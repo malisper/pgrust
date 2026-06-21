@@ -903,7 +903,7 @@ pub(crate) fn fix_append_rel_relids<'mcx>(
         let mut node = Node::mk_expr(mcx, root.node(id).clone_in(mcx)?)?;
         substitute_phv_relids_in_node(mcx, &mut node, varno, subrelids);
         if let Some(e) = node.into_expr() {
-            *root.node_mut(id) = e;
+            *root.node_mut(id) = e.erase_lifetime();
         }
     }
     Ok(())
@@ -1209,7 +1209,7 @@ fn remove_nulling_relids_in_append_rel_list<'mcx>(
         let mut node = Node::mk_expr(mcx, root.node(id).clone_in(mcx)?)?;
         backend_rewrite_core::remove_nulling_relids(&mut node, removable, except, mcx);
         if let Some(e) = node.into_expr() {
-            *root.node_mut(id) = e;
+            *root.node_mut(id) = e.erase_lifetime();
         }
     }
     Ok(())

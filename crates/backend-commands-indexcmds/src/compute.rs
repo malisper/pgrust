@@ -430,10 +430,10 @@ fn set_expression_column<'mcx>(
     mcx: Mcx<'mcx>,
     index_info: &mut IndexInfo<'mcx>,
     attn: i32,
-    expr: &Expr,
+    expr: &Expr<'mcx>,
 ) -> PgResult<()> {
     index_info.ii_IndexAttrNumbers[attn as usize] = 0; // marks expression
-    let expr_val: Expr = expr.clone();
+    let expr_val: Expr<'mcx> = expr.clone();
     append_expression(mcx, index_info, expr_val.clone());
 
     // transformExpr() should already have rejected subqueries / aggregates /
@@ -452,7 +452,7 @@ fn set_expression_column<'mcx>(
 }
 
 /// `indexInfo->ii_Expressions = lappend(indexInfo->ii_Expressions, expr)`.
-fn append_expression<'mcx>(mcx: Mcx<'mcx>, index_info: &mut IndexInfo<'mcx>, expr: Expr) {
+fn append_expression<'mcx>(mcx: Mcx<'mcx>, index_info: &mut IndexInfo<'mcx>, expr: Expr<'mcx>) {
     let list = index_info
         .ii_Expressions
         .get_or_insert_with(|| PgVec::new_in(mcx));

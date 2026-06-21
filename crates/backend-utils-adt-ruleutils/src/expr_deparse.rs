@@ -336,7 +336,7 @@ fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx
 /// the live `'mcx` lifetime so the F2 ORDER-BY renderer can consult it.
 fn clone_tle_vec<'mcx>(
     mcx: Mcx<'mcx>,
-    v: &[types_nodes::primnodes::TargetEntry<'static>],
+    v: &[types_nodes::primnodes::TargetEntry<'_>],
 ) -> PgResult<PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>> {
     let mut out = PgVec::new_in(mcx);
     out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
@@ -966,7 +966,7 @@ fn get_xmltable(
 /// `Expr` enum (the parent passed to nested paren/coercion recursions is `expr`
 /// itself, threaded as an `&Expr`).
 fn get_rule_expr_e(
-    expr: &Expr,
+    expr: &Expr<'_>,
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
@@ -2621,7 +2621,7 @@ fn find_param_referent<'mcx>(
     mcx: Mcx<'mcx>,
     param: &types_nodes::primnodes::Param,
     context: &DeparseContext<'mcx>,
-) -> PgResult<Option<(Expr, usize)>> {
+) -> PgResult<Option<(Expr<'mcx>, usize)>> {
     use types_nodes::nodes::ntag;
     use types_nodes::primnodes::PARAM_EXEC;
 
@@ -2886,7 +2886,7 @@ fn get_subplan_expr(
 /// (c) `PARAM_EXTERN` whose outermost namespace supplies a function arg name —
 ///     render the (optionally qualified) argument name;
 /// (d) otherwise — `$N`.
-pub fn get_parameter(expr: &Expr, context: &mut DeparseContext<'_>) -> PgResult<()> {
+pub fn get_parameter<'mcx>(expr: &Expr<'_>, context: &mut DeparseContext<'mcx>) -> PgResult<()> {
     use types_nodes::primnodes::PARAM_EXTERN;
 
     let param = match expr {
@@ -2902,7 +2902,9 @@ pub fn get_parameter(expr: &Expr, context: &mut DeparseContext<'_>) -> PgResult<
         // is dpns.ancestors[ancestor_index]; clone it out before mutating dpns.
         let target = {
             let dpns = &context.namespaces[0];
-            mcx::alloc_in(mcx, dpns.ancestors[ancestor_index].clone_in(mcx)?)?
+            let cloned: types_nodes::nodes::Node<'mcx> =
+                dpns.ancestors[ancestor_index].clone_in(mcx)?;
+            mcx::alloc_in(mcx, cloned)?
         };
         let save = crate::push_ancestor_plan(mcx, &mut context.namespaces[0], ancestor_index, &target)?;
 
@@ -3542,13 +3544,13 @@ fn get_special_variable<'mcx>(node: &Node<'mcx>, context: &mut DeparseContext<'m
 /// `get_special_variable` (from `get_variable`, no callback_arg) and
 /// `get_agg_combine_expr` (from `get_agg_expr_helper`, callback_arg is the
 /// original Aggref whose combine split is being deparsed).
-enum RsvCallback<'a> {
+enum RsvCallback<'a, 'mcx> {
     SpecialVariable,
-    AggCombineExpr(&'a Expr),
+    AggCombineExpr(&'a Expr<'mcx>),
 }
 
-impl<'a> RsvCallback<'a> {
-    fn invoke<'mcx>(&self, node: &Node<'mcx>, context: &mut DeparseContext<'mcx>) -> PgResult<()> {
+impl<'a, 'mcx> RsvCallback<'a, 'mcx> {
+    fn invoke<'n>(&self, node: &Node<'n>, context: &mut DeparseContext<'n>) -> PgResult<()> {
         match self {
             RsvCallback::SpecialVariable => get_special_variable(node, context),
             RsvCallback::AggCombineExpr(original_aggref) => {
@@ -3566,7 +3568,7 @@ impl<'a> RsvCallback<'a> {
 fn resolve_special_varno<'mcx>(
     node: &Node<'mcx>,
     context: &mut DeparseContext<'mcx>,
-    callback: &RsvCallback<'_>,
+    callback: &RsvCallback<'_, '_>,
 ) -> PgResult<()> {
     // If it's not a Var, invoke the callback.
     let var = match node.as_var() {
@@ -4550,7 +4552,7 @@ fn get_simple_binary_op_name(op: &OpExpr) -> Option<u8> {
  * -------------------------------------------------------------------------- */
 
 /// `&Const` from an `&Expr` known to be a Const.
-fn expr_as_const<'a>(expr: &'a Expr) -> PgResult<&'a Const> {
+fn expr_as_const<'a, 'mcx>(expr: &'a Expr<'mcx>) -> PgResult<&'a Const<'mcx>> {
     match expr {
         Expr::Const(c) => Ok(c),
         _ => Err(elog_error("expected Const".to_string())),
@@ -4558,7 +4560,7 @@ fn expr_as_const<'a>(expr: &'a Expr) -> PgResult<&'a Const> {
 }
 
 /// `list_nth(args, n)` for a `Vec<Expr>` argument list.
-fn expr_arg(args: &[Expr], n: usize) -> PgResult<&Expr> {
+fn expr_arg<'a, 'mcx>(args: &'a [Expr<'mcx>], n: usize) -> PgResult<&'a Expr<'mcx>> {
     args.get(n).ok_or_else(|| elog_error(format!("argument index {n} out of range")))
 }
 

@@ -2406,12 +2406,16 @@ fn build_trigger_when_predicate<'mcx>(
 
     // tgqual = stringToNode(trigger->tgqual);
     let node = backend_nodes_read_seams::string_to_node::call(mcx, &tgqual)?;
-    let mut expr: types_nodes::primnodes::Expr = node
+    // The qual flows through the `expand_generated_columns_in_expr` /
+    // `change_var_nodes` pipeline, all typed over the rewrite arena's notional
+    // `'static`; intern the decoded node there.
+    let mut expr: types_nodes::primnodes::Expr<'static> = node
         .as_expr()
         .ok_or_else(|| {
             PgError::error("trigger WHEN clause tgqual did not parse to an expression node".to_string())
         })?
-        .clone();
+        .clone()
+        .erase_lifetime();
 
     // tgqual = expand_generated_columns_in_expr(tgqual, rel, PRS2_OLD_VARNO);
     // tgqual = expand_generated_columns_in_expr(tgqual, rel, PRS2_NEW_VARNO);
@@ -2436,7 +2440,7 @@ fn build_trigger_when_predicate<'mcx>(
     expr = change_var_nodes_expr(expr, PRS2_NEW_VARNO, OUTER_VAR);
 
     // tgqual = (Node *) make_ands_implicit((Expr *) tgqual);
-    let quals: Vec<types_nodes::primnodes::Expr> =
+    let quals: Vec<types_nodes::primnodes::Expr<'static>> =
         backend_nodes_core::makefuncs::make_ands_implicit(Some(expr));
 
     // *predicate = ExecPrepareQual((List *) tgqual, estate);

@@ -217,7 +217,7 @@ pub(crate) fn name_list_strings(
 /// `transformExpr()` already rejected subqueries / aggregates / window
 /// functions; the only remaining check is that a predicate using mutable
 /// functions is rejected.
-pub fn CheckPredicate(mcx: Mcx<'_>, predicate: Expr) -> PgResult<()> {
+pub fn CheckPredicate<'mcx>(mcx: Mcx<'mcx>, predicate: Expr<'mcx>) -> PgResult<()> {
     if contain_mutable_functions_after_planning(mcx, predicate)? {
         return Err(ereport(ERROR)
             .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)

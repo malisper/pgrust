@@ -933,13 +933,18 @@ fn transform_trigger_when<'mcx>(
 
     // Transform expression.  Copy to be sure we don't modify original.
     let clause_copy = (**when_in).clone_in(mcx)?;
-    let mut when_expr = backend_parser_clause_seams::transform_where_clause::call(
+    // The where-clause transformer returns the parser-arena ('static) expr;
+    // re-localize into `mcx` so the collation pass + node wrap are arena-correct.
+    let mut when_expr = match backend_parser_clause_seams::transform_where_clause::call(
         mcx,
         &mut pstate,
         Some(clause_copy),
         types_nodes::parsestmt::ParseExprKind::EXPR_KIND_TRIGGER_WHEN,
         "WHEN",
-    )?;
+    )? {
+        Some(e) => Some(e.clone_in(mcx)?),
+        None => None,
+    };
 
     // We have to fix its collations too.
     if let Some(e) = when_expr.as_mut() {

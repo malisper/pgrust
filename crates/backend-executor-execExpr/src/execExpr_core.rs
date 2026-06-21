@@ -2222,8 +2222,8 @@ pub fn exec_init_qual_no_parent<'mcx>(
 /// fix_opfuncids — an implicit-AND qual list folds each top-level element
 /// independently), then compiled by the parent-less [`exec_init_qual_no_parent`]
 /// (which sets `EEO_FLAG_IS_QUAL`, so `ExecQual` semantics apply: NULL → FALSE).
-pub fn exec_prepare_qual<'mcx>(
-    qual: Option<&[Expr<'mcx>]>,
+pub fn exec_prepare_qual<'a, 'mcx>(
+    qual: Option<&[Expr<'a>]>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     // MemoryContextSwitchTo(estate->es_query_cxt) is implicit: the compile in

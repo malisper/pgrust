@@ -312,8 +312,8 @@ seam_core::seam!(
     /// crate's own logic. Used by the index-build path (`FormIndexDatum`
     /// partial-index predicate). Allocated in `es_query_cxt`; fallible on OOM /
     /// `ereport(ERROR)`.
-    pub fn exec_prepare_qual<'mcx>(
-        qual: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
+    pub fn exec_prepare_qual<'a, 'mcx>(
+        qual: Option<&[types_nodes::primnodes::Expr<'a>]>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>>
 );

@@ -246,7 +246,7 @@ pub fn transformExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     expr: Option<Node<'mcx>>,
     expr_kind: ParseExprKind,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     // Assert(exprKind != EXPR_KIND_NONE);
     debug_assert!(expr_kind != ParseExprKind::EXPR_KIND_NONE);
     let sv_expr_kind = pstate.p_expr_kind;
@@ -263,7 +263,7 @@ pub fn transformExpr<'mcx>(
 pub fn transformExprRecurse<'mcx>(
     pstate: &mut ParseState<'mcx>,
     expr: Option<Node<'mcx>>,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     let Some(expr) = expr else {
         return Ok(None);
     };
@@ -473,7 +473,7 @@ pub fn transformExprRecurse<'mcx>(
 fn transform_expr_node<'mcx>(
     pstate: &mut ParseState<'mcx>,
     e: Expr,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     match e {
         // A raw-grammar BoolExpr reaches the dispatcher as the `Node::BoolExpr`
         // arm above (the C `T_BoolExpr` case). An already-analyzed
@@ -603,7 +603,7 @@ fn expr_to_node<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
 fn transform_a_const<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Const<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let scratch = MemoryContext::new("make_const");
     let con = backend_parser_small1::make_const(scratch.mcx(), &*pstate, &a)?;
     Ok(Expr::Const(con))
@@ -626,7 +626,7 @@ fn exprIsNullConstant(arg: Option<&Node<'_>>) -> bool {
 fn transformAExprOp<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Expr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
     let A_Expr {
         name, lexpr, rexpr, location, ..
@@ -716,7 +716,7 @@ fn row_args(node: Option<Expr>) -> Vec<Expr> {
 fn transformAExprOpAny<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Expr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let A_Expr {
         name, lexpr, rexpr, location, ..
     } = a;
@@ -739,7 +739,7 @@ fn transformAExprOpAny<'mcx>(
 fn transformAExprOpAll<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Expr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let A_Expr {
         name, lexpr, rexpr, location, ..
     } = a;
@@ -764,7 +764,7 @@ fn transformAExprOpAll<'mcx>(
 fn transformAExprIn<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Expr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let A_Expr {
         name, lexpr, rexpr, rexpr_list_start, rexpr_list_end, location, ..
     } = a;
@@ -954,7 +954,7 @@ fn make_simple_a_expr<'mcx>(
 fn transformAExprBetween<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Expr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
     let A_Expr {
         kind, lexpr, rexpr, location, ..
@@ -988,7 +988,7 @@ fn transformAExprBetween<'mcx>(
     // Transform a synthesized comparison A_Expr and coerce it to boolean (what
     // transformExprRecurse over the synthesized makeBoolExpr's child does).
     let cmp = |pstate: &mut ParseState<'mcx>, op: &str, l: Node<'mcx>, r: Node<'mcx>|
-        -> PgResult<Expr> {
+        -> PgResult<Expr<'static>> {
         let node = make_simple_a_expr(mcx, A_Expr_Kind::AEXPR_OP, op, l, r, location)?;
         transformExprRecurse(pstate, Some(node))?
             .ok_or_else(|| PgError::error("transformAExprBetween: comparison is NULL"))
@@ -1046,7 +1046,7 @@ fn aexpr_clone_ctx<'mcx>(pstate: &ParseState<'mcx>) -> mcx::Mcx<'mcx> {
 fn transformAExprDistinct<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Expr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let A_Expr {
         name, lexpr, rexpr, kind, location, ..
     } = a;
@@ -1091,7 +1091,7 @@ fn transformAExprDistinct<'mcx>(
 fn transformAExprNullIf<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Expr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let A_Expr {
         name, lexpr, rexpr, location, ..
     } = a;
@@ -1144,7 +1144,7 @@ fn transformAExprNullIf<'mcx>(
 fn transformBoolExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: types_nodes::rawexprnodes::BoolExpr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let opname = match a.boolop {
         AND_EXPR => "AND",
         OR_EXPR => "OR",
@@ -1171,7 +1171,7 @@ fn transformBoolExpr<'mcx>(
 fn transformMergeSupportFunc<'mcx>(
     pstate: &mut ParseState<'mcx>,
     f: MergeSupportFunc,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // Must appear in the RETURNING list of a MERGE (this level or an ancestor).
     if pstate.p_expr_kind != ParseExprKind::EXPR_KIND_MERGE_RETURNING {
         let mut found = false;
@@ -1203,7 +1203,7 @@ fn transformMergeSupportFunc<'mcx>(
 fn transformCoalesceExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     c: types_nodes::rawexprnodes::CoalesceExpr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let last_srf = clone_last_srf(pstate);
     let location = c.location;
 
@@ -1236,7 +1236,7 @@ fn transformCoalesceExpr<'mcx>(
 fn transformMinMaxExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     m: types_nodes::rawexprnodes::MinMaxExpr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let funcname = if m.op == MinMaxOp::IS_GREATEST {
         "GREATEST"
     } else {
@@ -1325,7 +1325,7 @@ fn node_as_expr<'a>(b: &'a nodes::NodePtr<'_>) -> Option<&'a Expr> {
 fn transformSQLValueFunction<'mcx>(
     _pstate: &mut ParseState<'mcx>,
     mut svf: SQLValueFunction,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     use SQLValueFunctionOp::*;
     match svf.op {
         SVFOP_CURRENT_DATE => svf.r#type = DATEOID,
@@ -1362,7 +1362,7 @@ fn transformSQLValueFunction<'mcx>(
 fn transformBooleanTest<'mcx>(
     pstate: &mut ParseState<'mcx>,
     mut b: BooleanTest,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let clausename = match b.booltesttype {
         BoolTestType::IS_TRUE => "IS TRUE",
         BoolTestType::IS_NOT_TRUE => "IS NOT TRUE",
@@ -1392,7 +1392,7 @@ fn transformBooleanTest<'mcx>(
 fn transformBooleanTestRaw<'mcx>(
     pstate: &mut ParseState<'mcx>,
     b: types_nodes::rawexprnodes::BooleanTest<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let clausename = match b.booltesttype {
         BoolTestType::IS_TRUE => "IS TRUE",
         BoolTestType::IS_NOT_TRUE => "IS NOT TRUE",
@@ -1422,7 +1422,7 @@ fn transformBooleanTestRaw<'mcx>(
 fn transformNullTestRaw<'mcx>(
     pstate: &mut ParseState<'mcx>,
     n: types_nodes::rawexprnodes::NullTest<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // n->arg = (Expr *) transformExprRecurse(pstate, (Node *) n->arg);
     let arg = transformExprRecurse(pstate, boxed_node(n.arg))?;
     // n->argisrow = type_is_rowtype(exprType((Node *) n->arg));
@@ -1440,7 +1440,7 @@ fn transformNullTestRaw<'mcx>(
 fn transformNamedArgExprRaw<'mcx>(
     pstate: &mut ParseState<'mcx>,
     na: types_nodes::rawexprnodes::NamedArgExpr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // na->arg = (Expr *) transformExprRecurse(pstate, (Node *) na->arg);
     let arg = transformExprRecurse(pstate, boxed_node(na.arg))?;
     Ok(Expr::NamedArgExpr(NamedArgExpr {
@@ -1458,7 +1458,7 @@ fn transformNamedArgExprRaw<'mcx>(
 fn transformCurrentOfExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     mut cexpr: CurrentOfExpr,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // CURRENT OF can only appear at top level of UPDATE/DELETE.
     let nsitem = pstate.p_target_nsitem.as_ref().ok_or_else(|| {
         PgError::error("transformCurrentOfExpr: CURRENT OF requires a target nsitem")
@@ -1486,7 +1486,7 @@ fn transformCurrentOfExpr<'mcx>(
 fn transformCollateClause<'mcx>(
     pstate: &mut ParseState<'mcx>,
     c: CollateClause<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let CollateClause {
         arg, collname, location,
     } = c;
@@ -1554,7 +1554,7 @@ fn transformCollateClause<'mcx>(
 fn transformCaseExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     c: types_nodes::rawexprnodes::CaseExpr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let last_srf = clone_last_srf(pstate);
     let case_location = c.location;
 
@@ -1709,7 +1709,7 @@ fn make_row_comparison_op<'mcx>(
     largs: Vec<Expr>,
     rargs: Vec<Expr>,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let nopers = largs.len();
     if nopers != rargs.len() {
         return Err(ereport(ERROR)
@@ -1887,7 +1887,7 @@ fn make_row_distinct_op<'mcx>(
     lrow: RowExpr,
     rrow: RowExpr,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let largs = lrow.args;
     let rargs = rrow.args;
     if largs.len() != rargs.len() {
@@ -1922,7 +1922,7 @@ fn make_distinct_op<'mcx>(
     ltree: Option<Expr>,
     rtree: Option<Expr>,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let opname_s = opname_strings(opname);
     let last_srf = last_srf_expr(pstate);
     let result = backend_parser_parse_oper::make_op(
@@ -1964,7 +1964,7 @@ fn make_nulltest_from_distinct<'mcx>(
     kind: A_Expr_Kind,
     arg: Option<Node<'mcx>>,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let new_arg = transformExprRecurse(pstate, arg)?;
     let nulltesttype = if kind == A_Expr_Kind::AEXPR_NOT_DISTINCT {
         NullTestType::IS_NULL
@@ -1989,7 +1989,7 @@ fn make_nulltest_from_distinct<'mcx>(
 fn transformTypeCast<'mcx>(
     pstate: &mut ParseState<'mcx>,
     tc: Node<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let Some(tc) = tc.into_typecast() else {
         return Err(PgError::error("transformTypeCast: expected TypeCast"));
     };
@@ -2200,7 +2200,7 @@ fn transformArrayExpr<'mcx>(
     array_type: Oid,
     element_type: Oid,
     typmod: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mut array_type = array_type;
     let mut element_type = element_type;
 
@@ -2468,7 +2468,7 @@ enum CrErr {
 fn transformColumnRef<'mcx>(
     pstate: &mut ParseState<'mcx>,
     cref: ColumnRef<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
     let location = cref.location;
 
@@ -2974,7 +2974,7 @@ fn parse_func_on_whole_row<'mcx>(
 fn transformIndirection<'mcx>(
     pstate: &mut ParseState<'mcx>,
     ind: A_Indirection<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
     let last_srf = last_srf_expr(pstate);
 
@@ -3108,7 +3108,7 @@ fn unknown_attribute<'mcx>(
 fn transformFuncCall<'mcx>(
     pstate: &mut ParseState<'mcx>,
     fn_call: FuncCall<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let last_srf = last_srf_expr(pstate);
 
     // Transform the argument list.
@@ -3178,7 +3178,7 @@ fn transformRowExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     r: RawRowExpr<'mcx>,
     allow_default: bool,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
     let location = r.location;
 
@@ -3232,7 +3232,7 @@ fn transformRowExpr<'mcx>(
 fn transformMultiAssignRef<'mcx>(
     pstate: &mut ParseState<'mcx>,
     maref: MultiAssignRef<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     use types_nodes::primnodes::{Param, ParamKind, SubLinkType};
 
     let mcx = aexpr_clone_ctx(pstate);
@@ -3707,7 +3707,7 @@ pub fn setup_parse_plpgsql_expr<'mcx>(
 fn seam_transform_column_ref_hook_currentof<'mcx>(
     _pstate: &mut ParseState<'mcx>,
     _cexpr: Expr,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     panic!(
         "transformCurrentOfExpr cursor-name -> REFCURSOR-Param rewrite needs the \
          opaque columnref parser-hook ABI; the hook-installed path is reached only \
@@ -3728,7 +3728,7 @@ fn seam_transform_column_ref_hook_currentof<'mcx>(
 fn transformParamRef<'mcx>(
     pstate: &mut ParseState<'mcx>,
     pref: &types_nodes::rawnodes::ParamRef,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     use types_nodes::parsestmt::ParseRefHookState;
 
     // The small1 paramref hooks take a `types_nodes::params::ParamRef`; bridge
@@ -3826,7 +3826,7 @@ fn count_nonjunk_tlist_entries(
 fn transformSubLink<'mcx>(
     pstate: &mut ParseState<'mcx>,
     sublink: types_nodes::rawexprnodes::SubLink<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     use types_nodes::primnodes::{Param, ParamKind, SubLinkType};
 
     let mcx = aexpr_clone_ctx(pstate);
@@ -4093,7 +4093,7 @@ fn query_into_static<'mcx>(
 fn seam_transform_grouping_func<'mcx>(
     pstate: &mut ParseState<'mcx>,
     gf: Node<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     backend_parser_parse_agg_seams::transform_grouping_func::call(pstate, gf)
 }
 
@@ -4103,7 +4103,7 @@ fn seam_transform_grouping_func<'mcx>(
 fn transformXmlExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     x: types_nodes::rawexprnodes::XmlExpr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let types_nodes::rawexprnodes::XmlExpr {
         op,
         name,
@@ -4255,7 +4255,7 @@ fn transformXmlExpr<'mcx>(
 fn transformXmlSerialize<'mcx>(
     pstate: &mut ParseState<'mcx>,
     xs: types_nodes::rawexprnodes::XmlSerialize<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let types_nodes::rawexprnodes::XmlSerialize {
         xmloption,
         expr,
@@ -4330,7 +4330,7 @@ fn transformXmlSerialize<'mcx>(
 fn get_json_encoding_const<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     format: &Option<JsonFormat>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let encoding = match format {
         Some(f)
             if f.format_type != JsonFormatType::JS_FORMAT_DEFAULT
@@ -4384,7 +4384,7 @@ fn make_json_bytea_to_text_conversion<'mcx>(
     expr: Expr,
     format: &Option<JsonFormat>,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
     let encoding = get_json_encoding_const(mcx, format)?;
 
@@ -4569,7 +4569,7 @@ fn coerce_json_func_expr<'mcx>(
     expr: Expr,
     returning: &JsonReturning,
     report_error: bool,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     let exprtype = expr_type(Some(&expr))?;
 
     // if output type is not specified or equals to function type, return.
@@ -4642,7 +4642,7 @@ fn build_json_constructor_expr<'mcx>(
     unique: bool,
     absent_on_null: bool,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // We abuse CaseTestExpr as the placeholder for the coercion input.
     let placeholder = if let Some(fexpr) = fexpr.as_ref() {
         CaseTestExpr {
@@ -4702,7 +4702,7 @@ fn transform_json_value_expr<'mcx>(
     default_format: JsonFormatType,
     mut targettype: Oid,
     isarg: bool,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let raw = boxed_node(
         ve.raw_expr
             .as_ref()
@@ -4880,7 +4880,7 @@ fn exprs_eq_ptr(_a: &Expr, _b: &Expr) -> bool {
 fn transformJsonObjectConstructor<'mcx>(
     pstate: &mut ParseState<'mcx>,
     ctor: types_nodes::rawexprnodes::JsonObjectConstructor<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mut args: Vec<Expr> = Vec::new();
 
     for kv_ptr in ctor.exprs.iter() {
@@ -4935,7 +4935,7 @@ fn transformJsonObjectConstructor<'mcx>(
 fn transformJsonArrayConstructor<'mcx>(
     pstate: &mut ParseState<'mcx>,
     ctor: types_nodes::rawexprnodes::JsonArrayConstructor<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mut args: Vec<Expr> = Vec::new();
 
     for ve_ptr in ctor.exprs.iter() {
@@ -4981,7 +4981,7 @@ fn transformJsonArrayConstructor<'mcx>(
 fn transformJsonArrayQueryConstructor<'mcx>(
     pstate: &mut ParseState<'mcx>,
     ctor: types_nodes::rawexprnodes::JsonArrayQueryConstructor<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
 
     let query = ctor
@@ -5151,7 +5151,7 @@ fn transformJsonArrayQueryConstructor<'mcx>(
 fn transformJsonScalarExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     jsexpr: types_nodes::rawexprnodes::JsonScalarExpr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let arg_node = boxed_node(
         jsexpr
             .expr
@@ -5216,7 +5216,7 @@ fn transform_json_returning<'mcx>(
 fn transformJsonSerializeExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     jsexpr: types_nodes::rawexprnodes::JsonSerializeExpr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let arg_ve = jsexpr
         .expr
         .as_ref()
@@ -5343,7 +5343,7 @@ fn transform_json_parse_arg<'mcx>(
 fn transformJsonParseExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     jsexpr: types_nodes::rawexprnodes::JsonParseExpr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let returning = transform_json_returning(pstate, jsexpr.output.as_deref(), "JSON()")?;
 
     let arg_ve = jsexpr
@@ -5429,7 +5429,7 @@ fn transformJsonAggConstructor<'mcx>(
     ctor_type: JsonConstructorType,
     unique: bool,
     absent_on_null: bool,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
 
     // aggfilter = agg_ctor->agg_filter ? transformWhereClause(...) : NULL
@@ -5537,7 +5537,7 @@ fn transformJsonAggConstructor<'mcx>(
 fn transformJsonObjectAgg<'mcx>(
     pstate: &mut ParseState<'mcx>,
     agg: types_nodes::rawexprnodes::JsonObjectAgg<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let kv = agg
         .arg
         .as_ref()
@@ -5623,7 +5623,7 @@ fn transformJsonObjectAgg<'mcx>(
 fn transformJsonArrayAgg<'mcx>(
     pstate: &mut ParseState<'mcx>,
     agg: types_nodes::rawexprnodes::JsonArrayAgg<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let arg_ve = agg
         .arg
         .as_ref()
@@ -5684,7 +5684,7 @@ fn transformJsonArrayAgg<'mcx>(
 fn transformJsonIsPredicate<'mcx>(
     pstate: &mut ParseState<'mcx>,
     pred: types_nodes::rawexprnodes::JsonIsPredicate<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // transformJsonParseArg: recurse + coerce the subject to text/json/jsonb.
     let arg_node = boxed_node(
         pred.expr
@@ -5750,7 +5750,7 @@ fn transformJsonIsPredicate<'mcx>(
 fn transformJsonFuncExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     func: types_nodes::rawexprnodes::JsonFuncExpr<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
 
     let (func_name, default_format): (&str, JsonFormatType) = match func.op {
@@ -6331,7 +6331,7 @@ fn get_json_behavior_const<'mcx>(
     pstate: &ParseState<'mcx>,
     btype: JsonBehaviorType,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
     let mut typid = JSONBOID;
     let mut len: i32 = -1;
@@ -6614,17 +6614,17 @@ const MAXDIM: usize = 6;
 /// bounds, coercing each to int4, and computing the result type.
 fn array_subscript_transform<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    mut sbsref: SubscriptingRef,
+    mut sbsref: SubscriptingRef<'mcx>,
     indirection: &[A_Indices<'mcx>],
     pstate: &mut ParseState<'mcx>,
     is_slice: bool,
-) -> PgResult<SubscriptingRef> {
-    let mut upper_indexpr: Vec<Option<Expr>> = Vec::new();
-    let mut lower_indexpr: Vec<Option<Expr>> = Vec::new();
+) -> PgResult<SubscriptingRef<'mcx>> {
+    let mut upper_indexpr: Vec<Option<Expr<'mcx>>> = Vec::new();
+    let mut lower_indexpr: Vec<Option<Expr<'mcx>>> = Vec::new();
 
     for ai in indirection.iter() {
         if is_slice {
-            let subexpr: Option<Expr> = if let Some(lidx) = ai.lidx.as_deref() {
+            let subexpr: Option<Expr<'static>> = if let Some(lidx) = ai.lidx.as_deref() {
                 let se = transformExpr(pstate, Some(lidx.clone_in(mcx)?), pstate.p_expr_kind)?
                     .expect("array_subscript_transform: lidx transformed to NULL");
                 let setype = expr_type(Some(&se))?;
@@ -6658,17 +6658,17 @@ fn array_subscript_transform<'mcx>(
                     types_tuple::Datum::from_i32(1),
                     false,
                     true,
-                )?))
+                )?).erase_lifetime())
             } else {
                 // Slice with omitted lower bound: put NULL into the list.
                 None
             };
-            lower_indexpr.push(subexpr);
+            lower_indexpr.push(match subexpr { Some(e) => Some(e.clone_in(mcx)?), None => None });
         } else {
             debug_assert!(ai.lidx.is_none() && !ai.is_slice);
         }
 
-        let subexpr: Option<Expr> = if let Some(uidx) = ai.uidx.as_deref() {
+        let subexpr: Option<Expr<'static>> = if let Some(uidx) = ai.uidx.as_deref() {
             let se = transformExpr(pstate, Some(uidx.clone_in(mcx)?), pstate.p_expr_kind)?
                 .expect("array_subscript_transform: uidx transformed to NULL");
             let setype = expr_type(Some(&se))?;
@@ -6696,7 +6696,7 @@ fn array_subscript_transform<'mcx>(
             debug_assert!(is_slice && ai.is_slice);
             None
         };
-        upper_indexpr.push(subexpr);
+        upper_indexpr.push(match subexpr { Some(e) => Some(e.clone_in(mcx)?), None => None });
     }
 
     // Verify subscript list lengths are within the implementation limit.
@@ -6729,12 +6729,12 @@ fn array_subscript_transform<'mcx>(
 /// text (exactly one must be reachable), with no slice support.
 fn jsonb_subscript_transform<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    mut sbsref: SubscriptingRef,
+    mut sbsref: SubscriptingRef<'mcx>,
     indirection: &[A_Indices<'mcx>],
     pstate: &mut ParseState<'mcx>,
     is_slice: bool,
-) -> PgResult<SubscriptingRef> {
-    let mut upper_indexpr: Vec<Option<Expr>> = Vec::new();
+) -> PgResult<SubscriptingRef<'mcx>> {
+    let mut upper_indexpr: Vec<Option<Expr<'mcx>>> = Vec::new();
 
     for ai in indirection.iter() {
         if is_slice {
@@ -6811,7 +6811,7 @@ fn jsonb_subscript_transform<'mcx>(
                 CoercionForm::COERCE_IMPLICIT_CAST,
                 -1,
             )?;
-            upper_indexpr.push(Some(coerced));
+            upper_indexpr.push(Some(coerced.clone_in(mcx)?));
         } else {
             // Slice with omitted upper bound: cannot happen (errored above).
             debug_assert!(is_slice && ai.is_slice);

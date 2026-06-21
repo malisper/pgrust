@@ -59,7 +59,7 @@ fn operand_expr<'a, 'mcx>(
     node: &'a types_nodes::nodetidrangescan::TidRangeScan<'mcx>,
     qual_index: usize,
     side: types_tidrange::OperandSide,
-) -> Option<&'a Expr> {
+) -> Option<&'a Expr<'mcx>> {
     let quals = node.tidrangequals.as_ref()?;
     let Expr::OpExpr(op) = quals.get(qual_index)? else {
         return None;
