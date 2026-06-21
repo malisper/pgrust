@@ -175,6 +175,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCacheExists1(DATABASEOID, ObjectIdGetDatum(dbid))`:
+    /// whether a `pg_database` row exists for `dbid`.
+    pub fn database_exists(dbid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `SearchSysCacheExists1(AUTHOID, ObjectIdGetDatum(roleid))`
     /// (utils/cache/syscache.c): does a pg_authid row for this role OID exist?
     /// Used to confirm a role wasn't concurrently dropped. `Err` carries the

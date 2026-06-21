@@ -5203,6 +5203,10 @@ pub(crate) fn tablespace_exists(tblspc: Oid) -> PgResult<bool> {
     exists1(TABLESPACEOID, SysCacheKey::Value(KeyDatum::from_oid(tblspc)))
 }
 
+pub(crate) fn database_exists(dbid: Oid) -> PgResult<bool> {
+    exists1(DATABASEOID, SysCacheKey::Value(KeyDatum::from_oid(dbid)))
+}
+
 pub(crate) fn auth_oid_exists(roleid: Oid) -> PgResult<bool> {
     exists1(AUTHOID, SysCacheKey::Value(KeyDatum::from_oid(roleid)))
 }
