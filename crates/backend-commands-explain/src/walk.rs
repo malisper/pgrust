@@ -865,6 +865,7 @@ pub fn ExplainNode<'es, 'p>(
             show_scan_qual(es, mcx, plan_node, ancestors, is.indexqualorig.as_ref(), "Index Cond")?;
             show_scan_qual(es, mcx, plan_node, ancestors, is.indexorderbyorig.as_ref(), "Order By")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            show_indexsearches_info(es, planstate)?;
         }
         ntag::T_IndexOnlyScan => {
             // indexqual -> "Index Cond"; indexorderby -> "Order By";
@@ -873,11 +874,13 @@ pub fn ExplainNode<'es, 'p>(
             show_scan_qual(es, mcx, plan_node, ancestors, ios.indexqual.as_ref(), "Index Cond")?;
             show_scan_qual(es, mcx, plan_node, ancestors, ios.indexorderby.as_ref(), "Order By")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            show_indexsearches_info(es, planstate)?;
         }
         ntag::T_BitmapIndexScan => {
             // indexqualorig -> "Index Cond" (no Filter — the heap node carries it).
             let bis = plan_node.expect_bitmapindexscan();
             show_scan_qual(es, mcx, plan_node, ancestors, bis.indexqualorig.as_ref(), "Index Cond")?;
+            show_indexsearches_info(es, planstate)?;
         }
         ntag::T_BitmapHeapScan => {
             // bitmapqualorig -> "Recheck Cond"; plan->qual -> "Filter".
@@ -1255,6 +1258,42 @@ fn show_scan_qual<'es, 'p>(
     // ExplainPropertyText(qlabel, exprstr, es);
     fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
     Ok(())
+}
+
+/// `show_indexsearches_info(planstate, es)` (explain.c:3837) — show the total
+/// number of index searches for an IndexScan/IndexOnlyScan/BitmapIndexScan node.
+/// Sums the local-process counter with each parallel worker's counter (when a
+/// SharedInfo is present); the `--single` / non-parallel path has no SharedInfo
+/// and reports only the local count.
+fn show_indexsearches_info<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    planstate: &PlanStateNode<'p>,
+) -> PgResult<()> {
+    if !es.analyze {
+        return Ok(());
+    }
+
+    // Initialize counters with stats from the local process first, then add the
+    // sum of the per-worker counters (explain.c:3848-3888).
+    let (mut nsearches, shared) = match planstate {
+        PlanStateNode::IndexScan(m) => (m.iss_Instrument.nsearches, m.iss_SharedInfo.as_deref()),
+        PlanStateNode::IndexOnlyScan(m) => {
+            (m.ioss_Instrument.nsearches, m.ioss_SharedInfo.as_deref())
+        }
+        PlanStateNode::BitmapIndexScan(m) => {
+            (m.biss_Instrument.nsearches, m.biss_SharedInfo.as_deref())
+        }
+        // C's `default: break;` — only the three index node types reach here.
+        _ => return Ok(()),
+    };
+
+    if let Some(shared) = shared {
+        for w in shared.winstrument.iter() {
+            nsearches += w.nsearches;
+        }
+    }
+
+    fmt::ExplainPropertyUInteger("Index Searches", None, nsearches, es)
 }
 
 /// `show_expression(node, qlabel, planstate, ancestors, useprefix, es)`

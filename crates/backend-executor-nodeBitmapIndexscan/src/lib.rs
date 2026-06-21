@@ -186,6 +186,16 @@ fn multi_exec_scan_into<'mcx>(
         }
     }
 
+    // Mirror the AM-updated search counter into biss_Instrument (C aliases
+    // scan->instrument to &biss_Instrument; the owned port passes it by value
+    // into index_beginscan). EXPLAIN ANALYZE reads biss_Instrument before
+    // ExecutorEnd via show_indexsearches_info.
+    if let Some(scandesc) = node.biss_ScanDesc.as_ref() {
+        if let Some(instr) = scandesc.instrument.as_ref() {
+            node.biss_Instrument.nsearches = instr.nsearches;
+        }
+    }
+
     // must provide our own instrumentation support
     //   if (node->ss.ps.instrument) InstrStopNode(node->ss.ps.instrument, nTuples);
     if let Some(instr) = node.ss.ps.instrument.as_deref_mut() {

@@ -1163,6 +1163,10 @@ pub fn bt_first<'mcx>(
      * _bt_search/_bt_endpoint below.
      */
     pgstat_count_index_scan(rel);
+    // C: if (scan->instrument) scan->instrument->nsearches++; — the seam carries
+    // no IndexScanDesc, so park the count on the opaque; the AM adapter flushes
+    // it into scan->instrument.nsearches (see BTScanOpaqueData::nsearches).
+    so.nsearches += 1;
 
     /*----------
      * Examine the scan keys to discover where we need to start the scan.

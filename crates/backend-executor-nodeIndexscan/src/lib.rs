@@ -124,6 +124,11 @@ fn IndexNext<'mcx>(node: &mut IndexScanState<'mcx>, estate: &mut EStateData<'mcx
             let scandesc = node.iss_ScanDesc.as_mut().unwrap();
             indexam::index_getnext_slot::call(scandesc, direction, estate, scan_slot)?
         };
+        // Keep iss_Instrument current: C aliases scan->instrument to
+        // &iss_Instrument so the AM's per-_bt_first nsearches bump is live; the
+        // owned port passes it by value, so mirror it back after each fetch
+        // (EXPLAIN ANALYZE reads iss_Instrument before ExecutorEnd runs).
+        sync_index_instrument(node);
         if !found {
             break;
         }
@@ -149,6 +154,20 @@ fn IndexNext<'mcx>(node: &mut IndexScanState<'mcx>, estate: &mut EStateData<'mcx
     node.iss_ReachedEnd = true;
     execTuples::exec_clear_tuple::call(estate, scan_slot)?;
     Ok(false)
+}
+
+/// Mirror the scan descriptor's AM-updated `instrument.nsearches` back into
+/// `node.iss_Instrument`. C aliases `scan->instrument` to `&iss_Instrument`, so
+/// the bump inside `_bt_first` is directly visible; the owned port passes the
+/// counter by value into `index_beginscan`, so we copy it back. EXPLAIN ANALYZE
+/// reads `iss_Instrument` during `ExplainPrintPlan`, which runs before
+/// `ExecutorEnd`, so the sync must happen while the scan is live.
+fn sync_index_instrument<'mcx>(node: &mut IndexScanState<'mcx>) {
+    if let Some(scandesc) = node.iss_ScanDesc.as_ref() {
+        if let Some(instr) = scandesc.instrument.as_ref() {
+            node.iss_Instrument.nsearches = instr.nsearches;
+        }
+    }
 }
 
 // ===========================================================================
@@ -645,6 +664,10 @@ pub fn ExecEndIndexScan<'mcx>(
     node: &mut IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    // Final mirror of the AM-updated search counter (see sync_index_instrument);
+    // also ensures the parallel-worker accumulate below reads the latest count.
+    sync_index_instrument(node);
+
     // When ending a parallel worker, accumulate the gathered stats back into
     // shared memory for EXPLAIN ANALYZE.
     if node.iss_SharedInfo.is_some() && parallel::is_parallel_worker() {

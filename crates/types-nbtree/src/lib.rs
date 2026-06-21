@@ -655,6 +655,15 @@ pub struct BTScanOpaqueData<'mcx> {
     /// itemIndex, or -1 if not valid
     pub markItemIndex: i32,
 
+    /// Accumulates `_bt_first` primitive-scan starts for EXPLAIN ANALYZE's
+    /// `Index Searches` counter. C increments `scan->instrument->nsearches`
+    /// inside `_bt_first` (nbtsearch.c:959), but the `bt_first` seam carries
+    /// only `(rel, &mut so, dir)` — no `IndexScanDesc` — so the count is parked
+    /// here and flushed into `scan->instrument.nsearches` by the AM adapter
+    /// (`btgettuple_am`/`btgetbitmap_am`), the same mirroring pattern as
+    /// `ignore_killed_tuples`.
+    pub nsearches: u64,
+
     /// tuple storage for currPos (index-only scans), or `None`
     pub currTuples: Option<PgVec<'mcx, u8>>,
     /// tuple storage for markPos (index-only scans), or `None`
@@ -685,6 +694,7 @@ impl<'mcx> BTScanOpaqueData<'mcx> {
             dropPin: false,
             ignore_killed_tuples: false,
             markItemIndex: -1,
+            nsearches: 0,
             currTuples: None,
             markTuples: None,
             currPos: BTScanPosData::new(mcx),

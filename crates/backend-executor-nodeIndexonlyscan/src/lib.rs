@@ -174,12 +174,17 @@ fn IndexOnlyNext<'mcx>(
     // OK, now that we have what we need, fetch the next tuple.
     let mcx: Mcx<'_> = estate.es_query_cxt;
     loop {
-        let tid = {
+        let next = {
             let scandesc = node.ioss_ScanDesc.as_mut().unwrap();
-            match indexam::index_getnext_tid::call(mcx, scandesc, direction)? {
-                Some(tid) => tid,
-                None => break,
-            }
+            indexam::index_getnext_tid::call(mcx, scandesc, direction)?
+        };
+        // Mirror the AM-updated search counter back into ioss_Instrument (C
+        // aliases scan->instrument to &ioss_Instrument; the owned port passes it
+        // by value). EXPLAIN ANALYZE reads it before ExecutorEnd.
+        sync_ios_instrument(node);
+        let tid = match next {
+            Some(tid) => tid,
+            None => break,
         };
 
         let mut tuple_from_heap = false;
@@ -466,6 +471,19 @@ pub fn ExecReScanIndexOnlyScan<'mcx>(
     execScan::exec_scan_rescan_ss::call(&mut node.ss, estate)
 }
 
+/// Mirror the scan descriptor's AM-updated `instrument.nsearches` into
+/// `node.ioss_Instrument`. C aliases `scan->instrument` to `&ioss_Instrument`;
+/// the owned port passes the counter by value into `index_beginscan`, so copy it
+/// back. EXPLAIN ANALYZE reads `ioss_Instrument` during `ExplainPrintPlan`
+/// (before `ExecutorEnd`), so the sync must run while the scan is live.
+fn sync_ios_instrument<'mcx>(node: &mut IndexOnlyScanState<'mcx>) {
+    if let Some(scandesc) = node.ioss_ScanDesc.as_ref() {
+        if let Some(instr) = scandesc.instrument.as_ref() {
+            node.ioss_Instrument.nsearches = instr.nsearches;
+        }
+    }
+}
+
 /// `ExecEndIndexOnlyScan(node)` — release all storage.
 pub fn ExecEndIndexOnlyScan<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
@@ -479,6 +497,9 @@ pub fn ExecEndIndexOnlyScan<'mcx>(
         bufmgr::release_buffer::call(node.ioss_VMBuffer);
         node.ioss_VMBuffer = InvalidBuffer;
     }
+
+    // Final mirror of the AM-updated search counter (see sync_ios_instrument).
+    sync_ios_instrument(node);
 
     // When ending a parallel worker, accumulate the gathered stats back into
     // shared memory for EXPLAIN ANALYZE.

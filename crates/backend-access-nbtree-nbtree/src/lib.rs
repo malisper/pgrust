@@ -438,7 +438,24 @@ fn btgettuple_am<'mcx>(
         scan.xs_heaptid = core::current_heaptid::call(&nbt(scan).opaque);
         scan.xs_itup = core::current_itup::call(mcx, &nbt(scan).opaque)?;
     }
+    // Flush the parked `_bt_first` search count into the scan instrumentation
+    // (C increments scan->instrument->nsearches inside _bt_first).
+    flush_nsearches(scan);
     Ok(found)
+}
+
+/// Mirror the opaque's accumulated `_bt_first` count into the scan descriptor's
+/// instrumentation counter (when EXPLAIN ANALYZE wired one). Idempotent: the
+/// opaque carries the running total for the scan, so an absolute copy is correct
+/// across repeated `amgettuple`/`amgetbitmap` calls.
+fn flush_nsearches<'mcx>(scan: &mut IndexScanDescData<'mcx>) {
+    if scan.instrument.is_none() {
+        return;
+    }
+    let n = nbt(scan).opaque.nsearches;
+    if let Some(instr) = scan.instrument.as_mut() {
+        instr.nsearches = n;
+    }
 }
 
 /// `amgetbitmap` adapter.
@@ -454,7 +471,11 @@ fn btgetbitmap_am<'mcx>(
         .as_mut()
         .and_then(|p| p.downcast_mut::<types_tidbitmap::TIDBitmap>())
         .expect("amgetbitmap TIDBitmap payload is not a types_tidbitmap::TIDBitmap");
-    btgetbitmap(nbt(scan), tbm_concrete)
+    let r = btgetbitmap(nbt(scan), tbm_concrete);
+    // Flush the parked `_bt_first` search count (BitmapIndexScan EXPLAIN ANALYZE
+    // "Index Searches"); C bumps scan->instrument->nsearches inside _bt_first.
+    flush_nsearches(scan);
+    r
 }
 
 /// `ammarkpos` adapter.

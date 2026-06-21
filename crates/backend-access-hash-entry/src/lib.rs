@@ -342,7 +342,22 @@ fn hashgettuple_am<'mcx>(
     if found {
         scan.xs_heaptid = hsh(scan).xs_heaptid;
     }
+    flush_nsearches(scan);
     Ok(found)
+}
+
+/// Mirror the opaque's `_hash_first` search count into the scan descriptor's
+/// instrumentation counter (EXPLAIN ANALYZE "Index Searches"). C bumps
+/// `scan->instrument->nsearches` inside `_hash_first`; the owned port parks it on
+/// the HashScan opaque, so flush the running total here.
+fn flush_nsearches<'mcx>(scan: &mut IndexScanDescData<'mcx>) {
+    if scan.instrument.is_none() {
+        return;
+    }
+    let n = hsh(scan).nsearches as u64;
+    if let Some(instr) = scan.instrument.as_mut() {
+        instr.nsearches = n;
+    }
 }
 
 /// `amgetbitmap` adapter.
@@ -357,7 +372,9 @@ fn hashgetbitmap_am<'mcx>(
         .as_mut()
         .and_then(|p| p.downcast_mut::<types_tidbitmap::TIDBitmap>())
         .expect("amgetbitmap TIDBitmap payload is not a types_tidbitmap::TIDBitmap");
-    hashgetbitmap(hsh(scan), tbm_concrete)
+    let r = hashgetbitmap(hsh(scan), tbm_concrete);
+    flush_nsearches(scan);
+    r
 }
 
 /// `RelationGetIndexScan(indexRelation, nkeys, norderbys)` (genam.c) — allocate
