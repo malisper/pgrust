@@ -32,6 +32,9 @@ backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 # position-based tuple conversion for a composite function result.
 backend-utils-cache-typcache = { path = "../backend-utils-cache-typcache" }
 backend-access-common-next = { path = "../backend-access-common-next" }
+# heap_deform_tuple: deconstruct a composite Datum into its field values for a
+# ROW-target assignment (exec_move_row_from_datum, plain-composite leg).
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-executor-execTuples = { path = "../backend-executor-execTuples" }
 # The trigger-manager data accessors (tg_event / tg_trigtuple / tg_newtuple /
 # tg_relation / tg_trigger / tg_argv / tg_nargs) + the BEFORE-trigger

@@ -1996,15 +1996,41 @@ fn exec_assign_value_byref_impl(
             // exec_move_row_from_datum(estate, target, value) (pl_exec.c 5160):
             // assign a composite RHS into a ROW/REC target. The composite value
             // arrives as a by-reference HeapTupleHeader image (`value_byref`); the
-            // bare `value` word is `0` then. Thread the image through so the
-            // expanded record is built from the real tuple.
+            // bare `value` word is `0` then.
+            //
+            // C dispatches on the target dtype: a REC builds (or updates) an
+            // expanded record from the source tuple; a ROW deconstructs the
+            // composite into its fields and assigns each field to the row's
+            // per-attribute scalar variables (the `exec_move_row` / ROW arm,
+            // reached for `FOREACH x, y IN ARRAY <composite[]>` and INTO over a
+            // scalar-list target). The expanded-record path is REC-only.
+            let target_is_rec = matches!(
+                &estate.datums[target_dno as usize],
+                PLpgSQL_datum::Rec(_)
+            );
             if isnull {
-                seam::exec_move_row_null(estate, target_dno)?;
+                if target_is_rec {
+                    seam::exec_move_row_null(estate, target_dno)?;
+                } else {
+                    // ROW target, NULL source: every field becomes NULL
+                    // (exec_move_row with a NULL tuple stores NULLs).
+                    let target = row_variable_for(estate, target_dno);
+                    exec_move_row_into_target(estate, &target, &[])?;
+                }
             } else {
                 if !exec_seams::type_is_rowtype::call(valtype)? {
                     return Err(seam::ereport_return_noncomposite());
                 }
-                seam::exec_move_row_from_datum_byref(estate, target_dno, value, value_byref)?;
+                if target_is_rec {
+                    seam::exec_move_row_from_datum_byref(estate, target_dno, value, value_byref)?;
+                } else {
+                    // ROW target: deconstruct the source composite tuple into its
+                    // field columns and assign them attribute-by-attribute.
+                    let columns =
+                        deconstruct_composite_into_columns(value_byref, valtype, valtypmod)?;
+                    let target = row_variable_for(estate, target_dno);
+                    exec_move_row_into_target(estate, &target, &columns)?;
+                }
             }
         }
         PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
@@ -3249,6 +3275,113 @@ fn exec_move_row_into_target(
         }
     }
     Ok(())
+}
+
+/// Build a throwaway [`PLpgSQL_variable`] addressing the datum at `dno` so it can
+/// be handed to [`exec_move_row_into_target`], which only reads `target.dno`
+/// (the actual dtype/fields are looked up live in `estate.datums[dno]`).
+fn row_variable_for(
+    estate: &PLpgSQL_execstate,
+    dno: int32,
+) -> types_plpgsql::PLpgSQL_variable {
+    types_plpgsql::PLpgSQL_variable {
+        dtype: datum_dtype(&estate.datums[dno as usize]),
+        dno,
+        refname: std::string::String::new(),
+        lineno: 0,
+        isconst: false,
+        notnull: false,
+        default_val: None,
+    }
+}
+
+/// `exec_move_row_from_datum`'s plain-composite-Datum leg (pl_exec.c) for a ROW
+/// target: deconstruct a composite value (delivered as the verbatim
+/// `HeapTupleHeader` varlena image) into one [`exec_seams::ExecsqlColumn`] per
+/// non-dropped attribute, so the row's per-field variables can be assigned
+/// attribute-by-attribute. C: `lookup_rowtype_tupdesc(tupType, tupTypmod)` then
+/// `exec_move_row(target, &tmptup, tupdesc)`.
+fn deconstruct_composite_into_columns(
+    value_byref: Option<Vec<u8>>,
+    valtype: Oid,
+    valtypmod: int32,
+) -> types_error::PgResult<Vec<exec_seams::ExecsqlColumn>> {
+    use types_tuple::backend_access_common_heaptuple::{Datum as RichDatum, FormedTuple};
+    use types_tuple::heaptuple::{HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId};
+
+    let image = value_byref.ok_or_else(|| {
+        types_error::PgError::error(
+            "exec_move_row_from_datum: composite source has no by-reference image".to_string(),
+        )
+    })?;
+
+    with_query_mcx(|mcx| {
+        let ft: FormedTuple<'_> = FormedTuple::from_datum_image(mcx, &image)?;
+
+        // Extract the source rowtype: a labeled composite Datum carries its own
+        // type id/typmod in the header; fall back to the declared expression type
+        // (e.g. a RECORD value built without a registered typmod).
+        let (src_typeid, src_typmod) = match ft.tuple.t_data.as_ref() {
+            Some(header) => {
+                let tid = HeapTupleHeaderGetTypeId(header);
+                let tmod = HeapTupleHeaderGetTypMod(header);
+                if tid == types_core::INVALID_OID {
+                    (valtype, valtypmod)
+                } else {
+                    (tid, tmod)
+                }
+            }
+            None => (valtype, valtypmod),
+        };
+
+        let tupdesc = backend_utils_cache_typcache::lookup_rowtype_tupdesc(
+            mcx, src_typeid, src_typmod,
+        )?;
+
+        let deformed = backend_access_common_heaptuple::heap_deform_tuple(
+            mcx,
+            &ft.tuple,
+            &tupdesc,
+            ft.data.as_slice(),
+        )?;
+
+        let mut out: Vec<exec_seams::ExecsqlColumn> =
+            Vec::with_capacity(tupdesc.natts as usize);
+        for (i, (value, isnull)) in deformed.iter().enumerate() {
+            let att = tupdesc.attr(i);
+            // C's exec_move_row maps non-dropped source attributes positionally
+            // to the row's fields; a dropped column contributes a NULL placeholder
+            // so positions stay aligned with the row's varnos list.
+            if att.attisdropped {
+                out.push(exec_seams::ExecsqlColumn {
+                    value: 0,
+                    isnull: true,
+                    typeid: types_core::INVALID_OID,
+                    typmod: -1,
+                    name: std::string::String::new(),
+                    byref: None,
+                });
+                continue;
+            }
+            let (word, byref, isn) = match (isnull, value) {
+                (true, _) => (0usize, None, true),
+                (false, RichDatum::ByVal(w)) => (*w, None, false),
+                (false, RichDatum::ByRef(b)) => (0, Some(b.as_slice().to_vec()), false),
+                (false, RichDatum::Cstring(s)) => (0, Some(s.as_bytes().to_vec()), false),
+                (false, other) => (0, Some(other.as_varlena_bytes().into_owned()), false),
+            };
+            out.push(exec_seams::ExecsqlColumn {
+                value: word,
+                isnull: isn,
+                typeid: att.atttypid,
+                typmod: att.atttypmod,
+                name: std::string::String::from_utf8_lossy(att.attname.name_str())
+                    .into_owned(),
+                byref,
+            });
+        }
+        Ok(out)
+    })
 }
 
 /// `exec_eval_using_params(estate, params)` (pl_exec.c 8869) — evaluate the
