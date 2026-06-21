@@ -1227,9 +1227,6 @@ pub fn ExecEvalConstraintNotNull<'mcx>(
     // errsave with a NULL escontext == ereport(ERROR). op->d.domaincheck
     // .escontext is a parked opaque address (the soft-error sink is not threaded
     // here yet); NULL (0) is the hard-throw case, matching the common path.
-    // format_type_be() (lsyscache/format-type owner) is not a dependency of this
-    // crate, so the type name is rendered from the OID; the load-bearing
-    // behavior (the NOT_NULL_VIOLATION on a null domain value) is faithful.
     let _ = estate;
     let resulttype = match &step_data(state, op) {
         ExprEvalStepData::DomainCheck { resulttype, .. } => *resulttype,
@@ -1245,10 +1242,13 @@ pub fn ExecEvalConstraintNotNull<'mcx>(
     let (_value, resnull) = crate::interp_loop::read_cell(state, resvalue_id);
 
     if resnull {
+        // format_type_be(resulttype) — render the domain's type name (the C
+        // errmsg uses format_type_be, not the bare OID).
+        let typename =
+            backend_utils_adt_format_type_seams::format_type_be_owned::call(resulttype)?;
         return Err(PgError::error(format!(
             "domain {} does not allow null values",
-            // format_type_be(resulttype) — owner (format-type) not a dep here.
-            resulttype
+            typename
         ))
         .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION));
     }

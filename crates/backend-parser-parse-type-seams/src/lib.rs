@@ -50,6 +50,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `typenameTypeIdAndMod(NULL, typeName, &typeid, &typmod)` (parse_type.c):
+    /// resolve a `TypeName` to both its type OID and the typmod its
+    /// decoration (`varchar(5)` → typmod 5) computes via the type's
+    /// `typmodin`. Like [`typename_type_id`] but also yields the typmod;
+    /// `Err` carries the same `ereport(ERROR)` surface (type missing / shell /
+    /// bad typmod decoration).
+    ///
+    /// Takes the full `types_parsenodes::TypeName` (not the trimmed
+    /// `types_opclass::TypeName`) because resolving the typmod requires the
+    /// `typmods` decoration list, which the trimmed resolver TypeName drops.
+    pub fn typename_type_id_and_mod(type_name: &ParseTypeName) -> PgResult<(Oid, i32)>
+);
+
+seam_core::seam!(
     /// `typeTypeId(LookupTypeName(NULL, typeName, NULL, false))` (parse_type.c):
     /// resolve a `TypeName` to its type OID, raising `"type \"%s\" does not
     /// exist"` only when no row exists. Unlike [`typename_type_id`], a *shell*

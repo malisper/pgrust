@@ -854,6 +854,7 @@ pub fn init_seams() {
     s::parse_type_string::set(seam_parse_type_string);
     s::name_list_to_string::set(seam_name_list_to_string);
     s::typename_type_id::set(seam_typename_type_id);
+    s::typename_type_id_and_mod::set(seam_typename_type_id_and_mod);
     s::lookup_type_name_oid_from_names::set(seam_lookup_type_name_oid_from_names);
     s::typename_to_string::set(seam_typename_to_string);
     s::typename_to_string_node::set(seam_typename_to_string_node);
@@ -1372,6 +1373,14 @@ fn seam_typename_type_id(type_name: &types_opclass::TypeName) -> PgResult<Oid> {
     let scratch = mcx::MemoryContext::new("typenameTypeId");
     let tn = from_opclass_typename(type_name);
     typenameTypeId(scratch.mcx(), None, &tn)
+}
+
+/// `typenameTypeIdAndMod(NULL, typeName, ...)` over the full
+/// `types_parsenodes::TypeName` (carries the `typmods` decoration the typmod
+/// resolution needs).
+fn seam_typename_type_id_and_mod(type_name: &TypeName) -> PgResult<(Oid, i32)> {
+    let scratch = mcx::MemoryContext::new("typenameTypeIdAndMod");
+    typenameTypeIdAndMod(scratch.mcx(), None, type_name)
 }
 
 /// `typeTypeId(LookupTypeName(NULL, typeName, NULL, false))` over the trimmed

@@ -436,6 +436,13 @@ fn typenameTypeId(tn: &TypeName) -> PgResult<Oid> {
     backend_parser_parse_type_seams::typename_type_id::call(&to_resolver_typename(tn))
 }
 
+/// `typenameTypeIdAndMod(NULL, typeName, &typeid, &typmod)` (parse_type.c):
+/// resolves both the base type OID and the typmod the `TypeName` decoration
+/// specifies (used by `DefineDomain` to store the domain's typtypmod).
+fn typenameTypeIdAndMod(tn: &TypeName) -> PgResult<(Oid, i32)> {
+    backend_parser_parse_type_seams::typename_type_id_and_mod::call(tn)
+}
+
 /// `TypeNameToString(typeName)` (parse_type.c).
 #[allow(dead_code)]
 fn TypeNameToString(mcx: Mcx<'_>, tn: &TypeName) -> PgResult<String> {
@@ -3365,10 +3372,17 @@ pub fn DefineDomain<'mcx>(
             .map(|()| unreachable!());
     }
 
-    /* Look up the base type. */
-    let basetypeoid = typenameTypeId(type_name)?;
+    /*
+     * Look up the base type.
+     *
+     * C: typeTup = typenameType(pstate, stmt->typeName, &basetypeMod);
+     * The typmod comes from the *typeName decoration* (e.g. `varchar(5)` → 5)
+     * resolved through the base type's typmodin — NOT from the base type's own
+     * pg_type.typtypmod (which is -1 for varchar). This typmod is stored as the
+     * domain's typtypmod so coercion to the domain applies the length check.
+     */
+    let (basetypeoid, basetypeMod) = typenameTypeIdAndMod(type_name)?;
     let baseType = read_type_form(basetypeoid)?;
-    let basetypeMod = baseType.typtypmod;
 
     /*
      * Base type must be a plain base type, a composite type, another domain, an
