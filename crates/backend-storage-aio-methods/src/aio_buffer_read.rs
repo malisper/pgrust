@@ -204,8 +204,14 @@ pub fn wait_read_buffers_aio(wref: BufAioWaitRef) -> PgResult<(i32, u32)> {
     pgaio_wref_wait(&ew)?;
 
     // The completion path published the issuer-owned `PgAioReturn` into the
-    // backend-local slot at reclaim time (C writes through `report_return`).
-    let ret = take_pgaio_last_return(wref.aio_index).unwrap_or_default();
+    // backend-local pending-returns map at reclaim time (C writes through
+    // `report_return`). Consume it by this read's handle-instance GENERATION (the
+    // identity carried in our wref), not the recycled `aio_index`: with read-ahead
+    // several completed-but-unwaited reads can be queued on the same recycled
+    // index, and an index key would return a later read's result.
+    let generation =
+        ((wref.generation_upper as u64) << 32) | (wref.generation_lower as u64);
+    let ret = take_pgaio_last_return(wref.aio_index, generation).unwrap_or_default();
     Ok((ret.result.result, ret.result.status as u32))
 }
 

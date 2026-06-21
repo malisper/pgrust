@@ -105,6 +105,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use core::cell::Cell;
+use core::cell::RefCell;
 use core::sync::atomic::{AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
@@ -721,37 +722,74 @@ thread_local! {
     /// `MyProcSignalSlot`.
     static PGAIO_MY_BACKEND: Cell<Option<usize>> = const { Cell::new(None) };
 
-    /// The issuer-owned `PgAioReturn` for the most-recently-completed IO this
-    /// backend issued, keyed by the handle's `aio_index`.
+    /// The issuer-owned `PgAioReturn`s for IOs this backend has issued whose
+    /// result has been published by `pgaio_io_reclaim` but not yet consumed by
+    /// the issuer's `pgaio_wref_wait`.
     ///
     /// In C, `pgaio_io_acquire(resowner, ret)` records the caller's
     /// `PgAioReturn *ret` (e.g. `&operation->io_return`) on the handle's
     /// `report_return`; the completion path (`pgaio_io_reclaim`) writes the
     /// distilled result through that pointer into the caller's own storage,
-    /// which then outlives the handle's recycle. The value-typed model stores
-    /// `report_return` by value on the handle and clears it on recycle, so the
-    /// completed result would be lost to the issuer. This backend-local cell
-    /// mirrors C's issuer-owned slot: `pgaio_io_reclaim` publishes the final
-    /// `PgAioReturn` here (under the same single-handed-out-IO-per-backend
-    /// invariant the engine already enforces), and the buffer-read `wait` seam
-    /// reads it back after `pgaio_wref_wait`. Keyed by `aio_index` so a stale
-    /// entry from a recycled handle is never mistaken for a fresh completion.
-    static PGAIO_LAST_RETURN: Cell<Option<(u32, PgAioReturn)>> = const { Cell::new(None) };
+    /// which then outlives the handle's recycle. Crucially, each in-flight IO
+    /// instance owns a DISTINCT `io_return` (e.g. `read_stream.c` keeps a
+    /// separate `ReadBuffersOperation` — hence a separate `io_return` — for
+    /// every `InProgressIO` slot), so several completed-but-not-yet-waited
+    /// results can coexist when reads are issued ahead (the read-ahead
+    /// pipeline). Under `io_method = sync` each read completes and is reclaimed
+    /// inline within `start_read_buffers`, publishing its result before the
+    /// NEXT read is started, so multiple unconsumed results pile up here until
+    /// each operation's `WaitReadBuffers` claims its own.
+    ///
+    /// The value-typed model stores `report_return` by value on the handle and
+    /// clears it on recycle, so the completed result would be lost to the
+    /// issuer. This backend-local map mirrors C's per-operation slots: each
+    /// completion publishes under the handle instance's globally-unique
+    /// `generation` (the same generation carried in the issuer's `PgAioWaitRef`
+    /// at submit time, before `pgaio_io_reclaim` bumps it), and the buffer-read
+    /// `wait` seam consumes by that exact generation. A single `aio_index`-keyed
+    /// cell is INCORRECT: the handle is recycled to the same index across reads,
+    /// so a later read's result would clobber an earlier, still-unwaited read's
+    /// result (observed as `process_read_buffers_result` advancing
+    /// `nblocks_done` past `operation.buffers.len()` during VACUUM/scan of a
+    /// large relation).
+    static PGAIO_PENDING_RETURNS: RefCell<Vec<(u32, u64, PgAioReturn)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
-/// Publish the issuer-owned `PgAioReturn` for `aio_index`'s just-completed IO
-/// (`pgaio_io_reclaim` writing through C's `report_return` pointer into the
-/// caller's slot). See [`PGAIO_LAST_RETURN`].
-pub(crate) fn set_pgaio_last_return(aio_index: u32, ret: PgAioReturn) {
-    PGAIO_LAST_RETURN.with(|c| c.set(Some((aio_index, ret))));
+/// Publish the issuer-owned `PgAioReturn` for a just-completed IO instance,
+/// keyed by `(aio_index, generation)` (`pgaio_io_reclaim` writing through C's
+/// `report_return` pointer into the caller's slot). See [`PGAIO_PENDING_RETURNS`].
+pub(crate) fn set_pgaio_last_return(aio_index: u32, generation: u64, ret: PgAioReturn) {
+    PGAIO_PENDING_RETURNS.with(|c| {
+        let mut v = c.borrow_mut();
+        // Each completed IO instance has a UNIQUE (aio_index, generation), so this
+        // is normally a fresh push. We must NOT prune other entries on the same
+        // index here: with read-ahead, an earlier read on this (now-recycled)
+        // index can still be sitting completed-but-not-yet-waited while this later
+        // read on the same index completes — dropping it would lose the earlier
+        // read's result (the very bug this map fixes). Entries are removed only by
+        // `take` when their issuer waits; the map size is bounded by the live
+        // read-ahead depth (a handful of in-flight ReadStream IOs). The find guards
+        // against a (re)publish of the same instance.
+        if let Some(slot) = v.iter_mut().find(|(i, g, _)| *i == aio_index && *g == generation) {
+            slot.2 = ret;
+        } else {
+            v.push((aio_index, generation, ret));
+        }
+    });
 }
 
-/// Read back the issuer-owned `PgAioReturn` published for `aio_index`, or `None`
-/// if no completion has been recorded for that handle. See [`PGAIO_LAST_RETURN`].
-pub(crate) fn take_pgaio_last_return(aio_index: u32) -> Option<PgAioReturn> {
-    PGAIO_LAST_RETURN.with(|c| match c.get() {
-        Some((idx, ret)) if idx == aio_index => Some(ret),
-        _ => None,
+/// Read back (and remove) the issuer-owned `PgAioReturn` published for the IO
+/// instance identified by `(aio_index, generation)`, or `None` if no completion
+/// has been recorded for it. See [`PGAIO_PENDING_RETURNS`].
+pub(crate) fn take_pgaio_last_return(aio_index: u32, generation: u64) -> Option<PgAioReturn> {
+    PGAIO_PENDING_RETURNS.with(|c| {
+        let mut v = c.borrow_mut();
+        if let Some(pos) = v.iter().position(|(idx, g, _)| *idx == aio_index && *g == generation) {
+            Some(v.swap_remove(pos).2)
+        } else {
+            None
+        }
     })
 }
 

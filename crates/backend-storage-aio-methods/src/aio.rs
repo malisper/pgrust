@@ -538,6 +538,9 @@ fn pgaio_io_reclaim(ioh_index: usize) -> PgResult<()> {
         let local_result = pgaio_io_call_complete_local(ioh_index)?;
         pgaio_io_update_state(h, PgAioHandleState::CompletedLocal);
 
+        // Submit-time generation (the read's identity in the issuer's wref); the
+        // generation is only bumped after the field reset further below.
+        let generation = h.generation.load(Ordering::Relaxed);
         let mut d = h.data();
         if let Some(mut rr) = d.report_return {
             rr.result = local_result;
@@ -547,7 +550,15 @@ fn pgaio_io_reclaim(ioh_index: usize) -> PgResult<()> {
             // before the handle is recycled (C writes through the caller's
             // `report_return` pointer, whose storage outlives the handle). The
             // buffer-read `wait_read_buffers` seam reads it back after the wait.
-            crate::set_pgaio_last_return(ioh_index as u32, rr);
+            //
+            // Key by the handle INSTANCE generation (this read's identity in the
+            // issuer's wref), not the recycled `aio_index`: the read-ahead
+            // pipeline can have several completed-but-unwaited reads queued on the
+            // same recycled index, and an index-only key would let a later read's
+            // result clobber an earlier, still-unwaited read's. The generation is
+            // bumped further below (after the field reset), so this load is the
+            // submit-time generation the issuer holds in its `PgAioWaitRef`.
+            crate::set_pgaio_last_return(ioh_index as u32, generation, rr);
         }
     }
 
