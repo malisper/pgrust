@@ -2560,11 +2560,18 @@ fn after_trigger_save_event<'mcx>(
         .map(|r| r.rd_rel.relkind)
         .expect("AfterTriggerSaveEvent: ResultRelInfo has no relation");
 
-    // The statement-level (no-tuple) and cross-partition save legs are not
-    // reached here; the row-level INSERT/DELETE/UPDATE legs are ported.
+    // The statement-level (no-tuple) save leg of C's AfterTriggerSaveEvent
+    // (trigger.c:6169) is ported as the dedicated `after_trigger_save_event_stmt`
+    // function, which the ExecAS{Insert,Update,Delete}Triggers drivers call
+    // directly; this row-path entry is only ever reached with `row_trigger ==
+    // true` (the three call sites all pass it). Keep a loud guard in case a new
+    // caller routes a statement event here by mistake.
     if !row_trigger {
         return Err(PgError::error(
-            "AfterTriggerSaveEvent: statement-level event save not yet ported".to_string(),
+            "after_trigger_save_event: statement-level event reached the row \
+             save path; statement events must go through \
+             after_trigger_save_event_stmt"
+                .to_string(),
         ));
     }
     if relkind as i8 == RELKIND_FOREIGN_TABLE {
