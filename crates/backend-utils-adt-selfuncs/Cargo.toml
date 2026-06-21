@@ -71,3 +71,6 @@ backend-utils-adt-ts-small = { path = "../backend-utils-adt-ts-small" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 types-locale = { path = "../types-locale" }
 types-tsearch = { path = "../types-tsearch" }
+backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
+backend-optimizer-path-indxpath-seams = { path = "../backend-optimizer-path-indxpath-seams" }
+backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }

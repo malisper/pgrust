@@ -2099,13 +2099,19 @@ dependencies = [
 name = "backend-access-index-indexam"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-indextuple-seams",
  "backend-access-common-relation-seams",
  "backend-access-common-reloptions-seams",
+ "backend-access-common-scankey",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-access-heap-visibilitymap-seams",
  "backend-access-index-indexam-seams",
  "backend-access-table-tableam",
  "backend-catalog-index-seams",
  "backend-commands-analyze-rt-seams",
  "backend-commands-vacuum-seams",
+ "backend-executor-execTuples-seams",
+ "backend-storage-buffer-bufmgr-seams",
  "backend-storage-lmgr-predicate-seams",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-cache-relcache-seams",
@@ -21414,7 +21420,9 @@ version = "0.0.0"
 dependencies = [
  "backend-access-brin-insert-vacuum-seams",
  "backend-access-common-detoast-seams",
+ "backend-access-common-relation-seams",
  "backend-access-gin-ginutil-seams",
+ "backend-access-index-amapi-seams",
  "backend-access-index-indexam-seams",
  "backend-catalog-aclchk-seams",
  "backend-nodes-core",
@@ -21423,6 +21431,7 @@ dependencies = [
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-equivclass-seams",
+ "backend-optimizer-path-indxpath-seams",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-path-small-seams",
  "backend-optimizer-util-clauses",

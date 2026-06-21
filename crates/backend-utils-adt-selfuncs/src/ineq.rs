@@ -20,6 +20,14 @@ use types_selfuncs::{VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES
 
 use backend_utils_cache_lsyscache_seams as lsc;
 use backend_utils_fmgr_fmgr_seams as fmgr;
+use backend_access_index_indexam_seams as idxseam;
+use backend_access_index_amapi_seams as amapi;
+use backend_access_common_relation_seams as relseam;
+use backend_optimizer_path_indxpath_seams as ix;
+use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use types_scan::sdir::{BackwardScanDirection, ForwardScanDirection, ScanDirection};
+use types_storage::lock::NoLock;
+use crate::RELKIND_PARTITIONED_TABLE;
 
 use crate::scalar::{get_variable_numdistinct, statistic_proc_security_check};
 use crate::{
@@ -27,6 +35,11 @@ use crate::{
     STATISTIC_KIND_MCV,
 };
 use types_selfuncs::DEFAULT_INEQ_SEL;
+
+/// `COMPARE_LT` (cmptype.h) — `BTLessStrategyNumber`.
+const COMPARE_LT: i32 = 1;
+/// `COMPARE_GT` (cmptype.h) — `BTGreaterStrategyNumber`.
+const COMPARE_GT: i32 = 5;
 
 /// The canonical (value-carrying) image of one statistics-slot value, for the
 /// operator-comparison fmgr boundary. The shared `AttStatsSlot.values` carries a
@@ -44,6 +57,25 @@ pub(crate) fn slot_value_canon<'mcx>(
     match canon {
         Some(c) => c[i].clone_in(mcx),
         None => Ok(DatumV::ByVal(bare[i].as_usize())),
+    }
+}
+
+/// Like [`slot_value_canon`], but consults a per-position endpoint override
+/// first. `ineq_histogram_selectivity` may replace the first/last histogram
+/// boundary with the column's *actual* current min/max (an index endpoint
+/// probe via `get_actual_variable_range`); C overwrites `sslot.values[i]` in
+/// place, and this returns the overriding canonical value when one is recorded
+/// for position `i`, else falls back to the recorded histogram bound.
+fn hist_value_at<'mcx>(
+    bare: &[Datum],
+    canon: Option<&mcx::PgVec<'mcx, DatumV<'mcx>>>,
+    overrides: &[Option<DatumV<'mcx>>],
+    i: usize,
+    mcx: Mcx<'mcx>,
+) -> PgResult<DatumV<'mcx>> {
+    match &overrides[i] {
+        Some(v) => v.clone_in(mcx),
+        None => slot_value_canon(bare, canon, i, mcx),
     }
 }
 
@@ -237,81 +269,182 @@ pub(crate) fn histogram_selectivity<'mcx>(
  * panics when reached; the precise blocker is documented below.
  * ------------------------------------------------------------------------- */
 
+/// The endpoints `get_actual_variable_range` extracted from an index probe, as
+/// canonical value images. `have_data` mirrors C's boolean return; `min`/`max`
+/// are filled only for the endpoints the caller requested AND that were found.
+pub(crate) struct ActualVariableRange<'mcx> {
+    pub have_data: bool,
+    pub min: Option<DatumV<'mcx>>,
+    pub max: Option<DatumV<'mcx>>,
+}
+
 /// `get_actual_variable_range(root, vardata, sortop, collation, &min, &max)`
-/// (selfuncs.c) — try to replace a histogram endpoint with the column's true
-/// current min/max via an index endpoint probe.
+/// (selfuncs.c:6581) — try to identify the variable's *actual* current min
+/// and/or max by finding a suitable btree index and fetching its low/high
+/// endpoint via an index-only-scan probe. Returns `have_data = true` (C `true`)
+/// with the requested endpoints filled, or `have_data = false` (C `false`) when
+/// there is no suitable index or the probe gives up.
 ///
-/// BLOCKED (documented STOP; this lane owns `backend-utils-adt-selfuncs` only).
-/// `get_actual_variable_endpoint` (selfuncs.c:6770) deliberately bypasses the
-/// executor's plan-state layer: it sets up a transient `AllocSetContext`, opens
-/// the table + index with `NoLock`, makes a *bare* `table_slot_create` slot
-/// (no `EState`), builds an `IS NOT NULL` `ScanKeyData[1]`, and then runs
-/// `index_beginscan` + `index_rescan(scan, scankeys, 1, NULL, 0)` +
-/// `index_getnext_tid` + (`VM_ALL_VISIBLE` / `index_fetch_heap`) +
-/// `index_deform_tuple(xs_itup, ...)` directly on the raw `IndexScanDesc`, under
-/// an `InitNonVacuumableSnapshot(SnapshotNonVacuumable, GlobalVisTestFor(heap))`
-/// transient snapshot. Two sub-dependencies are genuinely unavailable from this
-/// crate and live in other owners:
-///
-/// 1. There is NO raw `index_rescan(scan, ScanKey[], nkeys, orderbys, n)` seam.
-///    The `backend-access-index-indexam-seams` owner exposes `index_rescan`
-///    only over a full executor `IndexOnlyScanState` / `IndexScanState` /
-///    `BitmapIndexScanState` node (it reads the node's `*_ScanKeys` arrays and
-///    `*_ScanDesc`). `get_actual_variable_endpoint` has no plan-state node — it
-///    drives a bare scan descriptor with a locally-built scankey array — so the
-///    node-shaped seams cannot express it.
-///
-/// 2. `index_fetch_heap` / `index_getnext_slot` require an `EStateData` + a
-///    `SlotId` from the executor tuple-table pool, but the endpoint probe runs
-///    *without* an executor (its slot is a standalone `table_slot_create` slot,
-///    its memory a private transient context). There is no executor-free
-///    heap-fetch-into-bare-slot form of these seams.
-///
-/// Lifting this requires the indexam-seams owner to add a raw-scankey
-/// `index_rescan` form and an executor-free `index_fetch_heap` (taking a
-/// standalone slot), plus the transient `SnapshotNonVacuumable` setup wired
-/// through — all out of this crate's lane. (Substrate that DOES exist:
-/// `IndexOptInfo` carries `sortopfamily`/`indpred`/`hypothetical`/`canreturn`/
-/// `indexcollations`/`reverse_sort`/`relam`; `index_beginscan`,
-/// `index_getnext_tid`, the `xs_want_itup`/`xs_itup`/`xs_itupdesc`/`xs_recheck`
-/// scan-desc fields, and `GlobalVisTestFor` are all present.)
-///
-/// Separately, this code path is not even reached in the current single-user
-/// boot: with `search_statrelattinh` uninstalled, `examine_simple_variable`
-/// cannot pin a `pg_statistic` `statsTuple` for a relation column, so
-/// `ineq_histogram_selectivity` takes the stats-absent default-estimate path
-/// and never calls `get_actual_variable_range`.
-fn get_actual_variable_range(
-    _root: &PlannerInfo,
-    _vardata: &VariableStatData,
-    _sortop: Oid,
-    _collation: Oid,
-    _min: Option<&mut Datum>,
-    _max: Option<&mut Datum>,
-) -> bool {
-    // C contract (selfuncs.c:6573): "If successful, store values in *min and/or
-    // *max, and return true. If unsuccessful, return false." A `false` return is
-    // not an error — the caller (`ineq_histogram_selectivity`) then uses whatever
-    // extremal value is recorded in `pg_statistic`, exactly as C does when there
-    // is no suitable index (`rel->indexlist == NIL`, partitioned table, no
-    // ordering / index-only-capable index matching the var) or when the endpoint
-    // probe gives up after visiting too many heap pages.
-    //
-    // The actual endpoint extraction (`get_actual_variable_endpoint`) drives the
-    // index-only-scan machinery directly: `index_beginscan(heapRel, indexRel, ...)`
-    // followed by a raw-scankey `index_rescan(scan, ScanKey[1], 1, NULL, 0)` (an
-    // `SK_ISNULL | SK_SEARCHNOTNULL` key), `index_getnext_tid` in a chosen
-    // direction, and an executor-free `index_fetch_heap` over a bare
-    // `table_slot_create` slot under a transient `SnapshotNonVacuumable` seeded
-    // from `GlobalVisTestFor(heapRel)`. The installed indexam seams are all
-    // node-shaped: `index_rescan` reads `ioss_ScanKeys` off an
-    // `IndexOnlyScanState`, and `index_getnext_tid`/`index_fetch_heap` take a
-    // `SlotId` into the `EState` slot pool plus `&mut EStateData` — none expose
-    // the bare-scan probe this needs, and there is no `SnapshotNonVacuumable` /
-    // `GlobalVisTestFor` setup seam (owner: backend-access-index-indexam). With
-    // the probe unavailable we decline exactly as C does for an unsuitable index,
-    // and the caller falls back to the histogram bound rather than failing.
-    false
+/// The bare-scan endpoint extraction (`get_actual_variable_endpoint`) lives in
+/// `backend-access-index-indexam` (it owns the scan-descriptor primitives) and
+/// is reached through the `get_actual_variable_endpoint` seam; this function is
+/// the index-selection driver (the part that is selfuncs's own logic). `want_min`
+/// / `want_max` correspond to C's non-NULL `min` / `max` pointers.
+#[allow(clippy::too_many_arguments)]
+fn get_actual_variable_range<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    vardata: &VariableStatData,
+    sortop: Oid,
+    collation: Oid,
+    want_min: bool,
+    want_max: bool,
+) -> PgResult<ActualVariableRange<'mcx>> {
+    let none = ActualVariableRange { have_data: false, min: None, max: None };
+
+    // No hope if no relation or it doesn't have indexes.
+    let relid = match vardata.rel {
+        None => return Ok(none),
+        Some(r) => r,
+    };
+    let rel = root.rel(relid);
+    if rel.indexlist.is_empty() {
+        return Ok(none);
+    }
+
+    // If it has indexes it must be a plain relation.
+    // Assert(rte->rtekind == RTE_RELATION).
+    let rte = planner_rt_fetch(run, root, rel.relid);
+    debug_assert_eq!(
+        rte.rtekind,
+        types_nodes::parsenodes::RTEKind::RTE_RELATION
+    );
+    let rte_relid = rte.relid;
+    let rte_relkind = rte.relkind;
+
+    // ignore partitioned tables. Any indexes here are not real indexes.
+    if rte_relkind == RELKIND_PARTITIONED_TABLE as i8 {
+        return Ok(none);
+    }
+
+    // Search through the indexes to see if any match our problem.
+    for index in rel.indexlist.iter() {
+        // Ignore non-ordering indexes.
+        if index.sortopfamily.is_empty() {
+            continue;
+        }
+        // Ignore partial indexes (we only want stats covering the whole rel).
+        if !index.indpred.is_empty() {
+            continue;
+        }
+        // Hypothetical indexes (from a get_relation_info hook) aren't real.
+        if index.hypothetical {
+            continue;
+        }
+        // get_actual_variable_endpoint uses the index-only-scan machinery, so
+        // ignore indexes that can't use it on their first column.
+        if !index.canreturn[0] {
+            continue;
+        }
+        // The first index column must match the desired variable, sortop, and
+        // collation --- but we can use a descending-order index.
+        if collation != index.indexcollations[0] {
+            continue; // test first 'cause it's cheapest
+        }
+        if !ix::match_index_to_operand::call(root, vardata.var, 0, index) {
+            continue;
+        }
+        let strategy = lsc::get_op_opfamily_strategy::call(sortop, index.sortopfamily[0])?;
+        let compare = amapi::index_am_translate_strategy::call(
+            strategy,
+            index.relam,
+            index.sortopfamily[0],
+            true,
+        )?;
+        let indexscandir = if compare == COMPARE_LT {
+            if index.reverse_sort[0] {
+                BackwardScanDirection
+            } else {
+                ForwardScanDirection
+            }
+        } else if compare == COMPARE_GT {
+            if index.reverse_sort[0] {
+                ForwardScanDirection
+            } else {
+                BackwardScanDirection
+            }
+        } else {
+            // index doesn't match the sortop
+            continue;
+        };
+
+        // Found a suitable index to extract data from.
+        // Open the table and index so we can read from them. We should already
+        // have some type of lock on each; table_open/index_open with NoLock.
+        let heap_rel = relseam::relation_open::call(mcx, rte_relid, NoLock)?;
+        let index_rel = idxseam::index_open::call(mcx, index.indexoid, NoLock)?;
+
+        // get_typlenbyval(vardata->atttype, &typLen, &typByVal).
+        let (typ_len, typ_byval) = lsc::get_typlenbyval::call(vardata.atttype)?;
+
+        let mut have_data = false;
+        let mut min_out: Option<DatumV<'mcx>> = None;
+        let mut max_out: Option<DatumV<'mcx>> = None;
+
+        // If min is requested ...
+        if want_min {
+            match idxseam::get_actual_variable_endpoint::call(
+                mcx,
+                heap_rel.alias(),
+                index_rel.alias(),
+                indexscandir,
+                typ_len,
+                typ_byval,
+            )? {
+                Some(v) => {
+                    min_out = Some(v);
+                    have_data = true;
+                }
+                None => have_data = false,
+            }
+        } else {
+            // If min not requested, still want to fetch max.
+            have_data = true;
+        }
+
+        // If max is requested, and we didn't already fail ...
+        if want_max && have_data {
+            // scan in the opposite direction; all else is the same.
+            let revdir = match indexscandir {
+                ForwardScanDirection => BackwardScanDirection,
+                BackwardScanDirection => ForwardScanDirection,
+                d => d,
+            };
+            match idxseam::get_actual_variable_endpoint::call(
+                mcx,
+                heap_rel.alias(),
+                index_rel.alias(),
+                revdir,
+                typ_len,
+                typ_byval,
+            )? {
+                Some(v) => max_out = Some(v),
+                None => have_data = false,
+            }
+        }
+
+        // index_close(indexRel, NoLock); table_close(heapRel, NoLock). The owned
+        // Relation handles close on drop (NoLock abort-path closer), matching
+        // C's explicit NoLock close here.
+        drop(index_rel);
+        drop(heap_rel);
+
+        // And we're done (C breaks out of the index loop unconditionally).
+        return Ok(ActualVariableRange { have_data, min: min_out, max: max_out });
+    }
+
+    Ok(none)
 }
 
 /// `convert_to_scalar(...)` (selfuncs.c) — the faithful per-type
@@ -327,8 +460,10 @@ use crate::convert::convert_to_scalar;
 /// inequality from the histogram. Returns the histogram selectivity, or `-1.0`
 /// if no usable histogram. 1:1 with the C body (`get_actual_variable_range`
 /// declines gracefully — see above — so the recorded histogram bound is used).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ineq_histogram_selectivity<'mcx>(
     mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     vardata: &VariableStatData,
     opoid: Oid,
@@ -364,6 +499,17 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
                     sslot.valuetype,
                 )?;
 
+                // `get_actual_variable_range` may replace the first / last
+                // histogram boundary with the column's *actual* current min/max
+                // (an index endpoint probe). C overwrites `sslot.values[0/...]`
+                // in place; here those positions are tracked as canonical-value
+                // overrides consulted by [`hist_value_at`] (the bare slot words
+                // remain untouched, so `convert_to_scalar`'s by-value scaling
+                // below still reads them — only the comparison value is the
+                // refined endpoint).
+                let mut endpoint_override: Vec<Option<DatumV<'mcx>>> =
+                    (0..nvalues).map(|_| None).collect();
+
                 if nvalues > 1
                     && stacoll == collation
                     && lsc::comparison_ops_are_compatible::call(staop, opoid)?
@@ -376,53 +522,51 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
                     let mut have_end = false;
 
                     if nvalues == 2 {
-                        // get_actual_variable_range mutates sslot.values[0/1]
-                        let (v0, v1) = (sslot.values[0], sslot.values[1]);
-                        let mut min = v0;
-                        let mut max = v1;
-                        have_end = get_actual_variable_range(
-                            root,
-                            vardata,
-                            staop,
-                            collation,
-                            Some(&mut min),
-                            Some(&mut max),
-                        );
-                        sslot.values[0] = min;
-                        sslot.values[1] = max;
+                        // get_actual_variable_range overwrites values[0] (min) and
+                        // values[1] (max).
+                        let range = get_actual_variable_range(
+                            mcx, run, root, vardata, staop, collation, true, true,
+                        )?;
+                        have_end = range.have_data;
+                        if let Some(v) = range.min {
+                            endpoint_override[0] = Some(v);
+                        }
+                        if let Some(v) = range.max {
+                            endpoint_override[1] = Some(v);
+                        }
                     }
 
                     while lobound < hibound {
                         let probe = (lobound + hibound) / 2;
 
                         if probe == 0 && nvalues > 2 {
-                            let mut min = sslot.values[0];
-                            have_end = get_actual_variable_range(
-                                root,
-                                vardata,
-                                staop,
-                                collation,
-                                Some(&mut min),
-                                None,
-                            );
-                            sslot.values[0] = min;
+                            let range = get_actual_variable_range(
+                                mcx, run, root, vardata, staop, collation, true, false,
+                            )?;
+                            have_end = range.have_data;
+                            if let Some(v) = range.min {
+                                endpoint_override[0] = Some(v);
+                            }
                         } else if probe == nvalues - 1 && nvalues > 2 {
-                            let mut max = sslot.values[probe as usize];
-                            have_end = get_actual_variable_range(
-                                root,
-                                vardata,
-                                staop,
-                                collation,
-                                None,
-                                Some(&mut max),
-                            );
-                            sslot.values[probe as usize] = max;
+                            let range = get_actual_variable_range(
+                                mcx, run, root, vardata, staop, collation, false, true,
+                            )?;
+                            have_end = range.have_data;
+                            if let Some(v) = range.max {
+                                endpoint_override[probe as usize] = Some(v);
+                            }
                         }
 
                         // Both the histogram bin value and the constant cross
                         // the by-reference-capable lane, so a
                         // by-ref `text`/`name`/`bytea` comparison is correct.
-                        let bin = slot_value_canon(&sslot.values, canon.as_ref(), probe as usize, mcx)?;
+                        let bin = hist_value_at(
+                            &sslot.values,
+                            canon.as_ref(),
+                            &endpoint_override,
+                            probe as usize,
+                            mcx,
+                        )?;
                         let res = fmgr::function_call2_coll_datum::call(
                             mcx,
                             opproc_oid,
@@ -497,12 +641,24 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
                                 DatumV::ByVal(w) => Datum::from_usize(*w),
                                 _ => Datum::from_usize(0),
                             };
+                            // For a by-value type, an endpoint refined by
+                            // get_actual_variable_range replaces the bare slot
+                            // word (C overwrites `sslot.values[i]`); read the
+                            // override word when present, else the bare slot.
+                            let low_word = match &endpoint_override[(i - 1) as usize] {
+                                Some(DatumV::ByVal(w)) => Datum::from_usize(*w),
+                                _ => sslot.values[(i - 1) as usize],
+                            };
+                            let high_word = match &endpoint_override[i as usize] {
+                                Some(DatumV::ByVal(w)) => Datum::from_usize(*w),
+                                _ => sslot.values[i as usize],
+                            };
                             let (ok, val, low, high) = convert_to_scalar(
                                 const_word,
                                 consttype,
                                 collation,
-                                sslot.values[(i - 1) as usize],
-                                sslot.values[i as usize],
+                                low_word,
+                                high_word,
                                 vardata.vartype,
                             );
                             if ok {
@@ -594,8 +750,10 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
 /// `scalarineqsel(root, operator, isgt, iseq, collation, vardata, constval,
 /// consttype)` (selfuncs.c) — selectivity of a scalar inequality. 1:1 with the
 /// C body. The CTID special case reads `vardata->rel->pages`/`tuples`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn scalarineqsel<'mcx>(
     mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     operator: Oid,
     isgt: bool,
@@ -687,7 +845,7 @@ pub(crate) fn scalarineqsel<'mcx>(
 
     // Histogram contribution.
     let hist_selec = ineq_histogram_selectivity(
-        mcx, root, vardata, operator, opproc_oid, isgt, iseq, collation, constval, consttype,
+        mcx, run, root, vardata, operator, opproc_oid, isgt, iseq, collation, constval, consttype,
     )?;
 
     // Merge MCV and histogram, knowing the histogram covers only non-null

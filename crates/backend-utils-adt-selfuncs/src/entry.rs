@@ -172,7 +172,7 @@ pub fn scalarineqsel_wrapper<'mcx>(
 
     // The rest of the work is done by scalarineqsel().
     let selec = scalarineqsel(
-        mcx, root, operator, isgt, iseq, collation, &vardata, constval, consttype,
+        mcx, run, root, operator, isgt, iseq, collation, &vardata, constval, consttype,
     )?;
 
     crate::examine::release_variable_stats(vardata);

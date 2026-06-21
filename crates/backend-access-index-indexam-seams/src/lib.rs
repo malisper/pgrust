@@ -14,6 +14,37 @@ use types_scan::sdir::ScanDirection;
 use types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
+    /// `get_actual_variable_endpoint(heapRel, indexRel, indexscandir, scankeys,
+    /// typLen, typByVal, slot, outercontext, &endpointDatum)` (selfuncs.c:6770) —
+    /// fetch one endpoint (min or max, per `indexscandir`) of an index's first
+    /// column using the index-only-scan machinery under a transient
+    /// `SnapshotNonVacuumable` snapshot. Returns the endpoint as its canonical
+    /// value image (`Some`, C `true` + `*endpointDatum`) or `None` (C `false`:
+    /// empty index, or gave up after visiting `VISITED_PAGES_LIMIT` heap pages).
+    ///
+    /// The driver logic (`get_actual_variable_range`, which picks a suitable
+    /// btree index and translates the sortop into a scan direction) lives in the
+    /// optimizer's selfuncs unit; only this bare-scan-descriptor probe — which
+    /// drives `index_beginscan`/`index_rescan`/`index_getnext_tid`/
+    /// `index_fetch_heap` directly on a raw `IndexScanDesc` (no executor
+    /// plan-state node), builds the `IS NOT NULL` `ScanKeyData`, sets up the
+    /// `SnapshotNonVacuumable` from `GlobalVisTestFor(heapRel)`, consults the
+    /// visibility map, and deforms `xs_itup` — belongs to indexam, which owns
+    /// those primitives. The owner installs it from `init_seams()`. `Err` carries
+    /// the probe's `ereport(ERROR)` surface.
+    pub fn get_actual_variable_endpoint<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_relation: types_rel::Relation<'mcx>,
+        index_relation: types_rel::Relation<'mcx>,
+        indexscandir: ScanDirection,
+        typ_len: i16,
+        typ_byval: bool,
+    ) -> types_error::PgResult<
+        Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
+    >
+);
+
+seam_core::seam!(
     /// `index_beginscan(heapRelation, indexRelation, snapshot, instrument,
     /// nkeys, norderbys)` (indexam.c): begin a scan of an index for the given
     /// relations and snapshot, returning a fresh `IndexScanDesc` allocated in

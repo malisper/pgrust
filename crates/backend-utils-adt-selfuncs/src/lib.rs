@@ -203,6 +203,11 @@ fn backend_optimizer_path_costsize_seams_clamp_row_est(nrows: f64) -> f64 {
 /// `RTE_VALUES` (parsenodes.h) — a `VALUES (...)` list RTE.
 pub(crate) const RTE_VALUES: types_pathnodes::RTEKind = 5;
 
+/// `RELKIND_PARTITIONED_TABLE` (pg_class.h) — partitioned-table relkind, `'p'`.
+/// `get_actual_variable_range` skips partitioned tables (their indexes are not
+/// real indexes).
+pub(crate) const RELKIND_PARTITIONED_TABLE: u8 = b'p';
+
 /* ---------------------------------------------------------------------------
  * Default selectivity constants (selfuncs.h) not re-exported by types-selfuncs.
  * ------------------------------------------------------------------------- */

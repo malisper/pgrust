@@ -82,6 +82,7 @@ pub fn init_seams() {
     seams::index_getnext_tid::set(seam_index_getnext_tid);
     seams::index_fetch_heap::set(seam_index_fetch_heap);
     seams::index_getnext_slot::set(seam_index_getnext_slot);
+    seams::get_actual_variable_endpoint::set(get_actual_variable_endpoint);
     seams::index_getbitmap::set(seam_index_getbitmap);
     seams::index_parallelscan_estimate::set(seam_index_parallelscan_estimate);
     seams::index_parallelscan_initialize::set(seam_index_parallelscan_initialize);
@@ -1132,6 +1133,177 @@ pub fn index_getnext_slot<'mcx>(
     }
 
     Ok(false)
+}
+
+/// `get_actual_variable_endpoint(heapRel, indexRel, indexscandir, scankeys,
+/// typLen, typByVal, tableslot, outercontext, &endpointDatum)` (selfuncs.c:6770)
+/// — fetch one endpoint datum (min or max, per `indexscandir`) from the index's
+/// first column, using the index-only-scan machinery under a transient
+/// `SnapshotNonVacuumable`. Returns `Some(value)` on success (C `true` +
+/// `*endpointDatum`) or `None` (C `false`: empty index, or gave up after too
+/// many heap-page visits).
+///
+/// The bare-scan probe lives here because indexam owns the scan-descriptor
+/// primitives (`index_beginscan`/`index_rescan`/`index_getnext_tid`/
+/// `index_fetch_heap`); the driver that picks a suitable btree index and chooses
+/// the scan direction (`get_actual_variable_range`) lives in the optimizer's
+/// selfuncs unit and reaches this through the `get_actual_variable_endpoint`
+/// seam. The scankey and table slot that C builds once in
+/// `get_actual_variable_range` (to share across the min and max invocations) are
+/// rebuilt per call here, since the seam is invoked once per endpoint — harmless
+/// (the `IS NOT NULL` key and the slot are cheap) and keeps the cross-crate
+/// surface minimal.
+pub fn get_actual_variable_endpoint<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation: Relation<'mcx>,
+    index_relation: Relation<'mcx>,
+    indexscandir: ScanDirection,
+    typ_len: i16,
+    typ_byval: bool,
+) -> PgResult<Option<DatumV<'mcx>>> {
+    use types_scan::scankey::{InvalidStrategy, ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL};
+    use types_snapshot::snapshot::SnapshotType;
+    use types_storage::{Buffer, InvalidBuffer};
+    use types_core::primitive::{BlockNumber, InvalidBlockNumber};
+
+    const VISITED_PAGES_LIMIT: i32 = 100;
+
+    // build some stuff needed for indexscan execution (the C caller's job; here
+    // per-call). table_slot_create(heapRel, NULL).
+    let mut slot = tableam::table_slot_create(mcx, &heap_relation)?;
+
+    // set up an IS NOT NULL scan key so that we ignore nulls
+    // ScanKeyEntryInitialize(&scankeys[0], SK_ISNULL | SK_SEARCHNOTNULL, 1,
+    //   InvalidStrategy, InvalidOid, InvalidOid, InvalidOid, (Datum) 0).
+    let mut scankey = ScanKeyData::empty();
+    backend_access_common_scankey::ScanKeyEntryInitialize(
+        &mut scankey,
+        SK_ISNULL | SK_SEARCHNOTNULL,
+        1, // index col to scan
+        InvalidStrategy,
+        InvalidOid, // no strategy subtype
+        InvalidOid, // no collation
+        InvalidOid, // no reg proc for this
+        DatumV::ByVal(0),
+    )?;
+    let scankeys = [scankey];
+
+    // InitNonVacuumableSnapshot(SnapshotNonVacuumable, GlobalVisTestFor(heapRel)).
+    let vistest =
+        backend_access_heap_vacuumlazy_seams::global_vis_test_for::call(&heap_relation)?;
+    let mut snapshot = SnapshotData::sentinel(SnapshotType::SNAPSHOT_NON_VACUUMABLE);
+    snapshot.vistest = vistest;
+
+    // index_beginscan(heapRel, indexRel, &SnapshotNonVacuumable, NULL, 1, 0).
+    let mut scan = index_beginscan(
+        mcx,
+        &heap_relation,
+        &index_relation,
+        snapshot,
+        None,
+        1,
+        0,
+    )?;
+
+    // Set it up for index-only scan; index_rescan(scan, scankeys, 1, NULL, 0).
+    scan.xs_want_itup = true;
+    index_rescan(mcx, &mut scan, &scankeys, 1, &[], 0)?;
+
+    let mut have_data = false;
+    let mut result: Option<DatumV<'mcx>> = None;
+    let mut vmbuffer: Buffer = InvalidBuffer;
+    let mut last_heap_block: BlockNumber = InvalidBlockNumber;
+    let mut n_visited_heap_pages: i32 = 0;
+
+    // Fetch first/next tuple in specified direction.
+    while let Some(tid) = index_getnext_tid(mcx, &mut scan, indexscandir)? {
+        let block = tid.ip_blkid.block_number();
+
+        // !VM_ALL_VISIBLE(heapRel, block, &vmbuffer)
+        let (status, vmbuf) = backend_access_heap_visibilitymap_seams::visibilitymap_get_status::call(
+            heap_relation.alias(),
+            block,
+            vmbuffer,
+        )?;
+        vmbuffer = vmbuf;
+        let all_visible = status
+            & backend_access_heap_visibilitymap_seams::VISIBILITYMAP_ALL_VISIBLE
+            != 0;
+
+        if !all_visible {
+            // Rats, we have to visit the heap to check visibility.
+            if !index_fetch_heap(mcx, &mut scan, &mut slot)? {
+                // No visible tuple for this index entry; advance to the next.
+                // Count heap-page fetches and give up if we've done too many.
+                // We don't charge a page fetch if this is the same heap page as
+                // the previous tuple.
+                if block != last_heap_block {
+                    last_heap_block = block;
+                    n_visited_heap_pages += 1;
+                    if n_visited_heap_pages > VISITED_PAGES_LIMIT {
+                        break;
+                    }
+                }
+                continue; // no visible tuple, try next index entry
+            }
+            // We don't actually need the heap tuple for anything; the slot's
+            // contents (and its buffer pin) are released when the slot is
+            // dropped below, since we break out of the loop right after reading
+            // the index tuple. (C calls ExecClearTuple(tableslot) here.)
+        }
+
+        // We expect that the index will return data in IndexTuple not HeapTuple
+        // format.
+        let itup = scan.xs_itup.as_ref().ok_or_else(|| {
+            PgError::error("no data returned for index-only scan".to_string())
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+        })?;
+
+        // We do not yet support recheck here.
+        if scan.xs_recheck {
+            break;
+        }
+
+        // OK to deconstruct the index tuple.
+        let itupdesc = scan.xs_itupdesc.as_deref().ok_or_else(|| {
+            PgError::error("index-only scan has no index tuple descriptor".to_string())
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+        })?;
+        let columns = backend_access_common_indextuple_seams::index_deform_tuple::call(
+            mcx,
+            itup.as_slice(),
+            itupdesc,
+        )?;
+
+        // Shouldn't have got a null, but be careful.
+        let (value0, isnull0) = &columns[0];
+        if *isnull0 {
+            return Err(PgError::error(format!(
+                "found unexpected null value in index \"{}\"",
+                index_relation.name()
+            ))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR));
+        }
+
+        // Copy the index column value out to caller's context.
+        // *endpointDatum = datumCopy(values[0], typByVal, typLen). In the arena
+        // model the deformed value already carries its referent; clone_in places
+        // it in the caller's `mcx` (C copies into `outercontext`).
+        let _ = (typ_byval, typ_len); // describe the value's storage; modeled by DatumV.
+        result = Some(value0.clone_in(mcx)?);
+        have_data = true;
+        break;
+    }
+
+    if vmbuffer != InvalidBuffer {
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(vmbuffer);
+    }
+    index_endscan(mcx, scan)?;
+
+    // Clean up the standalone table slot.
+    backend_executor_execTuples_seams::exec_drop_single_tuple_table_slot::call(slot)?;
+
+    Ok(if have_data { result } else { None })
 }
 
 /// `index_getbitmap(scan, bitmap)` — add the TIDs of all heap tuples

@@ -33,3 +33,9 @@ backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predica
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
+backend-access-common-indextuple-seams = { path = "../backend-access-common-indextuple-seams" }
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+backend-access-heap-visibilitymap-seams = { path = "../backend-access-heap-visibilitymap-seams" }
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }

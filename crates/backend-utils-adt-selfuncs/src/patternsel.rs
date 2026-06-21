@@ -550,15 +550,17 @@ fn pattern_fixed_prefix<'mcx>(
 /// `prefix_selectivity(root, vardata, eqopr, ltopr, geopr, collation,
 /// prefixcon)` (like_support.c) — selectivity of "var >= prefix AND var <
 /// greaterstr". 1:1 with the C body.
+#[allow(clippy::too_many_arguments)]
 fn prefix_selectivity<'mcx>(
     mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     vardata: &types_selfuncs::VariableStatData,
     eqopr: Oid,
     ltopr: Oid,
     geopr: Oid,
     collation: Oid,
-    prefixcon: &PrefixConst<'_>,
+    prefixcon: &PrefixConst<'mcx>,
 ) -> PgResult<f64> {
     // The `>=` / `<` histogram probes (`ineq_histogram_selectivity`) and the
     // `=` clamp (`var_eq_const`) compare the prefix const against the column's
@@ -575,6 +577,7 @@ fn prefix_selectivity<'mcx>(
     let ge_opproc = lsc::get_opcode::call(geopr)?;
     let mut prefixsel = ineq_histogram_selectivity(
         mcx,
+        run,
         root,
         vardata,
         geopr,
@@ -597,6 +600,7 @@ fn prefix_selectivity<'mcx>(
     if let Some(greaterstr) = greaterstrcon {
         let topsel = ineq_histogram_selectivity(
             mcx,
+            run,
             root,
             vardata,
             ltopr,
@@ -934,7 +938,7 @@ fn patternsel_common<'mcx>(
                 // branch, with `mcv_selec == 0` and `sumcommon == 0`).
                 let prefixsel = if pstatus == PatternPrefixStatus::Partial {
                     let pfx = prefix.as_ref().expect("partial prefix must be present");
-                    prefix_selectivity(mcx, root, &vardata, eqopr, ltopr, geopr, collation, pfx)?
+                    prefix_selectivity(mcx, run, root, &vardata, eqopr, ltopr, geopr, collation, pfx)?
                 } else {
                     1.0
                 };
@@ -967,7 +971,7 @@ fn patternsel_common<'mcx>(
         if hist_size < 100 {
             let prefixsel = if pstatus == PatternPrefixStatus::Partial {
                 let pfx = prefix.as_ref().expect("partial prefix must be present");
-                prefix_selectivity(mcx, root, &vardata, eqopr, ltopr, geopr, collation, pfx)?
+                prefix_selectivity(mcx, run, root, &vardata, eqopr, ltopr, geopr, collation, pfx)?
             } else {
                 1.0
             };

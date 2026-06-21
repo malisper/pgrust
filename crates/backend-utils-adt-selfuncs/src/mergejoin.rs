@@ -533,7 +533,7 @@ pub fn mergejoinscansel<'mcx>(
     let rightmin_v = rightmin;
     let leftmin_v = leftmin;
     let selec = scalarineqsel(
-        mcx, root, leop, isgt, true, collation, &leftvar, &rightmax_v, op_righttype,
+        mcx, run, root, leop, isgt, true, collation, &leftvar, &rightmax_v, op_righttype,
     )?;
     if selec != DEFAULT_INEQ_SEL {
         leftend = selec;
@@ -541,7 +541,7 @@ pub fn mergejoinscansel<'mcx>(
 
     // And similarly for the right variable.
     let selec = scalarineqsel(
-        mcx, root, revleop, isgt, true, collation, &rightvar, &leftmax_v, op_lefttype,
+        mcx, run, root, revleop, isgt, true, collation, &rightvar, &leftmax_v, op_lefttype,
     )?;
     if selec != DEFAULT_INEQ_SEL {
         rightend = selec;
@@ -561,7 +561,7 @@ pub fn mergejoinscansel<'mcx>(
     // The fraction of the left variable scanned before the first join pair is
     // the fraction that's < the right-side minimum value.
     let selec = scalarineqsel(
-        mcx, root, ltop, isgt, false, collation, &leftvar, &rightmin_v, op_righttype,
+        mcx, run, root, ltop, isgt, false, collation, &leftvar, &rightmin_v, op_righttype,
     )?;
     if selec != DEFAULT_INEQ_SEL {
         leftstart = selec;
@@ -569,7 +569,7 @@ pub fn mergejoinscansel<'mcx>(
 
     // And similarly for the right variable.
     let selec = scalarineqsel(
-        mcx, root, revltop, isgt, false, collation, &rightvar, &leftmin_v, op_lefttype,
+        mcx, run, root, revltop, isgt, false, collation, &rightvar, &leftmin_v, op_lefttype,
     )?;
     if selec != DEFAULT_INEQ_SEL {
         rightstart = selec;
