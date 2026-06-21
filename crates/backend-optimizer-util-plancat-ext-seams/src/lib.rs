@@ -163,7 +163,8 @@ seam_core::seam!(
     /// returning the (possibly new) node handles. Used to fix index expressions /
     /// predicates / constraint expressions / partition exprs to the parent rel's
     /// varno.
-    pub fn change_var_nodes(
+    pub fn change_var_nodes<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
         nodes: &[NodeId],
         rt_index: i32,

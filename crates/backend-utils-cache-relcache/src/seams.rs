@@ -853,7 +853,7 @@ fn critical_shared_relcaches_built() -> bool {
 fn relation_get_index_expressions<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,
-) -> PgResult<Option<PgVec<'mcx, types_nodes::Expr>>> {
+) -> PgResult<Option<PgVec<'mcx, types_nodes::Expr<'mcx>>>> {
     let has_expression_col = crate::core_entry_store::with_relation(rel.rd_id, |rd| {
         match &rd.rd_index {
             None => false,
@@ -872,8 +872,21 @@ fn relation_get_index_expressions<'mcx>(
     // vocabulary owned cross-unit; route through the node-tree owner seam, which
     // returns the decoded expression list in `mcx`. The owned entry does not
     // carry the C's `rd_indexprs` memoization, so the tree is re-derived per
-    // call (faithful behavior, minus the cache).
-    backend_utils_cache_relcache_nodexform_seams::index_expressions::call(mcx, rel.rd_id)
+    // call (faithful behavior, minus the cache). The nodexform decode returns the
+    // trees in its own query-lifetime result context (`'static`); re-localize them
+    // into the caller's `mcx` (the IndexInfo's arena) via `clone_in` so the result
+    // is `'mcx`-bound (C copies the IndexInfo expressions into the caller context).
+    match backend_utils_cache_relcache_nodexform_seams::index_expressions::call(mcx, rel.rd_id)? {
+        None => Ok(None),
+        Some(exprs) => {
+            let mut out: PgVec<'mcx, types_nodes::Expr<'mcx>> =
+                mcx::vec_with_capacity_in(mcx, exprs.len())?;
+            for e in exprs.iter() {
+                out.push(e.clone_in(mcx)?);
+            }
+            Ok(Some(out))
+        }
+    }
 }
 
 /// `RelationGetIndexPredicate(index)` (relcache.c:5210): the index's partial
@@ -893,7 +906,7 @@ fn relation_get_index_expressions<'mcx>(
 fn relation_get_index_predicate<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,
-) -> PgResult<Option<PgVec<'mcx, types_nodes::Expr>>> {
+) -> PgResult<Option<PgVec<'mcx, types_nodes::Expr<'mcx>>>> {
     // Quick exit when the relation is not an index (C `rd_indextuple == NULL`).
     let is_index = crate::core_entry_store::with_relation(rel.rd_id, |rd| rd.rd_index.is_some())?;
     if !is_index {
@@ -915,8 +928,20 @@ fn relation_get_index_predicate<'mcx>(
     // `make_ands_implicit`/`fix_opfuncids`) is node vocabulary owned cross-unit;
     // route through the node-tree owner seam, which returns the implicit-AND
     // predicate list in `mcx`. The owned entry does not carry the C's
-    // `rd_indpred` memoization, so the tree is re-derived per call.
-    backend_utils_cache_relcache_nodexform_seams::index_predicate::call(mcx, rel.rd_id)
+    // `rd_indpred` memoization, so the tree is re-derived per call. Re-localize the
+    // `'static` decode result into the caller's `mcx` via `clone_in` (C copies the
+    // predicate into the caller context).
+    match backend_utils_cache_relcache_nodexform_seams::index_predicate::call(mcx, rel.rd_id)? {
+        None => Ok(None),
+        Some(clauses) => {
+            let mut out: PgVec<'mcx, types_nodes::Expr<'mcx>> =
+                mcx::vec_with_capacity_in(mcx, clauses.len())?;
+            for e in clauses.iter() {
+                out.push(e.clone_in(mcx)?);
+            }
+            Ok(Some(out))
+        }
+    }
 }
 
 /// `RelationGetDummyIndexExpressions(relation)` (relcache.c:5156): like
@@ -939,7 +964,7 @@ fn relation_get_index_predicate<'mcx>(
 fn relation_get_dummy_index_expressions<'mcx>(
     mcx: Mcx<'mcx>,
     index: &types_rel::Relation<'mcx>,
-) -> PgResult<Option<PgVec<'mcx, types_nodes::primnodes::Expr>>> {
+) -> PgResult<Option<PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>>> {
     let has_expression_col = crate::core_entry_store::with_relation(index.rd_id, |rd| {
         match &rd.rd_index {
             None => false,
@@ -959,7 +984,22 @@ fn relation_get_dummy_index_expressions<'mcx>(
     // cross-unit; route through the node-tree owner seam, which returns the
     // dummy null-`Const` list in `mcx`. The owned entry does not carry the C's
     // memoization, so the tree is re-derived per call.
-    backend_utils_cache_relcache_nodexform_seams::dummy_index_expressions::call(mcx, index.rd_id)
+    // Re-localize the `'static` decode result into the caller's `mcx` via
+    // `clone_in` (C copies the dummy expressions into the caller context).
+    match backend_utils_cache_relcache_nodexform_seams::dummy_index_expressions::call(
+        mcx,
+        index.rd_id,
+    )? {
+        None => Ok(None),
+        Some(exprs) => {
+            let mut out: PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>> =
+                mcx::vec_with_capacity_in(mcx, exprs.len())?;
+            for e in exprs.iter() {
+                out.push(e.clone_in(mcx)?);
+            }
+            Ok(Some(out))
+        }
+    }
 }
 
 /// `RelationGetExclusionInfo(indexRelation, &operators, &procs, &strategies)`

@@ -961,8 +961,8 @@ fn cmptype_from_strategy(strat: i32) -> CompareType {
 /// `match_orclause_to_indexcol(root, rinfo, indexcol, index)` (indxpath.c:3297)
 /// — attempt to transform a list of OR-clause args into a single SAOP matching
 /// the index column.
-pub fn match_orclause_to_indexcol(
-    mcx: Mcx<'_>,
+pub fn match_orclause_to_indexcol<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     rinfo: RinfoId,
     indexcol: usize,
@@ -979,7 +979,10 @@ pub fn match_orclause_to_indexcol(
     // Deep-copy each arm via `clone_in` (a derived `.clone()` panics on an
     // owned-subtree operand such as a SubPlan inside an `OpExpr` arm).
     let orclause_id = root.rinfo(rinfo).orclause.expect("RestrictInfo without orclause");
-    let or_args: Vec<Expr> = {
+    // Deep-copy each arm into the planner-run `mcx`, then erase to the arena's
+    // notional `'static` (the OR-arm clauses are used at the arena level alongside
+    // `root.node(..)`-resolved nodes via `orarg_clause_owned`).
+    let or_args: Vec<Expr<'static>> = {
         let args = &root
             .node(orclause_id)
             .as_boolexpr()
@@ -987,13 +990,13 @@ pub fn match_orclause_to_indexcol(
             .args;
         let mut out = Vec::with_capacity(args.len());
         for a in args {
-            out.push(a.clone_in(mcx)?);
+            out.push(a.clone_in(mcx)?.erase_lifetime());
         }
         out
     };
 
-    let mut consts: Vec<Expr> = Vec::new();
-    let mut index_expr: Option<Expr> = None;
+    let mut consts: Vec<Expr<'mcx>> = Vec::new();
+    let mut index_expr: Option<Expr<'mcx>> = None;
     let mut match_opno: Oid = INVALID_OID;
     let mut consttype: Oid = INVALID_OID;
     let mut arraytype: Oid = INVALID_OID;
@@ -1033,7 +1036,7 @@ pub fn match_orclause_to_indexcol(
         // with match_opclause_to_indexcol. We compute the per-arm relids via
         // pull_varnos over each operand (the arms carry bare clause nodes here,
         // not RestrictInfos with precomputed left/right_relids).
-        let const_expr: Expr;
+        let const_expr: Expr<'mcx>;
         let left_uses = operand_uses_index_relid(mcx, root, &leftop, index_relid)?;
         let right_uses = operand_uses_index_relid(mcx, root, &rightop, index_relid)?;
         if match_index_to_operand(root, &leftop, indexcol, index)

@@ -60,7 +60,7 @@ pub(crate) struct OwnedPartitionKey {
     pub(crate) strategy: types_partition::PartitionStrategy,
     pub(crate) partnatts: i16,
     pub(crate) partattrs: Vec<types_core::primitive::AttrNumber>,
-    pub(crate) partexprs: Vec<types_nodes::primnodes::Expr>,
+    pub(crate) partexprs: Vec<types_nodes::primnodes::Expr<'static>>,
     pub(crate) partopfamily: Vec<Oid>,
     pub(crate) partopcintype: Vec<Oid>,
     pub(crate) partsupfunc: Vec<types_core::fmgr::FmgrInfo>,
@@ -119,7 +119,7 @@ pub(crate) struct RelcacheState {
     /// `relation->rd_partcheck` cache slots + the `rd_partcheckvalid` flag
     /// (keyed by relation OID; C: `rd_partcheck` in `rd_partcheckcxt`). An empty
     /// `Vec` with `valid = true` is the C NIL (no qual) case.
-    pub(crate) partcheck: HashMap<Oid, (bool, Vec<types_nodes::primnodes::Expr>)>,
+    pub(crate) partcheck: HashMap<Oid, (bool, Vec<types_nodes::primnodes::Expr<'static>>)>,
 }
 
 impl RelcacheState {
@@ -686,7 +686,19 @@ pub(crate) fn set_partkey(
         strategy: key.strategy,
         partnatts: key.partnatts,
         partattrs: copy_vec(&key.partattrs),
-        partexprs: key.partexprs.iter().cloned().collect(),
+        // Deep-clone the partition-key expressions into the process-lifetime cache
+        // context (C's `rd_partkeycxt`, a `CacheMemoryContext` child) so the cached
+        // `Expr<'static>` are self-contained — a derived `.clone()` would alias the
+        // caller's transient arena into the cache (a UAF the borrow checker flags).
+        partexprs: {
+            let cache_mcx = crate::derived::cache_memory_context();
+            let mut v: Vec<types_nodes::primnodes::Expr<'static>> =
+                Vec::with_capacity(key.partexprs.len());
+            for e in key.partexprs.iter() {
+                v.push(e.clone_in(cache_mcx)?.erase_lifetime());
+            }
+            v
+        },
         partopfamily: copy_vec(&key.partopfamily),
         partopcintype: copy_vec(&key.partopcintype),
         partsupfunc: copy_vec(&key.partsupfunc),
@@ -718,7 +730,10 @@ pub(crate) fn get_partkey<'mcx>(
         };
         let mut partexprs = mcx::PgVec::new_in(mcx);
         for e in &owned.partexprs {
-            partexprs.push(e.clone());
+            // Re-project a fresh deep copy into the caller's `mcx` (the partcache
+            // `copyObject` contract); a derived `.clone()` would alias the cache
+            // entry's by-ref `Datum` children into the caller's tree.
+            partexprs.push(e.clone_in(mcx)?);
         }
         Ok(Some(types_partition::PartitionKeyData {
             strategy: owned.strategy,
@@ -747,10 +762,14 @@ pub(crate) fn set_partcheck(
     relid: Oid,
     partcheck: &mcx::PgVec<'_, types_nodes::nodes::Node<'_>>,
 ) -> PgResult<()> {
-    let mut owned: Vec<types_nodes::primnodes::Expr> = Vec::with_capacity(partcheck.len());
+    let cache_mcx = crate::derived::cache_memory_context();
+    let mut owned: Vec<types_nodes::primnodes::Expr<'static>> = Vec::with_capacity(partcheck.len());
     for node in partcheck.iter() {
         match node.as_expr() {
-            Some(e) => owned.push(e.clone()),
+            // Deep-clone into the process-lifetime cache context (C's
+            // `rd_partcheckcxt`); a derived `.clone()` would alias the caller's
+            // transient arena into the cache.
+            Some(e) => owned.push(e.clone_in(cache_mcx)?.erase_lifetime()),
             None => {
                 return Err(ereport(ERROR)
                     .errmsg_internal(format!(
@@ -794,7 +813,9 @@ pub(crate) fn get_partcheck<'mcx>(
         match st.partcheck.get(&relid) {
             Some((valid, exprs)) => {
                 for e in exprs {
-                    out.push(types_nodes::nodes::Node::mk_expr(mcx, e.clone())?);
+                    // Re-project a fresh deep copy into the caller's `mcx` (the
+                    // partcache `copyObject` contract).
+                    out.push(types_nodes::nodes::Node::mk_expr(mcx, e.clone_in(mcx)?)?);
                 }
                 Ok((*valid, out))
             }

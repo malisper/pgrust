@@ -1741,10 +1741,10 @@ fn have_partkey_equi_join(
          */
         if strict_op {
             if bms::relids_overlap::call(&root.rel(rel1).relids, &root.outer_join_rels) {
-                expr1 = nodefuncs::remove_nulling_relids::call(expr1, &root.outer_join_rels, &None);
+                expr1 = nodefuncs::remove_nulling_relids::call(mcx, expr1, &root.outer_join_rels, &None);
             }
             if bms::relids_overlap::call(&root.rel(rel2).relids, &root.outer_join_rels) {
-                expr2 = nodefuncs::remove_nulling_relids::call(expr2, &root.outer_join_rels, &None);
+                expr2 = nodefuncs::remove_nulling_relids::call(mcx, expr2, &root.outer_join_rels, &None);
             }
         }
 

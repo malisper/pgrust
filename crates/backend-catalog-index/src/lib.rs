@@ -2310,15 +2310,31 @@ pub fn index_concurrently_create_copy<'mcx>(
      * exactly that raw decode (the predicate reduced to implicit-AND form).
      * Only read each when the old IndexInfo actually had it (the C NIL guards).
      */
-    let index_exprs: Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr>> =
+    // The raw-decode seams return the trees in their query-lifetime result context
+    // (`'static`); re-localize into the IndexInfo's `mcx` via `clone_in`.
+    let relocalize = |opt: Option<mcx::PgVec<'static, types_nodes::primnodes::Expr<'static>>>|
+     -> PgResult<Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>>> {
+        match opt {
+            None => Ok(None),
+            Some(v) => {
+                let mut out: mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>> =
+                    mcx::vec_with_capacity_in(mcx, v.len())?;
+                for e in v.iter() {
+                    out.push(e.clone_in(mcx)?);
+                }
+                Ok(Some(out))
+            }
+        }
+    };
+    let index_exprs: Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>> =
         if old_info.ii_Expressions.is_some() {
-            nodexform::index_raw_expressions::call(mcx, old_index_id)?
+            relocalize(nodexform::index_raw_expressions::call(mcx, old_index_id)?)?
         } else {
             None
         };
-    let index_preds: Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr>> =
+    let index_preds: Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>> =
         if old_info.ii_Predicate.is_some() {
-            nodexform::index_raw_predicate::call(mcx, old_index_id)?
+            relocalize(nodexform::index_raw_predicate::call(mcx, old_index_id)?)?
         } else {
             None
         };

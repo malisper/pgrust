@@ -4359,6 +4359,7 @@ fn make_group_input_target<'mcx>(
             let col_id = if strip_group_rtindex {
                 let owned = root.node(expr_id).clone_in(mcx)?;
                 let stripped = backend_nodes_nodeFuncs_seams::remove_nulling_relids::call(
+                    mcx,
                     owned,
                     &group_singleton,
                     &None,
@@ -4413,6 +4414,7 @@ fn make_group_input_target<'mcx>(
             // that breaks downstream sort-key matching.
             let vid = if strip_group_rtindex {
                 let stripped = backend_nodes_nodeFuncs_seams::remove_nulling_relids::call(
+                    mcx,
                     v,
                     &group_singleton,
                     &None,

@@ -499,7 +499,7 @@ seam_core::seam!(
     pub fn relation_get_dummy_index_expressions<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         index: &types_rel::Relation<'mcx>,
-    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'static>>>>
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>>>
 );
 seam_core::seam!(
     /// `rel->rd_rel->relowner`.
@@ -902,7 +902,7 @@ seam_core::seam!(
     pub fn relation_get_index_expressions<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         rel: &types_rel::Relation<'mcx>,
-    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::Expr<'static>>>>
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::Expr<'mcx>>>>
 );
 
 seam_core::seam!(
@@ -916,7 +916,7 @@ seam_core::seam!(
     pub fn relation_get_index_predicate<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         rel: &types_rel::Relation<'mcx>,
-    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::Expr<'static>>>>
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::Expr<'mcx>>>>
 );
 
 seam_core::seam!(

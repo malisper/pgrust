@@ -386,8 +386,8 @@ seam_core::seam!(
     /// expression trees into a parallel list of executable `ExprState`s,
     /// allocated in the EState's per-query context. Fallible on OOM and on
     /// unsupported expression shapes (`ereport(ERROR)`).
-    pub fn exec_prepare_expr_list<'mcx>(
-        expr_list: &[types_nodes::primnodes::Expr<'mcx>],
+    pub fn exec_prepare_expr_list<'a, 'mcx>(
+        expr_list: &[types_nodes::primnodes::Expr<'a>],
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<
         mcx::PgVec<'mcx, mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>,
@@ -738,8 +738,8 @@ seam_core::seam!(
     /// per-query context first. Used by `ExecInitGenerated` to prepare the
     /// stored-generated-column generation expressions. Allocated in the
     /// per-query context; fallible on OOM / `ereport(ERROR)`.
-    pub fn exec_prepare_expr<'mcx>(
-        node: &types_nodes::primnodes::Expr<'mcx>,
+    pub fn exec_prepare_expr<'a, 'mcx>(
+        node: &types_nodes::primnodes::Expr<'a>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
 );

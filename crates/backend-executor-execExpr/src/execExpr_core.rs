@@ -2318,8 +2318,8 @@ pub fn exec_init_expr_list_no_parent<'mcx>(
 /// SQL-function inlining), reached over the deps-less `expression_planner_value`
 /// VALUE seam (installed by the planner unit) so the executor does not depend on
 /// the optimizer owner directly.
-pub fn exec_prepare_expr<'mcx>(
-    node: &Expr<'mcx>,
+pub fn exec_prepare_expr<'a, 'mcx>(
+    node: &Expr<'a>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mcx = estate.es_query_cxt;
@@ -2499,8 +2499,8 @@ pub fn exec_init_expr_list_for_window<'mcx>(
 }
 
 /// `ExecPrepareExprList(exprList, estate)` (execExpr.c).
-pub fn exec_prepare_expr_list<'mcx>(
-    expr_list: &[Expr<'mcx>],
+pub fn exec_prepare_expr_list<'a, 'mcx>(
+    expr_list: &[Expr<'a>],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>> {
     let mcx = estate.es_query_cxt;

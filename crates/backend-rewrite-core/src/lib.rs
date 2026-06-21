@@ -153,11 +153,14 @@ pub fn init_seams() {
     // handles are unchanged (in-place mutation), so the same `Vec<NodeId>` is
     // returned.
     backend_optimizer_util_plancat_ext_seams::change_var_nodes::set(
-        |root: &mut types_pathnodes::PlannerInfo, nodes, rt_index, new_index| {
+        |mcx, root: &mut types_pathnodes::PlannerInfo, nodes, rt_index, new_index| {
             for &id in nodes {
-                let scratch = mcx::MemoryContext::new("change_var_nodes seam");
-                let mcx = scratch.mcx();
-                let mut node = types_nodes::nodes::Node::mk_expr(mcx, root.node(id).clone())
+                // Deep-copy the arena node into the caller-provided run arena `mcx`,
+                // re-stamp its Var refs in place, then re-intern into the
+                // `node_arena` `'static` handle-space. The clone lives in `mcx`
+                // (which owns the planner run), so the arena-intern erasure is sound
+                // (no function-local scratch escape).
+                let mut node = types_nodes::nodes::Node::mk_expr(mcx, root.node(id).clone_in(mcx)?)
                     .expect("change_var_nodes: opaque Node alloc failed (OOM)");
                 change::ChangeVarNodes(&mut node, rt_index, new_index, 0, mcx);
                 let walked = match node.into_expr() {
@@ -166,13 +169,9 @@ pub fn init_seams() {
                     // Expr input.
                     None => unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"),
                 };
-                // `ChangeVarNodes` is an in-place varno re-stamp; only the transient
-                // `Node` wrapper lived in `scratch` (the `Expr`'s children stay in the
-                // planner arena). Re-intern the walked node into the `node_arena`
-                // `'static` handle-space (the sanctioned arena-intern erasure).
                 *root.node_mut(id) = walked.erase_lifetime();
             }
-            nodes.to_vec()
+            Ok(nodes.to_vec())
         },
     );
 
@@ -225,7 +224,7 @@ pub fn init_seams() {
     // make_pathkeys_for_sortclauses_extended when stripping the group RTE index.
     // Same `&mut Node` wrap/unwrap as above; `except_relids == None` is the C NULL.
     backend_nodes_nodeFuncs_seams::remove_nulling_relids::set(
-        |expr, removable_relids, except_relids| {
+        |mcx, expr, removable_relids, except_relids| {
             let removable_er = removable_relids
                 .as_ref()
                 .map(|b| types_nodes::primnodes::ExprRelids { words: b.words.clone() })
@@ -234,19 +233,13 @@ pub fn init_seams() {
                 .as_ref()
                 .map(|b| types_nodes::primnodes::ExprRelids { words: b.words.clone() })
                 .unwrap_or_default();
-            // `expr` is moved in (the seam takes it by value), so wrapping it in a
-            // `Node` is a move — no `.clone()` (which would panic on an owned-
-            // subtree Expr such as `Aggref`). C mutates the node tree in place.
-            let scratch = mcx::MemoryContext::new("remove_nulling_relids seam");
-            let mcx = scratch.mcx();
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
             let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)
                 .expect("remove_nulling_relids: opaque Node alloc failed (OOM)");
             nulling::remove_nulling_relids(&mut node, &removable_er, &except_er, mcx);
             match node.into_expr() {
-                // In-place mutation: only the transient `Node` wrapper lived in
-                // `scratch`; re-intern the walked node into the seam's `'static`
-                // handle-space.
-                Some(e) => e.erase_lifetime(),
+                Some(e) => e,
                 None => unreachable!("remove_nulling_relids returned a non-Expr for an Expr input"),
             }
         },

@@ -1990,6 +1990,20 @@ fn scan_query_sublinks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
  * PlanCacheComputeResultDesc (static)
  * ======================================================================== */
 
+/// Deep-clone a borrowed target-entry slice into `mcx` (so its lifetime unifies
+/// with the descriptor's allocation context at the `exec_clean_type_from_tl`
+/// seam). `copyObject` shape per element.
+fn clone_targetentries_into<'mcx>(
+    mcx: Mcx<'mcx>,
+    tl: &[types_nodes::primnodes::TargetEntry<'_>],
+) -> PgResult<std::vec::Vec<types_nodes::primnodes::TargetEntry<'mcx>>> {
+    let mut out = std::vec::Vec::with_capacity(tl.len());
+    for te in tl {
+        out.push(te.clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
 /// `PlanCacheComputeResultDesc(stmt_list)` — over the owned `Query` list,
 /// returning an owned `TupleDescData` allocated in `dest`. `None` == no result
 /// tuples. The descriptor is `'static`-marked but lives in `dest`, which the
@@ -2003,15 +2017,21 @@ fn PlanCacheComputeResultDesc(
     let td: types_tuple::heaptuple::TupleDesc<'_> = match strategy {
         PStrat::PORTAL_ONE_SELECT | PStrat::PORTAL_ONE_MOD_WITH => match stmt_list.first() {
             Some(q) => {
-                exectuples_seams::exec_clean_type_from_tl::call(dest.mcx(), q.targetList.as_slice())?
+                // The `exec_clean_type_from_tl` seam unifies the target-list and the
+                // descriptor's allocation-context lifetime; clone the borrowed
+                // (stmt_list-lifetime) target list into `dest` so both unify there
+                // (the descriptor lives in `dest` anyway — the caller's keep-alive
+                // contract). Mirrors the PORTAL_UTIL_SELECT arm below.
+                let tl_owned = clone_targetentries_into(dest.mcx(), q.targetList.as_slice())?;
+                exectuples_seams::exec_clean_type_from_tl::call(dest.mcx(), tl_owned.as_slice())?
             }
             None => None,
         },
         PStrat::PORTAL_ONE_RETURNING => match query_list_get_primary_stmt(stmt_list) {
-            Some(q) => exectuples_seams::exec_clean_type_from_tl::call(
-                dest.mcx(),
-                q.returningList.as_slice(),
-            )?,
+            Some(q) => {
+                let tl_owned = clone_targetentries_into(dest.mcx(), q.returningList.as_slice())?;
+                exectuples_seams::exec_clean_type_from_tl::call(dest.mcx(), tl_owned.as_slice())?
+            }
             None => None,
         },
         PStrat::PORTAL_UTIL_SELECT => {

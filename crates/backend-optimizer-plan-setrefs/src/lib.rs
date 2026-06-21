@@ -1745,6 +1745,7 @@ fn set_upper_references<'mcx>(
                     // Move the owned Expr into the seam (by value) so no `.clone()`
                     // is needed; `PgBox::into_inner` extracts it from the box.
                     let stripped = backend_nodes_nodeFuncs_seams::remove_nulling_relids::call(
+                        mcx,
                         mcx::PgBox::into_inner(expr),
                         &removable,
                         &except,
@@ -1757,7 +1758,7 @@ fn set_upper_references<'mcx>(
             for e in qual.iter_mut() {
                 let owned = core::mem::replace(e, Expr::Const(error_placeholder_const()));
                 let stripped = backend_nodes_nodeFuncs_seams::remove_nulling_relids::call(
-                    owned, &removable, &except,
+                    mcx, owned, &removable, &except,
                 );
                 *e = stripped;
             }
