@@ -3628,29 +3628,33 @@ fn plpgsql_pre_column_ref<'mcx>(
         return Ok(None);
     }
 
-    // Lookup keys: progressively shorter trailing suffixes of the dotted name,
-    // longest first. This mirrors C `resolve_column_ref` + `plpgsql_ns_lookup`,
-    // which strips a leading enclosing-block LABEL from a qualified reference:
-    //   * `var`            -> scalar / whole-record bareword.
-    //   * `rec.field`      -> a RECFIELD (the param map keys fields this way), or
-    //                         `block.var` -> the scalar `var` (label stripped).
+    // Lookup keys. This mirrors C `resolve_column_ref` + `plpgsql_ns_lookup`,
+    // where the *leading* name (`name1`) must match a plpgsql variable / record /
+    // enclosing-block LABEL — an arbitrary leading qualifier (e.g. a SQL table
+    // alias) is NOT stripped. The param map keys scalars by their bare name and
+    // record fields by `rec.field`:
+    //   * `var`            -> scalar / whole-record bareword (1 field).
+    //   * `rec.field`      -> a RECFIELD, OR `label.var` -> the scalar `var` with
+    //                         the leading *block label* stripped (2 fields).
     //   * `label.rec.field`-> after stripping the leading block label, the
-    //                         RECFIELD key is `rec.field` (the trailing 2 names).
-    // The param map keys scalars by their bare name and record fields by
-    // `rec.field`, so trying each trailing suffix from longest to shortest hits
-    // the most-specific binding first (matching plpgsql_ns_lookup's preference
-    // for a qualified match before the unqualified fallback).
+    //                         RECFIELD key is `rec.field` (3 fields).
+    // So we try (a) the full dotted key as-is, then (b) — only if the leading
+    // part names a known block label — the remaining suffix with that one label
+    // stripped. We never strip a non-label leading qualifier, so `t.balance`
+    // with table alias `t` falls through to SQL column resolution.
     let info = {
         let names = &state.names;
-        let mut found = None;
-        for start in 0..parts.len() {
-            let key = parts[start..].join(".").to_ascii_lowercase();
-            if let Some(i) = names.get(&key) {
-                found = Some(i.clone());
-                break;
-            }
+        let full_key = parts.join(".").to_ascii_lowercase();
+        if let Some(i) = names.get(&full_key) {
+            Some(i.clone())
+        } else if parts.len() >= 2
+            && state.labels.contains(&parts[0].to_ascii_lowercase())
+        {
+            let stripped = parts[1..].join(".").to_ascii_lowercase();
+            names.get(&stripped).cloned()
+        } else {
+            None
         }
-        found
     };
 
     let Some(info) = info else {

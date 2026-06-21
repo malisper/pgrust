@@ -395,6 +395,14 @@ pub struct PlpgsqlExprParseState {
     /// name. A `block.var` qualified reference is stored under both `var` and
     /// `block.var` keys by the builder.
     pub names: Rc<alloc::collections::BTreeMap<alloc::string::String, PlpgsqlParamInfo>>,
+    /// Down-cased set of enclosing-block LABEL names visible to the expr (the
+    /// `PLPGSQL_NSTYPE_LABEL` nsitems). C's `plpgsql_ns_lookup` only strips a
+    /// *leading block label* from a qualified reference before matching the
+    /// remaining var/record name — it never drops an arbitrary leading
+    /// qualifier (e.g. a SQL table alias). The pre-columnref hook consults this
+    /// set so `t.balance` (where `t` is a table alias, not a plpgsql label) does
+    /// NOT spuriously resolve to a scalar var named `balance`.
+    pub labels: Rc<alloc::collections::BTreeSet<alloc::string::String>>,
     /// The datum numbers actually referenced during the parse (C
     /// `expr->paramnos`). Shared, growable; read back after analysis to drive
     /// `setup_param_list`. Cloning the carrier shares the same `Vec` (the hook
@@ -412,8 +420,19 @@ impl PlpgsqlExprParseState {
         names: alloc::collections::BTreeMap<alloc::string::String, PlpgsqlParamInfo>,
         input_collation: Oid,
     ) -> PlpgsqlExprParseState {
+        Self::with_labels(names, alloc::collections::BTreeSet::new(), input_collation)
+    }
+
+    /// Build the parse state with an explicit set of enclosing block-label
+    /// names (see [`PlpgsqlExprParseState::labels`]).
+    pub fn with_labels(
+        names: alloc::collections::BTreeMap<alloc::string::String, PlpgsqlParamInfo>,
+        labels: alloc::collections::BTreeSet<alloc::string::String>,
+        input_collation: Oid,
+    ) -> PlpgsqlExprParseState {
         PlpgsqlExprParseState {
             names: Rc::new(names),
+            labels: Rc::new(labels),
             paramnos: Rc::new(core::cell::RefCell::new(Vec::new())),
             input_collation,
         }

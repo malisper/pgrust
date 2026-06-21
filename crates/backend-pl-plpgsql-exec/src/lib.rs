@@ -1281,6 +1281,12 @@ fn build_plpgsql_parse_state(
 
     let mut names: std::collections::BTreeMap<std::string::String, PlpgsqlParamInfo> =
         std::collections::BTreeMap::new();
+    // Enclosing block-label names visible to the expr. C's `plpgsql_ns_lookup`
+    // only strips a leading *block label* from a qualified reference; recording
+    // the labels lets the pre-columnref hook distinguish `label.var` (resolves)
+    // from `tablealias.col` (must fall through to SQL column resolution).
+    let mut labels: std::collections::BTreeSet<std::string::String> =
+        std::collections::BTreeSet::new();
 
     // Walk the namespace chain (expr->ns -> prev -> ...). A VAR/REC nsitem's
     // `itemno` is its datum dno; LABEL items are block markers (skipped). The
@@ -1362,12 +1368,14 @@ fn build_plpgsql_parse_state(
                     }
                 }
             }
-            types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_LABEL => {}
+            types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_LABEL => {
+                labels.insert(ns.name.to_ascii_lowercase());
+            }
         }
         cur = ns.prev.as_deref();
     }
 
-    Ok(PlpgsqlExprParseState::new(names, input_collation))
+    Ok(PlpgsqlExprParseState::with_labels(names, labels, input_collation))
 }
 
 /// Project a rich expanded-record field [`RichDatum`] (the
