@@ -264,6 +264,39 @@ pub fn build_hash_table<'mcx>(
     Ok(())
 }
 
+/// Recover the `ExprState.parent` back-link (the address-stable enclosing
+/// `PlanStateNode::Agg`) from any already-stamped evaltrans on this AggState.
+///
+/// The owned model stamps `parent` onto each phase's evaltrans (and the cache
+/// variants present at init) in execProcnode's `stamp_agg_evaltrans_parents`,
+/// once the enum wrapper is address-stable. A fresh evaltrans built later (this
+/// recompile) cannot reach that enum from the inner `&mut AggStateData`, so it
+/// inherits the link from a sibling that already carries it. Returns `None`
+/// only before any evaltrans has been stamped (i.e. before ExecInitNode wired
+/// the back-links), in which case execProcnode's init stamp covers it.
+fn existing_evaltrans_parent<'mcx>(
+    aggstate: &AggStateData<'mcx>,
+) -> Option<types_nodes::planstate::PlanStateLink> {
+    let phases = aggstate.phases.as_ref()?;
+    for phase in phases.iter() {
+        if let Some(es) = phase.evaltrans.as_ref() {
+            if let Some(link) = es.parent {
+                return Some(link);
+            }
+        }
+        for row in phase.evaltrans_cache.iter() {
+            for cached in row.iter() {
+                if let Some(es) = cached.as_ref() {
+                    if let Some(link) = es.parent {
+                        return Some(link);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// `hashagg_recompile_expressions(aggstate, minslot, nullcheck)` — recompile
 /// the per-phase transition expressions for hashed input, selecting the
 /// outer-ops vs minimal-tuple and null-check cached variants.
@@ -299,6 +332,20 @@ pub fn hashagg_recompile_expressions<'mcx>(
         let dohash = true;
         let dosort = aggstate.aggstrategy == AggStrategy::AggMixed && !minslot;
 
+        // C's ExecBuildAggTrans sets `state->parent = &aggstate->ss.ps` at build
+        // time, so every (re)compiled evaltrans carries the AggState back-link the
+        // EEOP_AGG_PLAIN_TRANS_* / NULLCHECK interpreter steps recover through
+        // `state->parent`. The owned model cannot reach the enclosing,
+        // address-stable `PlanStateNode::Agg` enum from here (we hold only the
+        // inner `&mut AggStateData`), so the build seam leaves `parent` unset and
+        // execProcnode's `stamp_agg_evaltrans_parents` stamps it once at init.
+        // That init stamp does not cover evaltrans variants compiled *later* (this
+        // recompile, fired e.g. on a LATERAL rescan), so carry the back-link from
+        // an already-stamped sibling evaltrans onto the fresh one below. Every Agg
+        // has at least the init-built phase evaltrans stamped, so this link is
+        // always present once execution has begun.
+        let parent_link = existing_evaltrans_parent(aggstate);
+
         // C temporarily swaps `ss.ps.outerops` to `&TTSOpsMinimalTuple` (and sets
         // `outeropsfixed`) while compiling, so the EEOP_OUTER_FETCHSOME deform
         // step is specialized to a minimal-tuple slot when reading a spilled
@@ -314,9 +361,12 @@ pub fn hashagg_recompile_expressions<'mcx>(
         // the initial compile); it returns the freshly built ExprState which we
         // cache in evaltrans_cache[i][j].
         let phaseno = phase_idx as i32;
-        let evaltrans = backend_executor_execExpr_seams::exec_build_agg_trans::call(
+        let mut evaltrans = backend_executor_execExpr_seams::exec_build_agg_trans::call(
             mcx, aggstate, phaseno, dosort, dohash, nullcheck, estate,
         )?;
+        // Re-stamp the AggState back-link the build seam left unset (mirrors
+        // execProcnode's `stamp_agg_evaltrans_parents` for late recompiles).
+        evaltrans.parent = parent_link;
         aggstate.phases.as_mut().expect("phases")[phase_idx].evaltrans_cache[i][j] =
             Some(evaltrans);
     }
