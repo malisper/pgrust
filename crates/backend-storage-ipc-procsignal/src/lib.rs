@@ -22,23 +22,28 @@
 //! # Model notes (audit against these)
 //!
 //! - The C `ProcSignalHeader` lives in shared memory via
-//!   `ShmemInitStruct("ProcSignal", size, &found)`. Here a backend is a
-//!   thread and shared memory is explicitly shared, synchronized state, so
-//!   the header is a process-global [`OnceLock`]: first
-//!   `ProcSignalShmemInit` constructs it (the C `!found` arm — every per-slot
-//!   initialization value is preserved), later calls find it. The byte-size
-//!   handshake with `ShmemInitStruct` has no analogue, so
-//!   `ProcSignalShmemInit` does not consume [`ProcSignalShmemSize`]; the
-//!   size function itself stays ported (its `mul_size`/`add_size` overflow
-//!   ereports reach shmem.c through `backend-storage-ipc-shmem-seams`).
-//! - `slock_t pss_mutex` becomes a host `Mutex` owning exactly the fields C
-//!   documents it as protecting that are not independently atomic
-//!   (`pss_cancel_key_len`/`pss_cancel_key`); `pss_pid` and
-//!   `pss_signalFlags` stay lock-free-readable atomics exactly as in C, with
-//!   their writes performed while holding the guard, mirroring the C lock
-//!   discipline. The atomics use `SeqCst`, at least as strong as the
-//!   `pg_atomic_*` full-barrier RMW ops the C relies on (and the c2rust
-//!   object normalized the same ops to SeqCst).
+//!   `ShmemInitStruct("ProcSignal", size, &found)`. A parallel worker is a
+//!   genuine `fork(2)` child that signals its leader through this array, so
+//!   the slots MUST live in the real cross-process shared-memory segment (a
+//!   process-global `OnceLock<Box<[...]>>` would be a fork-COW *copy* — a
+//!   worker setting `pss_signalFlags[PROCSIG_PARALLEL_MESSAGE]` in its own
+//!   copy would never be observed by the leader, so the leader's
+//!   `WaitForParallelWorkersToFinish` would hang forever). The slot array and
+//!   the header's barrier generation are therefore allocated through
+//!   `ShmemInitStruct` (`shmem_init_struct` seam) into the same MAP_SHARED
+//!   segment that backs the PGPROC arrays, exactly mirroring
+//!   `backend-storage-lmgr-proc`'s `SHARED_PROC_*` blocks. Their addresses are
+//!   recorded in process-global `AtomicPtr`s (`PROC_SIGNAL_SLOTS` /
+//!   `PROC_SIGNAL_HDR_GEN`).
+//! - `slock_t pss_mutex` becomes a genuine cross-process
+//!   [`types_storage::storage::Spinlock`] (the same primitive `ProcStructLock`
+//!   uses), acquired via the `s_lock.c` backoff loop; it guards the
+//!   non-atomic cancel-key fields (`pss_cancel_key_len`/`pss_cancel_key`),
+//!   which live in an [`core::cell::UnsafeCell`] inside the `#[repr(C)]` slot.
+//!   `pss_pid` and `pss_signalFlags` stay lock-free-readable atomics exactly
+//!   as in C, with their writes performed while holding the spinlock,
+//!   mirroring the C lock discipline. The atomics use `SeqCst`, at least as
+//!   strong as the `pg_atomic_*` full-barrier RMW ops the C relies on.
 //! - `pss_barrierCV` is a [`types_condvar::ConditionVariable`]; the sleep /
 //!   broadcast protocol is `condition_variable.c`'s and is reached through
 //!   `backend-storage-lmgr-condition-variable-seams`.
@@ -58,9 +63,14 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+use core::cell::UnsafeCell;
 use std::cell::Cell;
-use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering::SeqCst};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{
+    fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed,
+    Ordering::SeqCst,
+};
+
+use types_storage::storage::Spinlock;
 
 use backend_utils_error::{elog, ereport};
 use types_condvar::ConditionVariable;
@@ -77,19 +87,28 @@ use types_storage::{
 /// value `PG_WAIT_IPC` itself.
 const WAIT_EVENT_PROC_SIGNAL_BARRIER: u32 = 0x0800_0000 | 0x2A;
 
-/// The fields of a slot protected by `pss_mutex` that are not independently
-/// atomic: the cancel key. `pss_cancel_key_len == 0` means no cancellation
-/// is possible.
+/// The cancel-key fields of a slot, protected by `pss_mutex` (not
+/// independently atomic). `pss_cancel_key_len == 0` means no cancellation is
+/// possible. Held behind an [`UnsafeCell`] so a `&ProcSignalSlot` reached
+/// through the shared raw pointer can mutate them while the spinlock is held.
 struct CancelKey {
     pss_cancel_key_len: i32,
     pss_cancel_key: [u8; MAX_CANCEL_KEY_LENGTH],
 }
 
-/// `ProcSignalSlot` (procsignal.c).
+/// `ProcSignalSlot` (procsignal.c) — `#[repr(C)]` so it can live in genuine
+/// cross-process shared memory (`ShmemInitStruct`). Every field is either an
+/// atomic, a cross-process [`Spinlock`], an [`UnsafeCell`] guarded by that
+/// spinlock, or a `#[repr(C)]` [`ConditionVariable`] (spinlock + proclist
+/// indices) — all of which are valid to share across `fork(2)` in a
+/// MAP_SHARED region.
+#[repr(C)]
 struct ProcSignalSlot {
     pss_pid: AtomicU32,
-    /// `slock_t pss_mutex` plus the plain fields it protects.
-    pss_mutex: Mutex<CancelKey>,
+    /// `slock_t pss_mutex` — a genuine cross-process spinlock.
+    pss_mutex: Spinlock,
+    /// Cancel-key fields protected by `pss_mutex`.
+    pss_cancel: UnsafeCell<CancelKey>,
     /// `volatile sig_atomic_t pss_signalFlags[NUM_PROCSIGNALS]`.
     pss_signalFlags: [AtomicBool; NUM_PROCSIGNALS],
 
@@ -99,15 +118,79 @@ struct ProcSignalSlot {
     pss_barrierCV: ConditionVariable,
 }
 
-/// `ProcSignalHeader` (procsignal.c). `psh_barrierGeneration` is the highest
-/// barrier generation in existence.
-struct ProcSignalHeader {
-    psh_barrierGeneration: AtomicU64,
-    psh_slot: Box<[ProcSignalSlot]>,
+// SAFETY: every field is an atomic, a `Spinlock` (atomic word), a
+// `ConditionVariable` (atomic spinlock + Copy proclist indices), or an
+// `UnsafeCell<CancelKey>` whose access is serialized by `pss_mutex`. The slot
+// is only ever reached through a shared raw pointer into the cross-process
+// segment; the lock discipline (mirroring the C `slock_t pss_mutex`) makes
+// concurrent access safe.
+unsafe impl Sync for ProcSignalSlot {}
+
+impl ProcSignalSlot {
+    /// `SpinLockAcquire(&slot->pss_mutex); f(&mut cancel); SpinLockRelease(...)`
+    /// — run `f` over the spinlock-protected cancel-key fields. `pss_pid` and
+    /// `pss_signalFlags` writes the C performs under the same lock are done by
+    /// the caller inside `f` via the passed-back slot ref where needed; here
+    /// only the cancel key needs the `&mut`.
+    fn with_mutex<R>(&self, f: impl FnOnce(&mut CancelKey) -> R) -> R {
+        // SpinLockAcquire: TAS_SPIN; on contention fall to the s_lock backoff.
+        if self.pss_mutex.tas_spin() != 0 {
+            backend_storage_lmgr_s_lock::s_lock(
+                &self.pss_mutex,
+                Some(file!()),
+                line!() as i32,
+                None,
+            );
+        }
+        // SAFETY: we hold `pss_mutex`, so we have exclusive access to the
+        // `UnsafeCell<CancelKey>` for the duration of `f`.
+        let r = f(unsafe { &mut *self.pss_cancel.get() });
+        self.pss_mutex.unlock();
+        r
+    }
 }
 
-/// `NON_EXEC_STATIC ProcSignalHeader *ProcSignal = NULL;`
-static PROC_SIGNAL: OnceLock<ProcSignalHeader> = OnceLock::new();
+/// Base of the genuinely-shared `ProcSignalSlot[]` array (the C
+/// `ProcSignal->psh_slot`), placed by [`ProcSignalShmemInit`]. NULL until
+/// then. Lives in the same MAP_SHARED segment as the PGPROC arrays so a
+/// `fork(2)`ed parallel worker and its leader observe the *same* slots.
+static PROC_SIGNAL_SLOTS: AtomicPtr<ProcSignalSlot> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`PROC_SIGNAL_SLOTS`] (`NumProcSignalSlots`).
+static PROC_SIGNAL_SLOT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Genuinely-shared `ProcSignalHeader.psh_barrierGeneration` (the highest
+/// barrier generation in existence). NULL until [`ProcSignalShmemInit`].
+static PROC_SIGNAL_HDR_GEN: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::null_mut());
+
+/// View over the cross-process ProcSignal shared state — the moral equivalent
+/// of dereferencing the C `ProcSignalHeader *ProcSignal`. Holds the slot-array
+/// base/len and the shared barrier-generation word, all reached through raw
+/// pointers into the MAP_SHARED segment (no host allocation, no fork-COW copy).
+struct ProcSignalHeader {
+    slots: *mut ProcSignalSlot,
+    nslots: usize,
+    psh_barrierGeneration: &'static AtomicU64,
+}
+
+impl ProcSignalHeader {
+    /// `&ProcSignal->psh_slot[i]` — the i-th shared slot.
+    fn slot(&self, i: usize) -> &ProcSignalSlot {
+        debug_assert!(i < self.nslots);
+        // SAFETY: `slots` addresses `nslots` `ProcSignalSlot`s in the shared
+        // segment, valid for the process lifetime; `i` is in bounds.
+        unsafe { &*self.slots.add(i) }
+    }
+
+    fn len(&self) -> usize {
+        self.nslots
+    }
+
+    /// Iterate the slots front-to-back.
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &ProcSignalSlot> + '_ {
+        (0..self.nslots).map(move |i| self.slot(i))
+    }
+}
 
 thread_local! {
     /// `static ProcSignalSlot *MyProcSignalSlot = NULL;` — our index into
@@ -135,10 +218,20 @@ pub fn SetProcSignalBarrierPending(value: bool) {
 
 /// The `ProcSignal != NULL` dereference: C would crash on use before
 /// `ProcSignalShmemInit`; here it is a loud panic.
-fn proc_signal() -> &'static ProcSignalHeader {
-    PROC_SIGNAL
-        .get()
-        .expect("ProcSignal shared memory not initialized (ProcSignalShmemInit not called)")
+fn proc_signal() -> ProcSignalHeader {
+    let slots = PROC_SIGNAL_SLOTS.load(Relaxed);
+    let gen = PROC_SIGNAL_HDR_GEN.load(Relaxed);
+    assert!(
+        !slots.is_null() && !gen.is_null(),
+        "ProcSignal shared memory not initialized (ProcSignalShmemInit not called)"
+    );
+    ProcSignalHeader {
+        slots,
+        nslots: PROC_SIGNAL_SLOT_COUNT.load(Relaxed),
+        // SAFETY: `gen` addresses an `AtomicU64` in the shared segment, valid
+        // for the process lifetime.
+        psh_barrierGeneration: unsafe { &*gen },
+    }
 }
 
 /// `NumProcSignalSlots` — `MaxBackends + NUM_AUXILIARY_PROCS`. Used where the
@@ -165,33 +258,66 @@ pub fn ProcSignalShmemSize() -> PgResult<usize> {
 }
 
 /// `ProcSignalShmemInit` — allocate and initialize ProcSignal's shared
-/// memory. First caller creates and initializes the array (the C `!found`
-/// branch); later callers just attach. The C failure surface is
-/// `ShmemInitStruct`'s out-of-shared-memory `ereport(ERROR)`; the host
-/// allocation backing the `OnceLock` has no recoverable failure, so this
-/// always returns `Ok` today.
+/// memory through `ShmemInitStruct`. First caller initializes the array (the C
+/// `!found` branch — every per-slot init value); later callers (or re-attach)
+/// just record the base. The `Err` surface is `ShmemInitStruct`'s
+/// out-of-shared-memory `ereport(ERROR)`.
+///
+/// C lays out a single `ProcSignalHeader { uint64 psh_barrierGeneration;
+/// ProcSignalSlot psh_slot[]; }` block. The flexible-array layout is
+/// reproduced here as two `ShmemInitStruct` chunks (the header generation word
+/// and the slot array) — functionally identical and easier to type in Rust;
+/// the byte budget reserved by [`ProcSignalShmemSize`] covers both.
 pub fn ProcSignalShmemInit() -> PgResult<()> {
-    PROC_SIGNAL.get_or_init(|| {
-        let nslots = num_proc_signal_slots() as usize;
-        let mut slots = Vec::with_capacity(nslots);
-        for _ in 0..nslots {
-            slots.push(ProcSignalSlot {
-                pss_pid: AtomicU32::new(0),
-                pss_mutex: Mutex::new(CancelKey {
-                    pss_cancel_key_len: 0,
-                    pss_cancel_key: [0; MAX_CANCEL_KEY_LENGTH],
-                }),
-                pss_signalFlags: std::array::from_fn(|_| AtomicBool::new(false)),
-                pss_barrierGeneration: AtomicU64::new(u64::MAX),
-                pss_barrierCheckMask: AtomicU32::new(0),
-                pss_barrierCV: ConditionVariable::new(),
-            });
+    let nslots = num_proc_signal_slots() as usize;
+
+    // psh_barrierGeneration word.
+    let (gen_ptr, gen_found) = backend_storage_ipc_shmem_seams::shmem_init_struct::call(
+        "ProcSignal barrier generation",
+        core::mem::size_of::<AtomicU64>(),
+    )?;
+    let gen_ptr = gen_ptr as *mut AtomicU64;
+    if !gen_found {
+        // SAFETY: `gen_ptr` addresses a writable `AtomicU64` in shmem.
+        unsafe { core::ptr::write(gen_ptr, AtomicU64::new(0)) };
+    }
+    PROC_SIGNAL_HDR_GEN.store(gen_ptr, Relaxed);
+
+    // psh_slot[] array.
+    let slots_size = backend_storage_ipc_shmem_seams::mul_size::call(
+        nslots,
+        core::mem::size_of::<ProcSignalSlot>(),
+    )?;
+    let (slots_ptr, slots_found) =
+        backend_storage_ipc_shmem_seams::shmem_init_struct::call("ProcSignal slots", slots_size)?;
+    let slots_ptr = slots_ptr as *mut ProcSignalSlot;
+    if !slots_found {
+        // C `!found` arm: initialize every slot.
+        for i in 0..nslots {
+            // SAFETY: `slots_ptr.add(i)` addresses a writable, properly-aligned
+            // `ProcSignalSlot` in shmem; we write each field exactly once.
+            unsafe {
+                core::ptr::write(
+                    slots_ptr.add(i),
+                    ProcSignalSlot {
+                        pss_pid: AtomicU32::new(0),
+                        pss_mutex: Spinlock::new(),
+                        pss_cancel: UnsafeCell::new(CancelKey {
+                            pss_cancel_key_len: 0,
+                            pss_cancel_key: [0; MAX_CANCEL_KEY_LENGTH],
+                        }),
+                        pss_signalFlags: std::array::from_fn(|_| AtomicBool::new(false)),
+                        pss_barrierGeneration: AtomicU64::new(u64::MAX),
+                        pss_barrierCheckMask: AtomicU32::new(0),
+                        pss_barrierCV: ConditionVariable::new(),
+                    },
+                );
+            }
         }
-        ProcSignalHeader {
-            psh_barrierGeneration: AtomicU64::new(0),
-            psh_slot: slots.into_boxed_slice(),
-        }
-    });
+    }
+    PROC_SIGNAL_SLOTS.store(slots_ptr, Relaxed);
+    PROC_SIGNAL_SLOT_COUNT.store(nslots, Relaxed);
+
     Ok(())
 }
 
@@ -215,7 +341,7 @@ pub fn ProcSignalInit(
         return elog(ERROR, "MyProcNumber not set");
     }
     let header = proc_signal();
-    let num_slots = header.psh_slot.len() as i32;
+    let num_slots = header.len() as i32;
     if my_proc_number >= num_slots {
         return elog(
             ERROR,
@@ -225,11 +351,11 @@ pub fn ProcSignalInit(
             ),
         );
     }
-    let slot = &header.psh_slot[my_proc_number as usize];
+    let slot = header.slot(my_proc_number as usize);
 
-    // SpinLockAcquire(&slot->pss_mutex)
-    let mut key = slot.pss_mutex.lock().unwrap();
-
+    // SpinLockAcquire(&slot->pss_mutex) ... SpinLockRelease at the end of the
+    // closure. `old_pss_pid` is captured for the post-release sanity check.
+    let old_pss_pid = slot.with_mutex(|key| {
     // Value used for sanity check below
     let old_pss_pid = slot.pss_pid.load(SeqCst);
 
@@ -257,8 +383,9 @@ pub fn ProcSignalInit(
     key.pss_cancel_key_len = cancel_key_len;
     slot.pss_pid.store(my_proc_pid as u32, SeqCst);
 
-    // SpinLockRelease(&slot->pss_mutex)
-    drop(key);
+    // SpinLockRelease(&slot->pss_mutex) happens when `with_mutex` returns.
+    old_pss_pid
+    });
 
     // Spinlock is released, do the check
     if old_pss_pid != 0 {
@@ -296,15 +423,29 @@ fn CleanupProcSignalState(_status: i32, _arg: types_tuple::Datum<'static>) -> Pg
     MY_PROC_SIGNAL_SLOT.set(None);
 
     let header = proc_signal();
-    let slot = &header.psh_slot[slot_index];
+    let slot = header.slot(slot_index);
 
-    // sanity check
-    let mut key = slot.pss_mutex.lock().unwrap();
-    let old_pid = slot.pss_pid.load(SeqCst);
+    // sanity check (under the spinlock)
+    let old_pid = slot.with_mutex(|key| {
+        let old_pid = slot.pss_pid.load(SeqCst);
+        if old_pid != my_proc_pid as u32 {
+            // mismatch: leave the slot alone (handled after release)
+            return old_pid;
+        }
+
+        // Mark the slot as unused
+        slot.pss_pid.store(0, SeqCst);
+        key.pss_cancel_key_len = 0;
+
+        // Make this slot look like it's absorbed all possible barriers, so
+        // that no barrier waits block on it.
+        slot.pss_barrierGeneration.store(u64::MAX, SeqCst);
+        old_pid
+    });
+
     if old_pid != my_proc_pid as u32 {
         // don't ERROR here. We're exiting anyway, and don't want to get into
         // infinite loop trying to exit
-        drop(key);
         // LOG never raises; ignore the Ok.
         let _ = elog(
             LOG,
@@ -315,16 +456,6 @@ fn CleanupProcSignalState(_status: i32, _arg: types_tuple::Datum<'static>) -> Pg
         );
         return Ok(()); /* XXX better to zero the slot anyway? */
     }
-
-    // Mark the slot as unused
-    slot.pss_pid.store(0, SeqCst);
-    key.pss_cancel_key_len = 0;
-
-    // Make this slot look like it's absorbed all possible barriers, so that
-    // no barrier waits block on it.
-    slot.pss_barrierGeneration.store(u64::MAX, SeqCst);
-
-    drop(key);
 
     backend_storage_lmgr_condition_variable_seams::condition_variable_broadcast::call(
         &slot.pss_barrierCV,
@@ -345,35 +476,43 @@ pub fn SendProcSignal(pid: i32, reason: ProcSignalReason, proc_number: ProcNumbe
     let header = proc_signal();
 
     if proc_number != INVALID_PROC_NUMBER {
-        debug_assert!(proc_number < header.psh_slot.len() as i32);
-        let slot = &header.psh_slot[proc_number as usize];
+        debug_assert!(proc_number < header.len() as i32);
+        let slot = header.slot(proc_number as usize);
 
-        let key = slot.pss_mutex.lock().unwrap();
-        if slot.pss_pid.load(SeqCst) == pid as u32 {
-            // Atomically set the proper flag
-            slot.pss_signalFlags[reason as usize].store(true, SeqCst);
-            drop(key);
+        let sent = slot.with_mutex(|_key| {
+            if slot.pss_pid.load(SeqCst) == pid as u32 {
+                // Atomically set the proper flag
+                slot.pss_signalFlags[reason as usize].store(true, SeqCst);
+                true
+            } else {
+                false
+            }
+        });
+        if sent {
             // Send signal
             return unsafe { libc::kill(pid, libc::SIGUSR1) };
         }
-        drop(key);
     } else {
         // procNumber not provided, so search the array using pid. We search
         // the array back to front so as to reduce search overhead. Passing
         // INVALID_PROC_NUMBER means that the target is most likely an
         // auxiliary process, which will have a slot near the end of the
         // array.
-        for slot in header.psh_slot.iter().rev() {
+        for slot in header.iter().rev() {
             if slot.pss_pid.load(SeqCst) == pid as u32 {
-                let key = slot.pss_mutex.lock().unwrap();
-                if slot.pss_pid.load(SeqCst) == pid as u32 {
-                    // Atomically set the proper flag
-                    slot.pss_signalFlags[reason as usize].store(true, SeqCst);
-                    drop(key);
+                let sent = slot.with_mutex(|_key| {
+                    if slot.pss_pid.load(SeqCst) == pid as u32 {
+                        // Atomically set the proper flag
+                        slot.pss_signalFlags[reason as usize].store(true, SeqCst);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if sent {
                     // Send signal
                     return unsafe { libc::kill(pid, libc::SIGUSR1) };
                 }
-                drop(key);
             }
         }
     }
@@ -397,7 +536,7 @@ pub fn EmitProcSignalBarrier(type_: ProcSignalBarrierType) -> u64 {
     // is totally ordered with respect to anything the caller did before, and
     // anything that we do afterwards. (This is also true of the later call
     // to pg_atomic_add_fetch_u64.)
-    for slot in header.psh_slot.iter() {
+    for slot in header.iter() {
         slot.pss_barrierCheckMask.fetch_or(flagbit, SeqCst);
     }
 
@@ -415,19 +554,20 @@ pub fn EmitProcSignalBarrier(type_: ProcSignalBarrierType) -> u64 {
     // have to wake them up - because we can't distinguish between such
     // backends and older backends that need to update state - but they
     // won't actually need to change any state.
-    for slot in header.psh_slot.iter().rev() {
+    for slot in header.iter().rev() {
         let mut pid = slot.pss_pid.load(SeqCst) as i32;
         if pid != 0 {
-            let key = slot.pss_mutex.lock().unwrap();
-            pid = slot.pss_pid.load(SeqCst) as i32;
+            pid = slot.with_mutex(|_key| {
+                let pid = slot.pss_pid.load(SeqCst) as i32;
+                if pid != 0 {
+                    // see SendProcSignal for details
+                    slot.pss_signalFlags[ProcSignalReason::PROCSIG_BARRIER as usize]
+                        .store(true, SeqCst);
+                }
+                pid
+            });
             if pid != 0 {
-                // see SendProcSignal for details
-                slot.pss_signalFlags[ProcSignalReason::PROCSIG_BARRIER as usize]
-                    .store(true, SeqCst);
-                drop(key);
                 unsafe { libc::kill(pid, libc::SIGUSR1) };
-            } else {
-                drop(key);
             }
         }
     }
@@ -451,7 +591,7 @@ pub fn WaitForProcSignalBarrier(generation: u64) -> PgResult<()> {
         ),
     )?;
 
-    for slot in header.psh_slot.iter().rev() {
+    for slot in header.iter().rev() {
         // It's important that we check only pss_barrierGeneration here and
         // not pss_barrierCheckMask. Bits in pss_barrierCheckMask get
         // cleared before the barrier is actually absorbed, but
@@ -526,10 +666,12 @@ pub fn ProcessProcSignalBarrier() -> PgResult<()> {
     SetProcSignalBarrierPending(false);
 
     let header = proc_signal();
-    let my_slot = &header.psh_slot[MY_PROC_SIGNAL_SLOT
-        .get()
-        .expect("ProcessProcSignalBarrier called without a ProcSignal slot")
-        .0];
+    let my_slot = header.slot(
+        MY_PROC_SIGNAL_SLOT
+            .get()
+            .expect("ProcessProcSignalBarrier called without a ProcSignal slot")
+            .0,
+    );
 
     // It's not unlikely to process multiple barriers at once, before the
     // signals for all the barriers have arrived. To avoid unnecessary work
@@ -644,10 +786,12 @@ pub fn ProcessProcSignalBarrier() -> PgResult<()> {
 /// be retried later.
 fn ResetProcSignalBarrierBits(flags: u32) {
     let header = proc_signal();
-    let my_slot = &header.psh_slot[MY_PROC_SIGNAL_SLOT
-        .get()
-        .expect("ResetProcSignalBarrierBits called without a ProcSignal slot")
-        .0];
+    let my_slot = header.slot(
+        MY_PROC_SIGNAL_SLOT
+            .get()
+            .expect("ResetProcSignalBarrierBits called without a ProcSignal slot")
+            .0,
+    );
     my_slot.pss_barrierCheckMask.fetch_or(flags, SeqCst);
     SetProcSignalBarrierPending(true);
     backend_utils_init_small_seams::set_interrupt_pending::call(true);
@@ -658,7 +802,8 @@ fn ResetProcSignalBarrierBits(flags: u32) {
 /// SIGUSR1.
 fn CheckProcSignal(reason: ProcSignalReason) -> bool {
     if let Some((index, _)) = MY_PROC_SIGNAL_SLOT.get() {
-        let slot = &proc_signal().psh_slot[index];
+        let header = proc_signal();
+        let slot = header.slot(index);
 
         // Careful here --- don't clear flag if we haven't seen it set.
         // pss_signalFlags is of type "volatile sig_atomic_t" to allow us to
@@ -788,25 +933,24 @@ pub fn SendCancelRequest(backend_pid: i32, cancel_key: &[u8]) {
     // that. PIDs are reused too, so sending the signal based on PID is
     // inherently racy anyway, although OS's avoid reusing PIDs too soon.
     let header = proc_signal();
-    for slot in header.psh_slot.iter() {
+    for slot in header.iter() {
         if slot.pss_pid.load(SeqCst) != backend_pid as u32 {
             continue;
         }
 
         // Acquire the spinlock and re-check
-        let key = slot.pss_mutex.lock().unwrap();
-        if slot.pss_pid.load(SeqCst) != backend_pid as u32 {
-            drop(key);
+        let recheck_and_match = slot.with_mutex(|key| {
+            if slot.pss_pid.load(SeqCst) != backend_pid as u32 {
+                return None;
+            }
+            Some(
+                key.pss_cancel_key_len == cancel_key_len
+                    && timingsafe_bcmp(&key.pss_cancel_key[..cancel_key.len()], cancel_key) == 0,
+            )
+        });
+        let Some(match_) = recheck_and_match else {
             continue;
-        }
-
-        let match_ = key.pss_cancel_key_len == cancel_key_len
-            && timingsafe_bcmp(
-                &key.pss_cancel_key[..cancel_key.len()],
-                cancel_key,
-            ) == 0;
-
-        drop(key);
+        };
 
         if match_ {
             // Found a match; signal that backend to cancel current op

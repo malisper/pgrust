@@ -315,6 +315,30 @@ fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     // returning INVALID keeps the known-good leader-only behavior (correct
     // results, no hang). (The tqueue dest-bridge it formerly also waited on has
     // LANDED.)
+    //
+    // UPDATE (procsignal shmem keystone landed): the worker-finish handshake
+    // HANG is now resolved — `ProcSignalSlot`s were promoted into genuine
+    // cross-process MAP_SHARED memory (was a fork-COW `OnceLock<Box<[...]>>`
+    // copy, so a worker's `pss_signalFlags[PROCSIG_PARALLEL_MESSAGE]` write was
+    // never observed by the leader; the leader's WaitLatch woke on the SIGUSR1
+    // EINTR but `CheckProcSignal` read its own stale copy → no
+    // `process_parallel_messages` → `error_mqh` never nulled → infinite loop).
+    // Verified empirically: with this early return removed, both workers run
+    // the plan, send the 'X' terminate, signal the leader, and the leader now
+    // enters `process_parallel_messages` (the hang is gone).
+    //
+    // The NEXT wall (now a CRASH, not a hang) is the LWLock fork-COW keystone:
+    // `MainLWLockArray` is a process-local `OnceLock<LWLockTable{ locks: Vec<…> }>`
+    // (lwlock.rs:430) built on the "threaded backends share process memory"
+    // assumption — but parallel workers are genuine `fork(2)` children, so each
+    // gets a COW *copy* of every LWLock word. The leader + both workers therefore
+    // do NOT mutually exclude on `ProcArrayLock`, so concurrent `ProcArrayAdd`
+    // races corrupt the shared procarray's dense `pgxactoff` and trips the
+    // `proc_pgxactoff == index-1` debug_assert (procarray membership.rs:113,
+    // observed left:0 right:2). Fix = promote `MainLWLockArray` into the real
+    // MAP_SHARED segment via `ShmemInitStruct` (same idiom as the PGPROC arrays
+    // and this commit's ProcSignal slots) — a large, separate keystone. Until it
+    // lands, returning INVALID keeps the known-good leader-only behavior.
     return Ok(DSM_HANDLE_INVALID);
 
     // If we already created a session-scope segment, return its handle.

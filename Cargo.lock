@@ -17702,6 +17702,7 @@ dependencies = [
  "backend-storage-ipc-shmem-seams",
  "backend-storage-ipc-sinval-seams",
  "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-s-lock",
  "backend-storage-smgr-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-error",

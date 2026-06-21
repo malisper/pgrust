@@ -51,6 +51,21 @@ fn install_seams_once() {
         backend_storage_ipc_shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).unwrap()));
         backend_storage_ipc_shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).unwrap()));
 
+        // Mock `ShmemInitStruct`: allocate a fresh zeroed, 16-byte-aligned
+        // host buffer and leak it (tests run serially and never free shmem).
+        // `found = false` so `ProcSignalShmemInit` runs its initializer arm.
+        // Each `setup()` re-allocates, giving every test a pristine slot array
+        // (the real postmaster allocates exactly once; the test isolation we
+        // want is fresh-per-test, so a fresh leak is the faithful stand-in).
+        backend_storage_ipc_shmem_seams::shmem_init_struct::set(|_name, size| {
+            use std::alloc::{alloc_zeroed, Layout};
+            let layout = Layout::from_size_align(size.max(1), 16).unwrap();
+            // SAFETY: nonzero size, valid alignment; the leak is intentional.
+            let ptr = unsafe { alloc_zeroed(layout) };
+            assert!(!ptr.is_null(), "test shmem alloc failed");
+            Ok((ptr, false))
+        });
+
         backend_storage_ipc_dsm_core_seams::on_shmem_exit::set(|f, arg| {
             ENV.with(|e| *e.shmem_exit_callback.borrow_mut() = Some((f, arg)));
             Ok(())
@@ -136,6 +151,22 @@ fn teardown() {
     f(0, arg).unwrap();
 }
 
+/// `&ProcSignal->psh_slot[i]` as a process-lifetime ref (the slot array lives
+/// in the leaked test "shmem" buffer, valid until process exit), so test
+/// assertions can hold it across `teardown()`.
+fn slot_ptr(i: usize) -> &'static ProcSignalSlot {
+    let base = PROC_SIGNAL_SLOTS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(!base.is_null());
+    // SAFETY: `base` addresses the leaked slot array; `i` is in bounds for the
+    // test's NumProcSignalSlots and the buffer outlives the process.
+    unsafe { &*base.add(i) }
+}
+
+/// Read the spinlock-protected cancel-key length of slot `i`.
+fn slot_cancel_key_len(i: usize) -> i32 {
+    slot_ptr(i).with_mutex(|key| key.pss_cancel_key_len)
+}
+
 /// A fake pid no real process can have (macOS caps pids at 99998; Linux
 /// pid_max defaults far lower), so `kill(2)` returns ESRCH.
 fn fake_pid(slot: i32) -> i32 {
@@ -158,24 +189,22 @@ fn init_registers_slot_and_cleanup_releases_it() {
     let pid = fake_pid(1);
     let _guard = setup(1, pid, &[7; 8]);
 
-    let header = proc_signal();
-    let slot = &header.psh_slot[1];
+    let slot = slot_ptr(1);
     assert_eq!(slot.pss_pid.load(SeqCst), pid as u32);
-    {
-        let key = slot.pss_mutex.lock().unwrap();
+    slot.with_mutex(|key| {
         assert_eq!(key.pss_cancel_key_len, 8);
         assert_eq!(&key.pss_cancel_key[..8], &[7; 8]);
-    }
+    });
     // Our generation caught up to the shared one.
     assert_eq!(
         slot.pss_barrierGeneration.load(SeqCst),
-        header.psh_barrierGeneration.load(SeqCst)
+        proc_signal().psh_barrierGeneration.load(SeqCst)
     );
 
     teardown();
     assert_eq!(slot.pss_pid.load(SeqCst), 0);
     assert_eq!(slot.pss_barrierGeneration.load(SeqCst), u64::MAX);
-    assert_eq!(slot.pss_mutex.lock().unwrap().pss_cancel_key_len, 0);
+    assert_eq!(slot_cancel_key_len(1), 0);
     assert!(ENV.with(|e| e.cv_broadcasts.get()) >= 1);
 }
 
@@ -188,7 +217,7 @@ fn send_proc_signal_sets_flag_and_handler_dispatches() {
     // (exactly the C ordering).
     let rc = SendProcSignal(pid, ProcSignalReason::PROCSIG_NOTIFY_INTERRUPT, 2);
     assert_eq!(rc, -1);
-    let slot = &proc_signal().psh_slot[2];
+    let slot = slot_ptr(2);
     assert!(slot.pss_signalFlags[ProcSignalReason::PROCSIG_NOTIFY_INTERRUPT as usize].load(SeqCst));
 
     // Search-by-pid path (INVALID_PROC_NUMBER).
@@ -230,12 +259,11 @@ fn send_proc_signal_sets_flag_and_handler_dispatches() {
 fn barrier_roundtrip_advances_generation() {
     let pid = fake_pid(3);
     let _guard = setup(3, pid, &[]);
-    let header = proc_signal();
-    let slot = &header.psh_slot[3];
+    let slot = slot_ptr(3);
 
     let generation =
         EmitProcSignalBarrier(ProcSignalBarrierType::PROCSIGNAL_BARRIER_SMGRRELEASE);
-    assert_eq!(generation, header.psh_barrierGeneration.load(SeqCst));
+    assert_eq!(generation, proc_signal().psh_barrierGeneration.load(SeqCst));
     assert_eq!(slot.pss_barrierCheckMask.load(SeqCst), 1);
     // Emit set our PROCSIG_BARRIER flag even though kill failed.
     assert!(slot.pss_signalFlags[ProcSignalReason::PROCSIG_BARRIER as usize].load(SeqCst));
@@ -267,8 +295,7 @@ fn barrier_roundtrip_advances_generation() {
 fn unabsorbed_barrier_rearms_and_retries() {
     let pid = fake_pid(0);
     let _guard = setup(0, pid, &[]);
-    let header = proc_signal();
-    let slot = &header.psh_slot[0];
+    let slot = slot_ptr(0);
 
     let generation =
         EmitProcSignalBarrier(ProcSignalBarrierType::PROCSIGNAL_BARRIER_SMGRRELEASE);
