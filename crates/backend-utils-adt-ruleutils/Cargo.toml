@@ -43,6 +43,8 @@ backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams
 backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
 types-cache = { path = "../types-cache" }
 types-catalog = { path = "../types-catalog" }
+types-matview = { path = "../types-matview" }
+backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }

@@ -75,6 +75,7 @@ mod dest_spi;
 mod eval;
 mod exec;
 mod execsql;
+mod oneshot;
 mod prepare;
 mod result_code;
 mod select;
@@ -87,6 +88,7 @@ pub use eval::{spi_eval_expr, EvalParamValue, EvalResult};
 pub use execsql::{
     spi_execsql, spi_execsql_collect, spi_execsql_dynamic, ExecsqlColumn, ExecsqlResult,
 };
+pub use oneshot::{SPI_exec, SPI_execute, SPI_getvalue_first};
 pub use result_code::*;
 pub use select::{spi_execute_select, spi_query_tupdesc};
 
@@ -135,5 +137,12 @@ pub fn init_seams() {
         use backend_commands_matview_deps_seams as m;
         m::spi_connect::set(backbone::spi_connect_seam);
         m::spi_finish::set(backbone::spi_finish_seam);
+        // The one-shot, no-parameter execute legs (`SPI_exec` / `SPI_execute`)
+        // + `SPI_processed` + the `SPI_tuptable` first-value read
+        // (`SPI_getvalue(SPI_tuptable->vals[0], …, 1)`).
+        m::spi_exec::set(oneshot::spi_exec_seam);
+        m::spi_execute::set(oneshot::spi_execute_seam);
+        m::spi_processed::set(oneshot::spi_processed_seam);
+        m::spi_getvalue_first::set(oneshot::spi_getvalue_first_seam);
     }
 }

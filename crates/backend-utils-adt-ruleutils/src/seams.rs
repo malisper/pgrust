@@ -133,6 +133,26 @@ pub fn init_seams() {
         crate::generate_operator_clause_catalog,
     );
 
+    // matview.c's refresh_by_match_merge emits the same operator fragment for
+    // each unique-index key column, marshaling a resolved `MatchMergeQual`
+    // (leftop / op / attrtype / rightop) into `generate_operator_clause`. The
+    // left and right operand types are both the matview column's `attrtype`.
+    backend_commands_matview_deps_seams::generate_operator_clause::set(
+        |qual: types_matview::MatchMergeQual| {
+            let cxt = mcx::MemoryContext::new("matview operator clause");
+            let mcx = cxt.mcx();
+            let bytes = crate::generate_operator_clause_catalog(
+                mcx,
+                qual.leftop.as_bytes(),
+                qual.attrtype,
+                qual.op,
+                qual.rightop.as_bytes(),
+                qual.attrtype,
+            )?;
+            Ok(alloc::string::String::from_utf8_lossy(&bytes).into_owned())
+        },
+    );
+
     // guc_funcs.c's GUC_LIST_QUOTE flatten branch (flatten_set_variable_args)
     // reaches `quote_identifier` through its own outward seam crate. C:
     // `char *quote_identifier(const char *)`; the owner is Mcx-bound (the result

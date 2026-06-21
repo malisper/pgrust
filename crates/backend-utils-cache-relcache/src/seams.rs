@@ -171,6 +171,10 @@ pub fn init_seams() {
     // RelationGetIndexPredicate == NIL test, read off the live index relcache
     // entry.
     backend_commands_matview_deps_seams::index_usability_info::set(index_usability_info);
+    // index_match_merge_quals (matview.c 740-817): the per-key-column equality
+    // quals for one usable unique index, read off the index's relcache opclass
+    // projection + the matview tuple descriptor.
+    backend_commands_matview_deps_seams::index_match_merge_quals::set(index_match_merge_quals);
 
     // --- WAL-startup: StartupXLOG (xlog.c:5657) drops stale init files ---
     sx::relation_cache_init_file_remove::set(crate::initfile::RelationCacheInitFileRemove);
@@ -1687,6 +1691,118 @@ fn index_usability_info(
             indkey: std::vec::Vec::new(),
         },
     })
+}
+/// `refresh_by_match_merge`'s per-usable-unique-index qual resolution
+/// (matview.c 740-817). For each key column of the index, identify the equality
+/// operator (via the column's opclass → opfamily/opcintype →
+/// `get_opfamily_member_for_cmptype(.., COMPARE_EQ)`) and build the
+/// `newdata.<col> = mv.<col>` operands (`quote_qualified_identifier`). The
+/// `opUsedForQual` de-dup and the `generate_operator_clause` emission stay in
+/// the matview driver; quals are returned in index-key order.
+fn index_match_merge_quals(
+    index: &types_rel::Relation<'_>,
+    matview: &types_rel::Relation<'_>,
+) -> PgResult<std::vec::Vec<types_matview::MatchMergeQual>> {
+    use types_matview::MatchMergeQual;
+
+    // `COMPARE_EQ` (access/cmptype.h) — the equality comparison type.
+    const COMPARE_EQ: i32 = 3;
+
+    // Read `indkey` (the key column attnums) and the relcache's per-key-column
+    // opclass projection (`rd_opfamily`/`rd_opcintype`, which the relcache
+    // populated from the index's `indclass` in `IndexSupportInitialize` — the C
+    // here re-reads `indclass` off `rd_indextuple` then looks up
+    // `get_opclass_opfamily_and_input_type(opclass)`, yielding exactly these).
+    let (indkey, opfamilies, opcintypes) = with_entry(index.rd_id, |rd| {
+        let indnkeyatts = rd.rd_index.as_ref().map(|i| i.indnkeyatts).unwrap_or(0) as usize;
+        let indkey: std::vec::Vec<AttrNumber> = rd
+            .rd_index
+            .as_ref()
+            .map(|i| i.indkey.iter().copied().take(indnkeyatts).collect())
+            .unwrap_or_default();
+        let opfamilies: std::vec::Vec<Oid> =
+            rd.rd_opfamily.iter().copied().take(indnkeyatts).collect();
+        let opcintypes: std::vec::Vec<Oid> =
+            rd.rd_opcintype.iter().copied().take(indnkeyatts).collect();
+        (indkey, opfamilies, opcintypes)
+    })?;
+
+    // Per-key-column matview attribute (attname / atttypid), read off the
+    // matview's tuple descriptor (`TupleDescAttr(tupdesc, attnum - 1)`).
+    struct Attr {
+        attname: std::string::String,
+        atttypid: Oid,
+    }
+    let attrs: std::vec::Vec<Attr> = crate::core_entry_store::with_relation(matview.rd_id, |rd| {
+        indkey
+            .iter()
+            .map(|&attnum| {
+                let a = rd.rd_att.attr((attnum - 1) as usize);
+                Attr {
+                    attname: a.attname.clone(),
+                    atttypid: a.atttypid,
+                }
+            })
+            .collect()
+    })?;
+
+    // A scratch context for the `quote_qualified_identifier` outputs (copied
+    // into owned `String`s before it drops).
+    let cxt = mcx::MemoryContext::new("matview match-merge quals");
+    let mcx = cxt.mcx();
+
+    let mut quals: std::vec::Vec<MatchMergeQual> = std::vec::Vec::with_capacity(indkey.len());
+    for (i, attr) in attrs.iter().enumerate() {
+        let attnum = indkey[i];
+        let opfamily = opfamilies[i];
+        let opcintype = opcintypes[i];
+        let attrtype = attr.atttypid;
+
+        // get_opfamily_member_for_cmptype(opfamily, opcintype, opcintype,
+        // COMPARE_EQ).
+        let op = backend_utils_cache_lsyscache_seams::get_opfamily_member_for_cmptype::call(
+            opfamily,
+            opcintype,
+            opcintype,
+            COMPARE_EQ,
+        )?;
+        if op == Oid::default() {
+            return Err(backend_utils_error::ereport(types_error::ERROR)
+                .errmsg_internal(format!(
+                    "missing equality operator for ({opcintype},{opcintype}) in opfamily {opfamily}"
+                ))
+                .into_error());
+        }
+
+        // leftop = quote_qualified_identifier("newdata", attname);
+        // rightop = quote_qualified_identifier("mv", attname);
+        let leftop =
+            backend_utils_adt_ruleutils_seams::quote_qualified_identifier::call(
+                mcx,
+                Some("newdata"),
+                &attr.attname,
+            )?
+            .as_str()
+            .to_string();
+        let rightop =
+            backend_utils_adt_ruleutils_seams::quote_qualified_identifier::call(
+                mcx,
+                Some("mv"),
+                &attr.attname,
+            )?
+            .as_str()
+            .to_string();
+
+        quals.push(MatchMergeQual {
+            attnum: attnum as i32,
+            op,
+            attrtype,
+            leftop,
+            rightop,
+        });
+    }
+
+    Ok(quals)
 }
 fn rd_rel_relpersistence(rel: &types_rel::Relation<'_>) -> PgResult<i8> {
     with_entry(rel.rd_id, |rd| rd.rd_rel.relpersistence as i8)

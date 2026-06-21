@@ -842,6 +842,9 @@ fn fc_record_image_le(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult
 fn fc_record_image_ge(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_image_ge)
 }
+fn fc_btrecordimagecmp(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    fc_record_cmp_i32(f, crate::rowtypes::record_image_cmp)
+}
 
 /// `record_larger`/`record_smaller`: `(mcx, FormedTuple, FormedTuple) ->
 /// PgResult<FormedTuple>` (returns one of the inputs as a composite result).
@@ -1455,6 +1458,7 @@ pub fn register_misc2_builtins() {
         builtin(3184, "record_image_gt", 2, true, false, fc_record_image_gt),
         builtin(3185, "record_image_le", 2, true, false, fc_record_image_le),
         builtin(3186, "record_image_ge", 2, true, false, fc_record_image_ge),
+        builtin(3187, "btrecordimagecmp", 2, true, false, fc_btrecordimagecmp),
         // ---- rowtypes.c: record hashing ----
         builtin(6192, "hash_record", 1, true, false, fc_hash_record),
         builtin(6193, "hash_record_extended", 2, true, false, fc_hash_record_extended),
