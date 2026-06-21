@@ -339,6 +339,18 @@ pub fn init_seams() {
     // the set-based initial check and the per-row check-on-insert trigger.
     backend_utils_adt_ri_triggers_seams::ri_initial_check::set(triggers::ri_initial_check);
     backend_utils_adt_ri_triggers_seams::ri_fkey_check_ins::set(triggers::ri_fkey_check_ins);
+    // `AfterTriggerSaveEvent` (trigger manager) consults these through `-seams`
+    // to skip queueing an FK-enforcement event it can prove will pass, exactly
+    // as C's trigger.c does. They are not optimizations: without the skip, a
+    // SET DEFAULT / multi-FK CASCADE / self-referential CASCADE update queues a
+    // spurious FK check that fires against the wrong snapshot.
+    backend_utils_adt_ri_triggers_seams::ri_fkey_trigger_type::set(checks::ri_fkey_trigger_type);
+    backend_utils_adt_ri_triggers_seams::ri_fkey_pk_upd_check_required::set(
+        triggers::ri_fkey_pk_upd_check_required,
+    );
+    backend_utils_adt_ri_triggers_seams::ri_fkey_fk_upd_check_required::set(
+        triggers::ri_fkey_fk_upd_check_required,
+    );
     // Register the RI trigger procs into the fmgr builtin table so that the
     // FK-enforcing triggers dispatch to their bodies (C: their `fmgr_builtins[]`
     // rows). Must run before any FK trigger fires.

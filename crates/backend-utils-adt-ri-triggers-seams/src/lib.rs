@@ -45,3 +45,48 @@ seam_core::seam!(
         trigdata: types_ri_triggers::TriggerDataRef,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RI_FKey_trigger_type(tgfoid)` (ri_triggers.c) — classify a trigger
+    /// function OID as an RI PK-side trigger (`RI_TRIGGER_PK`), an RI FK-side
+    /// trigger (`RI_TRIGGER_FK`), or a non-RI trigger (`RI_TRIGGER_NONE`).
+    /// Pure (no allocation, no error path). Used by `AfterTriggerSaveEvent` to
+    /// decide whether the FK-enforcement skip applies to a candidate trigger.
+    /// **Installed by `backend-utils-adt-ri-triggers`.**
+    pub fn ri_fkey_trigger_type(tgfoid: types_core::Oid) -> i32
+);
+
+seam_core::seam!(
+    /// `RI_FKey_pk_upd_check_required(trigger, pk_rel, oldslot, newslot)`
+    /// (ri_triggers.c) — decide whether the PK-side FK-enforcement AFTER event
+    /// must be queued for an UPDATE/DELETE on the referenced (PK) table. Returns
+    /// `false` when the change cannot possibly orphan a referencing row (key
+    /// columns went NULL, or old==new key). The `trigger`/`pk_rel` handles
+    /// resolve off the current-trigger side-channel the caller installs;
+    /// `newslot == None` for a DELETE. **Installed by
+    /// `backend-utils-adt-ri-triggers`.**
+    pub fn ri_fkey_pk_upd_check_required<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        trigger: types_ri_triggers::TriggerRef,
+        pk_rel: types_ri_triggers::TriggerDataRef,
+        oldslot: types_ri_triggers::TupleTableSlotRef,
+        newslot: Option<types_ri_triggers::TupleTableSlotRef>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `RI_FKey_fk_upd_check_required(trigger, fk_rel, oldslot, newslot)`
+    /// (ri_triggers.c) — decide whether the FK-side check AFTER event must be
+    /// queued for an UPDATE on the referencing (FK) table. Returns `false` when
+    /// the new key is NULL (SIMPLE/FULL handling), or the old==new key and the
+    /// old row was not inserted by the current transaction. The
+    /// `trigger`/`fk_rel` handles resolve off the current-trigger side-channel
+    /// the caller installs. **Installed by `backend-utils-adt-ri-triggers`.**
+    pub fn ri_fkey_fk_upd_check_required<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        trigger: types_ri_triggers::TriggerRef,
+        fk_rel: types_ri_triggers::TriggerDataRef,
+        oldslot: types_ri_triggers::TupleTableSlotRef,
+        newslot: types_ri_triggers::TupleTableSlotRef,
+    ) -> types_error::PgResult<bool>
+);

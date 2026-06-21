@@ -2836,6 +2836,143 @@ fn capture_transition_tuples<'mcx>(
 // and cross-partition root-conversion legs are loud-guarded.
 // ===========================================================================
 
+/// The FK-enforcement-trigger queue skip of `AfterTriggerSaveEvent`
+/// (trigger.c:6437-6505). Given a candidate AFTER trigger on an UPDATE/DELETE,
+/// classify its function via `RI_FKey_trigger_type` and, for an RI PK-side or
+/// FK-side trigger, consult `RI_FKey_{pk,fk}_upd_check_required` to decide
+/// whether the event can be skipped because the constraint will still pass.
+///
+/// Returns `true` when the event must be skipped (not queued). This is NOT an
+/// optimization: without it, a SET DEFAULT / multi-FK CASCADE / self-referential
+/// CASCADE update queues a spurious FK check that fires against the wrong
+/// snapshot, yielding a wrong "is not present" error or unbounded recursion.
+///
+/// The RI procs read the relation and the OLD/NEW key values off the
+/// current-trigger side-channel, exactly as during trigger execution, so we
+/// install a `CURRENT_TRIGGER_DATA` (trigger + relation) and
+/// `CURRENT_TRIGGER_SLOTS` (the materialized OLD/NEW tuples) for the call's
+/// duration.
+fn ri_fk_enforcement_skip<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    trig_index: usize,
+    tgfoid: Oid,
+    relkind: u8,
+    fired_by_update: bool,
+    oldslot: Option<types_nodes::SlotId>,
+    newslot: Option<types_nodes::SlotId>,
+) -> PgResult<bool> {
+    use backend_utils_adt_ri_triggers_seams as ri;
+    // RI_TRIGGER_NONE classification: nothing to do on the reachable
+    // (non-partitioned) row path (the partitioned-table NONE skip is excluded
+    // here, as the surrounding save path is the regular-table leg).
+    const RI_TRIGGER_PK: i32 = 1;
+    const RI_TRIGGER_FK: i32 = 2;
+    let kind = ri::ri_fkey_trigger_type::call(tgfoid);
+    if kind != RI_TRIGGER_PK && kind != RI_TRIGGER_FK {
+        return Ok(false);
+    }
+    const RELKIND_PARTITIONED_TABLE: u8 = b'p';
+    // RI_TRIGGER_FK: an update on a partitioned FK table is always skipped here
+    // (the insert event fired on the destination leaf does the FK check, and the
+    // partitioned virtual slot lacks the system attributes the check reads).
+    if kind == RI_TRIGGER_FK && relkind == RELKIND_PARTITIONED_TABLE {
+        return Ok(true);
+    }
+
+    let mcx = estate.es_query_cxt;
+
+    // Materialize the OLD/NEW slots into FormedTuples for the side-channel.
+    let old_formed: Option<
+        types_tuple::backend_access_common_heaptuple::FormedTuple<'static>,
+    > = match oldslot {
+        Some(s) => {
+            let (formed, _should_free) = {
+                let sd = estate.slot_data_mut(s);
+                backend_executor_execTuples_seams::exec_fetch_slot_heap_tuple::call(mcx, sd, true)?
+            };
+            // SAFETY: allocated in es_query_cxt; the side-channel that borrows it
+            // is installed and dropped strictly within this call.
+            Some(unsafe { core::mem::transmute(formed) })
+        }
+        None => None,
+    };
+    let new_formed: Option<
+        types_tuple::backend_access_common_heaptuple::FormedTuple<'static>,
+    > = match newslot {
+        Some(s) => {
+            let (formed, _should_free) = {
+                let sd = estate.slot_data_mut(s);
+                backend_executor_execTuples_seams::exec_fetch_slot_heap_tuple::call(mcx, sd, true)?
+            };
+            Some(unsafe { core::mem::transmute(formed) })
+        }
+        None => None,
+    };
+
+    // Clone the candidate trigger (carries tgconstraint the RI procs read) and
+    // alias the relation, both lifetime-extended to the side-channel's duration.
+    let rri = estate.result_rel(relinfo);
+    let trigdesc = rri
+        .ri_TrigDesc
+        .as_ref()
+        .expect("ri_fk_enforcement_skip: ri_TrigDesc is NULL");
+    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+        let cloned = trigdesc.triggers[trig_index].clone_in(mcx)?;
+        let boxed: mcx::PgBox<'mcx, Trigger<'mcx>> =
+            mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
+        unsafe { core::mem::transmute(boxed) }
+    };
+    let rel = rri
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ri_fk_enforcement_skip: ri_RelationDesc is NULL");
+    let tg_relation: types_rel::Relation<'static> = {
+        let aliased = rel.alias();
+        unsafe { core::mem::transmute(aliased) }
+    };
+    let slots_relation: types_rel::Relation<'static> = {
+        let aliased = rel.alias();
+        unsafe { core::mem::transmute(aliased) }
+    };
+
+    let trigdata = TriggerData {
+        type_: T_TriggerData,
+        tg_event: 0,
+        tg_relation: Some(tg_relation),
+        tg_trigtuple: None,
+        tg_newtuple: None,
+        tg_trigger: Some(trigger_box),
+        tg_trigslot: oldslot.map(|_| types_nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
+        tg_newslot: newslot.map(|_| types_nodes::SlotId(crate::ri_accessors::SLOT_NEW as u32)),
+        tg_oldtable: None,
+        tg_newtable: None,
+        tg_updatedcols: None,
+    };
+    let _td_guard = CurrentTriggerGuard::install(trigdata);
+    let _slots_guard = CurrentSlotsGuard::install(CurrentTriggerSlots {
+        relation: slots_relation,
+        trigtuple: old_formed,
+        newtuple: new_formed,
+    });
+
+    let trigger = types_ri_triggers::TriggerRef(crate::ri_accessors::CURRENT);
+    let rel_ref = types_ri_triggers::TriggerDataRef(crate::ri_accessors::CURRENT);
+    let old_ref = types_ri_triggers::TupleTableSlotRef(crate::ri_accessors::SLOT_TRIG);
+    let new_ref = types_ri_triggers::TupleTableSlotRef(crate::ri_accessors::SLOT_NEW);
+
+    let required = if kind == RI_TRIGGER_PK {
+        // Update or delete on trigger's PK table. newslot == None for a DELETE.
+        let new_opt = if fired_by_update { Some(new_ref) } else { None };
+        ri::ri_fkey_pk_upd_check_required::call(mcx, trigger, rel_ref, old_ref, new_opt)?
+    } else {
+        // RI_TRIGGER_FK: only fired on UPDATE (the FK INSERT/DELETE checks use a
+        // different trigger function); fk_upd_check_required reads both slots.
+        ri::ri_fkey_fk_upd_check_required::call(mcx, trigger, rel_ref, old_ref, new_ref)?
+    };
+    Ok(!required)
+}
+
 /// `AfterTriggerSaveEvent(...)` (trigger.c:4925) for the regular-table row path.
 ///
 /// The big C signature collapses: `src_partinfo`/`dst_partinfo` (cross-partition
@@ -3050,13 +3187,27 @@ fn after_trigger_save_event<'mcx>(
                 continue;
             }
             // FK-enforcement-trigger skip (trigger.c:6442). On UPDATE/DELETE,
-            // RI_FKey_trigger_type classifies the trigger function; the PK/FK
-            // `*_check_required` skips are *optimizations* that require the
-            // old/new value slots (RI re-derives "no action" if we don't skip),
-            // so we conservatively queue them here. The RI_TRIGGER_NONE arm only
-            // skips on a partitioned table (excluded above), so it never skips.
-            // The unique-key-recheck skip below is value-independent.
-            let _ = fired_by_upd_or_del;
+            // RI_FKey_trigger_type classifies the trigger function and the PK/FK
+            // `*_check_required` predicate decides whether queueing can be
+            // skipped because the constraint will still pass. Required for
+            // correctness (SET DEFAULT / multi-FK CASCADE / self-referential
+            // CASCADE), not an optimization. (The cross-partition PK
+            // component-delete skip and the partitioned NONE skip are not
+            // threaded on this regular-table leg.)
+            if fired_by_upd_or_del
+                && ri_fk_enforcement_skip(
+                    estate,
+                    relinfo,
+                    i,
+                    tgfoid,
+                    relkind,
+                    event == TRIGGER_EVENT_UPDATE,
+                    oldslot,
+                    newslot,
+                )?
+            {
+                continue;
+            }
             // F_UNIQUE_KEY_RECHECK skip: queue only if the constraint's index is
             // in recheckIndexes (otherwise uniqueness was definitely not
             // violated). F_UNIQUE_KEY_RECHECK == 1250 (pg_proc.dat).
