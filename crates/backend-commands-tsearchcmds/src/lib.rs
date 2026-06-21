@@ -32,7 +32,7 @@ use backend_catalog_namespace::{
 };
 use backend_utils_error::ereport;
 
-use mcx::{Mcx, PgString};
+use mcx::{Mcx, MemoryContext, PgString};
 
 use types_acl::{AclResult, ACL_CREATE, ACLCHECK_NOT_OWNER, ACLCHECK_OK};
 use types_catalog::catalog::{
@@ -679,6 +679,21 @@ fn GetTSConfigForm<'mcx>(
     names: &[Option<String>],
 ) -> PgResult<Option<TSConfigForm>> {
     seam::get_ts_config_form::call(names)
+}
+
+/// Body for the `get_ts_config_form` seam (`GetTSConfigTuple`, tsearchcmds.c:786):
+/// `get_ts_config_oid(names, missing_ok=true)`; `None` when the name resolves to
+/// no config, else the `TSConfigForm` snapshot via the `config_form_by_oid`
+/// projection (which raises the C "cache lookup failed" elog on a should-not-
+/// happen miss).
+fn get_ts_config_form_impl(names: &[Option<String>]) -> PgResult<Option<TSConfigForm>> {
+    let scratch = MemoryContext::new("GetTSConfigTuple");
+    let mcx = scratch.mcx();
+    let cfg_id = get_ts_config_oid(mcx, names, true)?;
+    if !OidIsValid(cfg_id) {
+        return Ok(None);
+    }
+    Ok(Some(seam::config_form_by_oid::call(cfg_id)?))
 }
 
 /// `makeConfigurationDependencies(tuple, removeOld, mapRel)` (tsearchcmds.c:811).
@@ -1749,6 +1764,8 @@ fn alter_ts_configuration_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResu
 pub fn init_seams() {
     backend_commands_tsearchcmds_seams::deserialize_deflist::set(deserialize_deflist_seam);
     backend_commands_tsearchcmds_seams::RemoveTSConfigurationById::set(RemoveTSConfigurationById);
+    // GetTSConfigTuple (tsearchcmds.c:786): get_ts_config_oid + config_form_by_oid.
+    backend_commands_tsearchcmds_seams::get_ts_config_form::set(get_ts_config_form_impl);
 
     // ProcessUtilitySlow dispatch arms (utility.c ALTER TEXT SEARCH DICTIONARY /
     // CONFIGURATION).
