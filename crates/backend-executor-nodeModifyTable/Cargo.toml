@@ -13,6 +13,7 @@ backend-executor-nodeModifyTable-seams = { path = "../backend-executor-nodeModif
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
 backend-executor-execJunk = { path = "../backend-executor-execJunk" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-heap-heapam-handler-dml-seams = { path = "../backend-access-heap-heapam-handler-dml-seams" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }

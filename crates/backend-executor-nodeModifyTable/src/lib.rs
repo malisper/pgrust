@@ -208,6 +208,21 @@ pub fn init_seams() {
         !estate.result_rel(rri).ri_has_project_new
     });
 
+    // `table_tuple_satisfies_snapshot(rel, slot, snapshot)` (tableam.h inline):
+    // dispatch to the heap AM provider (heapam_handler.c
+    // heapam_tuple_satisfies_snapshot), which SHARE-locks the slot's buffer,
+    // runs HeapTupleSatisfiesVisibility against the snapshot, and drops the
+    // lock. (Same dispatch genam's systable_recheck_tuple uses.)
+    insert::table_tuple_satisfies_snapshot::set(|estate, rel, slot, snapshot| {
+        let mut snap = snapshot.expect(
+            "table_tuple_satisfies_snapshot: es_snapshot is NULL (caller is in a serializable check)",
+        );
+        let slot_data = estate.slot_data_mut(slot);
+        backend_access_heap_heapam_handler_dml_seams::heapam_tuple_satisfies_snapshot::call(
+            &rel, slot_data, &mut snap,
+        )
+    });
+
     // `relinfo->ri_newTupleSlot->tts_ops != planSlot->tts_ops` — compare the
     // slot class (kind) of the relation's new-tuple slot against the plan slot.
     insert::ri_new_tuple_slot_ops_differ::set(|estate, rri, plan_slot| {
