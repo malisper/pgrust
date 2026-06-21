@@ -34,6 +34,7 @@
 #![allow(clippy::result_large_err)]
 
 use backend_access_transam_parallel as parallel;
+use backend_access_transam_parallel::shared_dsm_object;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execAsync_seams as execAsync;
 use backend_executor_execPartition_seams as execPartition;
@@ -53,10 +54,13 @@ use backend_utils_init_small_seams as globals;
 use mcx::{Mcx, PgBox};
 use types_core::PGINVALID_SOCKET;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
+use types_execparallel::{
+    DsmSegmentHandle, ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
+};
 use types_nodes::executor::EXEC_FLAG_MARK;
 use types_nodes::nodeappend::{
-    Append, AppendChooseStrategy, AppendStateData, AsyncRequestData,
+    pa_finished_offset, Append, AppendChooseStrategy, AppendStateData, AsyncRequestData,
+    PaFinished, ParallelAppendState, ParallelAppendStateHandle,
 };
 use types_nodes::nodes::Node;
 use types_nodes::{Bitmapset, EStateData, ScanDirectionIsForward, SlotId, TupleSlotKind};
@@ -622,7 +626,11 @@ pub fn ExecAppendEstimate(
     // node->pstate_len = add_size(offsetof(ParallelAppendState, pa_finished),
     //                             sizeof(bool) * node->as_nplans);
     let base = pa_finished_offset();
-    let tail = shmem::add_size::call(0, node.as_nplans as usize)?; // sizeof(bool) == 1
+    // sizeof(bool) == sizeof(PaFinished) == 1 (the C `bool` array element).
+    let tail = shmem::add_size::call(
+        0,
+        core::mem::size_of::<PaFinished>() * node.as_nplans as usize,
+    )?;
     node.pstate_len = shmem::add_size::call(base, tail)?;
 
     // shm_toc_estimate_chunk(&pcxt->estimator, node->pstate_len);
@@ -639,41 +647,64 @@ pub fn ExecAppendEstimate(
 /// nodeAppend owns the C control flow over its OWNED [`AppendStateData`] (the
 /// `pstate_len`/`plan_node_id` reads, the `choose_next_subplan` strategy switch).
 /// The orthogonal DSM allocation (`shm_toc_allocate`) is a real call into the
-/// `access/parallel.c`/`shm_toc.c` owner via its seams. What is genuinely
-/// unported is the **DSM-resident `ParallelAppendState` carrier**: the C
-/// `node->as_pstate` points INTO the just-allocated DSM chunk so every worker
-/// that `shm_toc_lookup`s the same key shares the one `pa_lock`/`pa_next_plan`/
-/// `pa_finished[]` coordination struct. The merged `AppendStateData.as_pstate`
-/// is an in-process `Box<ParallelAppendState>` (which cannot be cross-process
-/// shared), and the keystone typed-shared-DSM-object primitive
-/// (`shared_dsm_object`) has no flexible-array-tail placement variant for the
-/// `pa_finished[FLEXIBLE_ARRAY_MEMBER]` layout — so re-establishing the shared
-/// carrier (placement-init + `memset` + `LWLockInitialize` + `shm_toc_insert` +
-/// installing it as `as_pstate`) mirror-and-panics into the parallel DSM owner.
-/// This is the same blocker nodeAgg's `ExecAggInitializeDSM` carries for its
-/// `SharedAggInfo`.
+/// `access/parallel.c`/`shm_toc.c` owner via its seams. The DSM-resident
+/// `ParallelAppendState` carrier is placed DIRECTLY in the just-allocated DSM
+/// chunk through the keystone [`shared_dsm_object`] primitive: the flat-repr
+/// header (`pa_lock` + `pa_next_plan`) followed by the zeroed
+/// `pa_finished[node->as_nplans]` tail in the SAME chunk, so every worker that
+/// `shm_toc_lookup`s the same key shares the one cross-process coordination
+/// struct. `node->as_pstate` becomes the `Copy` handle into those bytes — exactly
+/// the model nodeHashjoin's `ExecHashJoinInitializeDSM` uses for its
+/// `ParallelHashJoinState`.
 pub fn ExecAppendInitializeDSM(
     node: &mut AppendStateData<'_>,
     pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // pstate = shm_toc_allocate(pcxt->toc, node->pstate_len);
     let plan_node_id = append_plan_node_id(node);
+    let nplans = node.as_nplans as usize;
+    let pstate_len = node.pstate_len;
     let toc = parallel::pcxt_toc(pcxt);
-    let chunk = parallel::shm_toc_allocate(toc, node.pstate_len);
-    let _ = (chunk, plan_node_id);
+    let chunk = parallel::shm_toc_allocate(toc, pstate_len);
+    let seg = pcxt_seg_handle(pcxt);
 
     // memset(pstate, 0, node->pstate_len);
     // LWLockInitialize(&pstate->pa_lock, LWTRANCHE_PARALLEL_APPEND);
-    // shm_toc_insert(pcxt->toc, node->ps.plan->plan_node_id, pstate);
-    // node->as_pstate = pstate;
-    // node->choose_next_subplan = choose_next_subplan_for_leader;
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: ParallelAppendState \
-         DSM place_and_init + carrier handoff (ExecAppendInitializeDSM) — needs a \
-         DSM-resident as_pstate carrier (merged AppendState uses in-process \
-         Box<ParallelAppendState>; a Box cannot be cross-process shared) and a \
-         keystone flexible-array-tail (pa_finished[]) placement primitive; unported"
+    //
+    // Placement-init the flat-repr header in the chunk via the keystone (the
+    // leader is the sole writer pre-launch); the `Default` header has a freshly
+    // initialized LWLock state (zeroed) and `pa_next_plan = 0`, then
+    // `LWLockInitialize` stamps the tranche id. The `pa_finished[]` tail bytes
+    // are zeroed in the same window (C's `memset(pstate, 0, pstate_len)`).
+    let header = shared_dsm_object::place_value::<ParallelAppendState>(
+        seg,
+        chunk,
+        ParallelAppendState::default(),
     );
+    shared_dsm_object::with_mut::<ParallelAppendState, ()>(seg, chunk, |pstate| {
+        lwlock::lwlock_initialize::call(
+            &mut pstate.pa_lock,
+            types_storage::storage::LWTRANCHE_PARALLEL_APPEND,
+        );
+    });
+    // Zero the `pa_finished[]` tail (the residual of `memset(pstate, 0, ...)`):
+    // place a default (`false`) `PaFinished` byte for each subplan.
+    let finished_off = pa_finished_offset();
+    let finished_addr = chunk.0 + finished_off;
+    init_pa_finished_tail(finished_addr, nplans);
+
+    // shm_toc_insert(pcxt->toc, node->ps.plan->plan_node_id, pstate);
+    parallel::shm_toc_insert(toc, plan_node_id as u64, chunk);
+
+    // node->as_pstate = pstate;
+    node.as_pstate = Some(ParallelAppendStateHandle::from_shared(
+        header,
+        finished_addr,
+        nplans,
+    ));
+    // node->choose_next_subplan = choose_next_subplan_for_leader;
+    node.choose_next_subplan = AppendChooseStrategy::Leader;
+    Ok(())
 }
 
 /// `ExecAppendReInitializeDSM(node, pcxt)` — reset shared state before
@@ -690,14 +721,17 @@ pub fn ExecAppendReInitializeDSM(
     // ParallelAppendState *pstate = node->as_pstate;
     // pstate->pa_next_plan = 0;
     // memset(pstate->pa_finished, 0, sizeof(bool) * node->as_nplans);
+    //
+    // The reinit window is the leader resetting shared state between scans after
+    // all participants detached, so the relaxed atomic stores under the
+    // (uncontended) shared `&self` are sound and behaviour-preserving.
     let nplans = node.as_nplans as usize;
     let pstate = node
         .as_pstate
-        .as_deref_mut()
         .ok_or_else(|| elog_error("ExecAppendReInitializeDSM: as_pstate is NULL"))?;
-    pstate.pa_next_plan = 0;
-    for slot in pstate.pa_finished.iter_mut().take(nplans) {
-        *slot = false;
+    pstate.header().set_pa_next_plan(0);
+    for slot in pstate.finished().iter().take(nplans) {
+        slot.set(false);
     }
     Ok(())
 }
@@ -708,28 +742,64 @@ pub fn ExecAppendReInitializeDSM(
 ///
 /// nodeAppend owns the `plan_node_id` read and the `choose_next_subplan` worker
 /// switch over the owned node; the `shm_toc_lookup` of the leader's chunk is a
-/// real call into the DSM owner's seams. Re-establishing `node->as_pstate` from
-/// the looked-up DSM chunk is blocked on the same DSM-resident carrier surface
-/// as [`ExecAppendInitializeDSM`] (the in-process `Box` cannot alias the shared
-/// DSM bytes), so it mirror-and-panics into the parallel DSM owner.
+/// real call into the DSM owner's seams. The worker recovers the SAME in-DSM
+/// [`ParallelAppendState`] the leader placed in [`ExecAppendInitializeDSM`] by
+/// attaching to the looked-up chunk through the keystone (the segment handle is
+/// only the `'seg` lifetime carrier, never dereferenced), and stores the `Copy`
+/// handle as `node->as_pstate`.
 pub fn ExecAppendInitializeWorker(
     node: &mut AppendStateData<'_>,
     pwcxt: ParallelWorkerContextHandle,
 ) -> PgResult<()> {
     // node->as_pstate = shm_toc_lookup(pwcxt->toc, node->ps.plan->plan_node_id, false);
     let plan_node_id = append_plan_node_id(node);
+    let nplans = node.as_nplans as usize;
     let toc = parallel::pwcxt_toc(pwcxt);
-    let chunk = parallel::shm_toc_lookup(toc, plan_node_id as u64, false);
-    let _ = chunk;
+    let chunk = parallel::shm_toc_lookup(toc, plan_node_id as u64, false)
+        .expect("ExecAppendInitializeWorker: shm_toc_lookup(noError=false) returned NULL");
+
+    // The worker attaches to the leader-placed header (no init) and recovers the
+    // `pa_finished[]` tail at `offsetof(ParallelAppendState, pa_finished)` in the
+    // SAME chunk. The segment handle is only the `'seg` lifetime carrier.
+    let seg = DsmSegmentHandle(0);
+    let header = shared_dsm_object::attach::<ParallelAppendState>(seg, chunk);
+    let finished_addr = chunk.0 + pa_finished_offset();
+    node.as_pstate = Some(ParallelAppendStateHandle::from_shared(
+        header,
+        finished_addr,
+        nplans,
+    ));
 
     // node->choose_next_subplan = choose_next_subplan_for_worker;
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: ParallelAppendState \
-         DSM attach + carrier handoff (ExecAppendInitializeWorker) — needs a \
-         DSM-resident as_pstate carrier (merged AppendState uses in-process \
-         Box<ParallelAppendState>) and a keystone flexible-array-tail placement \
-         primitive; unported"
-    );
+    node.choose_next_subplan = AppendChooseStrategy::Worker;
+    Ok(())
+}
+
+/// The `pcxt->seg` handle as the `DsmSegmentHandle` the keystone uses purely as
+/// the `'seg` lifetime carrier (it never dereferences it). `None` (leader-only,
+/// no DSM) maps to the sentinel `DsmSegmentHandle(0)`, the same convention
+/// nodeSeqscan uses.
+fn pcxt_seg_handle(pcxt: ParallelContextHandle) -> DsmSegmentHandle {
+    match parallel::pcxt_seg(pcxt) {
+        Some(seg) => seg,
+        None => DsmSegmentHandle(0),
+    }
+}
+
+/// Zero the `pa_finished[nplans]` flexible-array tail of a freshly-allocated
+/// chunk (the residual of the C `memset(pstate, 0, pstate_len)`): placement-move
+/// a default (`false`) [`PaFinished`] byte into each slot. The leader is the
+/// sole writer pre-launch, so the raw placement writes over those in-segment
+/// bytes are valid.
+fn init_pa_finished_tail(finished_addr: usize, nplans: usize) {
+    let base = finished_addr as *mut PaFinished;
+    // SAFETY: `finished_addr` is `chunk + offsetof(ParallelAppendState,
+    // pa_finished)` inside a real `shm_toc_allocate`'d chunk sized to hold
+    // `nplans` contiguous `PaFinished` bytes (the `pstate_len` estimate). The
+    // leader is the sole writer pre-launch, so each placement write is valid.
+    for i in 0..nplans {
+        unsafe { core::ptr::write(base.add(i), PaFinished::default()) };
+    }
 }
 
 /// `node->ps.plan->plan_node_id` — the toc key the shared
@@ -1603,36 +1673,34 @@ fn estate_epq_active(_estate: &EStateData<'_>) -> bool {
     false
 }
 
-/// `pstate->pa_finished[i]`.
+/// `pstate->pa_finished[i]` — the relaxed atomic load issued while holding
+/// `pa_lock` (the C plain read on the DSM-resident `bool` slot).
 fn pa_finished_get(node: &AppendStateData<'_>, i: i32) -> bool {
     node.as_pstate
-        .as_deref()
-        .and_then(|pstate| pstate.pa_finished.get(i as usize))
-        .copied()
+        .and_then(|pstate| pstate.finished().get(i as usize).map(|f| f.get()))
         .unwrap_or(false)
 }
 
-/// `pstate->pa_finished[i] = value`.
+/// `pstate->pa_finished[i] = value` — the relaxed atomic store under `pa_lock`.
 fn pa_finished_set(node: &mut AppendStateData<'_>, i: i32, value: bool) {
-    if let Some(pstate) = node.as_pstate.as_deref_mut() {
-        if let Some(slot) = pstate.pa_finished.get_mut(i as usize) {
-            *slot = value;
+    if let Some(pstate) = node.as_pstate {
+        if let Some(slot) = pstate.finished().get(i as usize) {
+            slot.set(value);
         }
     }
 }
 
-/// `pstate->pa_next_plan`.
+/// `pstate->pa_next_plan` — the relaxed atomic load under `pa_lock`.
 fn pa_next_plan_get(node: &AppendStateData<'_>) -> i32 {
     node.as_pstate
-        .as_deref()
-        .map(|pstate| pstate.pa_next_plan)
+        .map(|pstate| pstate.header().pa_next_plan())
         .unwrap_or(INVALID_SUBPLAN_INDEX)
 }
 
-/// `pstate->pa_next_plan = value`.
+/// `pstate->pa_next_plan = value` — the relaxed atomic store under `pa_lock`.
 fn pa_next_plan_set(node: &mut AppendStateData<'_>, value: i32) {
-    if let Some(pstate) = node.as_pstate.as_deref_mut() {
-        pstate.pa_next_plan = value;
+    if let Some(pstate) = node.as_pstate {
+        pstate.header().set_pa_next_plan(value);
     }
 }
 
@@ -1640,35 +1708,30 @@ fn pa_next_plan_set(node: &mut AppendStateData<'_>, value: i32) {
 /// `Drop` is the abort-path release and whose `release()` is the C
 /// `LWLockRelease(&pstate->pa_lock)`.
 ///
-/// `pa_lock` lives in the DSM-resident `ParallelAppendState` (heap-stable
-/// `Box`; `LWLock` is `Sync` over its atomics), conceptually shared memory
-/// separate from the backend-local `AppendState` fields the holder mutates
-/// (`as_whichplan`, `as_valid_subplans`, `pa_finished`, `pa_next_plan`). C
-/// holds the lock while touching exactly those. The guard's reference is
-/// derived through a raw pointer so it does not freeze the `&mut node` the
-/// surrounding code needs; this is sound because the lock object itself is
-/// never moved or mutated through `node` while the guard is held.
+/// `pa_lock` lives in the DSM-resident [`ParallelAppendState`] — the SAME
+/// in-segment bytes every worker maps — reached through the `Copy`
+/// [`ParallelAppendStateHandle`]. The lock is `Sync` over its atomic state and
+/// is never moved; the held lock object is separate from the backend-local
+/// `AppendState` fields the holder mutates (`as_whichplan`,
+/// `as_valid_subplans`) and from the DSM-resident `pa_next_plan`/`pa_finished[]`
+/// (interior-mutable), so deriving the lock borrow off the handle does not
+/// freeze the `&mut node` the surrounding code needs.
 fn lwlock_acquire<'a>(
     node: &AppendStateData<'_>,
 ) -> PgResult<lwlock::LWLockGuard<'a>> {
     let pstate = node
         .as_pstate
-        .as_deref()
         .ok_or_else(|| elog_error("Append has no parallel state"))?;
-    // SAFETY: `pa_lock` is in a heap-stable `Box`ed `ParallelAppendState`; it
-    // is `Sync` and is neither moved nor mutated through `node` while held.
-    let lock: &'a types_storage::LWLock = unsafe { &*core::ptr::addr_of!(pstate.pa_lock) };
+    // SAFETY: `pa_lock` is in the DSM-resident `ParallelAppendState` header
+    // (live for the DSM segment, which outlives the handle); it is `Sync` over
+    // its interior-mutable atomic state and is never moved.
+    let lock: &'a types_storage::LWLock =
+        unsafe { &*core::ptr::addr_of!(pstate.header().pa_lock) };
     lwlock::lwlock_acquire::call(
         lock,
         LWLockMode::LW_EXCLUSIVE,
         globals::my_proc_number::call(),
     )
-}
-
-/// `offsetof(ParallelAppendState, pa_finished)` — the fixed-head size before
-/// the per-plan `pa_finished` tail (the DSM size-estimator base).
-fn pa_finished_offset() -> usize {
-    core::mem::size_of::<types_storage::LWLock>() + core::mem::size_of::<i32>()
 }
 
 /// `elog(ERROR, msg)` — internal error with `ERRCODE_INTERNAL_ERROR`.

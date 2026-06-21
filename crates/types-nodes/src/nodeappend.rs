@@ -15,6 +15,10 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_error::PgResult;
+use types_parallel::shared_dsm_object::SharedRef;
+use types_parallel::SharedDsmObject;
+use types_storage::storage::pg_atomic_uint32;
+use types_storage::LWLock;
 
 use crate::bitmapset::Bitmapset;
 use crate::execnodes::{PlanStateData, SlotId};
@@ -87,7 +91,7 @@ pub struct AsyncRequestData {
 }
 
 /// `ParallelAppendState` (nodeAppend.c, file-private). Shared-memory
-/// coordination state for parallel-aware Append:
+/// coordination state for parallel-aware Append, living in DSM:
 ///
 /// ```c
 /// struct ParallelAppendState
@@ -97,15 +101,172 @@ pub struct AsyncRequestData {
 ///     bool        pa_finished[FLEXIBLE_ARRAY_MEMBER];
 /// };
 /// ```
-#[derive(Debug)]
+///
+/// `#[repr(C)]` with the C field order (`pa_lock`, `pa_next_plan`) because the
+/// leader placement-initializes this struct DIRECTLY in the `shm_toc` chunk and
+/// every worker reinterprets the SAME in-segment bytes through the keystone
+/// [`SharedRef`] — exactly the [`SharedDsmObject`] keystone the parallel
+/// block-table-scan / hash-join state use. The `bool pa_finished[]` flexible
+/// array is the `[PaFinished]` tail placed at `offsetof(ParallelAppendState,
+/// pa_finished)` inside the SAME chunk (no `Vec` — process-heap pointers cannot
+/// live in DSM).
+///
+/// `pa_next_plan` and `pa_finished[]` are the fields C mutates concurrently —
+/// always while holding `pa_lock` (the C plain fields, serialized by the
+/// LWLock). To be a sound [`SharedDsmObject`] (mutated through a shared `&self`)
+/// `pa_next_plan` is a `pg_atomic_uint32` accessed with a relaxed load/store
+/// under `pa_lock`; the LWLock supplies the ordering, so this is
+/// behaviour-preserving (the same model as `phs_startblock` in
+/// `ParallelBlockTableScanDescData`). `pa_lock` is the in-segment real
+/// [`LWLock`] (interior-mutable over its atomic `state` + waiter list).
+#[repr(C)]
+#[derive(Debug, Default)]
 pub struct ParallelAppendState {
     /// `LWLock pa_lock` — mutual exclusion to choose the next subplan.
-    pub pa_lock: types_storage::LWLock,
-    /// `int pa_next_plan` — next plan to choose by any worker.
-    pub pa_next_plan: i32,
-    /// `bool pa_finished[FLEXIBLE_ARRAY_MEMBER]` — per-subplan "finished"
-    /// flags.
-    pub pa_finished: Vec<bool>,
+    pub pa_lock: LWLock,
+    /// `int pa_next_plan` — next plan to choose by any worker, the C plain
+    /// field serialized by `pa_lock`, held in an atomic word so it round-trips
+    /// through the shared `&self` (a relaxed load/store under `pa_lock`).
+    pub pa_next_plan: pg_atomic_uint32,
+}
+
+// SAFETY: `#[repr(C)]` matching the C `ParallelAppendState` header
+// field-for-field; every field C mutates concurrently after the launch barrier
+// is interior-mutable — `pa_next_plan` is an atomic word (serialized by
+// `pa_lock`) and `pa_lock` is the in-segment LWLock; the leader's placement
+// initializer writes every header field and zeroes the `pa_finished[]` tail. A
+// shared `&Self` is therefore sound to alias across processes.
+unsafe impl SharedDsmObject for ParallelAppendState {}
+
+impl ParallelAppendState {
+    /// `pstate->pa_next_plan` (read) — the relaxed load issued while holding
+    /// `pa_lock` (the C plain read).
+    #[inline]
+    pub fn pa_next_plan(&self) -> i32 {
+        self.pa_next_plan.read() as i32
+    }
+
+    /// `pstate->pa_next_plan = v` (the C plain store under `pa_lock`).
+    #[inline]
+    pub fn set_pa_next_plan(&self, v: i32) {
+        self.pa_next_plan
+            .value
+            .store(v as u32, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// One element of the DSM-resident `pa_finished[FLEXIBLE_ARRAY_MEMBER]` array —
+/// a single C `bool`, held in an atomic byte so it round-trips through the
+/// shared `&self` (a relaxed load/store under `pa_lock`, the C plain field).
+/// `#[repr(transparent)]` over an `AtomicU8` so the in-segment layout matches
+/// the C `bool` element (one byte).
+#[repr(transparent)]
+#[derive(Debug, Default)]
+pub struct PaFinished {
+    pub value: core::sync::atomic::AtomicU8,
+}
+
+// SAFETY: `#[repr(transparent)]` over a one-byte `AtomicU8` matching the C
+// `bool` array element; interior-mutable, each slot written only while holding
+// `pa_lock`. A shared `&Self` is sound to alias across processes.
+unsafe impl SharedDsmObject for PaFinished {}
+
+impl PaFinished {
+    /// `pstate->pa_finished[i]` (read) — the relaxed load under `pa_lock`.
+    #[inline]
+    pub fn get(&self) -> bool {
+        self.value.load(core::sync::atomic::Ordering::Relaxed) != 0
+    }
+
+    /// `pstate->pa_finished[i] = v` (the C plain store under `pa_lock`).
+    #[inline]
+    pub fn set(&self, v: bool) {
+        self.value
+            .store(v as u8, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// `ParallelAppendState *` (nodeAppend.c) — C's pointer into DSM bytes. The
+/// `Copy` raw-pointer handle the executor threads through `node->as_pstate`:
+/// the in-DSM [`ParallelAppendState`] header plus the `[PaFinished]`
+/// flexible-array tail. The DSM segment that backs it is owned by the
+/// `ParallelContext` and outlives every access (exactly C's lifetime
+/// relationship), so the handle carries no Rust lifetime — just like the C
+/// pointer.
+#[derive(Clone, Copy)]
+pub struct ParallelAppendStateHandle {
+    /// Address of the in-DSM `ParallelAppendState` header.
+    header: *const ParallelAppendState,
+    /// Address of the `pa_finished[]` tail (`(char *) pstate +
+    /// offsetof(ParallelAppendState, pa_finished)`).
+    finished: *const PaFinished,
+    /// Number of `pa_finished[]` entries (== `node->as_nplans`).
+    nplans: usize,
+}
+
+// SAFETY: the handle is a borrow of a shared DSM segment whose cross-process
+// synchronization is the embedded interior-mutable fields' responsibility
+// (mirrors `SharedRef: Send`/`Sync`).
+unsafe impl Send for ParallelAppendStateHandle {}
+unsafe impl Sync for ParallelAppendStateHandle {}
+
+impl core::fmt::Debug for ParallelAppendStateHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ParallelAppendStateHandle")
+            .field("nplans", &self.nplans)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `offsetof(ParallelAppendState, pa_finished)` — the header size rounded up to
+/// `PaFinished`'s alignment (one byte), where the C flexible array begins. The
+/// DSM size-estimator base.
+#[inline]
+pub fn pa_finished_offset() -> usize {
+    let h = core::mem::size_of::<ParallelAppendState>();
+    let a = core::mem::align_of::<PaFinished>();
+    (h + a - 1) & !(a - 1)
+}
+
+impl ParallelAppendStateHandle {
+    /// Build the handle from the leader's freshly-placed header [`SharedRef`]
+    /// plus the in-segment address of the `pa_finished[]` tail and its element
+    /// count. The DSM segment backing both outlives the handle.
+    pub fn from_shared(
+        header: SharedRef<'_, ParallelAppendState>,
+        finished_addr: usize,
+        nplans: usize,
+    ) -> Self {
+        ParallelAppendStateHandle {
+            header: header.get() as *const ParallelAppendState,
+            finished: finished_addr as *const PaFinished,
+            nplans,
+        }
+    }
+
+    /// The shared `&ParallelAppendState` header. All concurrent mutation goes
+    /// through its interior-mutable fields, so this shared reference is sound
+    /// even while other processes hold their own `&` to the same bytes.
+    #[inline]
+    pub fn header(&self) -> &ParallelAppendState {
+        // SAFETY: `header` is a real in-segment address of a leader-initialized
+        // `ParallelAppendState` live for the DSM segment (which outlives this
+        // handle); `SharedDsmObject` guarantees every concurrently-mutated field
+        // is interior-mutable.
+        unsafe { &*self.header }
+    }
+
+    /// The `pa_finished[]` tail as a shared `&[PaFinished]`. Each element is
+    /// mutated through its interior-mutable byte, so the shared slice aliasing
+    /// another process's slice over the same bytes is sound.
+    #[inline]
+    pub fn finished(&self) -> &[PaFinished] {
+        // SAFETY: `finished` addresses `nplans` initialized `PaFinished` bytes
+        // laid out contiguously in-segment (placed by the leader), live for the
+        // DSM segment; `PaFinished: SharedDsmObject` guarantees interior
+        // mutability.
+        unsafe { core::slice::from_raw_parts(self.finished, self.nplans) }
+    }
 }
 
 /// `PartitionPruneState` (execPartition.h), trimmed to the fields the Append
@@ -185,8 +346,11 @@ pub struct AppendStateData<'mcx> {
     /// `int as_first_partial_plan` — index of `appendplans` containing the
     /// first partial plan.
     pub as_first_partial_plan: i32,
-    /// `ParallelAppendState *as_pstate` — parallel coordination info.
-    pub as_pstate: Option<alloc::boxed::Box<ParallelAppendState>>,
+    /// `ParallelAppendState *as_pstate` — parallel coordination info, a `Copy`
+    /// raw-pointer handle into the DSM-resident [`ParallelAppendState`] header +
+    /// `pa_finished[]` tail (C's `ParallelAppendState *`, a pointer into DSM
+    /// bytes). `None` for a non-parallel Append.
+    pub as_pstate: Option<ParallelAppendStateHandle>,
     /// `Size pstate_len` — size of the parallel coordination info.
     pub pstate_len: usize,
     /// `struct PartitionPruneState *as_prune_state`.
