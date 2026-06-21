@@ -43,6 +43,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Like [`fn_oid_and_expr`] but returns the call-expression as the *erased*
+    /// `ExternalFnExpr` carrier (`fmgr_info_set_expr` stamped an owned
+    /// `primnodes::Expr` onto `FmgrInfo.fn_expr`, not a frame-borrowed plan-tree
+    /// `Node`). This is the form `get_call_result_type` (funcapi.c) actually needs
+    /// to resolve a polymorphic SRF/composite result type: the funcapi resolution
+    /// reads `exprType(fn_expr)` / `get_call_expr_argtype(fn_expr, i)` /
+    /// `exprInputCollation(fn_expr)` off it, all of which the field-bearing
+    /// `ExternalFnExpr` (`tag` + erased `Expr` node) can answer, whereas a
+    /// plan-tree `&Node` cannot model `FuncExpr`/`OpExpr` yet. `fn_expr` is `None`
+    /// for the C `NULL` (no call expression — polymorphics then unresolvable).
+    /// Pure read; the `Rc`-backed `FnExprErased` clone is a cheap handle bump.
+    pub fn fn_oid_and_fn_expr_erased<'mcx>(
+        fcinfo: &'mcx FunctionCallInfoBaseData<'mcx>,
+    ) -> (types_core::Oid, Option<types_core::fmgr::FnExprErased>)
+);
+
+seam_core::seam!(
     /// The call's current memory context (C: `CurrentMemoryContext` at fmgr
     /// dispatch). `convert_*` helpers behind the `has_*_privilege` family
     /// allocate their transient name-list / `RangeVar` / pstrdup'd outputs in

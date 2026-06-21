@@ -17,7 +17,7 @@ use types_tuple::heaptuple::{TupleDesc, RECORDOID};
 
 use backend_utils_error::ereport;
 
-use crate::polymorphic::{get_type_func_class, resolve_polymorphic_tupdesc};
+use crate::polymorphic::{get_type_func_class, resolve_polymorphic_tupdesc, CallExpr};
 use crate::proc_info::build_function_result_tupdesc_t;
 
 /* ----------------------------------------------------------------
@@ -90,9 +90,17 @@ pub fn get_call_result_type<'mcx>(
     // read is seamed. `resultinfo` is held inline on the owned frame; C casts
     // the `fmNodePtr` to `ReturnSetInfo *` unconditionally here (the caller
     // contract guarantees a ReturnSetInfo for an SRF call).
-    let (fn_oid, fn_expr) = backend_utils_fmgr_fmgr_seams::fn_oid_and_expr::call(fcinfo);
+    // The call expression `internal_get_result_type` needs to resolve a
+    // polymorphic result type is `fcinfo->flinfo->fn_expr` — the owned `Expr`
+    // `fmgr_info_set_expr` stamped, recovered here as the erased carrier (a
+    // plan-tree `&Node` cannot model `FuncExpr`/`OpExpr`). C reads it as a bare
+    // `Node *`; the owned model carries the field-bearing `Expr` through the
+    // `CallExpr` abstraction.
+    let (fn_oid, fn_expr_erased) =
+        backend_utils_fmgr_fmgr_seams::fn_oid_and_fn_expr_erased::call(fcinfo);
+    let call_expr = fn_expr_erased.map(CallExpr::from_erased);
     let rsinfo = fcinfo.resultinfo.as_ref();
-    internal_get_result_type(mcx, fn_oid, fn_expr, rsinfo)
+    internal_get_result_type(mcx, fn_oid, call_expr.as_ref(), rsinfo)
 }
 
 /// `get_expr_result_type(expr, resultTypeId, resultTupleDesc)`
@@ -115,14 +123,16 @@ pub fn get_expr_result_type<'mcx>(
     // C: if (expr && IsA(expr, FuncExpr))
     //        result = internal_get_result_type(((FuncExpr *) expr)->funcid, expr, NULL, ...)
     if let Some(fe) = expr.and_then(|n| n.as_funcexpr()) {
-        return internal_get_result_type(mcx, fe.funcid, expr, None);
+        let call_expr = CallExpr::from_node(mcx, expr.unwrap())?;
+        return internal_get_result_type(mcx, fe.funcid, Some(&call_expr), None);
     }
 
     // C: else if (expr && IsA(expr, OpExpr))
     //        result = internal_get_result_type(get_opcode(((OpExpr *) expr)->opno), expr, NULL, ...)
     if let Some(op) = expr.and_then(|n| n.as_opexpr()) {
         let funcid = backend_utils_cache_lsyscache_seams::get_opcode::call(op.opno)?;
-        return internal_get_result_type(mcx, funcid, expr, None);
+        let call_expr = CallExpr::from_node(mcx, expr.unwrap())?;
+        return internal_get_result_type(mcx, funcid, Some(&call_expr), None);
     }
 
     // C: else if (expr && IsA(expr, RowExpr) && ((RowExpr *) expr)->row_typeid == RECORDOID)
@@ -235,7 +245,7 @@ pub fn get_func_result_type<'mcx>(
 pub fn internal_get_result_type<'mcx>(
     mcx: Mcx<'mcx>,
     funcid: Oid,
-    call_expr: Option<&Node<'mcx>>,
+    call_expr: Option<&CallExpr>,
     rsinfo: Option<&ReturnSetInfo<'mcx>>,
 ) -> PgResult<ResolvedResultType<'mcx>> {
     let mut out = ResolvedResultType::default();
@@ -291,13 +301,13 @@ pub fn internal_get_result_type<'mcx>(
         // C: Oid newrettype = exprType(call_expr);
         // The polymorphic return type is resolved from the concrete call
         // expression: `exprType` reads `FuncExpr.funcresulttype` (the parser
-        // already stamped the resolved element type there). That needs the
-        // field-bearing call node, so build a node-bearing `ExternalFnExpr`
-        // (erasing the owned `Expr` into the carrier the `expr_type` seam
-        // downcasts) rather than the tag-only adapter.
-        let newrettype = backend_nodes_nodeFuncs_seams::expr_type::call(
-            external_with_node(mcx, call_expr)?,
-        );
+        // already stamped the resolved element type there). `CallExpr` carries
+        // the field-bearing call node (erased owned `Expr`) and answers
+        // `exprType`; `None` call_expr yields `InvalidOid` (C `exprType(NULL)`).
+        let newrettype = match call_expr {
+            Some(ce) => ce.result_type(),
+            None => InvalidOid,
+        };
 
         // C: if (newrettype == InvalidOid) ereport(ERROR, DATATYPE_MISMATCH, ...);
         if newrettype == InvalidOid {
@@ -370,24 +380,6 @@ fn node_to_external(call_expr: Option<&Node<'_>>) -> types_fmgr::ExternalFnExpr 
         // through to `InvalidOid` (the tag-only contract).
         node: None,
     }
-}
-
-/// Build a field-bearing `ExternalFnExpr` from the call-expression `Node`,
-/// erasing the owned `Expr` (cloned into `mcx`) into the carrier so the
-/// `expr_type` seam can read its result-type field (C: `exprType(call_expr)`
-/// over a real `FuncExpr`/`OpExpr`). A `Node` that is not an expression (or a
-/// `None` call_expr) yields the tag-only carrier, for which `expr_type` falls
-/// through to `InvalidOid` — matching C's `exprType(NULL) == InvalidOid`.
-fn external_with_node<'mcx>(
-    mcx: Mcx<'mcx>,
-    call_expr: Option<&Node<'mcx>>,
-) -> PgResult<types_fmgr::ExternalFnExpr> {
-    let tag = call_expr.map(|n| n.tag().0).unwrap_or(0);
-    let node = match call_expr.and_then(|n| n.as_expr()) {
-        Some(e) => Some(types_core::fmgr::FnExprErased::new(e.clone_in(mcx)?)),
-        None => None,
-    };
-    Ok(types_fmgr::ExternalFnExpr { tag, node })
 }
 
 /// `get_expr_result_tupdesc(expr, noError)` (funcapi.c:551) — convenience

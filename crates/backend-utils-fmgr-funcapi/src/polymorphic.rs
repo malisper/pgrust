@@ -23,6 +23,86 @@ use backend_utils_adt_format_type_seams as format_type;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_nodes_nodeFuncs_seams as node_funcs;
 
+/// The `call_expr` the funcapi result-type / polymorphic-resolution cluster
+/// threads (C's `Node *call_expr`). C uses one `Node *` because its expression
+/// nodes ARE plan-tree nodes; this port models `FuncExpr`/`OpExpr` only on the
+/// owned `primnodes::Expr` side, so the carrier holds the call expression as an
+/// erased field-bearing `Expr` ([`types_fmgr::ExternalFnExpr`]):
+///
+///   * `get_call_result_type` builds it from the erased `FmgrInfo.fn_expr`
+///     (`fcinfo->flinfo->fn_expr`).
+///   * `get_expr_result_type` builds it from its `FuncExpr`/`OpExpr` plan-tree
+///     `Node` argument (cloning the owned `Expr` into the arena).
+///
+/// It answers the three inspections the resolver needs — `exprType(call_expr)`,
+/// `get_call_expr_argtype(call_expr, i)`, and `exprInputCollation(call_expr)` —
+/// so the resolver is written once against this abstraction.
+#[derive(Clone)]
+pub struct CallExpr {
+    external: types_fmgr::ExternalFnExpr,
+}
+
+impl CallExpr {
+    /// Build a [`CallExpr`] from the erased `FmgrInfo.fn_expr` carrier (the
+    /// `get_call_result_type` route). `tag` is unused on this side — the erased
+    /// `Expr` carries its own kind.
+    pub fn from_erased(erased: types_core::fmgr::FnExprErased) -> Self {
+        Self {
+            external: types_fmgr::ExternalFnExpr {
+                tag: 0,
+                node: Some(erased),
+            },
+        }
+    }
+
+    /// Build a [`CallExpr`] from a plan-tree call-expression `Node` (the
+    /// `get_expr_result_type` route), erasing its owned `Expr` into the arena so
+    /// the `ExternalFnExpr` / `&Expr` seams can read it. A `Node` that is not an
+    /// expression yields a tag-only carrier (the C `exprType` fall-through).
+    pub fn from_node<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node<'mcx>) -> PgResult<Self> {
+        let tag = node.tag().0;
+        let erased = match node.as_expr() {
+            Some(e) => Some(types_core::fmgr::FnExprErased::new(e.clone_in(mcx)?)),
+            None => None,
+        };
+        Ok(Self {
+            external: types_fmgr::ExternalFnExpr { tag, node: erased },
+        })
+    }
+
+    /// The erased owned `Expr` behind this call expression, if any.
+    fn expr(&self) -> Option<&types_nodes::primnodes::Expr> {
+        self.external
+            .node
+            .as_ref()
+            .and_then(|n| n.downcast_ref::<types_nodes::primnodes::Expr>())
+    }
+
+    /// `get_call_expr_argtype(call_expr, argnum)` (fmgr.c:1929) — the actual type
+    /// OID of argument `argnum`, or `InvalidOid` out of range / unhandled kind.
+    pub fn argtype(&self, argnum: i32) -> PgResult<Oid> {
+        match self.expr() {
+            Some(expr) => node_funcs::get_call_expr_argtype_expr::call(expr, argnum),
+            None => Ok(InvalidOid),
+        }
+    }
+
+    /// `exprType(call_expr)` (nodeFuncs.c) — the result type OID of the call
+    /// expression, or `InvalidOid` for an unhandled node kind.
+    pub fn result_type(&self) -> Oid {
+        node_funcs::expr_type::call(self.external.clone())
+    }
+
+    /// `exprInputCollation(call_expr)` (nodeFuncs.c) — the input collation the
+    /// call uses, or `InvalidOid`.
+    pub fn input_collation(&self) -> Oid {
+        match self.expr() {
+            Some(expr) => node_funcs::expr_input_collation_expr::call(expr),
+            None => InvalidOid,
+        }
+    }
+}
+
 // `get_typtype` returns `pg_type.typtype`; the `TYPTYPE_*` chars (catalog/
 // pg_type.h). The lsyscache seam reports them as `u8`.
 const TYPTYPE_BASE: u8 = b'b';
@@ -219,7 +299,7 @@ pub fn resolve_anymultirange_from_others(actuals: &mut PolymorphicActuals) -> Pg
 pub fn resolve_polymorphic_tupdesc<'mcx>(
     tupdesc: &mut TupleDesc<'mcx>,
     declared_args: &[Oid],
-    call_expr: Option<&Node<'mcx>>,
+    call_expr: Option<&CallExpr>,
 ) -> PgResult<bool> {
     // C: `int natts = tupdesc->natts;` — a non-NULL tupdesc is required.
     let td = tupdesc
@@ -300,7 +380,7 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
             ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => {
                 if !OidIsValid(poly_actuals.anyelement_type) {
                     poly_actuals.anyelement_type =
-                        node_funcs::get_call_expr_argtype_node::call(call_expr, i);
+                        call_expr.argtype(i)?;
                     if !OidIsValid(poly_actuals.anyelement_type) {
                         return Ok(false);
                     }
@@ -309,7 +389,7 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
             ANYARRAYOID => {
                 if !OidIsValid(poly_actuals.anyarray_type) {
                     poly_actuals.anyarray_type =
-                        node_funcs::get_call_expr_argtype_node::call(call_expr, i);
+                        call_expr.argtype(i)?;
                     if !OidIsValid(poly_actuals.anyarray_type) {
                         return Ok(false);
                     }
@@ -318,7 +398,7 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
             ANYRANGEOID => {
                 if !OidIsValid(poly_actuals.anyrange_type) {
                     poly_actuals.anyrange_type =
-                        node_funcs::get_call_expr_argtype_node::call(call_expr, i);
+                        call_expr.argtype(i)?;
                     if !OidIsValid(poly_actuals.anyrange_type) {
                         return Ok(false);
                     }
@@ -327,7 +407,7 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
             ANYMULTIRANGEOID => {
                 if !OidIsValid(poly_actuals.anymultirange_type) {
                     poly_actuals.anymultirange_type =
-                        node_funcs::get_call_expr_argtype_node::call(call_expr, i);
+                        call_expr.argtype(i)?;
                     if !OidIsValid(poly_actuals.anymultirange_type) {
                         return Ok(false);
                     }
@@ -336,7 +416,7 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
             ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
                 if !OidIsValid(anyc_actuals.anyelement_type) {
                     anyc_actuals.anyelement_type =
-                        node_funcs::get_call_expr_argtype_node::call(call_expr, i);
+                        call_expr.argtype(i)?;
                     if !OidIsValid(anyc_actuals.anyelement_type) {
                         return Ok(false);
                     }
@@ -345,7 +425,7 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
             ANYCOMPATIBLEARRAYOID => {
                 if !OidIsValid(anyc_actuals.anyarray_type) {
                     anyc_actuals.anyarray_type =
-                        node_funcs::get_call_expr_argtype_node::call(call_expr, i);
+                        call_expr.argtype(i)?;
                     if !OidIsValid(anyc_actuals.anyarray_type) {
                         return Ok(false);
                     }
@@ -354,7 +434,7 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
             ANYCOMPATIBLERANGEOID => {
                 if !OidIsValid(anyc_actuals.anyrange_type) {
                     anyc_actuals.anyrange_type =
-                        node_funcs::get_call_expr_argtype_node::call(call_expr, i);
+                        call_expr.argtype(i)?;
                     if !OidIsValid(anyc_actuals.anyrange_type) {
                         return Ok(false);
                     }
@@ -363,7 +443,7 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
             ANYCOMPATIBLEMULTIRANGEOID => {
                 if !OidIsValid(anyc_actuals.anymultirange_type) {
                     anyc_actuals.anymultirange_type =
-                        node_funcs::get_call_expr_argtype_node::call(call_expr, i);
+                        call_expr.argtype(i)?;
                     if !OidIsValid(anyc_actuals.anymultirange_type) {
                         return Ok(false);
                     }
@@ -424,7 +504,7 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
          * collation.  We do so if we can identify the input collation used
          * for the function.
          */
-        let inputcollation = node_funcs::expr_input_collation_node::call(call_expr);
+        let inputcollation = call_expr.input_collation();
 
         if OidIsValid(inputcollation) {
             if OidIsValid(anycollation) {
@@ -552,10 +632,10 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
 /// (funcapi.c:1064) — two-pass substitution of the polymorphic entries of the
 /// `argtypes` array (per `argmodes`) from the call's actual argument types;
 /// returns `false` if resolution failed (C `bool`).
-pub fn resolve_polymorphic_argtypes<'mcx>(
+pub fn resolve_polymorphic_argtypes(
     argtypes: &mut [Oid],
     argmodes: Option<&[u8]>,
-    call_expr: Option<&Node<'mcx>>,
+    call_expr: Option<&CallExpr>,
 ) -> PgResult<bool> {
     let numargs = argtypes.len();
     let mut have_polymorphic_result = false;
@@ -590,7 +670,7 @@ pub fn resolve_polymorphic_argtypes<'mcx>(
                     have_anyelement_result = true;
                 } else {
                     if !OidIsValid(poly_actuals.anyelement_type) {
-                        poly_actuals.anyelement_type = call_expr_argtype(call_expr, inargno);
+                        poly_actuals.anyelement_type = call_expr_argtype(call_expr, inargno)?;
                         if !OidIsValid(poly_actuals.anyelement_type) {
                             return Ok(false);
                         }
@@ -604,7 +684,7 @@ pub fn resolve_polymorphic_argtypes<'mcx>(
                     have_anyarray_result = true;
                 } else {
                     if !OidIsValid(poly_actuals.anyarray_type) {
-                        poly_actuals.anyarray_type = call_expr_argtype(call_expr, inargno);
+                        poly_actuals.anyarray_type = call_expr_argtype(call_expr, inargno)?;
                         if !OidIsValid(poly_actuals.anyarray_type) {
                             return Ok(false);
                         }
@@ -618,7 +698,7 @@ pub fn resolve_polymorphic_argtypes<'mcx>(
                     have_anyrange_result = true;
                 } else {
                     if !OidIsValid(poly_actuals.anyrange_type) {
-                        poly_actuals.anyrange_type = call_expr_argtype(call_expr, inargno);
+                        poly_actuals.anyrange_type = call_expr_argtype(call_expr, inargno)?;
                         if !OidIsValid(poly_actuals.anyrange_type) {
                             return Ok(false);
                         }
@@ -632,7 +712,7 @@ pub fn resolve_polymorphic_argtypes<'mcx>(
                     have_anymultirange_result = true;
                 } else {
                     if !OidIsValid(poly_actuals.anymultirange_type) {
-                        poly_actuals.anymultirange_type = call_expr_argtype(call_expr, inargno);
+                        poly_actuals.anymultirange_type = call_expr_argtype(call_expr, inargno)?;
                         if !OidIsValid(poly_actuals.anymultirange_type) {
                             return Ok(false);
                         }
@@ -646,7 +726,7 @@ pub fn resolve_polymorphic_argtypes<'mcx>(
                     have_anycompatible_result = true;
                 } else {
                     if !OidIsValid(anyc_actuals.anyelement_type) {
-                        anyc_actuals.anyelement_type = call_expr_argtype(call_expr, inargno);
+                        anyc_actuals.anyelement_type = call_expr_argtype(call_expr, inargno)?;
                         if !OidIsValid(anyc_actuals.anyelement_type) {
                             return Ok(false);
                         }
@@ -660,7 +740,7 @@ pub fn resolve_polymorphic_argtypes<'mcx>(
                     have_anycompatible_array_result = true;
                 } else {
                     if !OidIsValid(anyc_actuals.anyarray_type) {
-                        anyc_actuals.anyarray_type = call_expr_argtype(call_expr, inargno);
+                        anyc_actuals.anyarray_type = call_expr_argtype(call_expr, inargno)?;
                         if !OidIsValid(anyc_actuals.anyarray_type) {
                             return Ok(false);
                         }
@@ -674,7 +754,7 @@ pub fn resolve_polymorphic_argtypes<'mcx>(
                     have_anycompatible_range_result = true;
                 } else {
                     if !OidIsValid(anyc_actuals.anyrange_type) {
-                        anyc_actuals.anyrange_type = call_expr_argtype(call_expr, inargno);
+                        anyc_actuals.anyrange_type = call_expr_argtype(call_expr, inargno)?;
                         if !OidIsValid(anyc_actuals.anyrange_type) {
                             return Ok(false);
                         }
@@ -688,7 +768,7 @@ pub fn resolve_polymorphic_argtypes<'mcx>(
                     have_anycompatible_multirange_result = true;
                 } else {
                     if !OidIsValid(anyc_actuals.anymultirange_type) {
-                        anyc_actuals.anymultirange_type = call_expr_argtype(call_expr, inargno);
+                        anyc_actuals.anymultirange_type = call_expr_argtype(call_expr, inargno)?;
                         if !OidIsValid(anyc_actuals.anymultirange_type) {
                             return Ok(false);
                         }
@@ -798,23 +878,15 @@ pub fn get_type_func_class(typid: Oid) -> PgResult<(TypeFuncClass, Oid)> {
     }
 }
 
-/// `get_call_expr_argtype(call_expr, argnum)` (fmgr.c:1929, hosted here while
-/// `FmgrInfo.fn_expr` is still the tag-only ABI stub) — return the actual type
-/// OID of argument `argnum` of the call expression, or `InvalidOid`.
-///
-/// C `if (expr == NULL) return InvalidOid;` guard, then the `IsA` dispatch over
-/// the argument-bearing call-node kinds. The expression-node walk lives in the
-/// nodeFuncs owner (the plan-tree `Node` enum does not yet model `FuncExpr`
-/// etc.); route there.
-pub fn get_call_expr_argtype<'mcx>(call_expr: Option<&Node<'mcx>>, argnum: i32) -> Oid {
+/// `get_call_expr_argtype(call_expr, argnum)` (fmgr.c:1929) — the actual type
+/// OID of argument `argnum` of the call expression, or `InvalidOid`. C
+/// `if (expr == NULL) return InvalidOid;` guard, then the `IsA` dispatch (carried
+/// by [`CallExpr::argtype`]). `Err` carries the `get_base_element_type` /
+/// `exprType` cache-lookup `ereport` the `ScalarArrayOpExpr` element-type hack
+/// can raise.
+fn call_expr_argtype(call_expr: Option<&CallExpr>, argnum: i32) -> PgResult<Oid> {
     match call_expr {
-        None => InvalidOid,
-        Some(expr) => node_funcs::get_call_expr_argtype_node::call(expr, argnum),
+        None => Ok(InvalidOid),
+        Some(expr) => expr.argtype(argnum),
     }
-}
-
-/// `get_call_expr_argtype(call_expr, argnum)` as `resolve_polymorphic_argtypes`
-/// consumes it (the C call goes straight through, including a NULL expr).
-fn call_expr_argtype(call_expr: Option<&Node>, argnum: i32) -> Oid {
-    get_call_expr_argtype(call_expr, argnum)
 }

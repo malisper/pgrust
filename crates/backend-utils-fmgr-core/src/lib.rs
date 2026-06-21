@@ -3881,6 +3881,26 @@ fn fn_oid_and_expr_seam<'mcx>(
     (fn_oid, None)
 }
 
+/// `(fcinfo->flinfo->fn_oid, fcinfo->flinfo->fn_expr)` returning the call
+/// expression as the *erased* [`FnExprErased`] carrier — the form
+/// `get_call_result_type` (funcapi.c) uses for polymorphic SRF/composite result
+/// resolution. Unlike [`fn_oid_and_expr_seam`] (which cannot hand back a
+/// borrowed plan-tree `&Node` for the owned `Expr`), this clones the cheap
+/// `Rc`-backed handle off `FmgrInfo.fn_expr`, which carries the field-bearing
+/// `primnodes::Expr` that `exprType` / `get_call_expr_argtype` /
+/// `exprInputCollation` resolve against. `None` is C's NULL `fn_expr`.
+fn fn_oid_and_fn_expr_erased_seam(
+    fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
+) -> (Oid, Option<types_core::fmgr::FnExprErased>) {
+    let fn_oid = fcinfo.flinfo.as_ref().map_or(InvalidOid, |f| f.fn_oid);
+    let erased = fcinfo
+        .flinfo
+        .as_ref()
+        .and_then(|f| f.fn_expr.as_ref())
+        .cloned();
+    (fn_oid, erased)
+}
+
 // ===========================================================================
 // Re-resolve I/O seams driven by typed (non-frame) inputs.
 // (`input_is_valid_by_type_seam` is defined above and already installed.)
@@ -4325,6 +4345,9 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::get_fn_expr_variadic::set(get_fn_expr_variadic_seam);
     backend_utils_fmgr_fmgr_seams::get_fn_expr_arg_stable::set(get_fn_expr_arg_stable_seam);
     backend_utils_fmgr_fmgr_seams::fn_oid_and_expr::set(fn_oid_and_expr_seam);
+    backend_utils_fmgr_fmgr_seams::fn_oid_and_fn_expr_erased::set(
+        fn_oid_and_fn_expr_erased_seam,
+    );
 
     // Re-resolve I/O over typed inputs (`input_is_valid_by_type` installed above).
     backend_utils_fmgr_fmgr_seams::record_column_input::set(record_column_input_seam);

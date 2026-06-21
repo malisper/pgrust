@@ -139,6 +139,18 @@ seam_core::seam!(
     ) -> Oid
 );
 
+seam_core::seam!(
+    /// `exprInputCollation(node)` (nodeFuncs.c) over a *field-bearing* owned
+    /// call-expression node (`&Expr`) — the form the funcapi polymorphic resolver
+    /// uses when the `call_expr` arrives as the erased `FmgrInfo.fn_expr` `Expr`
+    /// (a polymorphic SRF/composite call resolved off `fcinfo->flinfo->fn_expr`),
+    /// rather than as a plan-tree `Node`. Reads the input collation a function
+    /// call uses (`FuncExpr.inputcollid` / `OpExpr.inputcollid` / …); a pure node
+    /// inspection. Returns `InvalidOid` for a node kind that stores no input
+    /// collation.
+    pub fn expr_input_collation_expr(expr: &Expr) -> Oid
+);
+
 /* ======================================================================
  * Node-inspection helpers reached by the optimizer pathkey/equivclass leaves.
  *

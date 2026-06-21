@@ -124,7 +124,12 @@ pub fn InitMaterializedSRF<'mcx>(
     // contract is `&'mcx`, the owning seam here receives `&mut`, and the frame
     // is the SRF call frame both views describe.
     let fcinfo_ref: &'mcx FunctionCallInfoBaseData<'mcx> = unsafe { &*(fcinfo as *const _) };
-    let (fn_oid, call_expr) = backend_utils_fmgr_fmgr_seams::fn_oid_and_expr::call(fcinfo_ref);
+    // The call expression `get_call_result_type` resolves a polymorphic result
+    // type from is `fcinfo->flinfo->fn_expr` (the owned `Expr` `fmgr_info_set_expr`
+    // stamped), recovered as the erased carrier and wrapped in `CallExpr`.
+    let (fn_oid, fn_expr_erased) =
+        backend_utils_fmgr_fmgr_seams::fn_oid_and_fn_expr_erased::call(fcinfo_ref);
+    let call_expr = fn_expr_erased.map(crate::polymorphic::CallExpr::from_erased);
 
     // Build a tuple descriptor for our result type.
     //
@@ -150,7 +155,8 @@ pub fn InitMaterializedSRF<'mcx>(
             // the function OID + call expression off the fmgr frame and the
             // ReturnSetInfo for the RECORD-via-expectedDesc arm.
             let rsinfo_for_resolve = fcinfo_ref.resultinfo.as_ref();
-            let resolved = internal_get_result_type(mcx, fn_oid, call_expr, rsinfo_for_resolve)?;
+            let resolved =
+                internal_get_result_type(mcx, fn_oid, call_expr.as_ref(), rsinfo_for_resolve)?;
             if resolved.class != Some(TypeFuncClass::Composite) {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INTERNAL_ERROR)

@@ -45,7 +45,6 @@ use types_funccache::{
     CachedFunction, CachedFunctionHashKey, CachedFunctionKeyId, CachedFunctionRef, ProcCompileInfo,
 };
 use types_nodes::fmgr::FunctionCallInfoBaseData;
-use types_nodes::nodes::Node;
 use types_tuple::heaptuple::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLENONARRAYOID, ANYCOMPATIBLEOID,
     ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYNONARRAYOID, ANYRANGEOID,
@@ -56,7 +55,7 @@ use backend_utils_error::ereport;
 use common_hashfn::{hash_bytes, hash_combine};
 
 use backend_access_common_tupdesc::{equalRowTypes, hashRowType, CreateTupleDescCopy};
-use backend_utils_fmgr_funcapi::polymorphic::{get_call_expr_argtype, resolve_polymorphic_argtypes};
+use backend_utils_fmgr_funcapi::polymorphic::{resolve_polymorphic_argtypes, CallExpr};
 use backend_utils_fmgr_funcapi::result_type::get_call_result_type;
 
 /// `INT4ARRAYOID` (`pg_type_d.h`) — `_int4`.
@@ -381,7 +380,7 @@ fn compute_function_hashkey<'mcx>(
 ) -> PgResult<CachedFunctionHashKey<'mcx>> {
     let mut hashkey = CachedFunctionHashKey::default();
 
-    let (fn_oid, fn_expr) = fn_oid_and_expr(fcinfo);
+    let (fn_oid, fn_expr) = fn_oid_and_call_expr(fcinfo);
 
     // get function OID
     hashkey.funcOid = fn_oid;
@@ -419,7 +418,7 @@ fn compute_function_hashkey<'mcx>(
             proc.pronargs as i32,
             &mut hashkey.argtypes,
             None, // all args are inputs
-            fn_expr,
+            fn_expr.as_ref(),
             forValidator,
             proc.proname.as_str(),
         )?;
@@ -451,12 +450,15 @@ fn called_as(fcinfo: &FunctionCallInfoBaseData, tag: u32) -> bool {
 }
 
 /// `fcinfo->flinfo->fn_oid` + `fcinfo->flinfo->fn_expr` — read through the fmgr
-/// seam (the node `FunctionCallInfoBaseData` carries `fn_expr` erased; the fmgr
-/// owner un-erases it).
-fn fn_oid_and_expr<'mcx>(
+/// seam. The call expression is recovered as the erased `FmgrInfo.fn_expr` `Expr`
+/// (a plan-tree `&Node` cannot model `FuncExpr`/`OpExpr`) and wrapped in
+/// [`CallExpr`], the form the polymorphic-argtype resolver consumes.
+fn fn_oid_and_call_expr<'mcx>(
     fcinfo: &'mcx FunctionCallInfoBaseData<'mcx>,
-) -> (Oid, Option<&'mcx Node<'mcx>>) {
-    backend_utils_fmgr_fmgr_seams::fn_oid_and_expr::call(fcinfo)
+) -> (Oid, Option<CallExpr>) {
+    let (fn_oid, erased) =
+        backend_utils_fmgr_fmgr_seams::fn_oid_and_fn_expr_erased::call(fcinfo);
+    (fn_oid, erased.map(CallExpr::from_erased))
 }
 
 /// `((TriggerData *) fcinfo->context)->tg_trigger->tgoid` — read through the
@@ -482,7 +484,7 @@ pub fn cfunc_resolve_polymorphic_argtypes(
     numargs: i32,
     argtypes: &mut [Oid],
     argmodes: Option<&[u8]>,
-    call_expr: Option<&Node>,
+    call_expr: Option<&CallExpr>,
     forValidator: bool,
     proname: &str,
 ) -> PgResult<()> {
@@ -509,7 +511,10 @@ pub fn cfunc_resolve_polymorphic_argtypes(
                 continue;
             }
             if argtypes[i] == RECORDOID || argtypes[i] == RECORDARRAYOID {
-                let resolvedtype = get_call_expr_argtype(call_expr, inargno);
+                let resolvedtype = match call_expr {
+                    Some(ce) => ce.argtype(inargno)?,
+                    None => InvalidOid,
+                };
                 if resolvedtype != InvalidOid {
                     argtypes[i] = resolvedtype;
                 }
@@ -589,7 +594,7 @@ pub fn cached_function_compile<'mcx>(
     includeResultType: bool,
     forValidator: bool,
 ) -> PgResult<CachedFunctionRef> {
-    let (fn_oid, _) = fn_oid_and_expr(fcinfo);
+    let (fn_oid, _) = fn_oid_and_call_expr(fcinfo);
 
     // Lookup the pg_proc tuple by Oid; we'll need it in any case (and its
     // xmin/ctid for the up-to-dateness check).

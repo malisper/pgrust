@@ -1812,6 +1812,7 @@ pub fn init_seams() {
     seams::call_expr_arg_stable_expr::set(seam_call_expr_arg_stable_expr);
     seams::get_call_expr_argtype_node::set(seam_get_call_expr_argtype_node);
     seams::expr_input_collation_node::set(seam_expr_input_collation_node);
+    seams::expr_input_collation_expr::set(seam_expr_input_collation_expr);
     seams::targetentry_info::set(seam_targetentry_info);
     seams::sortgroupclause_info::set(seam_sortgroupclause_info);
     seams::get_sortgroupref_tle::set(seam_get_sortgroupref_tle);
@@ -2180,6 +2181,12 @@ fn seam_get_call_expr_argtype_node(
 /// kind).
 fn seam_expr_input_collation_node(_node: &types_nodes::nodes::Node<'_>) -> Oid {
     InvalidOid
+}
+
+/// `exprInputCollation(node)` over a field-bearing owned `Expr` — the funcapi
+/// polymorphic resolver's read off the erased `FmgrInfo.fn_expr`.
+fn seam_expr_input_collation_expr(expr: &Expr) -> Oid {
+    expr_input_collation(Some(expr))
 }
 
 // `firstColType` helper for AlternativeSubPlan: read the shared first-column
