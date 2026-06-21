@@ -941,6 +941,16 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_COMPOSITE_TYPE | ATT_FOREIGN_TABLE,
             )?;
+            // See comments for ATPrepAlterColumnType. Re-run parse analysis so the
+            // USING clause (def->raw_default) is transformed into def->cooked_default
+            // before ATPrepAlterColumnType consumes it.
+            // cmd = ATParseTransformCmd(wqueue, tab, rel, cmd, recurse, lockmode,
+            //   AT_PASS_UNSET, context); Assert(cmd != NULL);
+            cmd = crate::at_coladd::ATParseTransformCmd(
+                mcx, wqueue, tab_idx, rel, cmd, recurse, lockmode, AT_PASS_UNSET, context,
+            )?
+            .expect("ATParseTransformCmd returned NULL for AT_AlterColumnType");
+            // Performs own recursion.
             // ATPrepAlterColumnType(wqueue, tab, rel, recurse, recursing, cmd,
             //   lockmode, context).
             crate::at_altertype::ATPrepAlterColumnType(
