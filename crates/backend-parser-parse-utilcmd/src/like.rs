@@ -42,7 +42,7 @@ use backend_commands_comment::GetComment;
 use backend_commands_sequence::sequence_options;
 use backend_parser_parse_type::{raw_typename_to_parse, typenameType};
 use backend_parser_small1::{
-    cancel_parser_errposition_callback, setup_parser_errposition_callback,
+    cancel_parser_errposition_callback, parser_errposition, setup_parser_errposition_callback,
 };
 use backend_utils_adt_format_type::format_type_be;
 use backend_utils_cache_typcache::lookup_rowtype_tupdesc;
@@ -142,10 +142,24 @@ pub fn transformTableLikeClause<'mcx>(
     let access_rv = access_range_var(src_rv);
 
     // setup_parser_errposition_callback(&pcbstate, cxt->pstate, location).
+    // The ambient error-context callback chain is retired (docs/query-lifecycle-raii.md);
+    // the location is attached at the propagation site instead, exactly as
+    // pcb_error_callback does: tag the error with parser_errposition(pstate, location)
+    // as the cursor position, but only when the error has none of its own
+    // (C: `if (edata->cursorpos == 0)`).
     setup_parser_errposition_callback(&cxt.pstate, src_location);
+    let attach_errpos = |mut e: types_error::PgError| -> types_error::PgError {
+        if e.cursor_position().is_none() {
+            let pos = parser_errposition(&cxt.pstate, src_location);
+            if pos > 0 {
+                e = e.with_cursor_position(pos);
+            }
+        }
+        e
+    };
 
     // Open the relation referenced by the LIKE clause.
-    let relation = relation_openrv(mcx, &access_rv, AccessShareLock)?;
+    let relation = relation_openrv(mcx, &access_rv, AccessShareLock).map_err(attach_errpos)?;
 
     let relkind = relation.rd_rel.relkind;
     if relkind != RELKIND_RELATION
@@ -156,11 +170,13 @@ pub fn transformTableLikeClause<'mcx>(
         && relkind != RELKIND_PARTITIONED_TABLE
     {
         let name = relation.name().to_string();
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-            .errmsg(format!("relation \"{name}\" is invalid in LIKE clause"))
-            .errdetail(errdetail_relkind_not_supported(relkind)?)
-            .into_error());
+        return Err(attach_errpos(
+            ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(format!("relation \"{name}\" is invalid in LIKE clause"))
+                .errdetail(errdetail_relkind_not_supported(relkind)?)
+                .into_error(),
+        ));
     }
 
     cancel_parser_errposition_callback();

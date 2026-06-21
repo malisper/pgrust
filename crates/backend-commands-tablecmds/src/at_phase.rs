@@ -952,7 +952,7 @@ pub(crate) fn ATPrepCmd<'mcx>(
             .expect("ATParseTransformCmd returned NULL for AT_AlterColumnType");
             // Performs own recursion.
             // ATPrepAlterColumnType(wqueue, tab, rel, recurse, recursing, cmd,
-            //   lockmode, context).
+            //   lockmode, context). Performs own recursion.
             crate::at_altertype::ATPrepAlterColumnType(
                 mcx, wqueue, tab_idx, rel, recurse, recursing, &cmd, lockmode, context,
             )?;
