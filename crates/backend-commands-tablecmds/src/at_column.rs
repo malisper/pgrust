@@ -753,6 +753,96 @@ pub fn ATExecSetStorage<'mcx>(
     Ok(object_address_subset(RelationRelationId, rel.rd_id, attnum as i32))
 }
 
+/// `ATExecSetCompression(rel, column, newValue, lockmode)` (tablecmds.c) —
+/// ALTER COLUMN SET COMPRESSION. Resolves the named compression method via
+/// `GetAttributeCompression`, writes `pg_attribute.attcompression`, then
+/// recurses to the column's simple index columns via
+/// `SetIndexStorageProperties`. No table rewrite — the change applies to newly
+/// stored values only.
+pub fn ATExecSetCompression<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    column: &str,
+    newValue: Option<&Node<'mcx>>,
+    lockmode: LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    // compression = strVal(newValue);
+    let compression = newValue
+        .expect("ALTER COLUMN SET COMPRESSION requires a compression value")
+        .expect_string()
+        .sval
+        .as_str()
+        .to_string();
+
+    // attrel = table_open(AttributeRelationId, RowExclusiveLock);
+    let attrel = relation_open(mcx, AttributeRelationId, RowExclusiveLock)?;
+
+    // tuple = SearchSysCacheCopyAttName(RelationGetRelid(rel), column);
+    let tuple = match SearchSysCacheAttName(mcx, rel.rd_id, column)? {
+        Some(t) => t,
+        None => {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_COLUMN)
+                .errmsg(format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    column,
+                    rel.name()
+                ))
+                .finish(here("ATExecSetCompression"))
+                .map(|()| unreachable!());
+        }
+    };
+
+    // prevent them from altering a system attribute
+    let attnum = att_field_i16(mcx, ATTNAME, &tuple, Anum_pg_attribute_attnum)?;
+    if attnum <= 0 {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("cannot alter system column \"{column}\""))
+            .finish(here("ATExecSetCompression"))
+            .map(|()| unreachable!());
+    }
+
+    // Check that column type is compressible, then get the attribute
+    // compression method code.
+    let atttypid = att_field_oid(mcx, ATTNAME, &tuple, Anum_pg_attribute_atttypid)?;
+    let cmethod = seam::get_attribute_compression::call(atttypid, Some(compression.as_str()))?;
+
+    // update pg_attribute entry: atttableform->attcompression = cmethod;
+    // CatalogTupleUpdate(attrel, &tuple->t_self, tuple);
+    let row = PgAttributeUpdateRow {
+        attcompression: Some(cmethod),
+        ..Default::default()
+    };
+    indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, &attrel, &tuple, &row)?;
+
+    // InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), attnum);
+    objaccess_seam::invoke_object_post_alter_hook::call(RelationRelationId, rel.rd_id, attnum as i32)?;
+
+    // Apply the change to indexes as well (only for simple index columns,
+    // matching behavior of index.c ConstructTupleDescriptor()).
+    SetIndexStorageProperties(
+        mcx,
+        rel,
+        &attrel,
+        attnum,
+        false,
+        0,
+        true,
+        cmethod,
+        lockmode,
+    )?;
+
+    // heap_freetuple(tuple) / table_close(attrel, RowExclusiveLock) — RAII.
+    drop(attrel);
+
+    // CommandCounterIncrement(); — make changes visible.
+    backend_access_transam_xact_seams::command_counter_increment::call()?;
+
+    // ObjectAddressSubSet(address, RelationRelationId, RelationGetRelid(rel), attnum);
+    Ok(object_address_subset(RelationRelationId, rel.rd_id, attnum as i32))
+}
+
 /// `SetIndexStorageProperties(rel, attrelation, attnum, setstorage, newstorage,
 /// setcompression, newcompression, lockmode)` (tablecmds.c:9098) — push a
 /// storage/compression change from a table column down to every index column

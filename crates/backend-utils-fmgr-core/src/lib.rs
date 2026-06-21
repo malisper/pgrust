@@ -3407,6 +3407,21 @@ fn external_pointer_len_for_tag(tag: u8) -> Option<usize> {
     Some(VARHDRSZ_EXTERNAL + payload)
 }
 
+/// Functions whose argument must reach the body as the RAW stored datum, NOT a
+/// detoasted image. In C these read `PG_GETARG_DATUM(0)` (never a
+/// `PG_GETARG_*_PP` macro), so the inline-compressed / out-of-line-external
+/// header survives into the body, where the function inspects it directly
+/// (`toast_get_compression_id` / `toast_datum_size` / the external pointer's
+/// `va_valueid`). The dispatch-level detoast must skip these or the body sees a
+/// flattened value and reports the wrong compression / size / chunk id.
+///
+/// OIDs (pg_proc.dat): `pg_column_size` 1269, `pg_column_compression` 2121,
+/// `pg_column_toast_chunk_id` 6316.
+#[inline]
+fn fn_skips_arg_detoast(fn_oid: Oid) -> bool {
+    matches!(fn_oid, 1269 | 2121 | 6316)
+}
+
 fn detoast_ref_arg_if_toasted<'mcx>(
     mcx: Mcx<'mcx>,
     refp: Option<RefPayload>,
@@ -3514,9 +3529,14 @@ fn function_call_invoke_datum_core<'mcx>(
     // may be inline-compressed (4B-C) or out-of-line-external, and the raw-byte
     // adt readers (md5/LIKE/etc.) would corrupt it. Detoast each toasted varlena
     // arg here so EVERY builtin sees a flat image (C: `PG_DETOAST_DATUM_PACKED`).
+    let skip_detoast = fn_skips_arg_detoast(fn_oid);
     let mut flat_ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(ref_args.len());
     for refp in ref_args {
-        flat_ref_args.push(detoast_ref_arg_if_toasted(mcx, refp)?);
+        flat_ref_args.push(if skip_detoast {
+            refp
+        } else {
+            detoast_ref_arg_if_toasted(mcx, refp)?
+        });
     }
     fcinfo.ref_args = flat_ref_args;
     fcinfo.debug_assert_ref_null_consistency();
@@ -3637,9 +3657,14 @@ fn function_call_finalfn_owned_seam<'mcx>(
     }
     let fn_expr = resolved.finfo.fn_expr.clone();
     let mut fcinfo = init_fcinfo(Some(resolved.finfo), collation, nargs);
+    let skip_detoast = fn_skips_arg_detoast(fn_oid);
     let mut flat_ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(ref_args.len());
     for refp in ref_args {
-        flat_ref_args.push(detoast_ref_arg_if_toasted(mcx, refp)?);
+        flat_ref_args.push(if skip_detoast {
+            refp
+        } else {
+            detoast_ref_arg_if_toasted(mcx, refp)?
+        });
     }
     fcinfo.ref_args = flat_ref_args;
     fcinfo.debug_assert_ref_null_consistency();

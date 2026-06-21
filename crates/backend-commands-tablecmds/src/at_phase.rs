@@ -890,7 +890,8 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_MATVIEW,
             )?;
-            unported("ALTER COLUMN SET COMPRESSION");
+            // This command never recurses; no command-specific prep needed.
+            pass = AT_PASS_MISC;
         }
         AT_DropColumn => {
             ATSimplePermissions(
@@ -1592,7 +1593,20 @@ fn ATExecCmd<'mcx>(
             drop(owned_rel);
         }
         AT_DropExpression => unported("DROP EXPRESSION (ATExecDropExpression)"),
-        AT_SetCompression => unported("SET COMPRESSION (ATExecSetCompression)"),
+        AT_SetCompression => {
+            let colname = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("ALTER COLUMN SET COMPRESSION requires a column name");
+            _address = crate::at_column::ATExecSetCompression(
+                mcx,
+                rel,
+                colname,
+                cmd.def.as_deref(),
+                lockmode,
+            )?;
+        }
         AT_DropColumn => {
             // ATExecDropColumn(wqueue, rel, cmd->name, cmd->behavior,
             //     cmd->recurse, false, cmd->missing_ok, lockmode, NULL)
