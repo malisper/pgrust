@@ -1827,6 +1827,28 @@ fn fmgr_fold<'mcx>(
     // FuncExpr/OpExpr, matching C's NULL fn_expr there).
     fn_expr: Option<&Expr>,
 ) -> PgResult<Expr> {
+    // Check permission to call the function, exactly as ExecInitFunc does
+    // (execExpr.c:2715) for the executor-backed fold path. The in-crate
+    // fast path here stands in for ExecInitExpr/ExecEvalExpr, which would
+    // otherwise raise "permission denied for function" at evaluation time;
+    // replicate that check so const-folding a function the caller may not
+    // execute fails identically (object_aclcheck(ProcedureRelationId, funcid,
+    // GetUserId(), ACL_EXECUTE) -> aclcheck_error(OBJECT_FUNCTION)).
+    let aclresult = backend_catalog_aclchk_seams::object_aclcheck::call(
+        types_core::catalog::PROCEDURE_RELATION_ID,
+        funcid,
+        backend_utils_init_miscinit_seams::get_user_id::call(),
+        types_acl::ACL_EXECUTE,
+    )?;
+    if aclresult != types_acl::ACLCHECK_OK {
+        let name = lsyscache::get_func_name::call(mcx, funcid)?.map(|s| s.as_str().to_string());
+        backend_catalog_aclchk_seams::aclcheck_error::call(
+            aclresult,
+            types_nodes::parsenodes::OBJECT_FUNCTION,
+            name,
+        )?;
+    }
+
     let (value, isnull) =
         clauses_seam::fmgr_call::call(mcx, funcid, inputcollid, args, result_type, fn_expr)?;
     let (typlen, typbyval) = lsyscache::get_typlenbyval::call(result_type)?;

@@ -1908,10 +1908,22 @@ pub fn ATExecAlterColumnType<'mcx>(
 
     // Update the default, if present, by brute force (remove and re-add).
     if let Some(defaultexpr) = defaultexpr {
+        // If it's a GENERATED default, drop its dependency records, in
+        // particular its INTERNAL dependency on the column, which would
+        // otherwise cause dependency.c to refuse to perform the deletion.
         if attgenerated != 0 {
-            // A GENERATED default has an INTERNAL dependency on the column that
-            // would otherwise block deletion; dropping those records is unported.
-            unported("GENERATED default dependency drop (deleteDependencyRecordsFor on attrdef)");
+            let attrdefoid = backend_catalog_pg_attrdef::GetAttrDefaultOid(mcx, relid, attnum)?;
+            if !OidIsValid(attrdefoid) {
+                return Err(types_error::PgError::error(&format!(
+                    "could not find attrdef tuple for relation {} attnum {}",
+                    relid, attnum
+                )));
+            }
+            let _ = pg_depend_seam::deleteDependencyRecordsFor::call(
+                AttrDefaultRelationId,
+                attrdefoid,
+                false,
+            )?;
         }
 
         // Make updates-so-far visible.
