@@ -868,7 +868,7 @@ impl<'mcx> DeparseColumns<'mcx> {
 
 impl<'mcx> DeparseNamespace<'mcx> {
     /// `memset(dpns, 0, sizeof(deparse_namespace))` — a zeroed namespace.
-    fn zeroed(mcx: Mcx<'mcx>) -> DeparseNamespace<'mcx> {
+    pub(crate) fn zeroed(mcx: Mcx<'mcx>) -> DeparseNamespace<'mcx> {
         DeparseNamespace {
             rtable: PgVec::new_in(mcx),
             rtable_names: PgVec::new_in(mcx),

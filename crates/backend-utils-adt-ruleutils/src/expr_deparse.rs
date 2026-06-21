@@ -54,7 +54,10 @@ use mcx::{Mcx, PgString, PgVec};
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use types_nodes::nodes::Node;
-use types_nodes::parsenodes::{RTE_CTE, RTE_JOIN, RTE_SUBQUERY};
+use types_nodes::parsenodes::{
+    RTE_CTE, RTE_FUNCTION, RTE_GROUP, RTE_JOIN, RTE_NAMEDTUPLESTORE, RTE_RELATION, RTE_RESULT,
+    RTE_SUBQUERY, RTE_TABLEFUNC, RTE_VALUES,
+};
 use types_nodes::primnodes::{
     Aggref, BoolExprType, BoolTestType, CaseExpr, Const, CurrentOfExpr, Expr, FuncExpr, MinMaxOp,
     NullTestType, OpExpr, ScalarArrayOpExpr, SQLValueFunction, SQLValueFunctionOp, SubLink,
@@ -1011,12 +1014,35 @@ fn get_rule_expr_e(
             get_subplan_expr(&sp.0, context, showimplicit)?;
         }
 
-        // --- Prerequisite-blocked arms (need an unported subsystem) ----------
-        Expr::FieldSelect(_) => {
-            return Err(deferred(
-                "FieldSelect (get_name_for_var_field; catalog/var-field)",
-            ))
+        Expr::FieldSelect(fselect) => {
+            let arg = fselect
+                .arg
+                .as_deref()
+                .ok_or_else(|| missing_field("FieldSelect.arg"))?;
+            let fno = fselect.fieldnum as i32;
+
+            // Parenthesize the argument unless it's a SubscriptingRef or another
+            // FieldSelect. It would be WRONG to not parenthesize a Var argument;
+            // having the right number of names is the issue, not simplicity.
+            let need_parens =
+                !matches!(arg, Expr::SubscriptingRef(_)) && !matches!(arg, Expr::FieldSelect(_));
+            if need_parens {
+                ch_(context, b'(')?;
+            }
+            get_rule_expr_e(arg, context, true)?;
+            if need_parens {
+                ch_(context, b')')?;
+            }
+
+            // Get and print the field name.
+            let mcx = context.buf.allocator();
+            let fieldname = get_name_for_var_field(arg, fno, 0, context)?;
+            ch_(context, b'.')?;
+            let q = quote_identifier(mcx, fieldname.as_str())?;
+            str_(context, q.as_str())?;
         }
+
+        // --- Prerequisite-blocked arms (need an unported subsystem) ----------
         Expr::XmlExpr(_) => {
             return Err(deferred(
                 "XmlExpr (get_rule_expr XmlExpr arm: map_xml_name_to_sql_identifier; XML deparser family)",
@@ -2009,15 +2035,10 @@ fn get_windowfunc_expr_helper(
  * -------------------------------------------------------------------------- */
 
 fn get_case_expr(c: &CaseExpr, context: &mut DeparseContext<'_>) -> PgResult<()> {
-    // appendContextKeyword(context, "CASE", 0, PRETTYINDENT_VAR, 0) — the
-    // non-indent path is just the literal; the pretty-indent stack belongs to
-    // the F2 query deparser machinery.
-    if pretty_indent(context) {
-        return Err(deferred(
-            "CaseExpr (PRETTYFLAG_INDENT / appendContextKeyword; pretty-indent machinery)",
-        ));
-    }
-    str_(context, "CASE")?;
+    use crate::query_deparse::{append_context_keyword, PRETTYINDENT_VAR};
+
+    // appendContextKeyword(context, "CASE", 0, PRETTYINDENT_VAR, 0)
+    append_context_keyword(context, "CASE", 0, PRETTYINDENT_VAR, 0)?;
 
     if let Some(arg) = c.arg.as_deref() {
         ch_(context, b' ')?;
@@ -2029,30 +2050,42 @@ fn get_case_expr(c: &CaseExpr, context: &mut DeparseContext<'_>) -> PgResult<()>
         let mut w: &Expr = cw.expr.as_deref().ok_or_else(|| missing_field("CaseWhen.expr"))?;
 
         if c.arg.is_some() {
-            // The parser produces WHEN clauses of the form "CaseTestExpr = RHS".
-            // Show just the RHS if we recognize the form.
+            // The parser produces WHEN clauses of the form "CaseTestExpr = RHS",
+            // possibly with an implicit coercion above the CaseTestExpr. Show
+            // just the RHS if we recognize the form; otherwise punt and display
+            // it as-is.
             if let Expr::OpExpr(op) = w {
-                if op.args.len() == 2 && matches!(op.args[0], Expr::CaseTestExpr(_)) {
+                if op.args.len() == 2
+                    && matches!(
+                        backend_nodes_core::nodefuncs::strip_implicit_coercions(&op.args[0]),
+                        Expr::CaseTestExpr(_)
+                    )
+                {
                     w = &op.args[1];
                 }
             }
         }
 
-        // !PRETTY_INDENT(context): append ' '.
-        ch_(context, b' ')?;
-        str_(context, "WHEN ")?;
+        if !pretty_indent(context) {
+            ch_(context, b' ')?;
+        }
+        append_context_keyword(context, "WHEN ", 0, 0, 0)?;
         get_rule_expr_e(w, context, false)?;
         str_(context, " THEN ")?;
         let result = cw.result.as_deref().ok_or_else(|| missing_field("CaseWhen.result"))?;
         get_rule_expr_e(result, context, true)?;
     }
 
-    ch_(context, b' ')?;
-    str_(context, "ELSE ")?;
+    if !pretty_indent(context) {
+        ch_(context, b' ')?;
+    }
+    append_context_keyword(context, "ELSE ", 0, 0, 0)?;
     let defresult = c.defresult.as_deref().ok_or_else(|| missing_field("CaseExpr.defresult"))?;
     get_rule_expr_e(defresult, context, true)?;
-    ch_(context, b' ')?;
-    str_(context, "END")?;
+    if !pretty_indent(context) {
+        ch_(context, b' ')?;
+    }
+    append_context_keyword(context, "END", -PRETTYINDENT_VAR, 0, 0)?;
     Ok(())
 }
 
@@ -3353,6 +3386,354 @@ pub fn get_variable<'mcx>(
     // C returns the attname (or NULL) so callers (get_target_list,
     // get_rule_sortgroupclause) can use it as the default output column name.
     Ok(attname)
+}
+
+/// `NameStr(TupleDescAttr(tupleDesc, fieldno - 1)->attname)` — extract a field
+/// name from a result tuple descriptor, copied into `mcx`.
+fn tupdesc_field_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    tupdesc: &types_tuple::heaptuple::TupleDesc<'mcx>,
+    fieldno: i32,
+) -> PgResult<PgString<'mcx>> {
+    let rd = tupdesc
+        .as_ref()
+        .ok_or_else(|| elog_error("get_expr_result_tupdesc returned no descriptor".to_string()))?;
+    // Assert(fieldno >= 1 && fieldno <= tupleDesc->natts).
+    if fieldno < 1 || fieldno > rd.natts {
+        return Err(elog_error(format!(
+            "bogus fieldno {fieldno} for tuple descriptor with {} attributes",
+            rd.natts
+        )));
+    }
+    let attr = rd
+        .attrs
+        .get((fieldno - 1) as usize)
+        .ok_or_else(|| elog_error(format!("tupdesc attr {} out of range", fieldno - 1)))?;
+    let name = String::from_utf8_lossy(attr.attname.name_str()).into_owned();
+    PgString::from_str_in(&name, mcx)
+}
+
+/// `list_copy_tail(context->namespaces, n)` — clone the namespace stack from
+/// index `n` onward (the parent namespaces for a nested subquery/CTE recursion).
+fn clone_namespaces_tail<'mcx>(
+    mcx: Mcx<'mcx>,
+    context: &DeparseContext<'mcx>,
+    n: usize,
+) -> PgResult<PgVec<'mcx, crate::DeparseNamespace<'mcx>>> {
+    let mut pv: PgVec<'mcx, crate::DeparseNamespace<'mcx>> = PgVec::new_in(mcx);
+    pv.try_reserve(context.namespaces.len().saturating_sub(n))
+        .map_err(|_| mcx.oom(0))?;
+    for ns in context.namespaces.iter().skip(n) {
+        pv.push(crate::clone_namespace_pub(mcx, ns)?);
+    }
+    Ok(pv)
+}
+
+/// `lcons(&mydpns, parent_namespaces)` — prepend a namespace to a (cloned) tail.
+fn lcons_namespace<'mcx>(
+    mcx: Mcx<'mcx>,
+    head: crate::DeparseNamespace<'mcx>,
+    parent: &[crate::DeparseNamespace<'mcx>],
+) -> PgResult<PgVec<'mcx, crate::DeparseNamespace<'mcx>>> {
+    let mut nsv: PgVec<'mcx, crate::DeparseNamespace<'mcx>> = PgVec::new_in(mcx);
+    nsv.try_reserve(parent.len() + 1).map_err(|_| mcx.oom(0))?;
+    nsv.push(head);
+    for ns in parent.iter() {
+        nsv.push(crate::clone_namespace_pub(mcx, ns)?);
+    }
+    Ok(nsv)
+}
+
+/// `get_name_for_var_field(Var *var, int fieldno, int levelsup,
+/// deparse_context *context)` — C ruleutils.c 8017-8444.
+///
+/// Determine the field name to use for a FieldSelect of `var.fieldno`. The
+/// query-decompilation paths (RowExpr whole-row colnames, non-RECORD Var via
+/// `get_expr_result_tupdesc`, RTE-in-rtable whole-row/RTE_SUBQUERY/RTE_JOIN/
+/// RTE_CTE recursion) are ported in full. The plan-tree-only branches
+/// (OUTER_VAR/INNER_VAR/INDEX_VAR digging into subplan tlists, the plan-tree
+/// SubqueryScan/CteScan/WorkTableScan childless-Result paths, and the Param
+/// referent into an ancestor plan) require the #159 plan-tree namespace, which
+/// is unported; they raise a precise deferred() the same way `get_variable`
+/// gates its #159 paths.
+fn get_name_for_var_field<'mcx>(
+    var: &Expr,
+    fieldno: i32,
+    levelsup: i32,
+    context: &mut DeparseContext<'mcx>,
+) -> PgResult<PgString<'mcx>> {
+    use types_nodes::nodes::CmdType;
+    /// `RECORDOID` (pg_type.dat) — the pseudo-type for anonymous record values.
+    const RECORDOID: Oid = 2249;
+
+    let mcx = context.buf.allocator();
+
+    // If it's a RowExpr that was expanded from a whole-row Var, use the column
+    // names attached to it.
+    if let Expr::RowExpr(r) = var {
+        if fieldno > 0 && fieldno <= r.colnames.len() as i32 {
+            return PgString::from_str_in(r.colnames[(fieldno - 1) as usize].as_str(), mcx);
+        }
+    }
+
+    // If it's a Param of type RECORD, try to find what the Param refers to.
+    if let Expr::Param(param) = var {
+        // find_param_referent only resolves with a plan tree (dpns->plan set);
+        // for query decompilation it returns None and we fall through.
+        if let Some((expr, _ancestor_idx)) = find_param_referent(mcx, param, context)? {
+            // Found a match: recurse to decipher the field name. push_ancestor_plan
+            // / pop_ancestor_plan is a plan-tree (#159) operation, unreachable for
+            // query decompilation (find_param_referent only succeeds with a plan).
+            let _ = expr;
+            return Err(deferred(
+                "get_name_for_var_field Param referent (push_ancestor_plan; #159 plan-tree)",
+            ));
+        }
+    }
+
+    // If it's a Var of type RECORD, find what it refers to; otherwise use
+    // get_expr_result_tupdesc().
+    let v = match var {
+        Expr::Var(v) if v.vartype == RECORDOID => v,
+        _ => {
+            let node = Node::mk_expr(mcx, var.clone_in(mcx)?)?;
+            let tupdesc =
+                backend_utils_fmgr_funcapi_seams::get_expr_result_tupdesc::call(mcx, Some(&node), false)?;
+            return tupdesc_field_name(mcx, &tupdesc, fieldno);
+        }
+    };
+
+    // Find appropriate nesting depth.
+    let netlevelsup = v.varlevelsup as i32 + levelsup;
+    if netlevelsup >= context.namespaces.len() as i32 {
+        return Err(elog_error(format!(
+            "bogus varlevelsup: {} offset {}",
+            v.varlevelsup, levelsup
+        )));
+    }
+    let dpns_idx = netlevelsup as usize;
+
+    // Prefer the syntactic referent when working from a parse tree.
+    let dpns_has_plan = context.namespaces[dpns_idx].plan.is_some();
+    let (varno, varattno) = if v.varnosyn as i32 > 0 && !dpns_has_plan {
+        (v.varnosyn as i32, v.varattnosyn)
+    } else {
+        (v.varno, v.varattno)
+    };
+
+    // Try to find the relevant RTE in this rtable. In a plan tree it's likely
+    // OUTER_VAR/INNER_VAR/INDEX_VAR — those need #159.
+    let in_range = {
+        let dpns = &context.namespaces[dpns_idx];
+        varno >= 1 && varno <= dpns.rtable.len() as i32
+    };
+    if !in_range {
+        return Err(deferred(
+            "get_name_for_var_field special varno (OUTER_VAR/INNER_VAR/INDEX_VAR; #159 plan-tree)",
+        ));
+    }
+
+    let attnum = varattno;
+
+    // attnum == InvalidAttrNumber: whole-row reference — select the right field.
+    if attnum == InvalidAttrNumber {
+        let rte_clone = context.namespaces[dpns_idx].rtable[(varno - 1) as usize].clone_in(mcx)?;
+        return backend_utils_adt_ruleutils_seams::get_rte_attribute_name::call(mcx, &rte_clone, fieldno as i16);
+    }
+
+    // Drill down by RTE kind. expr = (Node *) var is the default if we can't.
+    let rtekind = context.namespaces[dpns_idx].rtable[(varno - 1) as usize].rtekind;
+    let mut drill_expr: Expr = var.clone_in(mcx)?;
+
+    match rtekind {
+        RTE_RELATION | RTE_VALUES | RTE_NAMEDTUPLESTORE | RTE_RESULT => {
+            // A column of a table/values/ENR shouldn't have type RECORD. Fall
+            // through and fail (most likely) at the bottom.
+        }
+        RTE_SUBQUERY => {
+            // Subselect-in-FROM: examine sub-select's output expr.
+            let has_subquery = context.namespaces[dpns_idx].rtable[(varno - 1) as usize]
+                .subquery
+                .is_some();
+            if has_subquery {
+                let (ste_expr, aliasname): (Option<Expr>, String) = {
+                    let rte = &context.namespaces[dpns_idx].rtable[(varno - 1) as usize];
+                    let subquery = rte.subquery.as_ref().unwrap();
+                    let aliasname = rte
+                        .eref
+                        .as_ref()
+                        .and_then(|e| e.aliasname.as_deref())
+                        .unwrap_or("")
+                        .to_string();
+                    let ste = subquery
+                        .targetList
+                        .iter()
+                        .find(|tle| tle.resno == attnum && !tle.resjunk);
+                    match ste {
+                        Some(tle) => (tle.expr.as_ref().map(|e| (**e).clone_in(mcx)).transpose()?, aliasname),
+                        None => (None, aliasname),
+                    }
+                };
+                let expr = ste_expr.ok_or_else(|| {
+                    elog_error(format!("subquery {aliasname} does not have attribute {attnum}"))
+                })?;
+                if let Expr::Var(_) = &expr {
+                    // Recurse into the sub-select. Build an additional namespace
+                    // level (parent_namespaces = tail from netlevelsup).
+                    let subquery_clone = {
+                        let rte = &context.namespaces[dpns_idx].rtable[(varno - 1) as usize];
+                        rte.subquery.as_ref().unwrap().clone_in(mcx)?
+                    };
+                    let parent_namespaces = clone_namespaces_tail(mcx, context, netlevelsup as usize)?;
+                    let mut mydpns = crate::DeparseNamespace::zeroed(mcx);
+                    crate::set_deparse_for_query(mcx, &mut mydpns, &subquery_clone, &parent_namespaces)?;
+                    let new_ns = lcons_namespace(mcx, mydpns, &parent_namespaces)?;
+                    let saved = core::mem::replace(&mut context.namespaces, new_ns);
+                    let result = get_name_for_var_field(&expr, fieldno, 0, context);
+                    context.namespaces = saved;
+                    return result;
+                }
+                drill_expr = expr;
+            } else {
+                // Plan-tree SubqueryScan / childless-Result path (#159).
+                return Err(deferred(
+                    "get_name_for_var_field RTE_SUBQUERY plan-tree (SubqueryScan inner_plan; #159)",
+                ));
+            }
+        }
+        RTE_JOIN => {
+            // Join RTE: recursively inspect the alias variable.
+            let aliasvar: Option<Expr> = {
+                let rte = &context.namespaces[dpns_idx].rtable[(varno - 1) as usize];
+                if rte.joinaliasvars.is_empty() {
+                    return Err(elog_error(
+                        "cannot decompile join alias var in plan tree".to_string(),
+                    ));
+                }
+                rte.joinaliasvars
+                    .get((attnum - 1) as usize)
+                    .and_then(|n| n.as_expr())
+                    .map(|e| e.clone_in(mcx))
+                    .transpose()?
+            };
+            let expr = aliasvar
+                .ok_or_else(|| elog_error("join alias var is NULL".to_string()))?;
+            // we intentionally don't strip implicit coercions here
+            if let Expr::Var(av) = &expr {
+                return get_name_for_var_field(
+                    &Expr::Var(av.clone()),
+                    fieldno,
+                    v.varlevelsup as i32 + levelsup,
+                    context,
+                );
+            }
+            drill_expr = expr;
+        }
+        RTE_FUNCTION | RTE_TABLEFUNC => {
+            // A function declared with a RECORD result column is not allowed —
+            // we can't get here. Fall through and fail at the bottom.
+        }
+        RTE_CTE => {
+            // CTE reference: examine subquery's output expr.
+            let (ctelevelsup, ctename) = {
+                let rte = &context.namespaces[dpns_idx].rtable[(varno - 1) as usize];
+                (
+                    rte.ctelevelsup as i32 + netlevelsup,
+                    rte.ctename.as_deref().unwrap_or("").to_string(),
+                )
+            };
+            // Try to find the referenced CTE using the namespace stack.
+            let found_cte: Option<Expr> = if ctelevelsup >= context.namespaces.len() as i32 {
+                None
+            } else {
+                let ctedpns = &context.namespaces[ctelevelsup as usize];
+                let mut found: Option<Expr> = None;
+                for cte_node in ctedpns.ctes.iter() {
+                    if let Some(cte) = cte_node.as_commontableexpr() {
+                        if cte.ctename.as_deref() == Some(ctename.as_str()) {
+                            // GetCTETargetList(cte): SELECT->targetList else returningList.
+                            let ctequery = cte
+                                .ctequery
+                                .as_ref()
+                                .and_then(|q| q.as_query())
+                                .ok_or_else(|| elog_error("CTE ctequery is not a Query".to_string()))?;
+                            let tlist = if ctequery.commandType == CmdType::CMD_SELECT {
+                                &ctequery.targetList
+                            } else {
+                                &ctequery.returningList
+                            };
+                            let ste = tlist.iter().find(|tle| tle.resno == attnum && !tle.resjunk);
+                            let ste = ste.ok_or_else(|| {
+                                elog_error(format!("CTE {ctename} does not have attribute {attnum}"))
+                            })?;
+                            found = Some(
+                                ste.expr
+                                    .as_deref()
+                                    .ok_or_else(|| missing_field("CTE TargetEntry.expr"))?
+                                    .clone_in(mcx)?,
+                            );
+                            break;
+                        }
+                    }
+                }
+                found
+            };
+            match found_cte {
+                Some(expr) => {
+                    if let Expr::Var(_) = &expr {
+                        // Recurse into the CTE; build an additional namespace level.
+                        // ctequery for the matching CTE.
+                        let ctequery_clone = {
+                            let ctedpns = &context.namespaces[ctelevelsup as usize];
+                            let mut q = None;
+                            for cte_node in ctedpns.ctes.iter() {
+                                if let Some(cte) = cte_node.as_commontableexpr() {
+                                    if cte.ctename.as_deref() == Some(ctename.as_str()) {
+                                        q = cte
+                                            .ctequery
+                                            .as_ref()
+                                            .and_then(|n| n.as_query())
+                                            .map(|qq| qq.clone_in(mcx))
+                                            .transpose()?;
+                                        break;
+                                    }
+                                }
+                            }
+                            q.ok_or_else(|| elog_error("CTE ctequery vanished".to_string()))?
+                        };
+                        let parent_namespaces =
+                            clone_namespaces_tail(mcx, context, ctelevelsup as usize)?;
+                        let mut mydpns = crate::DeparseNamespace::zeroed(mcx);
+                        crate::set_deparse_for_query(mcx, &mut mydpns, &ctequery_clone, &parent_namespaces)?;
+                        let new_ns = lcons_namespace(mcx, mydpns, &parent_namespaces)?;
+                        let saved = core::mem::replace(&mut context.namespaces, new_ns);
+                        let result = get_name_for_var_field(&expr, fieldno, 0, context);
+                        context.namespaces = saved;
+                        return result;
+                    }
+                    drill_expr = expr;
+                }
+                None => {
+                    // Plan-tree CteScan / WorkTableScan path (#159).
+                    return Err(deferred(
+                        "get_name_for_var_field RTE_CTE plan-tree (CteScan inner_plan; #159)",
+                    ));
+                }
+            }
+        }
+        RTE_GROUP => {
+            // Vars referencing RTE_GROUP should have been replaced with the
+            // underlying grouping expressions; we can't get here.
+        }
+        _ => {}
+    }
+
+    // We now have an expression we can't expand any more; let
+    // get_expr_result_tupdesc() take a crack at it.
+    let node = Node::mk_expr(mcx, drill_expr)?;
+    let tupdesc =
+        backend_utils_fmgr_funcapi_seams::get_expr_result_tupdesc::call(mcx, Some(&node), false)?;
+    tupdesc_field_name(mcx, &tupdesc, fieldno)
 }
 
 /// The C 7833-7859 ORDER-BY Var prefix loop: scan the SELECT targetlist for a

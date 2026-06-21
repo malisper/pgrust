@@ -21146,6 +21146,7 @@ dependencies = [
  "backend-commands-functioncmds-seams",
  "backend-commands-tablespace-seams",
  "backend-commands-typecmds-seams",
+ "backend-nodes-core",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-nodes-read-seams",

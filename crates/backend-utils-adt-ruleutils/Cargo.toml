@@ -44,6 +44,7 @@ backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-sea
 types-cache = { path = "../types-cache" }
 types-catalog = { path = "../types-catalog" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }

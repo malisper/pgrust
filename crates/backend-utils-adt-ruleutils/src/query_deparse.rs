@@ -74,7 +74,7 @@ const PRETTYINDENT_STD: i32 = 8;
 /// `PRETTYINDENT_JOIN` (ruleutils.c 81).
 const PRETTYINDENT_JOIN: i32 = 4;
 /// `PRETTYINDENT_VAR` (ruleutils.c 82).
-const PRETTYINDENT_VAR: i32 = 4;
+pub(crate) const PRETTYINDENT_VAR: i32 = 4;
 /// `PRETTYINDENT_LIMIT` (ruleutils.c 84) — wrap limit.
 const PRETTYINDENT_LIMIT: i32 = 40;
 /// `PRETTYFLAG_PAREN` (ruleutils.c 88).
@@ -285,7 +285,7 @@ fn cte_name_conflict(context: &DeparseContext<'_>, relname: &str) -> bool {
 
 /// `appendContextKeyword(context, str, indentBefore, indentAfter, indentPlus)`
 /// (ruleutils.c 9081-9128).
-fn append_context_keyword(
+pub(crate) fn append_context_keyword(
     context: &mut DeparseContext<'_>,
     s: &str,
     indent_before: i32,
