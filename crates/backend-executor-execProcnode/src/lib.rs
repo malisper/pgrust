@@ -45,6 +45,7 @@ pub mod execProcnode_init;
 pub mod execProcnode_run_end;
 mod cte_seams;
 mod lockrows_seams;
+mod tidrangescan_seams;
 
 /// Install every seam this unit owns that corresponds to an `execProcnode.c`
 /// function.
@@ -85,4 +86,11 @@ pub fn init_seams() {
     // tableam substrate the node reaches, so it installs the node's 24 seams
     // here (the EvalPlanQual recheck leg loud-errors — see lockrows_seams.rs).
     lockrows_seams::init_seams();
+
+    // The TidRangeScan (WHERE ctid >= ... AND ctid < ...) node seams: this
+    // dispatch crate owns the ExecInitTidRangeScan/ExecProcNode call sites and the
+    // execTuples/execUtils/execExpr/tableam substrate the node reaches, so it
+    // installs the node's seams here (the `exec_assign_scan_projection_info` and
+    // `exec_scan_rescan` seams are installed by execScan, which owns those drivers).
+    tidrangescan_seams::init_seams();
 }

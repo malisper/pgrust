@@ -154,6 +154,26 @@ pub fn init_seams() {
         tid_exec_assign_scan_projection_info,
     );
     backend_executor_nodeTidscan_seams::exec_scan_rescan::set(exec_scan_rescan_ss);
+
+    // The TidRangeScan node carries its own node-owned seam crate too. Its
+    // `exec_assign_scan_projection_info` seam does NOT carry the plan's
+    // `scanrelid` explicitly (the `TidRangeScanState` retains its plan back-link,
+    // so the scanrelid is recovered from `ss.ps.plan` via the shared
+    // `scan_scanrelid` helper), and `exec_scan_rescan` marshals to the same
+    // generic `ExecScanReScan` driver as TidScan.
+    backend_executor_nodeTidrangescan_seams::exec_assign_scan_projection_info::set(
+        |tidrangestate, estate| {
+            let scanrelid = scan_scanrelid(&tidrangestate.ss);
+            execUtils::exec_assign_scan_projection_info_with_varno::call(
+                &mut tidrangestate.ss,
+                estate,
+                scanrelid as i32,
+            )
+        },
+    );
+    backend_executor_nodeTidrangescan_seams::exec_scan_rescan::set(|tidrangestate, estate| {
+        exec_scan_rescan_ss(&mut tidrangestate.ss, estate)
+    });
 }
 
 /// `ExecAssignScanProjectionInfo(node)` (execScan.c) specialized for the

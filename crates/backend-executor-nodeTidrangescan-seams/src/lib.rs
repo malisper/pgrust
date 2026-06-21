@@ -45,6 +45,7 @@ seam_core::seam!(
         node: &TidRangeScan<'mcx>,
         qual_index: usize,
         side: OperandSide,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>>
 );
 
@@ -54,7 +55,7 @@ seam_core::seam!(
     /// node's per-tuple `ExprContext` (`econtext`), returning the resulting TID.
     /// Sets `is_null` when the bound is SQL NULL.
     pub fn exec_eval_expr_switch_context<'mcx>(
-        exprstate: &ExprState,
+        exprstate: &mut ExprState<'mcx>,
         econtext: EcxtId,
         is_null: &mut bool,
         estate: &mut EStateData<'mcx>,
@@ -67,6 +68,7 @@ seam_core::seam!(
     pub fn exec_init_qual<'mcx>(
         tidrangestate: &mut TidRangeScanState<'mcx>,
         node: &TidRangeScan<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -227,19 +229,27 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `node->ps.state->es_epq_active != NULL`.
-    pub fn es_epq_active_present<'mcx>(node: &TidRangeScanState<'mcx>) -> PgResult<bool>
+    pub fn es_epq_active_present<'mcx>(
+        node: &TidRangeScanState<'mcx>,
+        estate: &EStateData<'mcx>,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `bms_is_member(epqstate->epqParam, node->ps.plan->extParam)`.
     pub fn epq_param_is_member_of_ext_param<'mcx>(
         node: &TidRangeScanState<'mcx>,
+        estate: &EStateData<'mcx>,
     ) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `epqstate->relsubs_done[index]`.
-    pub fn epq_relsubs_done<'mcx>(node: &TidRangeScanState<'mcx>, index: u32) -> PgResult<bool>
+    pub fn epq_relsubs_done<'mcx>(
+        node: &TidRangeScanState<'mcx>,
+        index: u32,
+        estate: &EStateData<'mcx>,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(
@@ -248,6 +258,7 @@ seam_core::seam!(
         node: &mut TidRangeScanState<'mcx>,
         index: u32,
         value: bool,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -256,6 +267,7 @@ seam_core::seam!(
     pub fn epq_relsubs_slot_present<'mcx>(
         node: &TidRangeScanState<'mcx>,
         index: u32,
+        estate: &EStateData<'mcx>,
     ) -> PgResult<bool>
 );
 
@@ -264,6 +276,7 @@ seam_core::seam!(
     pub fn epq_load_relsubs_slot<'mcx>(
         node: &mut TidRangeScanState<'mcx>,
         index: u32,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -272,6 +285,7 @@ seam_core::seam!(
     pub fn epq_relsubs_rowmark_present<'mcx>(
         node: &TidRangeScanState<'mcx>,
         index: u32,
+        estate: &EStateData<'mcx>,
     ) -> PgResult<bool>
 );
 
@@ -280,5 +294,6 @@ seam_core::seam!(
     pub fn eval_plan_qual_fetch_row_mark<'mcx>(
         node: &mut TidRangeScanState<'mcx>,
         scanrelid: u32,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<bool>
 );

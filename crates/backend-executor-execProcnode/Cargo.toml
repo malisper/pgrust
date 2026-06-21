@@ -62,6 +62,7 @@ backend-executor-nodeBitmapOr = { path = "../backend-executor-nodeBitmapOr" }
 backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
 backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
 backend-executor-nodeTidrangescan = { path = "../backend-executor-nodeTidrangescan" }
+backend-executor-nodeTidrangescan-seams = { path = "../backend-executor-nodeTidrangescan-seams" }
 backend-executor-nodeWindowAgg = { path = "../backend-executor-nodeWindowAgg" }
 backend-executor-nodeWorktablescan = { path = "../backend-executor-nodeWorktablescan" }
 # LockRows (nodeLockRows.c): this dispatch routes ExecInit/Proc/End/ReScan and
@@ -73,6 +74,8 @@ backend-executor-nodeLockRows-seams = { path = "../backend-executor-nodeLockRows
 # slot-ops / range-table-relation helpers (execUtils), the XactIsoLevel GUC.
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+types-tidrange = { path = "../types-tidrange" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 types-tableam = { path = "../types-tableam" }

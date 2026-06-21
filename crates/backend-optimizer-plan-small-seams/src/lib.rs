@@ -34,7 +34,7 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         run: &PlannerRun<'mcx>,
         jtnode: &FromExpr<'mcx>,
-    )
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

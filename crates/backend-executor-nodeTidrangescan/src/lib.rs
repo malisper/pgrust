@@ -186,6 +186,7 @@ fn MakeTidOpExpr<'mcx>(
     tidstate: &mut TidRangeScanState<'mcx>,
     node: &TidRangeScan<'mcx>,
     qual_index: usize,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<TidOpExpr<'mcx>> {
     // Node *arg1 = get_leftop((Expr *) expr);
     // Node *arg2 = get_rightop((Expr *) expr);
@@ -197,10 +198,12 @@ fn MakeTidOpExpr<'mcx>(
 
     if arg1_is_ctid {
         // exprstate = ExecInitExpr((Expr *) arg2, &tidstate->ss.ps);
-        exprstate = seam::exec_init_expr::call(tidstate, node, qual_index, OperandSide::Right)?;
+        exprstate =
+            seam::exec_init_expr::call(tidstate, node, qual_index, OperandSide::Right, estate)?;
     } else if arg2_is_ctid {
         // exprstate = ExecInitExpr((Expr *) arg1, &tidstate->ss.ps);
-        exprstate = seam::exec_init_expr::call(tidstate, node, qual_index, OperandSide::Left)?;
+        exprstate =
+            seam::exec_init_expr::call(tidstate, node, qual_index, OperandSide::Left, estate)?;
         invert = true;
     } else {
         return Err(elog_internal("could not identify CTID variable"));
@@ -280,7 +283,7 @@ fn TidExprListCreate<'mcx>(
         }
 
         // tidopexpr = MakeTidOpExpr(opexpr, tidrangestate);
-        let tidopexpr = MakeTidOpExpr(tidrangestate, node, qual_index)?;
+        let tidopexpr = MakeTidOpExpr(tidrangestate, node, qual_index, estate)?;
 
         // tidexprs = lappend(tidexprs, tidopexpr);
         tidexprs
@@ -331,7 +334,7 @@ fn TidRangeEval<'mcx>(
         let itemptr = {
             let exprstate = node.trss_tidexprs[i]
                 .exprstate
-                .as_deref()
+                .as_deref_mut()
                 .ok_or_else(|| elog_internal("TID range bound has no compiled expression"))?;
             seam::exec_eval_expr_switch_context::call(exprstate, econtext, &mut is_null, estate)?
         };
@@ -478,23 +481,23 @@ fn ExecScanFetch<'mcx>(
 
         if scanrelid == 0 {
             // ForeignScan/CustomScan that pushed a join to the remote side.
-            if seam::epq_param_is_member_of_ext_param::call(node)? {
+            if seam::epq_param_is_member_of_ext_param::call(node, estate)? {
                 if !recheck_mtd(node, estate)? {
                     seam::exec_clear_scan_tuple::call(node, estate)?;
                 }
                 return Ok(!scan_tuple_is_null(node, estate));
             }
-        } else if seam::epq_relsubs_done::call(node, scanrelid - 1)? {
+        } else if seam::epq_relsubs_done::call(node, scanrelid - 1, estate)? {
             // Return empty slot, as either there is no EPQ tuple for this rel or
             // we already returned it.
             seam::exec_clear_scan_tuple::call(node, estate)?;
             return Ok(false);
-        } else if seam::epq_relsubs_slot_present::call(node, scanrelid - 1)? {
+        } else if seam::epq_relsubs_slot_present::call(node, scanrelid - 1, estate)? {
             // Return replacement tuple provided by the EPQ caller.
-            seam::epq_load_relsubs_slot::call(node, scanrelid - 1)?;
+            seam::epq_load_relsubs_slot::call(node, scanrelid - 1, estate)?;
 
             // Mark to remember that we shouldn't return it again.
-            seam::epq_set_relsubs_done::call(node, scanrelid - 1, true)?;
+            seam::epq_set_relsubs_done::call(node, scanrelid - 1, true, estate)?;
 
             // Return empty slot if we haven't got a test tuple.
             if scan_tuple_is_null(node, estate) {
@@ -507,11 +510,11 @@ fn ExecScanFetch<'mcx>(
                 return Ok(false);
             }
             return Ok(true);
-        } else if seam::epq_relsubs_rowmark_present::call(node, scanrelid - 1)? {
+        } else if seam::epq_relsubs_rowmark_present::call(node, scanrelid - 1, estate)? {
             // Fetch and return replacement tuple using a non-locking rowmark.
-            seam::epq_set_relsubs_done::call(node, scanrelid - 1, true)?;
+            seam::epq_set_relsubs_done::call(node, scanrelid - 1, true, estate)?;
 
-            if !seam::eval_plan_qual_fetch_row_mark::call(node, scanrelid)? {
+            if !seam::eval_plan_qual_fetch_row_mark::call(node, scanrelid, estate)? {
                 return Ok(false);
             }
 
@@ -606,7 +609,7 @@ fn ExecScan<'mcx>(
     recheck_mtd: RecheckMtd,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    let epq_active = seam::es_epq_active_present::call(node)?;
+    let epq_active = seam::es_epq_active_present::call(node, estate)?;
     let has_qual = node.ss.ps.qual.is_some();
     let has_proj_info = node.ss.ps.ps_ProjInfo.is_some();
     ExecScanExtended(
@@ -687,6 +690,7 @@ pub fn ExecEndTidRangeScan<'mcx>(
 /// build the owned [`TidRangeScanState`] and return it by value.
 pub fn ExecInitTidRangeScan<'mcx>(
     node: &TidRangeScan<'mcx>,
+    plan_node: &'mcx types_nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<TidRangeScanState<'mcx>> {
@@ -703,6 +707,9 @@ pub fn ExecInitTidRangeScan<'mcx>(
         trss_inScan: false,
     };
 
+    // tidrangestate->ss.ps.plan = (Plan *) node;  The plan back-link aliases the
+    // caller's read-only plan node (the `&Node` the dispatcher holds).
+    tidrangestate.ss.ps.plan = Some(plan_node);
     // tidrangestate->ss.ps.plan = (Plan *) node;
     // tidrangestate->ss.ps.state = estate;
     // tidrangestate->ss.ps.ExecProcNode = ExecTidRangeScan;
@@ -738,7 +745,7 @@ pub fn ExecInitTidRangeScan<'mcx>(
     // initialize child expressions
     // tidrangestate->ss.ps.qual =
     //     ExecInitQual(node->scan.plan.qual, (PlanState *) tidrangestate);
-    seam::exec_init_qual::call(&mut tidrangestate, node)?;
+    seam::exec_init_qual::call(&mut tidrangestate, node, estate)?;
 
     TidExprListCreate(&mut tidrangestate, node, estate)?;
 

@@ -219,6 +219,23 @@ pub struct TableAmRoutine {
         slot: &mut SlotData<'mcx>,
     ) -> PgResult<bool>,
 
+    /// `scan_set_tidrange(scan, mintid, maxtid)` — restrict an in-progress scan
+    /// to the inclusive TID range `[mintid, maxtid]` (`heap_set_tidrange`).
+    pub scan_set_tidrange: for<'mcx> fn(
+        scan: &mut TableScanDescData<'mcx>,
+        mintid: &ItemPointerData,
+        maxtid: &ItemPointerData,
+    ) -> PgResult<()>,
+
+    /// `scan_getnextslot_tidrange(scan, direction, slot)` — fetch the next tuple
+    /// of a TID-range-bounded scan into `slot` (`heap_getnextslot_tidrange`).
+    pub scan_getnextslot_tidrange: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+        direction: ScanDirection,
+        slot: &mut SlotData<'mcx>,
+    ) -> PgResult<bool>,
+
     /// `parallelscan_estimate(rel)` — DSM space needed for the AM's shared
     /// parallel-scan state.
     pub parallelscan_estimate: fn(rel: &Relation<'_>) -> usize,

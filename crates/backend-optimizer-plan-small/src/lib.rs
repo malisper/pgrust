@@ -217,7 +217,7 @@ pub fn query_planner<'mcx>(
      *
      * add_base_rels_to_query(root, (Node *) parse->jointree);
      */
-    initsplan_seam::add_base_rels_to_query::call(root, run, jointree_of(run, root));
+    initsplan_seam::add_base_rels_to_query::call(root, run, jointree_of(run, root))?;
 
     /* Remove any redundant GROUP BY columns */
     initsplan_seam::remove_useless_groupby_columns::call(root, run);

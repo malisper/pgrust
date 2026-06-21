@@ -182,6 +182,7 @@ pub fn exec_init_node<'mcx>(
             let tidrangescan = node.expect_tidrangescan();
             let s = backend_executor_nodeTidrangescan::ExecInitTidRangeScan(
                 tidrangescan,
+                node,
                 estate,
                 eflags,
             )?;

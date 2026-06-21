@@ -36,7 +36,8 @@ use types_snapshot::snapshot::IsMVCCSnapshot;
 use types_tableam::relscan::{
     ParallelBlockTableScanExt, ParallelBlockTableScanWorkerData, ParallelTableScanDescData,
     TableScanDesc, TableScanDescData, SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC,
-    SO_TEMP_SNAPSHOT, SO_TYPE_ANALYZE, SO_TYPE_BITMAPSCAN, SO_TYPE_SEQSCAN, SO_TYPE_TIDSCAN,
+    SO_TEMP_SNAPSHOT, SO_TYPE_ANALYZE, SO_TYPE_BITMAPSCAN, SO_TYPE_SEQSCAN, SO_TYPE_TIDRANGESCAN,
+    SO_TYPE_TIDSCAN,
 };
 use types_tableam::scankey::ScanKeyData;
 use types_tableam::tableam::{
@@ -830,6 +831,58 @@ pub fn table_rescan<'mcx>(
 ) -> PgResult<()> {
     let routine = am(&scan.rs_rd);
     (routine.scan_rescan)(mcx, scan, key, false, false, false, false)
+}
+
+/// `table_beginscan_tidrange(rel, snapshot, mintid, maxtid)` (tableam.h inline)
+/// — set up a `TableScanDesc` for a TID range scan (`SO_TYPE_TIDRANGESCAN |
+/// SO_ALLOW_PAGEMODE`), then bound it to `[mintid, maxtid]`.
+pub fn table_beginscan_tidrange<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
+    mintid: &ItemPointerData,
+    maxtid: &ItemPointerData,
+) -> PgResult<TableScanDesc<'mcx>> {
+    let flags = SO_TYPE_TIDRANGESCAN | SO_ALLOW_PAGEMODE;
+    let routine = am(rel);
+    let mut sscan = (routine.scan_begin)(
+        mcx,
+        rel,
+        snapshot.map(|s| (*s).clone()),
+        0,
+        mcx::PgVec::new_in(mcx),
+        None,
+        flags,
+    )?;
+    // sscan->rs_rd->rd_tableam->scan_set_tidrange(sscan, mintid, maxtid);
+    (routine.scan_set_tidrange)(&mut sscan, mintid, maxtid)?;
+    Ok(sscan)
+}
+
+/// `table_rescan_tidrange(sscan, mintid, maxtid)` (tableam.h inline) — restart a
+/// TID range scan, re-bounding it to `[mintid, maxtid]`.
+pub fn table_rescan_tidrange<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    mintid: &ItemPointerData,
+    maxtid: &ItemPointerData,
+) -> PgResult<()> {
+    debug_assert!((scan.rs_flags & SO_TYPE_TIDRANGESCAN) != 0);
+    let routine = am(&scan.rs_rd);
+    (routine.scan_rescan)(mcx, scan, None, false, false, false, false)?;
+    (routine.scan_set_tidrange)(scan, mintid, maxtid)
+}
+
+/// `table_scan_getnextslot_tidrange(sscan, direction, slot)` (tableam.h inline)
+/// — fetch the next tuple of a TID-range scan into `slot`.
+pub fn table_scan_getnextslot_tidrange<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    direction: types_scan::sdir::ScanDirection,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    let routine = am(&scan.rs_rd);
+    (routine.scan_getnextslot_tidrange)(mcx, scan, direction, slot)
 }
 
 /// `table_tuple_tid_valid(scan, tid)` (tableam.h inline) — verify `tid` is a

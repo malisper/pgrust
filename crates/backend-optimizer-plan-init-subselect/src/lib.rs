@@ -199,7 +199,7 @@ pub fn init_seams() {
 
     /* ---- planmain.c entry points (plan-small-seams) ------------------- */
     psmall::add_base_rels_to_query::set(|root, run, jtnode| {
-        baserels::add_base_rels_to_query(root, run, jtnode).expect("add_base_rels_to_query")
+        baserels::add_base_rels_to_query(root, run, jtnode)
     });
     psmall::remove_useless_groupby_columns::set(|root, run| {
         groupby::remove_useless_groupby_columns(root, run)

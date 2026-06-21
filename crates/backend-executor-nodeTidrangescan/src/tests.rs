@@ -43,7 +43,7 @@ fn install() {
 
     init_plan_state_links::set(|_st, _node| Ok(()));
     check_for_interrupts::set(|| Ok(()));
-    es_epq_active_present::set(|_| Ok(false));
+    es_epq_active_present::set(|_, _| Ok(false));
     reset_per_tuple_expr_context::set(|_, _| Ok(()));
     set_econtext_scantuple_to_scan_slot::set(|_, _| Ok(()));
     exec_clear_scan_tuple::set(|node, estate| {
@@ -83,24 +83,24 @@ fn install() {
         Ok(())
     });
     scan_scanrelid::set(|_| Ok(1));
-    epq_param_is_member_of_ext_param::set(|_| Ok(false));
-    epq_relsubs_done::set(|_, _| Ok(false));
-    epq_set_relsubs_done::set(|_, _, _| Ok(()));
-    epq_relsubs_slot_present::set(|_, _| Ok(false));
-    epq_load_relsubs_slot::set(|_, _| Ok(()));
-    epq_relsubs_rowmark_present::set(|_, _| Ok(false));
-    eval_plan_qual_fetch_row_mark::set(|_, _| Ok(false));
+    epq_param_is_member_of_ext_param::set(|_, _| Ok(false));
+    epq_relsubs_done::set(|_, _, _| Ok(false));
+    epq_set_relsubs_done::set(|_, _, _, _| Ok(()));
+    epq_relsubs_slot_present::set(|_, _, _| Ok(false));
+    epq_load_relsubs_slot::set(|_, _, _| Ok(()));
+    epq_relsubs_rowmark_present::set(|_, _, _| Ok(false));
+    eval_plan_qual_fetch_row_mark::set(|_, _, _| Ok(false));
     exec_assign_expr_context::set(|_, _| Ok(()));
     exec_open_scan_relation::set(|_, _, _, _| Ok(()));
     exec_init_scan_tuple_slot::set(|_, _| Ok(()));
     exec_init_result_type_tl::set(|_, _| Ok(()));
     exec_assign_scan_projection_info::set(|_, _| Ok(()));
-    exec_init_qual::set(|_, _| Ok(()));
+    exec_init_qual::set(|_, _, _| Ok(()));
     // Each compiled bound resolves to a freshly-allocated ExprState. In the
     // real flow ExecInitExpr allocates in CurrentMemoryContext; the test uses a
     // process-lived context so the returned `PgBox<'mcx, ExprState<'mcx>>` outlives
     // any per-test `'mcx`.
-    exec_init_expr::set(|_tidstate, _node, _qual_index, _side| {
+    exec_init_expr::set(|_tidstate, _node, _qual_index, _side, _estate| {
         mcx::alloc_in(expr_state_mcx(), ExprState::default())
     });
 }
@@ -494,7 +494,11 @@ fn init_builds_bounds_from_quals() {
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     let node = make_tid_range_scan(&estate, 2);
-    let st = ExecInitTidRangeScan(&node, &mut estate, 0).unwrap();
+    let mcx = estate.es_query_cxt;
+    let plan_node = mcx::leak_in(
+        mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_tid_range_scan(mcx, node.clone_in(mcx).unwrap()).unwrap()).unwrap(),
+    );
+    let st = ExecInitTidRangeScan(&node, plan_node, &mut estate, 0).unwrap();
     assert_eq!(st.trss_tidexprs.len(), 2);
     for b in st.trss_tidexprs.iter() {
         // CTID `>=` -> lower-bound, inclusive.
@@ -519,5 +523,8 @@ fn init_errors_on_non_opexpr_qual() {
         },
         tidrangequals: Some(quals),
     };
-    assert!(ExecInitTidRangeScan(&node, &mut estate, 0).is_err());
+    let plan_node = mcx::leak_in(
+        mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_tid_range_scan(mcx, node.clone_in(mcx).unwrap()).unwrap()).unwrap(),
+    );
+    assert!(ExecInitTidRangeScan(&node, plan_node, &mut estate, 0).is_err());
 }

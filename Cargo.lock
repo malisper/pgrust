@@ -9642,6 +9642,7 @@ dependencies = [
  "backend-access-table-tableam",
  "backend-access-transam-xact",
  "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
  "backend-executor-execMain-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
@@ -9685,6 +9686,7 @@ dependencies = [
  "backend-executor-nodeSubqueryscan",
  "backend-executor-nodeTableFuncscan",
  "backend-executor-nodeTidrangescan",
+ "backend-executor-nodeTidrangescan-seams",
  "backend-executor-nodeTidscan",
  "backend-executor-nodeUnique",
  "backend-executor-nodeValuesscan",
@@ -9704,6 +9706,7 @@ dependencies = [
  "types-rel",
  "types-tableam",
  "types-tidbitmap",
+ "types-tidrange",
  "types-tuple",
 ]
 
@@ -9878,6 +9881,7 @@ dependencies = [
  "backend-executor-execScan-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
+ "backend-executor-nodeTidrangescan-seams",
  "backend-executor-nodeTidscan-seams",
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",

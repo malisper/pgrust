@@ -151,6 +151,26 @@ fn heapam_scan_getnextslot<'mcx>(
     heapam::scan::heap_getnextslot(mcx, scan, direction, slot)
 }
 
+/// `.scan_set_tidrange = heap_set_tidrange`.
+fn heapam_scan_set_tidrange<'mcx>(
+    scan: &mut TableScanDescData<'mcx>,
+    mintid: &types_tuple::heaptuple::ItemPointerData,
+    maxtid: &types_tuple::heaptuple::ItemPointerData,
+) -> PgResult<()> {
+    heapam::scan::heap_set_tidrange(scan, mintid, maxtid);
+    Ok(())
+}
+
+/// `.scan_getnextslot_tidrange = heap_getnextslot_tidrange`.
+fn heapam_scan_getnextslot_tidrange<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    direction: ScanDirection,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    heapam::scan::heap_getnextslot_tidrange(mcx, scan, direction, slot)
+}
+
 /// `.scan_bitmap_next_tuple = heapam_scan_bitmap_next_tuple`.
 fn heapam_scan_bitmap_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
@@ -660,6 +680,8 @@ pub fn get_heapam_table_am_routine() -> TableAmRoutine {
 
         scan_begin: heapam_scan_begin,
         scan_getnextslot: heapam_scan_getnextslot,
+        scan_set_tidrange: heapam_scan_set_tidrange,
+        scan_getnextslot_tidrange: heapam_scan_getnextslot_tidrange,
         scan_end: heapam_scan_end,
         scan_rescan: heapam_scan_rescan,
 
