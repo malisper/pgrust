@@ -105,18 +105,6 @@ fn check_component_fn_acl<'mcx>(mcx: mcx::Mcx<'mcx>, fnoid: Oid, agg_owner: Oid)
     Ok(())
 }
 
-/// Build a `function_call_invoke` argument cell from an in-crate `Datum<'mcx>`
-/// value/isnull pair. The fmgr-call frame carries bare-word `types_datum`
-/// `NullableDatum`s (the seam's value-based ABI), so the canonical
-/// `Datum<'mcx>` is collapsed to its raw word here (mirror execExprInterp's
-/// `word_of` gather in `func_step_inputs`).
-#[inline]
-fn nd(value: &Datum<'_>, isnull: bool) -> types_datum::NullableDatum {
-    types_datum::NullableDatum {
-        value: types_datum::Datum::from_usize(value.as_usize()),
-        isnull,
-    }
-}
 
 /// nodeWindowAgg has no `<unit>-seams` crate: callers (execProcnode's dispatch
 /// tables) depend on it directly. It reaches outward only, so `init_seams` is
@@ -1899,16 +1887,24 @@ fn update_frameheadpos<'mcx>(
                     //         BoolGetDatum(less)))) break;
                     let fn_oid = winstate.startInRangeFunc.fn_oid;
                     let collation = winstate.inRangeColl;
+                    // The in_range comparison operands (headval/currval/offset)
+                    // may be by-reference values (numeric/date/timestamp/interval
+                    // RANGE columns), so they must cross the fmgr boundary as
+                    // canonical `Datum`s — the by-reference-capable
+                    // `function_call_invoke_datum` lane — rather than being forced
+                    // through `as_usize()`, which panics on a by-reference arm.
+                    let mcx = estate.es_query_cxt;
                     let args = [
-                        nd(&headval, false),
-                        nd(&currval, false),
-                        nd(&winstate.startOffsetValue, false),
-                        nd(&Datum::from_bool(sub), false),
-                        nd(&Datum::from_bool(less), false),
+                        headval.clone(),
+                        currval.clone(),
+                        winstate.startOffsetValue.clone(),
+                        Datum::from_bool(sub),
+                        Datum::from_bool(less),
                     ];
-                    let (res, _isnull) =
-                        fmgr::function_call_invoke::call(fn_oid, collation, &args)?;
-                    if Datum::from_usize(res.as_usize()).as_bool() {
+                    let (res, _isnull) = fmgr::function_call_invoke_datum::call(
+                        mcx, fn_oid, collation, &args, &[], None,
+                    )?;
+                    if res.as_bool() {
                         break;
                     }
                 }
@@ -2123,16 +2119,20 @@ fn update_frametailpos<'mcx>(
                     //         BoolGetDatum(less)))) break;
                     let fn_oid = winstate.endInRangeFunc.fn_oid;
                     let collation = winstate.inRangeColl;
+                    // By-reference-capable fmgr lane (see the START_OFFSET site):
+                    // the RANGE in_range operands may be by-reference values.
+                    let mcx = estate.es_query_cxt;
                     let args = [
-                        nd(&tailval, false),
-                        nd(&currval, false),
-                        nd(&winstate.endOffsetValue, false),
-                        nd(&Datum::from_bool(sub), false),
-                        nd(&Datum::from_bool(less), false),
+                        tailval.clone(),
+                        currval.clone(),
+                        winstate.endOffsetValue.clone(),
+                        Datum::from_bool(sub),
+                        Datum::from_bool(less),
                     ];
-                    let (res, _isnull) =
-                        fmgr::function_call_invoke::call(fn_oid, collation, &args)?;
-                    if !Datum::from_usize(res.as_usize()).as_bool() {
+                    let (res, _isnull) = fmgr::function_call_invoke_datum::call(
+                        mcx, fn_oid, collation, &args, &[], None,
+                    )?;
+                    if !res.as_bool() {
                         break;
                     }
                 }

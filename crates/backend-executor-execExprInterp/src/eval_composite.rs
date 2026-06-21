@@ -37,7 +37,7 @@
 // The canonical unified value type (Datum-unification keystone) — what the
 // keystone-owned `ExprState.resvalue` / `ResultCell.value` carry, and what the
 // composite helpers operate on directly.
-use backend_utils_fmgr_fmgr_seams::function_call_invoke;
+use backend_utils_fmgr_fmgr_seams::function_call_invoke_datum;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::{
@@ -284,7 +284,7 @@ pub fn ExecEvalRow<'mcx>(
 pub fn ExecEvalMinMax<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // Datum *values = op->d.minmax.values;
     // bool  *nulls  = op->d.minmax.nulls;
@@ -363,25 +363,23 @@ pub fn ExecEvalMinMax<'mcx>(
             // else if (cmpresult < 0 && operator == IS_GREATEST) *op->resvalue = values[off];
             //
             // The resolved FmgrInfo cannot cross the seam, so dispatch by
-            // fn_oid through function_call_invoke (#296: the call frame now
-            // carries args/collation/isnull). The two compared values are
-            // gathered into the args[0]/args[1] frame; both are non-null here.
-            let args = [
-                types_datum::NullableDatum {
-                    value: types_datum::Datum::from_usize(cur_value.as_usize()),
-                    isnull: false,
-                },
-                types_datum::NullableDatum {
-                    value: types_datum::Datum::from_usize(values[off].as_usize()),
-                    isnull: false,
-                },
-            ];
-            let (word, isnull) = function_call_invoke::call(fn_oid, collation, &args)?;
+            // fn_oid through function_call_invoke_datum (#296), the canonical
+            // (by-reference-capable) call-frame lane: the BTORDER_PROC compare
+            // function operands may be by-reference values (text/numeric/etc.),
+            // so they must cross the boundary as `Datum` (by-ref bytes preserved)
+            // rather than being forced through `as_usize()`, which panics on a
+            // by-reference arm. The two compared values are gathered into the
+            // args[0]/args[1] frame; both are non-null here.
+            let mcx = estate.es_query_cxt;
+            let args = [cur_value.clone(), values[off].clone()];
+            let (result, isnull) =
+                function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], None)?;
             if isnull {
                 // probably should not happen
                 continue;
             }
-            let cmpresult = types_datum::Datum::from_usize(word.as_usize()).as_i32();
+            // The comparison yields a by-value int32 cmpresult.
+            let cmpresult = types_datum::Datum::from_usize(result.as_usize()).as_i32();
             if (cmpresult > 0 && operator == MinMaxOp::IS_LEAST)
                 || (cmpresult < 0 && operator == MinMaxOp::IS_GREATEST)
             {

@@ -206,11 +206,19 @@ pub fn json_encode_datetime(
             EncodeTimeOnly(&tm, fsec, false, 0, USE_XSD_DATES, &mut buf);
         }
         x if x == TIMETZOID => {
-            // DatumGetTimeTzADTP: the by-reference 12-byte {time:i64, zone:i32}.
-            let bytes = value.as_ref_bytes();
+            // C's `JsonEncodeDateTime` reads `DatumGetTimeTzADTP(value)` — the
+            // by-reference 12-byte {time:i64, zone:i32}. The jsonpath jbvDatetime
+            // port carries a `timetz` losslessly *split* into a by-value time
+            // word (`value`) plus the zone threaded alongside in `tzp` (see
+            // jsonpath_exec datetime.rs: `value = Datum::from_i64(tt.time);
+            // tz = tt.zone`), so reconstruct the `TimeTzADT` from those two
+            // halves rather than reading a by-reference image that the by-value
+            // word does not carry (`as_ref_bytes` would panic on the `ByVal`
+            // arm). `tzp` is always Some here (the jsonb encoder passes the
+            // datetime's `tz`); fall back to 0 to mirror an absent zone.
             let time = TimeTzADT {
-                time: i64::from_ne_bytes(bytes[0..8].try_into().unwrap()),
-                zone: i32::from_ne_bytes(bytes[8..12].try_into().unwrap()),
+                time: value.as_i64(),
+                zone: tzp.unwrap_or(0),
             };
             let mut tm = pg_tm::default();
             let mut fsec: fsec_t = 0;

@@ -250,8 +250,22 @@ pub fn record_in<'mcx>(
         )?;
         match conv {
             Some(v) => {
-                values[i] = v;
-                nulls[i] = false;
+                // The per-column null flag is governed solely by the literal
+                // parse (a NULL column = empty input between separators set
+                // `nulls[i] = true` above), NOT by the input function's return
+                // value. C's `record_in` passes the (possibly NULL) `column`
+                // cstring to `InputFunctionCallSafe` and keeps the `nulls[i]`
+                // it already decided: a strict input function fed a NULL string
+                // yields `(Datum) 0`, which stays paired with `nulls[i] = true`
+                // and is never read by the form path. So only adopt the
+                // converted value (and clear the null flag) for a non-NULL
+                // column; a NULL column keeps `nulls[i] = true` / the
+                // `Datum::null()` placeholder, avoiding a by-value `(Datum) 0`
+                // being mis-fed to the by-reference form path.
+                if column_data.is_some() {
+                    values[i] = v;
+                    nulls[i] = false;
+                }
             }
             None => {
                 // Soft error reported by the column input function: C's
