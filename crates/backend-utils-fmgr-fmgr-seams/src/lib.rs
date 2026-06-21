@@ -418,12 +418,20 @@ seam_core::seam!(
     /// over the input function's flattened payload bytes in `mcx`, C's
     /// `PointerGetDatum(palloc'd result)`). `Err` carries the lookup failure and
     /// whatever the input function raises.
+    ///
+    /// `escontext` is C's `InputFunctionCallSafe` soft-error sink: when `Some`
+    /// and the input function reports a *recoverable* conversion error, it is
+    /// saved into the sink and `Ok(Datum::null())` is returned (C returns
+    /// `false` with `result` left 0 — the caller checks `error_occurred`). With
+    /// `None` (the hard caller) a conversion error escalates to `Err`, exactly
+    /// as C's NULL-escontext path (`InputFunctionCall`).
     pub fn input_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
         str: Option<&str>,
         typioparam: Oid,
         typmod: i32,
+        escontext: Option<&mut types_error::SoftErrorContext>,
     ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>
 );
 

@@ -860,6 +860,7 @@ pub fn ExecEvalJsonExprPath<'mcx>(
             Some(&vs),
             typioparam,
             typmod,
+            None,
         )?;
         write_cell(state, resv, coerced, false);
     }

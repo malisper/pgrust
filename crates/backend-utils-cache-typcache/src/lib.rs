@@ -2873,7 +2873,14 @@ fn domain_check_input(
     value: &ColumnDatum<'_>,
     isnull: bool,
     domain_type: Oid,
+    escontext: Option<&mut types_error::SoftErrorContext>,
 ) -> PgResult<()> {
+    // Carry the soft-error sink into the per-constraint closure so the NOT NULL
+    // and CHECK violations can `errsave` into it (domains.c: `errsave(escontext,
+    // ...)`) instead of always hard-erroring. The CHECK *expression* evaluation
+    // (`domain_check_exec`/`ExecCheck`) never sees it — C passes no escontext
+    // there — so only the violation reports go soft.
+    let mut escontext = escontext;
     // Standalone execution context for the compiled CHECK exprstates
     // (C: my_extra->mcxt, populated lazily; here per-call).
     let execctx = domains_seams::create_domain_ctx::call()?;
@@ -2895,16 +2902,26 @@ fn domain_check_input(
             match con.constrainttype {
                 DOM_CONSTRAINT_NOTNULL => {
                     if isnull {
-                        // C also attaches errdatatype() diagnostic fields
+                        // C: errsave(escontext, errcode(ERRCODE_NOT_NULL_VIOLATION),
+                        //           "domain %s does not allow null values", ...).
+                        // also attaches errdatatype() diagnostic fields
                         // (PG_DIAG_SCHEMA_NAME / PG_DIAG_DATATYPE_NAME); the
                         // domains family currently treats `errdatatype` as a
                         // no-op (no type-name lsyscache seam), so the message +
-                        // sqlstate carry the violation.
-                        return Err(PgError::error(format!(
-                            "domain {} does not allow null values",
-                            format_type(domain_type)?
-                        ))
-                        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION));
+                        // sqlstate carry the violation. With a soft sink the
+                        // error is saved into it and we `break` (C `return`s out
+                        // of the loop after errsave, since on a soft-error path
+                        // errsave does not longjmp).
+                        types_error::ereturn(
+                            escontext.as_deref_mut(),
+                            (),
+                            PgError::error(format!(
+                                "domain {} does not allow null values",
+                                format_type(domain_type)?
+                            ))
+                            .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION),
+                        )?;
+                        return Ok(());
                     }
                 }
                 DOM_CONSTRAINT_CHECK => {
@@ -2915,18 +2932,26 @@ fn domain_check_input(
                         typlen,
                     )?;
                     if !ok {
-                        // C: errcode(ERRCODE_CHECK_VIOLATION),
-                        // errdomainconstraint(domain_type, con->name) — the
-                        // constraint name is the carried diagnostic; the
-                        // schema/datatype errdatatype fields are the no-op
-                        // documented in the domains family.
-                        return Err(PgError::error(format!(
-                            "value for domain {} violates check constraint \"{}\"",
-                            format_type(domain_type)?,
-                            con.name
-                        ))
-                        .with_sqlstate(ERRCODE_CHECK_VIOLATION)
-                        .with_constraint_name(con.name.clone()));
+                        // C: errsave(escontext, errcode(ERRCODE_CHECK_VIOLATION),
+                        //           errdomainconstraint(domain_type, con->name),
+                        //           "value for domain %s violates check
+                        //           constraint \"%s\"", ...). The constraint name
+                        // is the carried diagnostic; the schema/datatype
+                        // errdatatype fields are the no-op documented in the
+                        // domains family. With a soft sink the error is saved and
+                        // we return (matching C's flow after errsave).
+                        types_error::ereturn(
+                            escontext.as_deref_mut(),
+                            (),
+                            PgError::error(format!(
+                                "value for domain {} violates check constraint \"{}\"",
+                                format_type(domain_type)?,
+                                con.name
+                            ))
+                            .with_sqlstate(ERRCODE_CHECK_VIOLATION)
+                            .with_constraint_name(con.name.clone()),
+                        )?;
+                        return Ok(());
                     }
                 }
                 other => {

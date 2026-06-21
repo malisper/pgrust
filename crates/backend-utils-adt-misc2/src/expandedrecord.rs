@@ -245,7 +245,9 @@ fn domain_check(
     isnull: bool,
     domain_type: Oid,
 ) -> PgResult<()> {
-    backend_utils_cache_typcache_seams::domain_check_input::call(value, isnull, domain_type)
+    // C `domain_check` passes NULL escontext (the expanded-record field-store
+    // path is hard-error).
+    backend_utils_cache_typcache_seams::domain_check_input::call(value, isnull, domain_type, None)
 }
 
 /// `detoast_external_attr(attr)` (access/common/detoast.c). Returns the

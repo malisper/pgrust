@@ -1283,7 +1283,28 @@ fn fc_domain_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
     let domain_type = arg_oid(fcinfo, 1);
     let typmod = if arg_is_null(fcinfo, 2) { -1 } else { arg_i32(fcinfo, 2) };
     let m = scratch_mcx();
-    let value = crate::domains::domain_in(m.mcx(), string.as_deref(), domain_type, typmod)?;
+    // C: escontext = (Node *) fcinfo->context — the soft-error sink an
+    // `InputFunctionCallSafe` caller (e.g. `pg_input_is_valid` /
+    // `pg_input_error_info`) installs on the frame. Thread it so a base-input or
+    // domain-constraint violation records a soft error instead of hard-erroring.
+    // Move it out (the borrow checker can't co-borrow it with the `&mut fcinfo`
+    // the ret-marshalling helpers need) and put it back before returning.
+    let mut escontext = fcinfo.escontext.take();
+    let outcome = crate::domains::domain_in(
+        m.mcx(),
+        string.as_deref(),
+        domain_type,
+        typmod,
+        escontext.as_mut(),
+    );
+    fcinfo.escontext = escontext;
+    let value = outcome?;
+    // A soft error was recorded into the sink: C's `InputFunctionCallSafe`
+    // returned false / `result` is 0. Surface the NULL word the frame already
+    // carries (the caller inspects `error_occurred`, not the value).
+    if fcinfo.escontext.as_ref().is_some_and(|c| c.error_occurred()) {
+        return Ok(ret_null(fcinfo));
+    }
     // C: if (string == NULL) PG_RETURN_NULL(); else PG_RETURN_DATUM(value);
     // domain_in is not strict: a NULL input string yields a NULL domain value
     // (after the NOT NULL / CHECK constraints have run in domain_check_input),

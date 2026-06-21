@@ -667,7 +667,7 @@ pub fn stringTypeDatum<'mcx>(
      * value (text/name/varchar/numeric) as an owned `ByRef` over the input
      * function's flattened payload bytes in `mcx`, mirroring C's bare-Datum
      * return that points into the palloc'd result. */
-    fmgr::input_function_call::call(mcx, typinput, string, typioparam, atttypmod)
+    fmgr::input_function_call::call(mcx, typinput, string, typioparam, atttypmod, None)
 }
 
 /// `getTypeIOParam(typeTuple)` (lsyscache.c): the I/O parameter OID a type's

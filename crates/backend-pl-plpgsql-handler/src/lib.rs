@@ -805,6 +805,7 @@ pub fn init_seams() {
                 Some(s.as_str()),
                 typioparam,
                 reqtypmod,
+                None,
             )?;
             // The coerced result crosses back either as a by-value bare word or —
             // for a pass-by-reference target (`text`/`varchar`/`numeric`/…) — as

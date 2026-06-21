@@ -365,10 +365,19 @@ seam_core::seam!(
     /// (ERRCODE_CHECK_VIOLATION, "value for domain %s violates check
     /// constraint \"%s\"") with the schema/datatype/constraint diagnostic
     /// fields attached, and anything the CHECK expression itself raises.
+    ///
+    /// `escontext` is C's `Node *escontext` soft-error sink (domains.c:139):
+    /// when `Some` (the `pg_input_is_valid` / `InputFunctionCallSafe` path), a
+    /// NOT NULL or CHECK violation is saved into it (`errsave`) and the call
+    /// returns `Ok(())` with the sink's `error_occurred` flag set, instead of an
+    /// `Err`. With `None` (the hard caller) the violation propagates as `Err`.
+    /// Anything the CHECK *expression itself* raises is always a hard `Err`
+    /// (C passes no escontext into `ExecCheck`).
     pub fn domain_check_input<'mcx>(
         value: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
         isnull: bool,
         domain_type: types_core::primitive::Oid,
+        escontext: Option<&mut types_error::SoftErrorContext>,
     ) -> types_error::PgResult<()>
 );
 

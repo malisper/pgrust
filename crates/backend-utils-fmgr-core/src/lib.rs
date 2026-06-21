@@ -3189,9 +3189,33 @@ fn input_function_call_seam<'mcx>(
     str: Option<&str>,
     typioparam: Oid,
     typmod: i32,
+    escontext: Option<&mut types_error::SoftErrorContext>,
 ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
     use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
-    match oid_input_function_call_out(mcx, function_id, str, typioparam, typmod)? {
+    // With a soft sink (C: `InputFunctionCallSafe(..., escontext, &result)`), run
+    // the input function under the escontext: a recoverable conversion error is
+    // saved into it and we return `Datum::null()` (C returns false, result = 0;
+    // the caller checks `error_occurred`). Without a sink this is the plain
+    // hard-error `InputFunctionCall` path.
+    let out = match escontext {
+        Some(es) => {
+            let resolved = fmgr_info(mcx, function_id)?;
+            match input_function_call_safe_typed(
+                mcx,
+                &resolved.resolution,
+                resolved.finfo,
+                str,
+                typioparam,
+                typmod,
+                Some(es),
+            )? {
+                Some(o) => o,
+                None => return Ok(CanonDatum::null()),
+            }
+        }
+        None => oid_input_function_call_out(mcx, function_id, str, typioparam, typmod)?,
+    };
+    match out {
         FmgrOut::ByVal(d) => Ok(CanonDatum::ByVal(canon_word(&d).as_usize())),
         // A `cstring`-returning input function (`cstring_in`, typlen == -2) yields
         // C's `char *` (`CStringGetDatum`), NOT a varlena pointer. Preserve the

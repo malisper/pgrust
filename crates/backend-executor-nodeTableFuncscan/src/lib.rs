@@ -297,6 +297,7 @@ fn routine_get_value<'mcx>(
                         Some(s.as_str()),
                         typioparam,
                         typmod,
+                        None,
                     )?;
                     Ok((d, false))
                 }

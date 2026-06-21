@@ -59,29 +59,43 @@ pub fn domain_in<'mcx>(
     string: Option<&str>,
     typioparam: u32,
     _typmod: i32,
+    escontext: Option<&mut types_error::SoftErrorContext>,
 ) -> PgResult<Datum<'mcx>> {
     let domain_type = typioparam;
+    let mut escontext = escontext;
 
     // domain_state_setup(domainType, /*binary=*/false, ...): the typcache half
     // (validates the OID is a domain; looks up the base type's text input fn).
     let io = typcache_seams::domain_get_base_input_info::call(domain_type, false)?;
 
-    // Invoke the base type's typinput procedure to convert the data. With no
-    // escontext (hard-error caller), InputFunctionCallSafe is equivalent to
-    // InputFunctionCall. The seam yields the canonical `Datum<'mcx>` — a
-    // by-value scalar as `ByVal`, a by-reference base value (e.g. a domain over
-    // text/varchar) as an owned `ByRef` — threaded straight through (C: the
-    // base input function's `Datum` is the domain value).
+    // C: if (!InputFunctionCallSafe(&my_extra->proc, string, ..., escontext, &value))
+    //        return (Datum) 0;
+    // Invoke the base type's typinput procedure to convert the data, threading
+    // the soft-error sink so a malformed base-value input (e.g. `pg_input_is_valid
+    // ('junk','positiveint')`) records a soft error and bails instead of hard
+    // erroring. The seam yields the canonical `Datum<'mcx>` — a by-value scalar
+    // as `ByVal`, a by-reference base value (e.g. a domain over text/varchar) as
+    // an owned `ByRef` — threaded straight through.
     let value = fmgr_seams::input_function_call::call(
         mcx,
         io.typiofunc,
         string,
         io.typioparam,
         io.typtypmod,
+        escontext.as_deref_mut(),
     )?;
+    // A soft base-input error: stop here (C returns (Datum) 0 immediately).
+    if escontext.as_ref().is_some_and(|c| c.error_occurred()) {
+        return Ok(Datum::null());
+    }
 
     // Do the necessary checks to ensure it's a valid domain value.
-    typcache_seams::domain_check_input::call(&value, string.is_none(), domain_type)?;
+    typcache_seams::domain_check_input::call(
+        &value,
+        string.is_none(),
+        domain_type,
+        escontext.as_deref_mut(),
+    )?;
 
     Ok(value)
 }
@@ -118,8 +132,9 @@ pub fn domain_recv<'mcx>(
     // Do the necessary checks to ensure it's a valid domain value. (binary
     // input always supplies a non-null value, matching the C `buf == NULL`
     // being unreachable for the normal system path; we mirror the not-strict
-    // shape by reporting isnull == false.)
-    typcache_seams::domain_check_input::call(&value, false, domain_type)?;
+    // shape by reporting isnull == false.) C's `domain_recv` passes NULL
+    // escontext (the binary-protocol path is always hard-error).
+    typcache_seams::domain_check_input::call(&value, false, domain_type, None)?;
 
     Ok(value)
 }
@@ -137,7 +152,7 @@ pub fn domain_check<'mcx>(
     isnull: bool,
     domain_type: u32,
 ) -> PgResult<()> {
-    typcache_seams::domain_check_input::call(value, isnull, domain_type)
+    typcache_seams::domain_check_input::call(value, isnull, domain_type, None)
 }
 
 /// `domain_check_safe(value, isnull, domainType, extra, mcxt, escontext)` — the
@@ -146,20 +161,22 @@ pub fn domain_check<'mcx>(
 /// `ErrorSaveContext` populated) when a constraint violation is captured softly,
 /// `true` otherwise.
 ///
-/// The owned-model `domain_check_input` engine is the hard-error variant
-/// (`escontext == NULL`); a soft `ErrorSaveContext` is not yet carried across
-/// the typcache seam (that soft path belongs to the typcache owner, like every
-/// other adt `*_safe`). With no soft context the C `escontext == NULL` reduces
-/// to `domain_check`: an `Err` propagates the hard `ereport(ERROR)`, and success
-/// is `true` (`!SOFT_ERROR_OCCURRED(NULL)`).
+/// The `domain_check_input` typcache seam now carries the soft-error sink, so a
+/// constraint violation is `errsave`d into `escontext` (when `Some`) and this
+/// returns `false`; with `None` (the hard caller) the violation propagates as an
+/// `Err`. On success (or a softly-captured violation) the C return is
+/// `!SOFT_ERROR_OCCURRED(escontext)`.
 pub fn domain_check_safe<'mcx>(
     _mcx: Mcx<'mcx>,
     value: &Datum<'mcx>,
     isnull: bool,
     domain_type: u32,
+    escontext: Option<&mut types_error::SoftErrorContext>,
 ) -> PgResult<bool> {
-    typcache_seams::domain_check_input::call(value, isnull, domain_type)?;
-    Ok(true)
+    let mut escontext = escontext;
+    typcache_seams::domain_check_input::call(value, isnull, domain_type, escontext.as_deref_mut())?;
+    // C: return !SOFT_ERROR_OCCURRED(escontext);
+    Ok(!escontext.is_some_and(|c| c.error_occurred()))
 }
 
 /// `errdatatype(datatypeOid)` — errcontext helper naming the domain type.
