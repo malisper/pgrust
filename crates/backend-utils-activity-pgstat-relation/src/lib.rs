@@ -1348,6 +1348,11 @@ pub fn init_seams() {
         pgstat_update_heap_dead_tuples(relid, relisshared, en, delta)
             .expect("pgstat_update_heap_dead_tuples failed");
     });
+    pgseam::pgstat_copy_relation_stats::set(
+        |dst_relid, dst_relisshared, src_relid, src_relisshared| {
+            pgstat_copy_relation_stats(dst_relid, dst_relisshared, src_relid, src_relisshared)
+        },
+    );
 
     // `pgstat_count_truncate(rel)` (tablecmds ExecuteTruncateGuts). The tablecmds
     // caller crosses by `&Relation`; project (relid, relisshared, pgstat_enabled)

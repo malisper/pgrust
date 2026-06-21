@@ -400,3 +400,17 @@ seam_core::seam!(
     /// (xlog.c). Fallible: the unlink path `ereport(ERROR)`s.
     pub fn pgstat_discard_stats() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `pgstat_copy_relation_stats(dst, src)` (pgstat_relation.c): copy the
+    /// cumulative per-relation statistics entry from `src` to `dst`. Called by
+    /// `index_concurrently_swap` to carry an index's stats to its rebuilt copy.
+    /// The relations cross as `(oid, relisshared)` pairs (the C reads `rd_rel->
+    /// relisshared` + `RelationGetRelid`). `Err` carries any `ereport(ERROR)`.
+    pub fn pgstat_copy_relation_stats(
+        dst_relid: types_core::primitive::Oid,
+        dst_relisshared: bool,
+        src_relid: types_core::primitive::Oid,
+        src_relisshared: bool,
+    ) -> types_error::PgResult<()>
+);

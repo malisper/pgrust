@@ -73,6 +73,36 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `stringToNode(TextDatumGetCString(SysCacheGetAttrNotNull(INDEXRELID,
+    /// indexTuple, Anum_pg_index_indexprs)))` — the *raw* `pg_index.indexprs`
+    /// expression list, decoded directly from the catalog `pg_node_tree` with
+    /// NO `eval_const_expressions` / `fix_opfuncids` flattening (unlike
+    /// [`index_expressions`]). This is what `index_concurrently_create_copy`
+    /// (catalog/index.c:1359-1369) requires: it must NOT reuse the planner-
+    /// flattened IndexInfo expressions. `None` when the index has no expression
+    /// columns. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn index_raw_expressions<'mcx>(
+        mcx: Mcx<'mcx>,
+        index_relid: Oid,
+    ) -> PgResult<Option<PgVec<'mcx, Expr>>>
+);
+
+seam_core::seam!(
+    /// `make_ands_implicit((Expr *) stringToNode(TextDatumGetCString(
+    /// SysCacheGetAttrNotNull(INDEXRELID, indexTuple, Anum_pg_index_indpred))))`
+    /// — the *raw* `pg_index.indpred`, decoded directly from the catalog
+    /// `pg_node_tree` and reduced to implicit-AND form, with NO
+    /// `eval_const_expressions` / `canonicalize_qual` flattening (unlike
+    /// [`index_predicate`]). Required by `index_concurrently_create_copy`
+    /// (catalog/index.c:1370-1383). `None` when the index is not partial. Can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn index_raw_predicate<'mcx>(
+        mcx: Mcx<'mcx>,
+        index_relid: Oid,
+    ) -> PgResult<Option<PgVec<'mcx, Expr>>>
+);
+
+seam_core::seam!(
     /// `RelationGetDummyIndexExpressions(relation)` (relcache.c:5156): read the
     /// raw `pg_index.indexprs` datum (`heap_getattr` over `GetPgIndexDescriptor`),
     /// `stringToNode` the expression list, then per sub-tree

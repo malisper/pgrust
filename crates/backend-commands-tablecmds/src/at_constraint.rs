@@ -364,6 +364,7 @@ pub fn ATExecSetNotNull<'mcx>(
                 conenforced: con_form.conenforced,
                 condeferrable: con_form.condeferrable,
                 condeferred: con_form.condeferred,
+                conindid: con_form.conindid,
             };
             backend_catalog_indexing_seams::catalog_tuple_update_pg_constraint::call(
                 &constr_rel,

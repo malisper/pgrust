@@ -34,7 +34,8 @@ use types_catalog::pg_constraint::{
     Anum_pg_constraint_contype,
     Anum_pg_constraint_contypid, Anum_pg_constraint_convalidated, Anum_pg_constraint_oid,
     ConKeyArray, ConstraintCategory, ConstraintFieldUpdate, FormData_pg_constraint, OidArray,
-    PgConstraintInsertRow, ConstraintNameNspIndexId, ConstraintRelidTypidNameIndexId,
+    PgConstraintInsertRow, ConstraintNameNspIndexId, ConstraintOidIndexId,
+    ConstraintRelidTypidNameIndexId,
     ConstraintTypidIndexId,
     CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
     CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, OID_MULTIRANGE_INTERSECT_MULTIRANGE_OP,
@@ -923,6 +924,7 @@ pub fn disinherit_constraints(
                 conenforced: con.conenforced,
                 condeferrable: con.condeferrable,
                 condeferred: con.condeferred,
+                conindid: con.conindid,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(
                 &catalog,
@@ -1206,6 +1208,7 @@ pub fn AdjustNotNullInheritance(
                 conenforced: conform.conenforced,
                 condeferrable: conform.condeferrable,
                 condeferred: conform.condeferred,
+                conindid: conform.conindid,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(
                 &pg_constraint,
@@ -1461,6 +1464,7 @@ pub fn MergeWithExistingConstraint(
         conenforced: con.conenforced,
         condeferrable: con.condeferrable,
         condeferred: con.condeferred,
+        conindid: con.conindid,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conDesc, tid, &fields)?;
 
@@ -1811,6 +1815,7 @@ pub fn RenameConstraintById(mcx: Mcx<'_>, conId: Oid, newname: &str) -> PgResult
         conenforced: conform.conenforced,
         condeferrable: conform.condeferrable,
         condeferred: conform.condeferred,
+        conindid: conform.conindid,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conDesc, con.tid, &fields)?;
 
@@ -1870,6 +1875,7 @@ pub fn AlterConstraintNamespaces(
                 conenforced: conform.conenforced,
                 condeferrable: conform.condeferrable,
                 condeferred: conform.condeferred,
+                conindid: conform.conindid,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(&conRel, row.tid, &fields)?;
 
@@ -1951,6 +1957,7 @@ pub fn ConstraintSetParentConstraint(
             conenforced: constrForm.conenforced,
             condeferrable: constrForm.condeferrable,
             condeferred: constrForm.condeferred,
+            conindid: constrForm.conindid,
         };
         indexing_seams::catalog_tuple_update_pg_constraint::call(&constrRel, tid, &fields)?;
 
@@ -1992,6 +1999,7 @@ pub fn ConstraintSetParentConstraint(
             conenforced: constrForm.conenforced,
             condeferrable: constrForm.condeferrable,
             condeferred: constrForm.condeferred,
+            conindid: constrForm.conindid,
         };
         indexing_seams::catalog_tuple_update_pg_constraint::call(&constrRel, tid, &fields)?;
 
@@ -3008,6 +3016,7 @@ pub fn set_constraint_validated(_mcx: Mcx<'_>, con_oid: Oid) -> PgResult<()> {
         conenforced: conform.conenforced,
         condeferrable: conform.condeferrable,
         condeferred: conform.condeferred,
+        conindid: conform.conindid,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conrel, con.tid, &fields)?;
 
@@ -3096,6 +3105,7 @@ pub fn AlterConstrUpdateConstraintEntry(
         conenforced,
         condeferrable,
         condeferred,
+        conindid: conform.conindid,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conrel, con.tid, &fields)?;
 
@@ -3142,8 +3152,121 @@ pub fn find_relation_constraint_by_name(
     Ok(found)
 }
 
+/* ===========================================================================
+ * index_concurrently_swap's constraint+trigger move leg (catalog/index.c:1656-1724)
+ * ========================================================================= */
+
+/// `swap_index_constraints_and_triggers(constraintOids, oldIndexId, newIndexId)`
+/// — the "Move constraints and triggers over to the new index" block of
+/// `index_concurrently_swap` (catalog/index.c:1656-1724).
+///
+/// For each constraint whose `conindid == oldIndexId`, set `conindid =
+/// newIndexId` and `CatalogTupleUpdate`. Then scan `pg_trigger` by
+/// `tgconstraint` and move every `tgconstrindid == oldIndexId` to `newIndexId`.
+/// Homed here because the `pg_constraint` unit owns the constraint catalog and
+/// reaches `pg_trigger` through genam.
+fn swap_index_constraints_and_triggers(
+    constraint_oids: &[Oid],
+    old_index_id: Oid,
+    new_index_id: Oid,
+) -> PgResult<()> {
+    use types_catalog::pg_trigger::{
+        Anum_pg_trigger_tgconstraint, Anum_pg_trigger_tgconstrindid, TriggerConstraintIndexId,
+        TriggerFieldUpdate, TriggerRelationId,
+    };
+
+    let pg_constraint_ctx = MemoryContext::new("swap_index_constraints");
+    let cmcx = pg_constraint_ctx.mcx();
+    let pg_constraint = table::table_open(cmcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+    let pg_trigger = table::table_open(cmcx, TriggerRelationId, RowExclusiveLock)?;
+
+    for &constraint_oid in constraint_oids {
+        /*
+         * Move the constraint from the old to the new index. The C reads the
+         * constraint row via SearchSysCacheCopy1(CONSTROID); here we scan the
+         * pg_constraint OID index for the row, deform it, and (when it points at
+         * the old index) rewrite conindid via the indexing update seam.
+         */
+        let key = [oid_key(Anum_pg_constraint_oid, constraint_oid)?];
+        let mut con_row: Option<(ItemPointerData, FormData_pg_constraint)> = None;
+        systable_scan_foreach(
+            &pg_constraint,
+            ConstraintOidIndexId,
+            &key,
+            |row| {
+                con_row = Some((row.tid, row.form.clone()));
+                Ok(false)
+            },
+        )?;
+        let Some((tid, con)) = con_row else {
+            return Err(PgError::error(format!(
+                "could not find tuple for constraint {constraint_oid}"
+            )));
+        };
+
+        if con.conindid == old_index_id {
+            let fields = ConstraintFieldUpdate {
+                conname: con.conname,
+                connamespace: con.connamespace,
+                conislocal: con.conislocal,
+                coninhcount: con.coninhcount,
+                conparentid: con.conparentid,
+                convalidated: con.convalidated,
+                connoinherit: con.connoinherit,
+                conenforced: con.conenforced,
+                condeferrable: con.condeferrable,
+                condeferred: con.condeferred,
+                conindid: new_index_id,
+            };
+            indexing_seams::catalog_tuple_update_pg_constraint::call(&pg_constraint, tid, &fields)?;
+        }
+
+        /*
+         * Search for trigger records whose tgconstraint matches, and move the
+         * referenced tgconstrindid from the old index to the new one.
+         */
+        let tkey = [oid_key(Anum_pg_trigger_tgconstraint, constraint_oid)?];
+        let mut scan = genam_seams::systable_beginscan::call(
+            &pg_trigger,
+            TriggerConstraintIndexId,
+            true,
+            None,
+            &tkey,
+        )?;
+        loop {
+            let scratch = MemoryContext::new("pg_trigger scan row");
+            let smcx = scratch.mcx();
+            let Some(tup) = genam_seams::systable_getnext::call(smcx, scan.desc_mut())? else {
+                break;
+            };
+            let cols = heap_deform_tuple(smcx, &tup.tuple, &pg_trigger.rd_att, &tup.data)?;
+            let tgconstrindid =
+                cols[(Anum_pg_trigger_tgconstrindid as usize) - 1].0.as_oid();
+            if tgconstrindid != old_index_id {
+                continue;
+            }
+            let tid = tup.tuple.t_self;
+            let fields = TriggerFieldUpdate {
+                tgname: None,
+                tgparentid: None,
+                tgdeferrable: None,
+                tginitdeferred: None,
+                tgenabled: None,
+                tgconstrindid: Some(new_index_id),
+            };
+            indexing_seams::catalog_tuple_update_pg_trigger::call(&pg_trigger, tid, &fields)?;
+        }
+        scan.end()?;
+    }
+
+    pg_trigger.close(RowExclusiveLock)?;
+    pg_constraint.close(RowExclusiveLock)?;
+    Ok(())
+}
+
 pub fn init_seams() {
     use backend_catalog_pg_constraint_seams as seams;
+    seams::swap_index_constraints_and_triggers::set(swap_index_constraints_and_triggers);
 
     seams::find_domain_not_null_constraint_oid::set(|mcx, typid| {
         find_domain_not_null_constraint_oid(mcx, typid)
@@ -3516,6 +3639,7 @@ pub fn merge_constraints_into_existing<'mcx>(
                 conenforced: child_form.conenforced,
                 condeferrable: child_form.condeferrable,
                 condeferred: child_form.condeferred,
+                conindid: child_form.conindid,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(&constraintrel, tid, &fields)?;
             found = true;

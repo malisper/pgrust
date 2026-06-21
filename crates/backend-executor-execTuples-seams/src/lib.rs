@@ -293,6 +293,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c): store a
+    /// palloc'd (or otherwise non-buffer-backed) heap tuple into a plain
+    /// `HeapTupleTableSlot`, holding NO buffer pin. This is the store
+    /// `heapam_handler.c`'s `heapam_index_validate_scan` performs into its
+    /// `TTSOpsHeapTuple` slot (the tuple is a copy, so `shouldFree` is `false`
+    /// there — the slot does not own it). The slot crosses as the
+    /// payload-bearing `&mut SlotData`. `Err` carries the "wrong type of slot"
+    /// `elog(ERROR)`.
+    pub fn exec_store_heap_tuple<'mcx>(
+        tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+        should_free: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecStorePinnedBufferHeapTuple(tuple, slot, buffer)` (execTuples.c):
     /// like [`exec_store_buffer_heap_tuple`] but *transfers* an existing pin on
     /// `buffer` into the slot instead of taking a fresh one — the store

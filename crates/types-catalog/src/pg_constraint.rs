@@ -259,6 +259,10 @@ pub struct ConstraintFieldUpdate {
     /// CONSTRAINT ... INITIALLY DEFERRED; the other mutator sites carry through
     /// the row's existing value.
     pub condeferred: bool,
+    /// `conindid` — the index OID backing this constraint. Moved from the old to
+    /// the new index by `index_concurrently_swap` (catalog/index.c:1689); every
+    /// other mutator site carries through the row's existing value.
+    pub conindid: Oid,
 }
 
 /// A `SearchSysCache1(CONSTROID)` projection: the scalar `Form_pg_constraint`

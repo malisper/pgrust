@@ -457,6 +457,49 @@ fn index_predicate<'mcx>(
     Ok(Some(result))
 }
 
+/// `index_concurrently_create_copy` expression source (catalog/index.c:1359-1369):
+/// `indexExprs = (List *) stringToNode(exprString)` — the RAW `pg_index.indexprs`
+/// expression list, with NO `eval_const_expressions` / `fix_opfuncids`. C uses
+/// this (not the IndexInfo expressions) precisely because the IndexInfo lists are
+/// flattened for the planner; the new index must store the original tree.
+fn index_raw_expressions<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relid: Oid,
+) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    let Some(text) = syscache_seam::pg_index_exprs_text::call(index_relid)? else {
+        return Ok(None);
+    };
+    let raw = decode_node_text_to_exprs(mcx, &text)?;
+    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    for e in raw {
+        result.push(e);
+    }
+    Ok(Some(result))
+}
+
+/// `index_concurrently_create_copy` predicate source (catalog/index.c:1370-1383):
+/// `indexPreds = make_ands_implicit((Expr *) stringToNode(predString))` — the RAW
+/// `pg_index.indpred`, reduced to implicit-AND form, with NO
+/// `eval_const_expressions` / `canonicalize_qual` flattening (the stored predicate
+/// is already an implicit-AND `List*`, so `make_ands_implicit` over the rebuilt
+/// `make_ands_explicit` clause is identity-preserving).
+fn index_raw_predicate<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relid: Oid,
+) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    let Some(text) = syscache_seam::pg_index_pred_text::call(index_relid)? else {
+        return Ok(None);
+    };
+    let clauses = decode_node_text_to_exprs(mcx, &text)?;
+    let pred_expr = backend_nodes_core::makefuncs::make_ands_explicit(clauses);
+    let implicit = backend_nodes_core::makefuncs::make_ands_implicit(Some(pred_expr));
+    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    for e in implicit {
+        result.push(e);
+    }
+    Ok(Some(result))
+}
+
 /// `RelationGetDummyIndexExpressions(relation)` (relcache.c:5156): decode the
 /// raw `pg_index.indexprs` text, then build, per raw sub-expression, a null
 /// `Const` carrying the same type/typmod/collation —
@@ -512,5 +555,7 @@ pub fn init_seams() {
     inward::publication_desc::set(publication_desc);
     inward::index_expressions::set(index_expressions);
     inward::index_predicate::set(index_predicate);
+    inward::index_raw_expressions::set(index_raw_expressions);
+    inward::index_raw_predicate::set(index_raw_predicate);
     inward::dummy_index_expressions::set(dummy_index_expressions);
 }

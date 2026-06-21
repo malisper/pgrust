@@ -445,3 +445,34 @@ seam_core::seam!(
         index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `index_concurrently_create_copy(heapRelation, oldIndexId, tablespaceOid,
+    /// newName)` (catalog/index.c): create concurrently a new index in the
+    /// catalogs based on the definition of the one given by `old_index_id`, to be
+    /// built later (`INDEX_CREATE_SKIP_BUILD | INDEX_CREATE_CONCURRENT`). Returns
+    /// the new index relation's OID. `heap_relation` crosses by reference (the
+    /// caller retains ownership). `Err` carries the exclusion-constraint refusal,
+    /// the cache-lookup failures, and the catalog-mutation `ereport(ERROR)`s.
+    pub fn index_concurrently_create_copy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_relation: &types_rel::Relation<'mcx>,
+        old_index_id: types_core::primitive::Oid,
+        tablespace_oid: types_core::primitive::Oid,
+        new_name: &str,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `index_concurrently_swap(newIndexId, oldIndexId, oldName)`
+    /// (catalog/index.c): swap name, dependencies, constraints and statistics of
+    /// the old index over to the new index, marking the old index invalid and the
+    /// new one valid. `Err` carries the cache-lookup failures and the
+    /// catalog-mutation `ereport(ERROR)`s.
+    pub fn index_concurrently_swap<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        new_index_id: types_core::primitive::Oid,
+        old_index_id: types_core::primitive::Oid,
+        old_name: &str,
+    ) -> types_error::PgResult<()>
+);

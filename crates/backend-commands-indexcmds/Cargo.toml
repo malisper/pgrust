@@ -74,6 +74,9 @@ backend-commands-user-seams = { path = "../backend-commands-user-seams" }
 backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
+backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }

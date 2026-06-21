@@ -148,7 +148,7 @@ pub fn EnableDisableTrigger<'mcx>(
                 tgdeferrable: None,
                 tginitdeferred: None,
                 tgenabled: Some(fires_when),
-            };
+                tgconstrindid: None,            };
             indexing::catalog_tuple_update_pg_trigger::call(&tgrel, tuple.tuple.t_self, &fields)?;
             changed = true;
         }

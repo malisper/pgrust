@@ -93,7 +93,7 @@ pub fn AlterConstrTriggerDeferrability(
             tgdeferrable: Some(deferrable),
             tginitdeferred: Some(initdeferred),
             tgenabled: None,
-        };
+            tgconstrindid: None,        };
         indexing::catalog_tuple_update_pg_trigger::call(&tgrel, tgtuple.tuple.t_self, &fields)?;
 
         // InvokeObjectPostAlterHook(TriggerRelationId, tgform->oid, 0); -- no-op.

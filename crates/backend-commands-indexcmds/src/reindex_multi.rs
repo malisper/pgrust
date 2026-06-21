@@ -59,7 +59,7 @@ use types_nodes::parsenodes::{OBJECT_DATABASE, OBJECT_SCHEMA};
 
 use backend_commands_tablespace::get_tablespace_name;
 
-use crate::{reindex_concurrently_deferred, xact_seam, ReindexParams};
+use crate::{xact_seam, ReindexParams};
 use types_cluster::{
     REINDEXOPT_CONCURRENTLY, REINDEXOPT_MISSING_OK, REINDEXOPT_REPORT_PROGRESS,
     REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_PROCESS_TOAST,
@@ -217,17 +217,16 @@ pub(crate) fn ReindexMultipleInternal<'mcx>(
         if (params.options & REINDEXOPT_CONCURRENTLY) != 0 && relpersistence != RELPERSISTENCE_TEMP {
             let mut newparams = *params;
             newparams.options |= REINDEXOPT_MISSING_OK;
-            // ReindexRelationConcurrently(stmt, relid, &newparams) — the heavy
-            // multi-transaction concurrent-rebuild leg is not yet ported. It
-            // returns the precise "REINDEX CONCURRENTLY is not yet supported"
-            // error, exactly as the single-relation drivers do. (When ported it
-            // does its own verbose output; here we still honour the C snapshot
-            // pop before propagating.)
-            let _ = newparams;
+            // (void) ReindexRelationConcurrently(stmt, relid, &newparams).
+            // ReindexRelationConcurrently does its own verbose output and its own
+            // cross-transaction snapshot management; afterwards C pops any active
+            // snapshot still set.
+            crate::reindex_concurrently::ReindexRelationConcurrently(
+                mcx, stmt, relid, &newparams,
+            )?;
             if snapmgr_seam::active_snapshot_set::call() {
                 snapmgr_seam::pop_active_snapshot::call()?;
             }
-            return Err(reindex_concurrently_deferred());
         } else if relkind == RELKIND_INDEX {
             let mut newparams = *params;
             newparams.options |= REINDEXOPT_REPORT_PROGRESS | REINDEXOPT_MISSING_OK;

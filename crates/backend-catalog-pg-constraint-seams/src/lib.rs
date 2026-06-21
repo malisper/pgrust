@@ -227,3 +227,19 @@ seam_core::seam!(
     /// OID. `Err` carries the catalog-mutation `ereport(ERROR)`s.
     pub fn create_constraint_entry(mcx: Mcx<'_>, args: CreateConstraintEntryArgs<'_>) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// `index_concurrently_swap`'s "move constraints and triggers over to the
+    /// new index" leg (catalog/index.c:1656-1724): for every constraint OID in
+    /// `constraint_oids` whose `conindid == old_index_id`, set `conindid =
+    /// new_index_id`; then scan `pg_trigger` by `tgconstraint` and move any
+    /// `tgconstrindid == old_index_id` to `new_index_id`. Owned by the
+    /// `pg_constraint` unit (it owns the constraint catalog and can reach
+    /// `pg_trigger` through genam). `Err` carries the catalog-mutation
+    /// `ereport(ERROR)`s.
+    pub fn swap_index_constraints_and_triggers(
+        constraint_oids: &[Oid],
+        old_index_id: Oid,
+        new_index_id: Oid,
+    ) -> PgResult<()>
+);

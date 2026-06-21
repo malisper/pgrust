@@ -192,4 +192,8 @@ pub struct TriggerFieldUpdate {
     /// `TRIGGER_FIRES_*` / `TRIGGER_DISABLED` codes. `None` when the mutator
     /// does not touch the firing config.
     pub tgenabled: Option<i8>,
+    /// `tgconstrindid` — the index OID a constraint trigger references. Moved
+    /// from the old to the new index by `index_concurrently_swap`
+    /// (catalog/index.c:1716). `None` when the mutator does not touch it.
+    pub tgconstrindid: Option<Oid>,
 }

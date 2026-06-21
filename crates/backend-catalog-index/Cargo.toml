@@ -24,6 +24,9 @@ backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
 # {Expressions,Predicate}` / `RelationGetExclusionInfo`) used by
 # `BuildIndexInfo` and `index_build`.
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+# Raw (non-planner-flattened) index expr/pred decode for
+# `index_concurrently_create_copy`.
+backend-utils-cache-relcache-nodexform-seams = { path = "../backend-utils-cache-relcache-nodexform-seams" }
 # Processing-mode reads (`IsNormalProcessingMode`).
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 # `GetUserIdAndSecContext` (matview-deps owns the getter).
@@ -87,6 +90,8 @@ backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
 backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint-seams" }
 backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-seams" }
+backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
+backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
 backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }

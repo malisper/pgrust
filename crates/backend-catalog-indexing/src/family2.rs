@@ -1763,6 +1763,7 @@ fn catalog_tuple_update_pg_constraint(
     set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_conenforced, Datum::from_bool(fields.conenforced));
     set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_condeferrable, Datum::from_bool(fields.condeferrable));
     set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_condeferred, Datum::from_bool(fields.condeferred));
+    set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_conindid, Datum::from_oid(fields.conindid));
     modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
 }
 
@@ -1795,6 +1796,9 @@ fn catalog_tuple_update_pg_trigger(
     }
     if let Some(p) = fields.tgparentid {
         set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tgparentid, Datum::from_oid(p));
+    }
+    if let Some(idx) = fields.tgconstrindid {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tgconstrindid, Datum::from_oid(idx));
     }
     modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
 }

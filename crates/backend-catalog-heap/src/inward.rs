@@ -219,6 +219,9 @@ pub fn init_seams() {
         heap_create_with_catalog_transient_seam,
     );
     backend_catalog_heap_seams::heap_drop_with_catalog::set(heap_drop_with_catalog_seam);
+    backend_catalog_heap_seams::copy_statistics::set(|mcx, fromrelid, torelid| {
+        crate::CopyStatistics(mcx, fromrelid, torelid)
+    });
     backend_catalog_heap_seams::check_attribute_names_types::set(check_attribute_names_types_seam);
     backend_catalog_heap_seams::check_attribute_type::set(check_attribute_type_seam);
     // Low-level relation-create seams `index_create` (catalog/index.c) calls

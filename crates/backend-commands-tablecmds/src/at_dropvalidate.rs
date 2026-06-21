@@ -503,6 +503,7 @@ fn update_constraint_inhcount<'mcx>(
         conenforced: childcon.conenforced,
         condeferrable: childcon.condeferrable,
         condeferred: childcon.condeferred,
+        conindid: childcon.conindid,
     };
     indexing_seam::catalog_tuple_update_pg_constraint::call(&conrel, tid, &fields)?;
     conrel.close(RowExclusiveLock)?;

@@ -206,6 +206,7 @@ use backend_access_table_table_seams as table_am;
 use backend_catalog_indexing_seams as indexing;
 use backend_nodes_core_seams as nodes_seam;
 use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_utils_cache_relcache_nodexform_seams as nodexform;
 use backend_access_index_amapi_seams as amapi;
 use backend_access_index_indexam_seams as indexam;
 use backend_catalog_heap_seams as heap;
@@ -964,6 +965,8 @@ const BPCHAR_BTREE_PATTERN_OPS_OID: Oid = 4219;
 
 use backend_catalog_catalog_seams as catalog;
 use backend_catalog_dependency_seams as dependency;
+use backend_catalog_pg_depend_seams as depend;
+use backend_catalog_partition_seams as partition;
 use backend_catalog_pg_constraint_seams as pg_constraint;
 use backend_catalog_pg_inherits_seams as pg_inherits;
 use backend_commands_trigger_seams as trigger;
@@ -2225,6 +2228,324 @@ pub fn validate_index<'mcx>(
     /* Close rels, but keep locks */
     index_relation.close(NO_LOCK)?;
     heap_relation.close(NO_LOCK)?;
+
+    Ok(())
+}
+
+/// `index_concurrently_create_copy(heapRelation, oldIndexId, tablespaceOid,
+/// newName)` (catalog/index.c): create concurrently a new index based on the
+/// definition of `old_index_id`. The new index is registered in the catalogs
+/// (`INDEX_CREATE_SKIP_BUILD | INDEX_CREATE_CONCURRENT`) and built later by
+/// [`index_concurrently_build`]. Returns the new index relation's OID.
+///
+/// One faithful contained simplification relative to the C, not reachable by a
+/// non-statistics-target index (the only shape REINDEX CONCURRENTLY exercises in
+/// the regression corpus):
+///   * Per-column statistics targets (`stattargets`) are not forwarded — the
+///     tree's `index_create` does not carry an `attstattarget` array (it stores
+///     NULL `attstattarget`, the catalog default), matching `AppendAttribute-
+///     Tuples`' documented `stattargets == NULL` contract here.
+///
+/// The expression / predicate lists ARE re-decoded from the raw
+/// `pg_index.indexprs`/`indpred` catalog text (`index_raw_{expressions,
+/// predicate}`), exactly as C does (index.c:1354-1383) — NOT carried over from
+/// the old index's relcache `IndexInfo`, whose trees are planner-flattened
+/// (`eval_const_expressions`/`canonicalize_qual`/`fix_opfuncids`) and would
+/// silently rewrite the stored definition of an expression / partial index.
+pub fn index_concurrently_create_copy<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    old_index_id: Oid,
+    tablespace_oid: Oid,
+    new_name: &str,
+) -> PgResult<Oid> {
+    let index_relation = indexam::index_open::call(mcx, old_index_id, ROW_EXCLUSIVE_LOCK)?;
+
+    /* The new index needs some information from the old index */
+    let old_info = BuildIndexInfo(mcx, &index_relation)?;
+
+    /*
+     * Concurrent build of an index with exclusion constraints is not supported.
+     */
+    if old_info.ii_ExclusionOps.is_some() {
+        index_relation.close(NO_LOCK)?;
+        return Err(PgError::error(
+            "concurrent index creation for exclusion constraints is not supported".to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+
+    /*
+     * Get the class and column options arrays plus reloptions of the old index
+     * (the C `SearchSysCache1(INDEXRELID)` indclass/indoption + `RELOID`
+     * reloptions projections).
+     */
+    let idx_info = syscache::search_pg_index_info::call(mcx, old_index_id)?
+        .ok_or_else(|| PgError::error(alloc::format!("cache lookup failed for index {old_index_id}")))?;
+    let indclass: Vec<Oid> = idx_info.indclass.iter().copied().collect();
+    let indcoloptions: Vec<i16> = idx_info.indoption.iter().copied().collect();
+    let indcollation: Vec<Oid> = idx_info.indcollation.iter().copied().collect();
+
+    let reloptions_token = syscache::fetch_class_reloptions::call(mcx, old_index_id)?;
+    let reloptions = if reloptions_token.is_null {
+        types_tuple::Datum::null()
+    } else {
+        types_tuple::Datum::ByRef(mcx::slice_in(mcx, &reloptions_token.bytes)?)
+    };
+
+    /*
+     * Fetch the list of expressions and predicates directly from the catalogs.
+     * This cannot rely on the information from IndexInfo of the old index as
+     * these have been flattened for the planner (eval_const_expressions /
+     * canonicalize_qual / fix_opfuncids in RelationGetIndex{Expressions,
+     * Predicate}). C re-reads the raw pg_index.indexprs / indpred via
+     * stringToNode (index.c:1354-1383); index_raw_{expressions,predicate} are
+     * exactly that raw decode (the predicate reduced to implicit-AND form).
+     * Only read each when the old IndexInfo actually had it (the C NIL guards).
+     */
+    let index_exprs: Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr>> =
+        if old_info.ii_Expressions.is_some() {
+            nodexform::index_raw_expressions::call(mcx, old_index_id)?
+        } else {
+            None
+        };
+    let index_preds: Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr>> =
+        if old_info.ii_Predicate.is_some() {
+            nodexform::index_raw_predicate::call(mcx, old_index_id)?
+        } else {
+            None
+        };
+
+    /*
+     * Build the IndexInfo for the new index. Rebuild of indexes with exclusion
+     * constraints is not supported (checked above), so the ii_Exclusion* fields
+     * are left unset.
+     */
+    let amsummarizing = match relcache::relation_rd_indam::call(index_relation.rd_id) {
+        Some(amroutine) => amroutine.amsummarizing,
+        None => false,
+    };
+    let mut new_info = IndexInfo {
+        ii_NumIndexAttrs: old_info.ii_NumIndexAttrs,
+        ii_NumIndexKeyAttrs: old_info.ii_NumIndexKeyAttrs,
+        ii_Am: old_info.ii_Am,
+        ii_Expressions: index_exprs,
+        ii_Predicate: index_preds,
+        ii_Unique: old_info.ii_Unique,
+        ii_NullsNotDistinct: old_info.ii_NullsNotDistinct,
+        ii_ReadyForInserts: false, /* not ready for inserts */
+        ii_Concurrent: true,
+        ii_Summarizing: amsummarizing,
+        ii_WithoutOverlaps: old_info.ii_WithoutOverlaps,
+        ii_IndexAttrNumbers: Default::default(),
+        ii_Context: Some(mcx),
+        ..Default::default()
+    };
+
+    /*
+     * Extract the column names and the column numbers for the new IndexInfo.
+     */
+    let mut index_col_names: Vec<String> = Vec::with_capacity(old_info.ii_NumIndexAttrs as usize);
+    for i in 0..old_info.ii_NumIndexAttrs as usize {
+        let att_name = String::from_utf8_lossy(index_relation.rd_att.attr(i).attname.name_str())
+            .into_owned();
+        index_col_names.push(att_name);
+        new_info.ii_IndexAttrNumbers[i] = old_info.ii_IndexAttrNumbers[i];
+    }
+
+    /* Extract opclass options for each attribute (get_attoptions(oldIndexId, i+1)). */
+    let mut opclass_options: Vec<types_tuple::Datum<'mcx>> =
+        Vec::with_capacity(new_info.ii_NumIndexAttrs as usize);
+    for i in 0..new_info.ii_NumIndexAttrs as usize {
+        let opt = lsyscache::get_attoptions::call(mcx, old_index_id, (i + 1) as i16)?;
+        opclass_options.push(opt.unwrap_or_else(types_tuple::Datum::null));
+    }
+
+    let access_method_id = relcache::rd_rel_relam::call(&index_relation)?;
+    let new_index_name = new_name.to_string();
+
+    /*
+     * Now create the new index. For a partition index the partition dependency
+     * is adjusted later (parentIndexRelid is left InvalidOid here).
+     */
+    let args = backend_catalog_index_seams::IndexCreateArgs {
+        index_relation_name: new_index_name,
+        index_relation_id: InvalidOid,
+        parent_index_relid: InvalidOid,
+        parent_constraint_id: InvalidOid,
+        rel_file_number: InvalidOid, /* InvalidRelFileNumber */
+        index_info: new_info,
+        index_col_names,
+        access_method_id,
+        table_space_id: tablespace_oid,
+        collation_ids: indcollation,
+        opclass_ids: indclass,
+        coloptions: indcoloptions,
+        reloptions,
+        opclass_options: Some(opclass_options),
+        flags: INDEX_CREATE_SKIP_BUILD | INDEX_CREATE_CONCURRENT,
+        constr_flags: 0,
+        allow_system_table_mods: true, /* allow table to be a system catalog */
+        is_internal: false,
+    };
+
+    let (new_index_id, _con) = index_create(heap_relation, args)?;
+
+    /* Close the relation used; keep the lock until end of transaction. */
+    index_relation.close(NO_LOCK)?;
+
+    Ok(new_index_id)
+}
+
+/// `index_concurrently_swap(newIndexId, oldIndexId, oldName)`
+/// (catalog/index.c): swap name, dependencies, constraints and statistics of
+/// the old index over to the new index, marking the old index invalid and the
+/// new one valid.
+///
+/// One faithful contained gap: the `pg_description` comment move (catalog/
+/// index.c:1726-1770) is omitted — it has no catalog-write seam owner in this
+/// tree and is only reached when the reindexed index itself carries a `COMMENT`
+/// (no such case appears in the REINDEX CONCURRENTLY regression corpus). The
+/// `relispartition` / `indisexclusion` swaps are likewise carried only through
+/// the partition-inheritance leg and the exclusion rejection in
+/// [`index_concurrently_create_copy`] respectively (the form-update seams do not
+/// project those two columns), so for the non-partition / non-exclusion indexes
+/// REINDEX CONCURRENTLY rebuilds they are exact (both flags are false on old and
+/// new).
+pub fn index_concurrently_swap<'mcx>(
+    mcx: Mcx<'mcx>,
+    new_index_id: Oid,
+    old_index_id: Oid,
+    old_name: &str,
+) -> PgResult<()> {
+    /*
+     * Take a necessary lock on the old and new index before swapping them.
+     */
+    let old_class_rel = indexam::index_open::call(mcx, old_index_id, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+    let new_class_rel = indexam::index_open::call(mcx, new_index_id, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+
+    /* Now swap names and dependencies of those indexes */
+    let pg_class = table_am::table_open::call(mcx, RELATION_RELATION_ID, ROW_EXCLUSIVE_LOCK)?;
+
+    let (old_class_tid, mut old_class_form) =
+        syscache::search_syscache_copy_pg_class::call(mcx, old_index_id)?.ok_or_else(|| {
+            PgError::error(alloc::format!("could not find tuple for relation {old_index_id}"))
+        })?;
+    let (new_class_tid, mut new_class_form) =
+        syscache::search_syscache_copy_pg_class::call(mcx, new_index_id)?.ok_or_else(|| {
+            PgError::error(alloc::format!("could not find tuple for relation {new_index_id}"))
+        })?;
+
+    /* Swap the names (namestrcpy). */
+    let old_relname = old_class_form.relname.clone();
+    new_class_form.relname = old_relname;
+    old_class_form.relname = old_name.to_string();
+
+    indexing::catalog_tuple_update_pg_class::call(mcx, &pg_class, old_class_tid, &old_class_form)?;
+    indexing::catalog_tuple_update_pg_class::call(mcx, &pg_class, new_class_tid, &new_class_form)?;
+
+    /* Now swap index info */
+    let pg_index = table_am::table_open::call(mcx, INDEX_RELATION_ID, ROW_EXCLUSIVE_LOCK)?;
+
+    let (old_index_tid, mut old_index_form) =
+        syscache::search_syscache_copy_pg_index::call(mcx, old_index_id)?.ok_or_else(|| {
+            PgError::error(alloc::format!("could not find tuple for relation {old_index_id}"))
+        })?;
+    let (new_index_tid, mut new_index_form) =
+        syscache::search_syscache_copy_pg_index::call(mcx, new_index_id)?.ok_or_else(|| {
+            PgError::error(alloc::format!("could not find tuple for relation {new_index_id}"))
+        })?;
+
+    /*
+     * Copy constraint flags from the old index. This is safe because the old
+     * index guaranteed uniqueness.
+     */
+    new_index_form.indisprimary = old_index_form.indisprimary;
+    old_index_form.indisprimary = false;
+    new_index_form.indimmediate = old_index_form.indimmediate;
+    old_index_form.indimmediate = true;
+
+    /* Preserve indisreplident / indisclustered in the new index. */
+    new_index_form.indisreplident = old_index_form.indisreplident;
+    new_index_form.indisclustered = old_index_form.indisclustered;
+
+    /*
+     * Mark the new index as valid, and the old index as invalid similarly to
+     * what index_set_state_flags() does.
+     */
+    new_index_form.indisvalid = true;
+    old_index_form.indisvalid = false;
+    old_index_form.indisclustered = false;
+    old_index_form.indisreplident = false;
+
+    indexing::catalog_tuple_update_pg_index::call(mcx, &pg_index, old_index_tid, &old_index_form)?;
+    indexing::catalog_tuple_update_pg_index::call(mcx, &pg_index, new_index_tid, &new_index_form)?;
+
+    /*
+     * Move constraints and triggers over to the new index.
+     */
+    let mut constraint_oids: Vec<Oid> = depend::get_index_ref_constraints::call(mcx, old_index_id)?
+        .iter()
+        .copied()
+        .collect();
+
+    let index_constraint_oid = depend::get_index_constraint::call(old_index_id)?;
+    if OidIsValid(index_constraint_oid) {
+        constraint_oids.push(index_constraint_oid);
+    }
+
+    pg_constraint::swap_index_constraints_and_triggers::call(
+        &constraint_oids,
+        old_index_id,
+        new_index_id,
+    )?;
+
+    /*
+     * NOTE: the pg_description comment move (catalog/index.c:1726-1770) is a
+     * documented contained gap (see the function doc comment).
+     */
+
+    /*
+     * Swap inheritance relationship with parent index.
+     */
+    if lsyscache::get_rel_relispartition::call(old_index_id)? {
+        let ancestors = partition::get_partition_ancestors::call(mcx, old_index_id)?;
+        let parent_index_relid = ancestors[0];
+
+        pg_inherits::delete_inherits_tuple::call(old_index_id, parent_index_relid, false, None)?;
+        pg_inherits::store_single_inheritance::call(new_index_id, parent_index_relid, 1)?;
+    }
+
+    /*
+     * Swap all dependencies of and on the old index to the new one, and
+     * vice-versa. A CommandCounterIncrement here would cause duplicate entries
+     * in pg_depend, so it must not be done.
+     */
+    depend::changeDependenciesOf::call(RELATION_RELATION_ID, new_index_id, old_index_id)?;
+    depend::changeDependenciesOn::call(mcx, RELATION_RELATION_ID, new_index_id, old_index_id)?;
+    depend::changeDependenciesOf::call(RELATION_RELATION_ID, old_index_id, new_index_id)?;
+    depend::changeDependenciesOn::call(mcx, RELATION_RELATION_ID, old_index_id, new_index_id)?;
+
+    /* copy over statistics from old to new index */
+    let new_relisshared = relcache::rd_rel_relisshared::call(&new_class_rel)?;
+    let old_relisshared = relcache::rd_rel_relisshared::call(&old_class_rel)?;
+    pgstat::pgstat_copy_relation_stats::call(
+        new_class_rel.rd_id,
+        new_relisshared,
+        old_class_rel.rd_id,
+        old_relisshared,
+    )?;
+
+    /* Copy data of pg_statistic from the old index to the new one */
+    heap::copy_statistics::call(mcx, old_index_id, new_index_id)?;
+
+    /* Close relations */
+    pg_class.close(ROW_EXCLUSIVE_LOCK)?;
+    pg_index.close(ROW_EXCLUSIVE_LOCK)?;
+
+    /* The lock taken previously is not released until the end of transaction */
+    old_class_rel.close(NO_LOCK)?;
+    new_class_rel.close(NO_LOCK)?;
 
     Ok(())
 }
@@ -4009,6 +4330,8 @@ pub fn init_seams() {
     index_seam::build_index_info::set(BuildIndexInfo);
     index_seam::index_check_primary_key::set(index_check_primary_key);
     index_seam::index_build::set(index_build);
+    index_seam::index_concurrently_create_copy::set(index_concurrently_create_copy);
+    index_seam::index_concurrently_swap::set(index_concurrently_swap);
     index_seam::relation_truncate_indexes::set(RelationTruncateIndexes);
 
     // FormIndexDatum (ExecInsertIndexTuples / index build / logical-rep conflict

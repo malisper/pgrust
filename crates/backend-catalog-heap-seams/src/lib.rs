@@ -352,3 +352,15 @@ seam_core::seam!(
         reloptions: Option<std::vec::Vec<u8>>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CopyStatistics(fromrelid, torelid)` (catalog/heap.c): copy every
+    /// `pg_statistic` row from `fromrelid` to `torelid` (used by
+    /// `index_concurrently_swap` to carry an index's stats to its rebuilt copy).
+    /// `Err` carries the catalog-mutation `ereport(ERROR)`s.
+    pub fn copy_statistics<'mcx>(
+        mcx: Mcx<'mcx>,
+        fromrelid: Oid,
+        torelid: Oid,
+    ) -> PgResult<()>
+);

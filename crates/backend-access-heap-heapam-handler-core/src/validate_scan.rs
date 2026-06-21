@@ -84,7 +84,17 @@ pub fn heapam_index_validate_scan<'mcx>(
     // predicates.  Also a slot to hold the current tuple.
     let mut estate = expr_seam::create_executor_state::call(mcx)?;
     let econtext = exec_util_seam::get_per_tuple_expr_context::call(&mut estate)?;
-    let slot_data = backend_access_table_tableam::table_slot_create(mcx, heap_relation)?;
+    // C: slot = MakeSingleTupleTableSlot(RelationGetDescr(heapRelation),
+    //                                    &TTSOpsHeapTuple);
+    // A plain heap-tuple slot holds NO buffer pin (the scanned tuple is copied
+    // into it via ExecStoreHeapTuple below). Using a buffer-pinning slot here
+    // leaks one heap-page pin per validated tuple ("resource was not closed").
+    let tupdesc = Some(mcx::alloc_in(mcx, heap_relation.rd_att.clone_in(mcx)?)?);
+    let slot_data = slot_seam::make_single_tuple_table_slot::call(
+        mcx,
+        tupdesc,
+        types_nodes::TupleSlotKind::HeapTuple,
+    )?;
     let slot = estate.push_slot_data(slot_data)?;
 
     // Arrange for econtext's scan tuple to be the tuple under test.
@@ -250,8 +260,13 @@ pub fn heapam_index_validate_scan<'mcx>(
             exec_util_seam::reset_expr_context::call(&mut estate, econtext)?;
 
             // Set up for predicate or expression evaluation: store the tuple.
+            // C: ExecStoreHeapTuple(heapTuple, slot, false) — a plain
+            // (non-buffer) store; `false` because the slot does not own the
+            // copied tuple. This holds no buffer pin (unlike the buffer store,
+            // which would leak the scanned heap page).
             let sd = estate.slot_data_mut(slot);
-            slot_seam::exec_store_buffer_heap_tuple::call(heap_tuple.clone_in(mcx)?, sd, cbuf)?;
+            slot_seam::exec_store_heap_tuple::call(heap_tuple.clone_in(mcx)?, sd, false)?;
+            let _ = cbuf;
 
             // In a partial index, discard tuples that don't satisfy the predicate.
             if let Some(pred) = predicate.as_mut() {

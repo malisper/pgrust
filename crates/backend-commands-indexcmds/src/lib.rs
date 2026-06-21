@@ -126,6 +126,7 @@ use types_pgstat::backend_progress::ProgressCommandType;
 pub mod choosers;
 pub mod compute;
 pub mod opclass;
+pub mod reindex_concurrently;
 pub mod reindex_multi;
 
 pub use choosers::{
@@ -1439,7 +1440,7 @@ fn ReindexIndex<'mcx>(
     } else if (params.options & REINDEXOPT_CONCURRENTLY) != 0
         && persistence != RELPERSISTENCE_TEMP_U8
     {
-        return Err(reindex_concurrently_deferred());
+        reindex_concurrently::ReindexRelationConcurrently(mcx, stmt, ind_oid, params)?;
     } else {
         let mut newparams = *params;
         newparams.options |= REINDEXOPT_REPORT_PROGRESS;
@@ -1481,7 +1482,7 @@ fn ReindexTable<'mcx>(
     } else if (params.options & REINDEXOPT_CONCURRENTLY) != 0
         && lsyscache::get_rel_persistence::call(heap_oid)? != RELPERSISTENCE_TEMP_U8
     {
-        return Err(reindex_concurrently_deferred());
+        reindex_concurrently::ReindexRelationConcurrently(mcx, stmt, heap_oid, params)?;
     } else {
         let mut newparams = *params;
         newparams.options |= REINDEXOPT_REPORT_PROGRESS;
@@ -1501,13 +1502,6 @@ fn ReindexTable<'mcx>(
     Ok(())
 }
 
-
-pub(crate) fn reindex_concurrently_deferred() -> backend_utils_error::PgError {
-    ereport(ERROR)
-        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-        .errmsg(format!("REINDEX CONCURRENTLY is not yet supported"))
-        .into_error()
-}
 
 // ---------------------------------------------------------------------------
 // DefineIndex partitioned-table legs (key-subset check + parent-index linking)
