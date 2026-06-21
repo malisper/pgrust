@@ -146,6 +146,14 @@ std::thread_local! {
         core::cell::RefCell::new(std::collections::HashMap::new());
     /// The next receiver token to hand out.
     static NEXT_TOKEN: core::cell::Cell<u64> = const { core::cell::Cell::new(1) };
+    /// For a composite (`returnsTuple`) result, the declared result rowtype OID
+    /// keyed by receiver token — the `tdtypeid` the captured composite Datum's
+    /// header must carry (C `BlessTupleDesc` stamps the junkfilter result slot's
+    /// descriptor with the declared rowtype). `RECORDOID` for a `RETURNS RECORD`
+    /// / `RETURNS TABLE(...)` function (the result slot already carries its
+    /// executor-assigned RECORD typmod).
+    static RETURN_ROWTYPE: core::cell::RefCell<std::collections::HashMap<u64, Oid>> =
+        core::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 fn alloc_capture_token() -> u64 {
@@ -161,6 +169,9 @@ fn alloc_capture_token() -> u64 {
 }
 
 fn take_capture(token: u64) -> CaptureSlot {
+    RETURN_ROWTYPE.with(|c| {
+        c.borrow_mut().remove(&token);
+    });
     CAPTURES.with(|c| c.borrow_mut().remove(&token).unwrap_or_default())
 }
 
@@ -193,6 +204,80 @@ fn capture_receive<'mcx>(mcx: Mcx<'mcx>, state: u64, slot: &mut SlotData<'mcx>) 
                 slot_state.ref_payload = captured.ref_payload;
                 slot_state.isnull = captured.isnull;
             }
+        }
+    });
+    Ok(true)
+}
+
+/// `sqlfunction_receive` for a whole-row composite (`returnsTuple`) result —
+/// `postquel_get_single_result`'s `returnsTuple` arm
+/// (`ExecFetchSlotHeapTupleDatum(slot)`). The result query's final slot already
+/// holds the function's output columns coerced to the declared rowtype (parse
+/// analysis ran `check_sql_fn_retval`, coercing the body's final targetlist to
+/// the return type), so the whole slot IS the composite value; fetch it as a
+/// composite `Datum` (`ExecFetchSlotHeapTupleDatum` = `heap_copy_tuple_as_datum`
+/// over the slot's tupdesc) and capture it as a [`RefPayload::Composite`].
+fn composite_receive<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: u64,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    // Skip after the first row (a non-set composite result is a single tuple).
+    let already = CAPTURES.with(|c| c.borrow().get(&state).map(|s| s.got_row).unwrap_or(false));
+    if already {
+        return Ok(true);
+    }
+
+    // ExecFetchSlotHeapTuple(slot, false, &shouldFree): the whole row as a heap
+    // tuple over the slot's descriptor (the result query's final targetlist,
+    // already coerced to the declared rowtype by check_sql_fn_retval at analyze
+    // time).
+    let (tuple, _should_free) =
+        backend_executor_execTuples::slot_store_fetch::ExecFetchSlotHeapTuple(mcx, slot, false)?;
+
+    // Form the composite Datum against a descriptor carrying the *declared*
+    // result rowtype identity (C `BlessTupleDesc(jf_resultSlot->tts_tupleDescriptor)`
+    // for `returnsTuple`): the column layout comes from the slot's descriptor but
+    // the header's `tdtypeid`/`tdtypmod` must name the declared rowtype so the
+    // caller can interpret the composite Datum (else "record type has not been
+    // registered"). For a `RETURNS RECORD`/`TABLE` function the slot already
+    // carries its executor-assigned RECORD typmod, so it is used as-is.
+    let rettype = RETURN_ROWTYPE.with(|c| c.borrow().get(&state).copied().unwrap_or(RECORDOID));
+    let slot_desc = slot
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()
+        .ok_or_else(|| PgError::error("fmgr_sql: composite result slot has no descriptor"))?;
+    let mut desc: TupleDescData<'mcx> = slot_desc.clone_in(mcx)?;
+    if rettype != RECORDOID {
+        // Named composite: stamp the declared rowtype identity.
+        desc.tdtypeid = rettype;
+        desc.tdtypmod = -1;
+    } else if desc.tdtypmod < 0 {
+        // Anonymous RECORD result (RETURNS RECORD / OUT params): register the
+        // descriptor so the composite Datum carries a resolvable typmod
+        // (C `BlessTupleDesc` -> assign_record_type_typmod).
+        desc.tdtypeid = RECORDOID;
+        backend_utils_cache_typcache_seams::assign_record_type_typmod::call(&mut desc)?;
+    }
+    let datum = backend_access_common_heaptuple::HeapTupleGetDatum(mcx, &tuple, &desc)?;
+    let image = match datum {
+        CanonDatum::ByRef(b) => b.as_slice().to_vec(),
+        CanonDatum::Composite(t) => t.to_datum_image(),
+        other => {
+            return Err(PgError::error(format!(
+                "fmgr_sql: composite result Datum is not a by-reference image: {other:?}"
+            )))
+        }
+    };
+
+    CAPTURES.with(|c| {
+        let mut map = c.borrow_mut();
+        if let Some(slot_state) = map.get_mut(&state) {
+            slot_state.got_row = true;
+            slot_state.value = 0;
+            slot_state.ref_payload = Some(RefPayload::Composite(image));
+            slot_state.isnull = false;
         }
     });
     Ok(true)
@@ -289,13 +374,6 @@ fn fmgr_sql<'mcx>(
     // that leg is not yet ported and stays loud.
     let returns_tuple =
         rettype == RECORDOID || lsyscache_seams::type_is_rowtype::call(rettype)?;
-    if returns_tuple && !set_returning {
-        return Err(PgError::error(
-                "fmgr_sql: composite / whole-row (non-SETOF) SQL-function results are \
-                 not yet supported (needs the coerce_fn_result_tuple path)",
-            )
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
-    }
 
     let (prosrc, prosqlbody) = clauses_seams::get_func_sql_body::call(mcx, fn_oid)?;
 
@@ -355,7 +433,17 @@ fn fmgr_sql<'mcx>(
         return Ok(BareDatum::null());
     }
 
-    let run_result = run_body(mcx, &querytrees, prosrc.as_str(), params, &form.proname);
+    // For a composite (`returnsTuple`) result, thread the declared rowtype OID so
+    // the captured composite Datum's header names it (C `BlessTupleDesc`).
+    let return_rowtype = if returns_tuple { Some(rettype) } else { None };
+    let run_result = run_body(
+        mcx,
+        &querytrees,
+        prosrc.as_str(),
+        params,
+        &form.proname,
+        return_rowtype,
+    );
 
     if pushed_snapshot {
         // Pop even on error so we don't leak the active-snapshot stack.
@@ -737,6 +825,7 @@ fn run_body<'mcx>(
     source_text: &str,
     params: ParamListInfo,
     fname: &str,
+    return_rowtype: Option<Oid>,
 ) -> PgResult<Option<CaptureSlot>> {
     // Rewrite + plan each query. Find the index of the last canSetTag plan: that
     // one delivers the function result.
@@ -782,7 +871,7 @@ fn run_body<'mcx>(
         // sql_exec_error_callback (functions.c:1929): any error raised while
         // executing an identifiable body statement gets the call-stack context
         // line `SQL function "<fname>" statement <N>` (N = 1-based error_query_index).
-        let cap = run_one_query(mcx, plan, source_text, params.clone(), is_result)
+        let cap = run_one_query(mcx, plan, source_text, params.clone(), is_result, return_rowtype)
             .map_err(|e| e.add_context(sql_exec_context(fname, i + 1)))?;
         if is_result {
             captured = cap;
@@ -810,13 +899,25 @@ fn run_one_query<'mcx>(
     source_text: &str,
     params: ParamListInfo,
     is_result: bool,
+    return_rowtype: Option<Oid>,
 ) -> PgResult<Option<CaptureSlot>> {
     // postquel_start: build the receiver + QueryDesc, ExecutorStart.
     let (dest, token) = if is_result {
         let token = alloc_capture_token();
+        // A composite (whole-row) result captures the WHOLE slot as a composite
+        // Datum (`postquel_get_single_result`'s `returnsTuple` arm); a scalar
+        // result captures only column 1.
+        let receive_slot = if let Some(rettype) = return_rowtype {
+            RETURN_ROWTYPE.with(|c| {
+                c.borrow_mut().insert(token, rettype);
+            });
+            composite_receive
+        } else {
+            capture_receive
+        };
         let vtable = backend_tcop_dest::ReceiverVtable {
             rStartup: capture_startup,
-            receiveSlot: capture_receive,
+            receiveSlot: receive_slot,
             rShutdown: capture_shutdown,
         };
         let handle =

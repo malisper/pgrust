@@ -31,6 +31,7 @@ backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
 # direct deps (no cycle: none of these depend on this crate or its seam)
 backend-executor-execMain = { path = "../backend-executor-execMain" }
 backend-executor-execTuples = { path = "../backend-executor-execTuples" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-parser-analyze = { path = "../backend-parser-analyze" }
 backend-parser-driver = { path = "../backend-parser-driver" }
 backend-nodes-core = { path = "../backend-nodes-core" }
@@ -43,3 +44,4 @@ backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-claus
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
