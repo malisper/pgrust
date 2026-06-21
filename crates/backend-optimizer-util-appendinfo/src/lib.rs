@@ -1437,6 +1437,7 @@ pub fn init_seams() {
         })?;
         adjust_appendrel_attrs_multilevel(root, node, child_rel, parentrel)
     });
+    eq_ext::adjust_restrictlist_multilevel::set(adjust_restrictlist_multilevel);
 }
 
 /// `adjust_appendrel_attrs(root, (Node *) node, nappinfos, appinfos)` — the

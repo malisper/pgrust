@@ -176,6 +176,7 @@ pub fn generate_join_implied_equalities<'mcx>(
         if root.ec(ec).ec_broken {
             sublist = generate_join_implied_equalities_broken(
                 root,
+                run,
                 ec,
                 &nominal_join_relids,
                 &outer_relids,
@@ -240,6 +241,7 @@ pub fn generate_join_implied_equalities_for_ecs<'mcx>(
         if root.ec(ec).ec_broken {
             sublist = generate_join_implied_equalities_broken(
                 root,
+                run,
                 ec,
                 &nominal_join_relids,
                 &outer_relids,
@@ -386,8 +388,9 @@ fn generate_join_implied_equalities_normal<'mcx>(
  * generate_join_implied_equalities_broken (equivclass.c:1899)
  * ==================================================================== */
 
-fn generate_join_implied_equalities_broken(
+fn generate_join_implied_equalities_broken<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     ec: EcId,
     nominal_join_relids: &Relids,
     outer_relids: &Relids,
@@ -406,14 +409,25 @@ fn generate_join_implied_equalities_broken(
         }
     }
 
-    /* if inner is a child rel, translate parent→child Vars */
+    /*
+     * If we have to translate, just brute-force apply
+     * adjust_appendrel_attrs_multilevel to all the RestrictInfos at once.
+     * Since inner_rel might be an indirect descendant of the baserel mentioned
+     * in the ec_sources clauses, we have to be prepared to apply multiple
+     * levels of Var translation (C equivclass.c:1929).
+     */
     if is_other_rel(root.rel(inner_rel)) && !result.is_empty() {
-        panic!(
-            "generate_join_implied_equalities_broken: child inner relation \
-             (RELOPT_OTHER_*; adjust_appendrel_attrs_multilevel over the source \
-             RestrictInfo list, equivclass.c:1929) is not ported — appendrel \
-             child rels do not reach this path until the appendrel program lands"
-        );
+        let top_parent = root
+            .rel(inner_rel)
+            .top_parent
+            .expect("child inner_rel must have a top_parent");
+        result = ec_seam::adjust_restrictlist_multilevel::call(
+            run.mcx(),
+            root,
+            &result,
+            inner_rel,
+            top_parent,
+        )?;
     }
 
     Ok(result)

@@ -129,6 +129,21 @@ seam_core::seam!(
     ) -> PgResult<Expr>
 );
 seam_core::seam!(
+    /// `(List *) adjust_appendrel_attrs_multilevel(root, (Node *) restrictlist,
+    /// child_rel, top_parent)` (appendinfo.c) — multi-level parent→child
+    /// translation of a `RestrictInfo` list (carried as `RinfoId` handles).
+    /// `generate_join_implied_equalities_broken` (equivclass.c:1929) brute-force
+    /// applies this to translate the parent EC's source clauses down to a child
+    /// inner relation.
+    pub fn adjust_restrictlist_multilevel<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        restrictlist: &[RinfoId],
+        child_rel: RelId,
+        top_parent: RelId,
+    ) -> PgResult<Vec<RinfoId>>
+);
+seam_core::seam!(
     /// `find_childrel_parents(root, rel)` (relnode.c) — the topmost-parent
     /// relids of an "other member" rel.
     pub fn find_childrel_parents(root: &PlannerInfo, rel: RelId) -> Relids
