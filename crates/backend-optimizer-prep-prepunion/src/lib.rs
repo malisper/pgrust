@@ -1308,11 +1308,14 @@ fn build_setop_tlist_from_exprs<'mcx>(
             // run on any generated nodes.  For the moment that's not a problem
             // because we force the correct exposed collation below.  (C:1413)
             // pstate == NULL — no UNKNOWNs here.
+            // The coerce seam operates over the parser/coerce arena (`'static`);
+            // erase the arg in and re-localize the (coerced) result into `mcx`.
             expr = backend_parser_coerce_seams::coerce_to_common_type_no_pstate::call(
-                expr,
+                expr.erase_lifetime(),
                 col_type,
                 "UNION/INTERSECT/EXCEPT",
-            )?;
+            )?
+            .clone_in(mcx)?;
             *trivial_tlist = false; // the coercion makes it not trivial
         }
 
