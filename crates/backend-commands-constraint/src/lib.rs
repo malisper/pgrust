@@ -260,18 +260,19 @@ pub fn unique_key_recheck(
             // write xmin/xmax/speculativeToken, so this stays faithful.
             let mut snapshot_self = Some(SnapshotData::sentinel(SnapshotType::SNAPSHOT_SELF));
 
+            // `&mut tmptid`: table_index_fetch_tuple mutates the tid in place to
+            // the resolved live HOT-chain member's TID (heap's
+            // ItemPointerSetOffsetNumber), exactly as C's
+            // `table_index_fetch_tuple(..., &tmptid, ...)` does.
             let found = tableam::table_index_fetch_tuple(
                 mcx,
                 &mut scan,
-                &tmptid,
+                &mut tmptid,
                 &mut snapshot_self,
                 estate.slot_data_mut(slot),
                 &mut call_again,
                 None,
             )?;
-            // table_index_fetch_tuple may update `tmptid` to the live HOT child's
-            // TID; read it back from the slot the fetch populated.
-            tmptid = estate.slot(slot).tts_tid;
 
             if !found {
                 // All rows referenced by the index entry are dead, so skip the

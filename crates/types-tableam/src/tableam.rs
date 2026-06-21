@@ -309,6 +309,15 @@ pub struct TableAmRoutine {
     /// — fetch the tuple at `tid` into `slot`, returning true on a
     /// snapshot-visible match.
     ///
+    /// `tid` is `&mut` because C takes `ItemPointer tid` (a pointer) and the
+    /// heap AM mutates it in place to the offset of the live HOT-chain member
+    /// it resolved to (`heap_hot_search_buffer`'s
+    /// `ItemPointerSetOffsetNumber(tid, offnum)`). The mutation must propagate
+    /// back to the caller's `scan->xs_heaptid`: on the next continuation call
+    /// (`call_again`/`xs_heap_continue`) the AM resumes the HOT-chain walk from
+    /// that resolved member and skips it, so the chain terminates instead of
+    /// re-returning the same live member forever.
+    ///
     /// `snapshot` is `&mut` because C passes `Snapshot` by pointer and the
     /// visibility check (`HeapTupleSatisfiesDirty`, reached for a non-MVCC
     /// dirty snapshot) writes the concurrent inserter/deleter's
@@ -318,7 +327,7 @@ pub struct TableAmRoutine {
     pub index_fetch_tuple: for<'mcx> fn(
         mcx: Mcx<'mcx>,
         scan: &mut IndexFetchTableData<'mcx>,
-        tid: &ItemPointerData,
+        tid: &mut ItemPointerData,
         snapshot: &mut Snapshot,
         slot: &mut SlotData<'mcx>,
         call_again: &mut bool,

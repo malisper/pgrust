@@ -1059,7 +1059,12 @@ pub fn index_fetch_heap<'mcx>(
     // out of `scan->xs_snapshot` to decide whether to wait on the conflicting
     // xact. Cloning here (the previous behaviour) silently discarded the
     // write-back, so unique/exclusion conflict-wait never fired.
-    let heaptid = scan.xs_heaptid;
+    // C passes `&scan->xs_heaptid` directly; the heap AM mutates it in place to
+    // the resolved live HOT-chain member's offset, and the next continuation
+    // call resumes the walk from there. Disjoint field borrows force a local
+    // copy here, so we write the (possibly mutated) tid back into the scan
+    // afterward to preserve that effect.
+    let mut heaptid = scan.xs_heaptid;
     let mut heap_continue = scan.xs_heap_continue;
     // Disjoint field borrows: `xs_snapshot` (&mut) and `xs_heapfetch` (&mut).
     let snapshot = &mut scan.xs_snapshot;
@@ -1070,12 +1075,13 @@ pub fn index_fetch_heap<'mcx>(
     let found = tableam::table_index_fetch_tuple(
         mcx,
         heapfetch,
-        &heaptid,
+        &mut heaptid,
         snapshot,
         slot,
         &mut heap_continue,
         Some(&mut all_dead),
     )?;
+    scan.xs_heaptid = heaptid;
     scan.xs_heap_continue = heap_continue;
 
     if found {

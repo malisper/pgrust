@@ -661,7 +661,7 @@ pub fn table_index_fetch_end(scan: Box<IndexFetchTableData<'_>>) -> PgResult<()>
 pub fn table_index_fetch_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut IndexFetchTableData<'mcx>,
-    tid: &ItemPointerData,
+    tid: &mut ItemPointerData,
     snapshot: &mut Snapshot,
     slot: &mut SlotData<'mcx>,
     call_again: &mut bool,

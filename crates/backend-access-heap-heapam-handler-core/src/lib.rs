@@ -297,7 +297,7 @@ fn heapam_index_fetch_end(mut scan: Box<IndexFetchTableData<'_>>) -> PgResult<()
 fn heapam_index_fetch_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut IndexFetchTableData<'mcx>,
-    tid: &ItemPointerData,
+    tid: &mut ItemPointerData,
     snapshot: &mut Snapshot,
     slot: &mut SlotData<'mcx>,
     call_again: &mut bool,
@@ -351,7 +351,22 @@ fn heapam_index_fetch_tuple<'mcx>(
         }
     }
 
+    // In C, heap_hot_search_buffer takes `tid` by pointer and MUTATES it in
+    // place to the offset of the visible HOT-chain member it resolved to
+    // (heapam.c:1811 ItemPointerSetOffsetNumber(tid, offnum)). Our
+    // heap_hot_search_buffer returns that resolved TID as `res.tid` instead of
+    // mutating the caller's tid, so write it back here. This is load-bearing:
+    // `tid` is the caller's `scan->xs_heaptid`, and on the next continuation
+    // call (call_again / xs_heap_continue) heap_hot_search_buffer restarts the
+    // walk from this offset with skip=true, skipping the just-returned member so
+    // the chain terminates. Without the write-back the continuation would
+    // restart at the original root offset, re-resolve the same live member, and
+    // return it forever — surfacing as a false "found self tuple multiple times
+    // in index" in the deferred unique/exclusion recheck. (heapam.c only
+    // mutates tid on found==true; the not-found path leaves it untouched, which
+    // is what `_bt_check_unique`'s "tid unchanged means end of chain" relies on.)
     if res.found {
+        *tid = res.tid;
         // Only in a non-MVCC snapshot can more than one member of the HOT
         // chain be visible.
         *call_again = !types_snapshot::snapshot::IsMVCCSnapshot(&*snap);
@@ -359,15 +374,8 @@ fn heapam_index_fetch_tuple<'mcx>(
         let mut tuple = res
             .heap_tuple
             .expect("heap_hot_search_buffer: found==true with no tuple");
-        // bslot->base.tupdata.t_self = *tid;
-        // In C, heap_hot_search_buffer takes `tid` by pointer and MUTATES it in
-        // place to the offset of the visible HOT-chain member it resolved to
-        // (heapam.c:1809 ItemPointerSetOffsetNumber(tid, offnum)); the following
-        // `bslot->base.tupdata.t_self = *tid` therefore stores the *resolved live
-        // member* TID, not the original index/root TID. Our heap_hot_search_buffer
-        // returns that resolved TID as res.tid instead of mutating the caller's
-        // tid, so use res.tid here. For a non-HOT row res.tid == *tid.
-        tuple.tuple.t_self = res.tid;
+        // bslot->base.tupdata.t_self = *tid (the resolved live-member TID).
+        tuple.tuple.t_self = *tid;
         tuple.tuple.t_tableOid = rel.rd_id;
         slot.base_mut().tts_tableOid = rel.rd_id;
         slot_seam::exec_store_buffer_heap_tuple::call(tuple, slot, cbuf)?;
