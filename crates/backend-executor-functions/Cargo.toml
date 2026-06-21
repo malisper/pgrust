@@ -45,3 +45,5 @@ backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
+types-portal = { path = "../types-portal" }

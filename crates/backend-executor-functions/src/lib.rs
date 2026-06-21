@@ -844,19 +844,20 @@ fn run_body<'mcx>(
             rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)?;
         let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)?;
         for rq in rewritten.iter() {
-            if rq.commandType == CmdType::CMD_UTILITY {
-                return Err(PgError::error(
-                        "fmgr_sql: utility statements in SQL functions are not yet \
-                         supported (needs the ProcessUtility postquel leg)",
-                    )
-                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
-            }
-            let plan = planner_seams::pg_plan_query::call(
-                mcx,
-                rq,
-                source_text,
-                CURSOR_OPT_PARALLEL_OK,
-            )?;
+            // Utility statements require no planning; C wraps them in a trivial
+            // CMD_UTILITY PlannedStmt (copying canSetTag/utilityStmt/etc.) and
+            // executes them via ProcessUtility on the postquel path
+            // (pg_plan_queries / functions.c postquel_getnext). See run_one_query.
+            let plan = if rq.commandType == CmdType::CMD_UTILITY {
+                PlannedStmt::for_utility(mcx, rq)?
+            } else {
+                planner_seams::pg_plan_query::call(
+                    mcx,
+                    rq,
+                    source_text,
+                    CURSOR_OPT_PARALLEL_OK,
+                )?
+            };
             if plan.canSetTag {
                 last_setstag = Some(plans.len());
             }
@@ -928,6 +929,28 @@ fn run_one_query<'mcx>(
     };
 
     let run = (|| -> PgResult<()> {
+        // postquel_start/postquel_getnext: utility statements don't go through
+        // the Executor — they invoke ProcessUtility directly (functions.c:1304,
+        // 1408). C calls ProcessUtility(plannedstmt, src, true /*readOnlyTree*/,
+        // PROCESS_UTILITY_QUERY, params, queryEnv, dest, NULL). queryEnv is
+        // always NULL on this path; qc is a throwaway (C passes NULL).
+        if plan.commandType == CMD_UTILITY {
+            let mut qc = types_portal::QueryCompletion {
+                commandTag: types_portal::CMDTAG_UNKNOWN,
+                nprocessed: 0,
+            };
+            return backend_tcop_utility_seams::process_utility::call(
+                mcx,
+                plan,
+                source_text,
+                true, // readOnlyTree: protect the function cache's parsetree
+                types_nodes::parsestmt::PROCESS_UTILITY_QUERY,
+                params,
+                dest,
+                &mut qc,
+            );
+        }
+
         let mut query_desc = execMain::CreateQueryDesc(
             mcx.context(),
             plan,
@@ -1028,19 +1051,20 @@ fn run_body_setof<'mcx>(
             rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)?;
         let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)?;
         for rq in rewritten.iter() {
-            if rq.commandType == CmdType::CMD_UTILITY {
-                return Err(PgError::error(
-                        "fmgr_sql: utility statements in SQL functions are not yet \
-                         supported (needs the ProcessUtility postquel leg)",
-                    )
-                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
-            }
-            let plan = planner_seams::pg_plan_query::call(
-                mcx,
-                rq,
-                source_text,
-                CURSOR_OPT_PARALLEL_OK,
-            )?;
+            // Utility statements require no planning; C wraps them in a trivial
+            // CMD_UTILITY PlannedStmt (copying canSetTag/utilityStmt/etc.) and
+            // executes them via ProcessUtility on the postquel path
+            // (pg_plan_queries / functions.c postquel_getnext). See run_one_query.
+            let plan = if rq.commandType == CmdType::CMD_UTILITY {
+                PlannedStmt::for_utility(mcx, rq)?
+            } else {
+                planner_seams::pg_plan_query::call(
+                    mcx,
+                    rq,
+                    source_text,
+                    CURSOR_OPT_PARALLEL_OK,
+                )?
+            };
             if plan.canSetTag {
                 last_setstag = Some(plans.len());
             }
@@ -1081,6 +1105,25 @@ fn run_one_query_setof<'mcx>(
     } else {
         backend_tcop_dest::none_receiver()
     };
+
+    // Utility statements bypass the Executor and run via ProcessUtility
+    // (functions.c postquel_getnext CMD_UTILITY leg); see run_one_query.
+    if plan.commandType == CMD_UTILITY {
+        let mut qc = types_portal::QueryCompletion {
+            commandTag: types_portal::CMDTAG_UNKNOWN,
+            nprocessed: 0,
+        };
+        return backend_tcop_utility_seams::process_utility::call(
+            mcx,
+            plan,
+            source_text,
+            true,
+            types_nodes::parsestmt::PROCESS_UTILITY_QUERY,
+            params,
+            dest,
+            &mut qc,
+        );
+    }
 
     let mut query_desc = execMain::CreateQueryDesc(
         mcx.context(),
