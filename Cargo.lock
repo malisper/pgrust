@@ -466,9 +466,14 @@ dependencies = [
 name = "backend-access-common-printtup-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-core",
  "types-dest",
+ "types-error",
  "types-nodes",
+ "types-portal",
+ "types-tuple",
 ]
 
 [[package]]
@@ -12287,6 +12292,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -18248,6 +18254,7 @@ name = "backend-tcop-postgres"
 version = "0.0.0"
 dependencies = [
  "allocator-api2",
+ "backend-access-common-printtup-seams",
  "backend-access-transam-parallel",
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact",
@@ -18255,6 +18262,7 @@ dependencies = [
  "backend-commands-async",
  "backend-commands-event-trigger-seams",
  "backend-commands-matview-deps-seams",
+ "backend-commands-prepare",
  "backend-commands-user-seams",
  "backend-executor-execParallel-support-seams",
  "backend-libpq-pqcomm",
@@ -18262,6 +18270,7 @@ dependencies = [
  "backend-libpq-pqsignal",
  "backend-libpq-pqsignal-seams",
  "backend-main-main-seams",
+ "backend-nodes-params-seams",
  "backend-optimizer-plan-planner-seams",
  "backend-optimizer-util-pathnode-seams",
  "backend-parser-analyze",
@@ -18295,12 +18304,16 @@ dependencies = [
  "backend-utils-activity-pgstat-seams",
  "backend-utils-activity-status-seams",
  "backend-utils-adt-timestamp-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-plancache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-postinit-seams",
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
+ "backend-utils-mb-mbutils-seams",
  "backend-utils-misc-guc",
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
@@ -18325,6 +18338,7 @@ dependencies = [
  "types-nodes",
  "types-parsenodes",
  "types-pgstat",
+ "types-plancache",
  "types-portal",
  "types-signal",
  "types-snapshot",
@@ -18332,6 +18346,7 @@ dependencies = [
  "types-storage",
  "types-stringinfo",
  "types-timeout",
+ "types-tuple",
 ]
 
 [[package]]

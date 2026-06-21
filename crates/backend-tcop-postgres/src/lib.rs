@@ -62,6 +62,7 @@
 
 extern crate alloc;
 
+pub mod extended_query;
 pub mod globals;
 pub mod guc;
 pub mod interrupt;

@@ -53,6 +53,13 @@ thread_local! {
     /// are skipping messages until the next Sync after an extended-query error.
     static IGNORE_TILL_SYNC: Cell<bool> = const { Cell::new(false) };
 
+    /// `static CachedPlanSource *unnamed_stmt_psrc = NULL;` (postgres.c:165) —
+    /// the saved `CachedPlanSource` for the unnamed prepared statement (the one
+    /// created by a `Parse` message with an empty statement name). A handle of
+    /// `0` (`CachedPlanSourceHandle::NULL`) mirrors the C `NULL`.
+    static UNNAMED_STMT_PSRC: Cell<types_nodes::parsestmt::CachedPlanSourceHandle> =
+        const { Cell::new(types_nodes::parsestmt::CachedPlanSourceHandle::NULL) };
+
     /// `static volatile sig_atomic_t RecoveryConflictPending = false;`
     /// (postgres.c:158).
     static RECOVERY_CONFLICT_PENDING: Cell<bool> = const { Cell::new(false) };
@@ -176,6 +183,18 @@ pub fn ignore_till_sync() -> bool {
 #[inline]
 pub fn set_ignore_till_sync(value: bool) {
     IGNORE_TILL_SYNC.set(value);
+}
+
+// `unnamed_stmt_psrc`.
+
+#[inline]
+pub fn unnamed_stmt_psrc() -> types_nodes::parsestmt::CachedPlanSourceHandle {
+    UNNAMED_STMT_PSRC.get()
+}
+
+#[inline]
+pub fn set_unnamed_stmt_psrc(value: types_nodes::parsestmt::CachedPlanSourceHandle) {
+    UNNAMED_STMT_PSRC.set(value);
 }
 
 // `RecoveryConflictPending`.

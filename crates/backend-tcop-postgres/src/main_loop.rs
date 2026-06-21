@@ -685,34 +685,55 @@ fn dispatch_message<'mcx>(
 
         x if x == pqmsg::PARSE => {
             forbidden_in_wal_sender(firstchar)?;
-            // exec_parse_message (extended-query protocol, F2 family) does not
-            // exist yet — the whole prepared-statement / plancache extended path
-            // is unported. The simple-Query target never sends Parse.
-            panic!(
-                "PostgresMain 'P' (Parse): exec_parse_message is the unported \
-                 extended-query (F2) protocol path (plancache-gated); not \
-                 reached on the simple-Query target"
-            );
+            // Set statement_timestamp().
+            xact_seams::set_current_statement_start_timestamp::call();
+
+            // stmt_name, query_string, numParams, paramTypes[].
+            let stmt_name = {
+                let s = pqformat::pq_getmsgstring(mcx, input_message)?;
+                String::from_utf8_lossy(s.as_bytes()).into_owned()
+            };
+            let query_string: &'mcx str = {
+                let qs = pqformat::pq_getmsgstring(mcx, input_message)?;
+                leak_str_in(mcx, qs.as_bytes())?
+            };
+            let num_params = pqformat::pq_getmsgint(input_message, 2)? as i32;
+            let mut param_types: alloc::vec::Vec<types_core::primitive::Oid> =
+                alloc::vec::Vec::with_capacity(num_params.max(0) as usize);
+            for _ in 0..num_params {
+                param_types.push(pqformat::pq_getmsgint(input_message, 4)?);
+            }
+            pqformat::pq_getmsgend(input_message)?;
+
+            crate::extended_query::exec_parse_message(
+                mcx,
+                query_string,
+                &stmt_name,
+                &param_types,
+            )?;
         }
 
         x if x == pqmsg::BIND => {
             forbidden_in_wal_sender(firstchar)?;
-            // exec_bind_message (extended-query protocol, F2) — unported.
-            panic!(
-                "PostgresMain 'B' (Bind): exec_bind_message is the unported \
-                 extended-query (F2) protocol path (plancache-gated); not \
-                 reached on the simple-Query target"
-            );
+            // Set statement_timestamp().
+            xact_seams::set_current_statement_start_timestamp::call();
+            // The field extraction is complex enough to keep out-of-line.
+            crate::extended_query::exec_bind_message(mcx, input_message)?;
         }
 
         x if x == pqmsg::EXECUTE => {
             forbidden_in_wal_sender(firstchar)?;
-            // exec_execute_message (extended-query protocol, F2) — unported.
-            panic!(
-                "PostgresMain 'E' (Execute): exec_execute_message is the \
-                 unported extended-query (F2) protocol path (plancache-gated); \
-                 not reached on the simple-Query target"
-            );
+            // Set statement_timestamp().
+            xact_seams::set_current_statement_start_timestamp::call();
+
+            let portal_name = {
+                let s = pqformat::pq_getmsgstring(mcx, input_message)?;
+                String::from_utf8_lossy(s.as_bytes()).into_owned()
+            };
+            let max_rows = pqformat::pq_getmsgint(input_message, 4)? as i32 as i64;
+            pqformat::pq_getmsgend(input_message)?;
+
+            crate::extended_query::exec_execute_message(mcx, &portal_name, max_rows)?;
         }
 
         x if x == pqmsg::FUNCTION_CALL => {
@@ -727,13 +748,31 @@ fn dispatch_message<'mcx>(
             forbidden_in_wal_sender(firstchar)?;
             // Set statement_timestamp() (needed for xact).
             xact_seams::set_current_statement_start_timestamp::call();
-            // exec_describe_statement_message / exec_describe_portal_message are
-            // the unported extended-query (F2) describe path.
-            panic!(
-                "PostgresMain 'D' (Describe): exec_describe_*_message is the \
-                 unported extended-query (F2) protocol path; not reached on the \
-                 simple-Query target"
-            );
+
+            let describe_type = pqformat::pq_getmsgbyte(input_message)?;
+            let describe_target = {
+                let s = pqformat::pq_getmsgstring(mcx, input_message)?;
+                String::from_utf8_lossy(s.as_bytes()).into_owned()
+            };
+            pqformat::pq_getmsgend(input_message)?;
+
+            match describe_type as u8 {
+                b'S' => {
+                    crate::extended_query::exec_describe_statement_message(
+                        mcx,
+                        &describe_target,
+                    )?;
+                }
+                b'P' => {
+                    crate::extended_query::exec_describe_portal_message(mcx, &describe_target)?;
+                }
+                other => {
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+                        .errmsg(alloc::format!("invalid DESCRIBE message subtype {other}"))
+                        .into_error());
+                }
+            }
         }
 
         x if x == pqmsg::FLUSH => {
@@ -809,15 +848,9 @@ fn dispatch_close_message<'mcx>(
     match close_type as u8 {
         b'S' => {
             if !close_target.is_empty() {
-                // DropPreparedStatement: the prepared-statement store is
-                // the extended-query (F2) plancache path. A named
-                // prepared statement can only exist after a Parse, which
-                // is unported, so this is never reached on this target.
-                panic!(
-                    "PostgresMain Close 'S': DropPreparedStatement for a \
-                     named prepared statement requires the unported \
-                     extended-query (Parse) path to have created one"
-                );
+                // DropPreparedStatement(close_target, false): drop a named
+                // prepared statement (extended-query Parse created it).
+                backend_commands_prepare::DropPreparedStatement(&close_target, false)?;
             } else {
                 // special-case the unnamed statement
                 crate::simple_query::drop_unnamed_stmt()?;

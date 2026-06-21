@@ -724,6 +724,45 @@ pub fn check_log_statement(stmt_list: &PgVec<'_, RawStmt<'_>>) -> PgResult<bool>
     Ok(false)
 }
 
+/// `check_log_statement(stmt_list)` (postgres.c:2384) over a list of *planned*
+/// statements (the extended-query Execute path, where `portal->stmts` is a
+/// `PlannedStmt` list). Mirrors `GetCommandLogLevel`'s `T_PlannedStmt` case:
+/// a `CMD_SELECT` plan is `LOGSTMT_ALL`, a modifying plan is `LOGSTMT_MOD`, a
+/// utility plan defers to `GetCommandLogLevel(stmt->utilityStmt)`.
+pub fn check_log_statement_planned(
+    stmt_list: &[types_nodes::nodeindexscan::PlannedStmt<'_>],
+) -> PgResult<bool> {
+    use backend_utils_misc_guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_MOD, LOGSTMT_NONE};
+    let log_statement = log_statement_guc();
+
+    if log_statement == LOGSTMT_NONE {
+        return Ok(false);
+    }
+    if log_statement == LOGSTMT_ALL {
+        return Ok(true);
+    }
+
+    for stmt in stmt_list.iter() {
+        let lev = match stmt.commandType {
+            CmdType::CMD_SELECT => LOGSTMT_ALL,
+            CmdType::CMD_UPDATE
+            | CmdType::CMD_INSERT
+            | CmdType::CMD_DELETE
+            | CmdType::CMD_MERGE => LOGSTMT_MOD,
+            CmdType::CMD_UTILITY => match stmt.utilityStmt.as_deref() {
+                Some(u) => utility_seams::get_command_log_level::call(u)?,
+                None => LOGSTMT_ALL,
+            },
+            _ => LOGSTMT_ALL,
+        };
+        if lev <= log_statement {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 // ===========================================================================
 // drop_unnamed_stmt — postgres.c:2904
 // ===========================================================================
@@ -735,9 +774,13 @@ pub fn check_log_statement(stmt_list: &PgVec<'_, RawStmt<'_>>) -> PgResult<bool>
 /// (F2) family, which is not ported; on the simple-Query path it is always
 /// `NULL`, so this is a no-op. Mirror PG: nothing to drop.
 pub fn drop_unnamed_stmt() -> PgResult<()> {
-    // unnamed_stmt_psrc is NULL on the simple-Query path (it is only set by
-    // exec_parse_message, F2/unported). The C `if (unnamed_stmt_psrc)` body is
-    // dead here; nothing to do.
+    // paranoia to avoid a dangling pointer in case of error
+    let psrc = globals::unnamed_stmt_psrc();
+    if psrc != types_nodes::parsestmt::CachedPlanSourceHandle::NULL {
+        // Clear the global FIRST (C: unnamed_stmt_psrc = NULL; before the drop).
+        globals::set_unnamed_stmt_psrc(types_nodes::parsestmt::CachedPlanSourceHandle::NULL);
+        backend_utils_cache_plancache_seams::drop_cached_plan::call(psrc)?;
+    }
     Ok(())
 }
 

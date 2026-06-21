@@ -108,6 +108,19 @@ backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams
 backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
 backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 
+# F2 extended-query (Parse/Bind/Describe/Execute) pipeline. The plancache /
+# prepared-statement store / type-I/O / param-store / RowDescription owners and
+# seams. Acyclic: prepare and the seam leaves never depend on this owner.
+backend-commands-prepare = { path = "../backend-commands-prepare" }
+backend-utils-cache-plancache-seams = { path = "../backend-utils-cache-plancache-seams" }
+backend-nodes-params-seams = { path = "../backend-nodes-params-seams" }
+backend-access-common-printtup-seams = { path = "../backend-access-common-printtup-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+types-tuple = { path = "../types-tuple" }
+types-plancache = { path = "../types-plancache" }
+
 # F0b: the single-user standalone bootstrap (PostgresSingleUserMain) callees.
 backend-utils-init-postinit-seams = { path = "../backend-utils-init-postinit-seams" }
 backend-storage-ipc-ipci-seams = { path = "../backend-storage-ipc-ipci-seams" }
