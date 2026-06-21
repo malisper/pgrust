@@ -47,3 +47,7 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
 types-portal = { path = "../types-portal" }
+# get_call_expr_argtype_expr: resolve polymorphic SQL-function argtypes from the call frame
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+# format_type_be for the "could not determine actual type" diagnostic
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }

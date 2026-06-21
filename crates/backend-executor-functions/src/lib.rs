@@ -48,7 +48,7 @@ use alloc::boxed::Box;
 use mcx::{Mcx, MemoryContext};
 use types_core::{InvalidOid, Oid};
 use types_datum::Datum as BareDatum;
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_fmgr::boundary::RefPayload;
 use types_fmgr::FunctionCallInfoBaseData;
 use types_nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
@@ -335,7 +335,14 @@ fn fmgr_sql<'mcx>(
     // (PgProcSimple), and the body source (prosrc / prosqlbody).
     let form = clauses_seams::get_func_form::call(fn_oid)?;
     let rettype = form.prorettype;
-    let proargtypes = &form.proargtypes;
+    // prepare_sql_fn_parse_info (functions.c:268-296): copy the declared input
+    // argument types, then resolve any polymorphic argument to its actual type
+    // from the call frame (`get_call_expr_argtype(call_expr, argnum)`). Both the
+    // `$n` Param list and the body parser must see the RESOLVED types so a body
+    // expression over a polymorphic argument (e.g. `upper($1)` where `$1` is
+    // declared `anymultirange`) type-checks against the concrete actual type.
+    let proargtypes = resolve_sql_fn_argtypes(&form.proargtypes, fcinfo)?;
+    let proargtypes = &proargtypes[..];
 
     // Set-returning (SETOF/TABLE) SQL function: C `fmgr_sql` runs the body and
     // delivers the whole result set to the caller's `ReturnSetInfo` in
@@ -493,6 +500,66 @@ fn fmgr_sql<'mcx>(
 /// proargtypes[i]`, `pflags = PARAM_FLAG_CONST`. The param list is owned for
 /// the call's lifetime (`Rc<ParamListInfoData<'static>>`); a by-reference arg's
 /// bytes are owned by the param value (`Datum::ByRef`), independent of `fcinfo`.
+/// `prepare_sql_fn_parse_info`'s polymorphic-resolution leg (functions.c:268-296):
+/// copy the declared `proargtypes`, then replace each polymorphic entry with the
+/// actual argument type read off the call frame
+/// (`get_call_expr_argtype(call_expr, argnum)` via the `get_fn_expr_argtype`
+/// seam). A polymorphic argument whose actual type cannot be determined is the
+/// `could not determine actual type of argument declared %s` error.
+/// `get_fn_expr_argtype(fcinfo->flinfo, argnum)` over this crate's frame carrier
+/// (fmgr.c): read the call-expression `Expr` the frame's `flinfo->fn_expr`
+/// stamped and return the declared type of argument `argnum` (the
+/// `get_call_expr_argtype` `IsA` dispatch, owned by the nodeFuncs seam), or
+/// `InvalidOid` when no field-bearing call node is carried.
+fn fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData, argnum: i32) -> PgResult<Oid> {
+    let Some(flinfo) = fcinfo.flinfo.as_ref() else {
+        return Ok(InvalidOid);
+    };
+    let Some(fn_expr) = flinfo.fn_expr.as_ref() else {
+        return Ok(InvalidOid);
+    };
+    match fn_expr.as_ref() {
+        // The opclass-options ByteaConst is not a call expression.
+        types_fmgr::FnExpr::ByteaConst(_) => Ok(InvalidOid),
+        types_fmgr::FnExpr::External(ext) => {
+            match ext
+                .node
+                .as_ref()
+                .and_then(|n| n.downcast_ref::<types_nodes::primnodes::Expr>())
+            {
+                Some(e) => {
+                    backend_nodes_nodeFuncs_seams::get_call_expr_argtype_expr::call(e, argnum)
+                }
+                None => Ok(InvalidOid),
+            }
+        }
+    }
+}
+
+fn resolve_sql_fn_argtypes(
+    proargtypes: &[Oid],
+    fcinfo: &FunctionCallInfoBaseData,
+) -> PgResult<alloc::vec::Vec<Oid>> {
+    let mut out = proargtypes.to_vec();
+    for (argnum, slot) in out.iter_mut().enumerate() {
+        if is_polymorphic_type(*slot) {
+            // get_call_expr_argtype(flinfo->fn_expr, argnum): recover the
+            // field-bearing call `Expr` off the frame's stamped `fn_expr` and
+            // read the actual declared type of argument `argnum`.
+            let actual = fn_expr_argtype(fcinfo, argnum as i32)?;
+            if !types_core::OidIsValid(actual) {
+                return Err(PgError::error(format!(
+                    "could not determine actual type of argument declared {}",
+                    backend_utils_adt_format_type_seams::format_type_be_owned::call(*slot)?
+                ))
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
+            }
+            *slot = actual;
+        }
+    }
+    Ok(out)
+}
+
 fn build_param_list(
     fcinfo: &FunctionCallInfoBaseData,
     proargtypes: &[Oid],

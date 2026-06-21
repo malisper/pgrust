@@ -150,6 +150,15 @@ fn dispatch_user_setof<'mcx>(
     // if the callee `ereport(ERROR)`s (unwinds).
     let guard = types_fmgr::mat_srf::push(allowed_modes);
 
+    // The call-expression node `ExecMakeTableFunctionResult` stamped onto the
+    // frame's `flinfo->fn_expr` (`fmgr_info_set_expr`). The by-OID re-dispatch
+    // below re-resolves the `FmgrInfo` and would otherwise drop it; thread it
+    // through so a polymorphic SQL/plpgsql table function can resolve its actual
+    // argument types (`prepare_sql_fn_parse_info` / `get_fn_expr_argtype`) — C's
+    // `init_sql_fcache` reads `finfo->fn_expr`. Without this a polymorphic SQL
+    // function over `anymultirange`/`anyrange` args fails its body type-check.
+    let fn_expr = fcinfo.flinfo.as_ref().and_then(|f| f.fn_expr.clone());
+
     // FunctionCallInvoke over the fmgr home: resolves the OID (plpgsql/SQL ->
     // fmgr_sql / plpgsql_call_handler) and runs the body. For a materialize SETOF
     // function the rows arrive via the sink and the scalar word is the NULL
@@ -157,7 +166,7 @@ fn dispatch_user_setof<'mcx>(
     // function — C still drives it through ExecMakeTableFunctionResult, with the
     // ValuePerCall path delivering one row) the scalar word IS the single result.
     let invoke = backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::call(
-        mcx, foid, collation, &args, &nulls, None,
+        mcx, foid, collation, &args, &nulls, fn_expr,
     );
 
     let sink = guard.take();
