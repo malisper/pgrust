@@ -2457,20 +2457,127 @@ fn rewriteTargetView<'mcx>(
         }
     }
 
-    // INSERT .. ON CONFLICT .. DO UPDATE rewriting (EXCLUDED pseudo-rel rebuild)
-    // is a deeper leg that needs addRangeTableEntryForRelation /
-    // BuildOnConflictExcludedTargetlist substrate this slice does not hold.
+    // For INSERT .. ON CONFLICT .. DO UPDATE, we must also update assorted stuff
+    // in the onConflict data structure. (rewriteHandler.c:3645)
     if parsetree
         .onConflict
         .as_deref()
         .is_some_and(|oc| oc.action == OnConflictAction::ONCONFLICT_UPDATE)
     {
-        base_rel.close(NoLock)?;
-        return Err(elog(
-            "rewriteTargetView: INSERT .. ON CONFLICT .. DO UPDATE on an auto-updatable \
-             view (EXCLUDED RTE rebuild) is not part of this slice \
-             (owner: backend-rewrite-rewritehandler rewriteTargetView)",
-        ));
+        // Like the INSERT/UPDATE code above, update the resnos in the auxiliary
+        // UPDATE targetlist to refer to columns of the base relation.
+        // (rewriteHandler.c:3661)
+        for tle_node in parsetree
+            .onConflict
+            .as_deref_mut()
+            .unwrap_or_else(|| unreachable!())
+            .onConflictSet
+            .iter_mut()
+        {
+            let Some(tle) = (**tle_node).as_targetentry_mut() else {
+                continue;
+            };
+            if tle.resjunk {
+                continue;
+            }
+            tle.resno = view_tle_base_attno(&view_targetlist, tle.resno)?;
+        }
+
+        // Also, create a new RTE for the EXCLUDED pseudo-relation, using the
+        // query's new base rel (which may well have a different column list from
+        // the view, hence a new column alias list). This matches
+        // transformOnConflictClause. In particular, the relkind is set to
+        // composite to signal that we're not dealing with an actual relation.
+        // (rewriteHandler.c:3679)
+        let old_excl_rel_index = parsetree
+            .onConflict
+            .as_deref()
+            .unwrap_or_else(|| unreachable!())
+            .exclRelIndex;
+
+        let excl_alias =
+            backend_nodes_core::makefuncs::make_alias(mcx, "excluded", PgVec::new_in(mcx))?;
+        let mut excl_pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+        let new_excl_nsitem = backend_parser_relation::addRangeTableEntryForRelation(
+            mcx,
+            &mut excl_pstate,
+            &base_rel,
+            RowExclusiveLock,
+            Some(excl_alias),
+            false,
+            false,
+        )?;
+        let mut new_excl_rte = new_excl_nsitem
+            .p_rte
+            .map(|b| (*b).clone_in(mcx))
+            .transpose()?
+            .ok_or_else(|| elog("rewriteTargetView: EXCLUDED nsitem has no RTE"))?;
+        new_excl_rte.relkind = types_tuple::access::RELKIND_COMPOSITE_TYPE as i8;
+        // Ignore the RTEPermissionInfo that would've been added.
+        new_excl_rte.perminfoindex = 0;
+
+        parsetree.rtable.push(new_excl_rte);
+        let new_excl_rel_index = parsetree.rtable.len() as i32;
+        parsetree
+            .onConflict
+            .as_deref_mut()
+            .unwrap_or_else(|| unreachable!())
+            .exclRelIndex = new_excl_rel_index;
+
+        // Replace the targetlist for the EXCLUDED pseudo-relation with a new one,
+        // representing the columns from the new base relation.
+        // (rewriteHandler.c:3705)
+        let new_excl_tlist = backend_parser_analyze::BuildOnConflictExcludedTargetlist(
+            mcx,
+            &base_rel,
+            new_excl_rel_index,
+        )?;
+        parsetree
+            .onConflict
+            .as_deref_mut()
+            .unwrap_or_else(|| unreachable!())
+            .exclRelTlist = new_excl_tlist;
+
+        // Update all Vars in the ON CONFLICT clause that refer to the old
+        // EXCLUDED pseudo-relation. We use the column mappings defined in the
+        // view targetlist, but the outputs must refer to the new EXCLUDED
+        // pseudo-relation rather than the new target RTE. "EXCLUDED.*" will be
+        // expanded using the view's rowtype, which is correct.
+        // (rewriteHandler.c:3719)
+        let mut tmp_tlist: Vec<types_nodes::primnodes::TargetEntry<'mcx>> = view_targetlist
+            .iter()
+            .map(|t| t.clone_in(mcx))
+            .collect::<PgResult<_>>()?;
+        for tle in tmp_tlist.iter_mut() {
+            let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?;
+            ChangeVarNodes(&mut node, new_rt_index, new_excl_rel_index, 0, mcx);
+            *tle = node.into_targetentry().unwrap_or_else(|| unreachable!());
+        }
+
+        let view_rte = parsetree.rtable[view_rte_idx].clone_in(mcx)?;
+        let oc = parsetree
+            .onConflict
+            .take()
+            .unwrap_or_else(|| unreachable!());
+        let mut oc_node = Node::mk_on_conflict_expr(mcx, (*oc).clone_in(mcx)?)?;
+        let mut outer_has_sublinks = Some(parsetree.hasSubLinks);
+        ReplaceVarsFromTargetList(
+            &mut oc_node,
+            old_excl_rel_index,
+            0,
+            &view_rte,
+            &tmp_tlist,
+            new_rt_index,
+            ReplaceVarsNoMatchOption::ReportError,
+            0,
+            &mut outer_has_sublinks,
+            mcx,
+        )?;
+        parsetree.hasSubLinks = outer_has_sublinks.unwrap_or(parsetree.hasSubLinks);
+        let new_oc = oc_node
+            .into_onconflictexpr()
+            .unwrap_or_else(|| unreachable!());
+        parsetree.onConflict = Some(alloc_in(mcx, new_oc)?);
     }
 
     // For UPDATE/DELETE/MERGE, pull up any WHERE quals from the view, re-pointed

@@ -820,7 +820,7 @@ fn transformOnConflictClause<'mcx>(
 /// `BuildOnConflictExcludedTargetlist(targetrel, exclRelIndex)` (analyze.c:1265)
 /// — build the EXCLUDED pseudo-relation targetlist, one `TargetEntry` per
 /// attribute (including dropped columns), plus a trailing whole-row Var.
-fn build_on_conflict_excluded_targetlist<'mcx>(
+pub fn build_on_conflict_excluded_targetlist<'mcx>(
     mcx: Mcx<'mcx>,
     targetrel: &types_rel::RelationData<'mcx>,
     excl_rel_index: i32,

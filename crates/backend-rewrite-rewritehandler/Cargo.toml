@@ -25,6 +25,7 @@ backend-rewrite-core = { path = "../backend-rewrite-core" }
 backend-rewrite-rowsecurity = { path = "../backend-rewrite-rowsecurity" }
 backend-rewrite-rewriteSearchCycle = { path = "../backend-rewrite-rewriteSearchCycle" }
 backend-parser-relation = { path = "../backend-parser-relation" }
+backend-parser-small1 = { path = "../backend-parser-small1" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-access-table-table = { path = "../backend-access-table-table" }

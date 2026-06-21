@@ -16590,6 +16590,7 @@ dependencies = [
  "backend-parser-analyze",
  "backend-parser-coerce",
  "backend-parser-relation",
+ "backend-parser-small1",
  "backend-rewrite-core",
  "backend-rewrite-rewriteSearchCycle",
  "backend-rewrite-rewritehandler-seams",
