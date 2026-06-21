@@ -1922,19 +1922,14 @@ fn type_is_toastable(_typid: Oid) -> bool {
 /// The plan-tree Const carries a `Datum<'static>`; copying it into the
 /// per-query context decouples it from the (read-only) plan tree.
 fn const_value_in<'mcx>(mcx: Mcx<'mcx>, value: &Datum<'static>) -> PgResult<Datum<'mcx>> {
-    match value {
-        Datum::ByVal(w) => Ok(Datum::ByVal(*w)),
-        Datum::ByRef(bytes) => {
-            let mut v = mcx::vec_with_capacity_in(mcx, bytes.len())?;
-            for b in bytes.iter() {
-                v.push(*b);
-            }
-            Ok(Datum::ByRef(v))
-        }
-        Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
-            panic!("const_value_in: Cstring/Composite/Expanded/Internal Const value not yet produced — wave 2")
-        }
-    }
+    // Faithfully `datumCopy` the Const's value into the per-query context. The
+    // canonical `Datum::clone_in` covers every kind: ByVal (no-op word copy),
+    // ByRef (deep-copy the varlena bytes), Cstring (clone the NUL-terminated
+    // text), Composite (rebuild the HeapTupleHeader image), and Expanded
+    // (flatten via EOH into a ByRef varlena). `Internal` has no copy semantics
+    // (C never `datumCopy`s an `internal` pseudo-type, and a plan-tree Const is
+    // never of internal type), which `clone_in` reflects.
+    value.clone_in(mcx)
 }
 
 /// `ExecInitExpr(expr, planstate)` — compile an expression in the plan-state's

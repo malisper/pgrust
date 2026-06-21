@@ -4101,32 +4101,17 @@ fn clone_desc<'mcx>(
 }
 
 // ---------------------------------------------------------------------------
-// Datum by-value convenience.
+// Datum copy convenience.
 // ---------------------------------------------------------------------------
-
-trait DatumByValExt<'mcx> {
-    /// Copy the by-value word (C `datumCopy` for a by-value type, a no-op copy).
-    fn clone_in_word(&self) -> Datum<'mcx>;
-    /// `att->attbyval`-style check for whether this is the by-value arm.
-    fn is_byval(&self) -> bool;
-}
-
-impl<'mcx> DatumByValExt<'mcx> for Datum<'mcx> {
-    fn clone_in_word(&self) -> Datum<'mcx> {
-        match self {
-            Datum::ByVal(w) => Datum::ByVal(*w),
-            Datum::ByRef(_) => {
-                panic!("nodeWindowAgg: clone_in_word called on a by-reference Datum")
-            }
-            Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
-                panic!("nodeWindowAgg: clone_in_word called on a Cstring/Composite/Expanded/Internal Datum — not yet produced — wave 2")
-            }
-        }
-    }
-
-    fn is_byval(&self) -> bool {
-        matches!(self, Datum::ByVal(_))
-    }
-}
+//
+// The window-agg `datumCopy` of working values (transition/result values, frame
+// offsets) goes through the faithful `datum::datum_copy_v` seam — which honours
+// `typbyval`/`typlen` for every kind (by-value word, by-ref varlena, expanded
+// object) — at the call sites above. The former `DatumByValExt::clone_in_word`
+// helper was a by-value-only convenience that panicked on any by-ref/Cstring/
+// Composite/Expanded/Internal Datum; it had no call sites and is removed so no
+// reachable path can trip those panics. Code needing a context-bound copy uses
+// `Datum::clone_in(mcx)` (covers all kinds), and the live `datum_copy_v` seam
+// covers the typlen-aware copies.
 
 extern crate alloc;
