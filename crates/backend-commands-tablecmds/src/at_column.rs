@@ -572,7 +572,7 @@ pub fn ATExecSetStatistics<'mcx>(
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!(
                     "cannot alter statistics on included column \"{}\" of index \"{}\"",
-                    att_name(mcx, cache_id, &tuple)?,
+                    String::from_utf8_lossy(rel.rd_att.attr((attnum - 1) as usize).attname.name_str()),
                     rel.name()
                 ))
                 .finish(here("ATExecSetStatistics"))
@@ -590,7 +590,7 @@ pub fn ATExecSetStatistics<'mcx>(
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!(
                     "cannot alter statistics on non-expression column \"{}\" of index \"{}\"",
-                    att_name(mcx, cache_id, &tuple)?,
+                    String::from_utf8_lossy(rel.rd_att.attr((attnum - 1) as usize).attname.name_str()),
                     rel.name()
                 ))
                 .errhint("Alter statistics on table column instead.".to_string())
@@ -644,21 +644,6 @@ fn att_field_oid(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) 
 /// `GETSTRUCT(tuple)->field` for a non-null `char` `pg_attribute` column.
 fn att_field_char(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<i8> {
     Ok(backend_utils_cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_char())
-}
-
-/// `NameStr(attrtuple->attname)` from a syscache tuple (`attname`, Anum 1).
-fn att_name(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>) -> PgResult<String> {
-    let datum = backend_utils_cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, 1)?;
-    match &datum {
-        Datum::ByRef(b) => {
-            // A `Name` is a fixed 64-byte NUL-padded image; read up to the NUL.
-            let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-            Ok(String::from_utf8_lossy(&b[..end]).into_owned())
-        }
-        _ => Err(types_error::PgError::error(
-            "att_name: attname attribute is by-value",
-        )),
-    }
 }
 
 // ===========================================================================
