@@ -1719,6 +1719,43 @@ pub fn construct_array_builtin_v<'mcx>(
     Ok(TDatum::ByRef(buf))
 }
 
+/// Seam `construct_md_array_like_input_v` — the `construct_md_array(...,
+/// ARR_NDIM(param), ARR_DIMS(param), ARR_LBOUND(param), ...)` tail of the
+/// ordered-set `percentile_*_multi_final` finalfns (orderedsetaggs.c). The
+/// result array reuses the input percentile array's shape: detoast
+/// `input_bytes` (`PG_GETARG_ARRAYTYPE_P`), copy its `ndim`/`dims`/`lbound`,
+/// and build with the supplied row-major element words + null bitmap. The
+/// element varlena is carried as a [`types_tuple::Datum::ByRef`].
+pub fn construct_md_array_like_input_v<'mcx>(
+    mcx: Mcx<'mcx>,
+    input_bytes: &[u8],
+    elems: &[Datum],
+    nulls: &[bool],
+    elmtype: Oid,
+    elmlen: i16,
+    elmbyval: bool,
+    elmalign: core::ffi::c_char,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let arr = detoast_seam::detoast_attr::call(mcx, input_bytes)?;
+    let ndim = foundation::arr_ndim(&arr);
+    let dims = foundation::arr_dims(mcx, &arr)?;
+    let lbs = foundation::arr_lbounds(mcx, &arr)?;
+    let buf = construct_md_array(
+        mcx,
+        elems,
+        Some(nulls),
+        ndim,
+        &dims,
+        &lbs,
+        elmtype,
+        elmlen as i32,
+        elmbyval,
+        elmalign as u8,
+    )?;
+    Ok(TDatum::ByRef(buf))
+}
+
 /// Seam `construct_array_expr` — `ExecEvalArrayExpr`'s array fabrication
 /// (execExprInterp.c) over the 6-arm value lane. Dispatches to the scalar 1-D
 /// `construct_md_array_values` path or the nested multi-D

@@ -156,6 +156,32 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `construct_md_array(result_datum, result_isnull, ARR_NDIM(param),
+    /// ARR_DIMS(param), ARR_LBOUND(param), elmtype, elmlen, elmbyval, elmalign)`
+    /// (arrayfuncs.c), as used by the ordered-set `percentile_*_multi_final`
+    /// finalfns (orderedsetaggs.c): build the result array with the **same shape
+    /// as the input percentile array** `input_bytes` (its `ndim`/`dims`/`lbound`
+    /// are copied verbatim) and a null bitmap from `nulls`. `elems`/`nulls` are
+    /// in row-major element order (length = the input array's item count); each
+    /// non-null `elems[i]` is a pass-by-value element `Datum` of the result
+    /// element type `elmtype` (its `(elmlen, elmbyval, elmalign)` triple is the
+    /// sort column's `typLen`/`typByVal`/`typAlign`). The input image is
+    /// detoasted to read its header. The result varlena is allocated in `mcx`
+    /// and carried as a [`DatumV::ByRef`]. Can `ereport(ERROR)`
+    /// (dimension/size overflow).
+    pub fn construct_md_array_like_input_v<'mcx>(
+        mcx: Mcx<'mcx>,
+        input_bytes: &[u8],
+        elems: &[Datum],
+        nulls: &[bool],
+        elmtype: Oid,
+        elmlen: i16,
+        elmbyval: bool,
+        elmalign: core::ffi::c_char,
+    ) -> PgResult<DatumV<'mcx>>
+);
+
+seam_core::seam!(
     /// The array half of `DecodeTextArrayToBitmapset` (evtcache.c): treat
     /// `array` as a detoasted `text[]` varlena (`DatumGetArrayTypeP`), enforce
     /// `ARR_NDIM(arr) != 1 || ARR_HASNULL(arr) || ARR_ELEMTYPE(arr) != TEXTOID`

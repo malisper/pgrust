@@ -82,9 +82,13 @@ fn setup_pct_info(
     pct
 }
 
-/// Read the percentile-array arg (`float8[]`) off the by-ref lane into
-/// `(Word, isnull)` element pairs.
-fn read_percentiles(fcinfo: &mut FunctionCallInfoBaseData) -> Option<alloc::vec::Vec<(Word, bool)>> {
+/// Read the percentile-array arg (`float8[]`) off the by-ref lane: the verbatim
+/// on-disk array image (so the finalfn can copy its `ndim`/`dims`/`lbound` into
+/// the result, per the C `construct_md_array(..., ARR_NDIM(param), ...)`) and
+/// its per-element `(Word, isnull)` pairs.
+fn read_percentiles(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> Option<(alloc::vec::Vec<u8>, alloc::vec::Vec<(Word, bool)>)> {
     if arg_isnull(fcinfo, 1) {
         return None;
     }
@@ -104,7 +108,7 @@ fn read_percentiles(fcinfo: &mut FunctionCallInfoBaseData) -> Option<alloc::vec:
         true,
         TYPALIGN_DOUBLE,
     ));
-    Some(elems.iter().copied().collect())
+    Some((bytes, elems.iter().copied().collect()))
 }
 
 /// Build the result array (1-D) from by-value element words of type `elmtype`.
@@ -123,6 +127,46 @@ fn build_result_array(
     );
     // The constructed array is a by-ref varlena (DatumV::ByRef); hand it back on
     // the Varlena result lane.
+    match arr {
+        CDatum::ByRef(v) => {
+            fcinfo.set_ref_result(RefPayload::Varlena(v.iter().copied().collect()));
+            Word::from_usize(0)
+        }
+        _ => raise(types_error::PgError::error(
+            "percentile multi finalfn: constructed array is not a by-ref varlena",
+        )),
+    }
+}
+
+/// Build the result array with the **same shape** as the input percentile array
+/// (C `construct_md_array(result_datum, result_isnull, ARR_NDIM(param),
+/// ARR_DIMS(param), ARR_LBOUND(param), sortColType, typLen, typByVal,
+/// typAlign)`): `input_bytes` is the verbatim input `float8[]` image whose
+/// `ndim`/`dims`/`lbound` are copied, `nulls` is the per-element null bitmap.
+#[allow(clippy::too_many_arguments)]
+fn build_md_result_array(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    input_bytes: &[u8],
+    elems: &[Word],
+    nulls: &[bool],
+    elmtype: types_core::Oid,
+    typ_len: i16,
+    typ_by_val: bool,
+    typ_align: i8,
+) -> Word {
+    let mcx = leak_ctx("percentile result md-array");
+    let arr = ok(
+        backend_utils_adt_arrayfuncs_seams::construct_md_array_like_input_v::call(
+            mcx,
+            input_bytes,
+            elems,
+            nulls,
+            elmtype,
+            typ_len,
+            typ_by_val,
+            typ_align as core::ffi::c_char,
+        ),
+    );
     match arr {
         CDatum::ByRef(v) => {
             fcinfo.set_ref_result(RefPayload::Varlena(v.iter().copied().collect()));
@@ -164,11 +208,13 @@ pub fn fc_percentile_disc_multi_final(fcinfo: &mut FunctionCallInfoBaseData) -> 
         restash(fcinfo, osastate);
         return ret_null(fcinfo);
     }
-    let Some(percentiles) = read_percentiles(fcinfo) else {
+    let Some((input_bytes, percentiles)) = read_percentiles(fcinfo) else {
         restash(fcinfo, osastate);
         return ret_null(fcinfo);
     };
     let elmtype = osastate.qstate.sort_col_type;
+    let typ_len = osastate.qstate.typ_len;
+    let typ_align = osastate.qstate.typ_align;
     let by_val = osastate.qstate.typ_by_val;
     if percentiles.is_empty() {
         let r = empty_array(fcinfo, elmtype);
@@ -211,8 +257,17 @@ pub fn fc_percentile_disc_multi_final(fcinfo: &mut FunctionCallInfoBaseData) -> 
         }
     }
 
-    let elems = finalize_slots(&result);
-    let r = build_result_array(fcinfo, &elems, elmtype);
+    let (elems, nulls) = finalize_slots(&result);
+    let r = build_md_result_array(
+        fcinfo,
+        &input_bytes,
+        &elems,
+        &nulls,
+        elmtype,
+        typ_len,
+        by_val,
+        typ_align,
+    );
     restash(fcinfo, osastate);
     r
 }
@@ -230,7 +285,7 @@ pub fn fc_percentile_cont_float8_multi_final(fcinfo: &mut FunctionCallInfoBaseDa
     if osastate.qstate.sort_col_type != FLOAT8OID {
         raise(types_error::PgError::error("percentile_cont_multi: type mismatch"));
     }
-    let Some(percentiles) = read_percentiles(fcinfo) else {
+    let Some((input_bytes, percentiles)) = read_percentiles(fcinfo) else {
         restash(fcinfo, osastate);
         return ret_null(fcinfo);
     };
@@ -292,8 +347,19 @@ pub fn fc_percentile_cont_float8_multi_final(fcinfo: &mut FunctionCallInfoBaseDa
         }
     }
 
-    let elems = finalize_slots(&result);
-    let r = build_result_array(fcinfo, &elems, FLOAT8OID);
+    let (elems, nulls) = finalize_slots(&result);
+    // float8: typlen=8, byval=true, align='d' (C `sortColType`/`typLen`/etc are
+    // float8 for percentile_cont).
+    let r = build_md_result_array(
+        fcinfo,
+        &input_bytes,
+        &elems,
+        &nulls,
+        FLOAT8OID,
+        8,
+        true,
+        TYPALIGN_DOUBLE as i8,
+    );
     restash(fcinfo, osastate);
     r
 }
@@ -325,19 +391,27 @@ enum ResultSlot {
     Val(Word),
 }
 
-/// Materialize the per-index result slots into the by-value element-word vector.
-/// NULLs in the output are represented as a zero element (the 1-D
-/// `construct_array_builtin_v` path here does not carry a null bitmap;
-/// percentile over a non-NULL-array input produces no NULL output elements in
-/// practice, and a NULL percentile input maps to a 0 element — see crate docs).
-fn finalize_slots(slots: &[ResultSlot]) -> alloc::vec::Vec<Word> {
-    slots
-        .iter()
-        .map(|s| match s {
-            ResultSlot::Null => Word::from_usize(0),
-            ResultSlot::Val(w) => *w,
-        })
-        .collect()
+/// Materialize the per-index result slots into the row-major
+/// `(element-word, isnull)` vectors that feed `construct_md_array` — the NULL
+/// slots (a NULL percentile input, or a NULL sampled value) carry an
+/// `isnull=true` flag, so the result array gets a real null bitmap (C
+/// `result_isnull`) rather than a spurious zero element.
+fn finalize_slots(slots: &[ResultSlot]) -> (alloc::vec::Vec<Word>, alloc::vec::Vec<bool>) {
+    let mut elems = alloc::vec::Vec::with_capacity(slots.len());
+    let mut nulls = alloc::vec::Vec::with_capacity(slots.len());
+    for s in slots {
+        match s {
+            ResultSlot::Null => {
+                elems.push(Word::from_usize(0));
+                nulls.push(true);
+            }
+            ResultSlot::Val(w) => {
+                elems.push(*w);
+                nulls.push(false);
+            }
+        }
+    }
+    (elems, nulls)
 }
 
 fn clone_cdatum<'a, 'b>(d: &CDatum<'a>) -> CDatum<'b> {
