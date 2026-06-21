@@ -92,7 +92,7 @@ pub fn ExecuteCallStmt<'mcx>(
     if aclresult != ACLCHECK_OK {
         let name =
             backend_commands_functioncmds_seams::get_func_name::call(funcid)?.unwrap_or_default();
-        backend_commands_functioncmds_seams::aclcheck_error_function::call(aclresult, name)?;
+        backend_commands_functioncmds_seams::aclcheck_error_procedure::call(aclresult, name)?;
     }
 
     /*

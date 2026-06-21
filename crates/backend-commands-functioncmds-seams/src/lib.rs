@@ -198,6 +198,13 @@ seam_core::seam!(
     pub fn aclcheck_error_function(aclresult: AclResult, objname: String) -> PgResult<()>
 );
 
+seam_core::seam!(
+    /// `aclcheck_error(aclresult, OBJECT_PROCEDURE, name)` — always raises.
+    /// The CALL (`ExecuteCallStmt`) EXECUTE-privilege error: a procedure, not a
+    /// function, so it reports "permission denied for procedure %s".
+    pub fn aclcheck_error_procedure(aclresult: AclResult, objname: String) -> PgResult<()>
+);
+
 // NOTE: `aclcheck_error_type` (aclchk.c) was RE-HOMED to
 // `backend-catalog-aclchk-seams` (its real owner is aclchk.c, which now has a
 // ported owner crate; functioncmds was merely its first consumer). Consumers

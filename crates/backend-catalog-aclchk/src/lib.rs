@@ -1501,6 +1501,9 @@ pub fn init_seams() {
         fc::aclcheck_error_function::set(|aclresult, objname| {
             aclcheck_error(aclresult, ObjectType::Function, Some(objname))
         });
+        fc::aclcheck_error_procedure::set(|aclresult, objname| {
+            aclcheck_error(aclresult, ObjectType::Procedure, Some(objname))
+        });
         // `get_func_name(funcid)` — the procedure name for the CALL ACL error.
         // Body owned by lsyscache (`get_func_name`); cross-install onto the
         // functioncmds-seams declaration.

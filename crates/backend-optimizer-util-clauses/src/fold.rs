@@ -1573,10 +1573,21 @@ fn inline_function(
         return Ok(None);
     }
 
-    // object_aclcheck(ProcedureRelationId, funcid, GetUserId(), ACL_EXECUTE)
-    // and FmgrHookIsNeeded(funcid) (clauses.c:4598/4602): the single-user
-    // `postgres` boot-superuser model passes ACL unconditionally and installs
-    // no fmgr hooks, matching every other consumer's external treatment.
+    // Check permission to call function (fail later, if not)
+    // (clauses.c:4598): object_aclcheck(ProcedureRelationId, funcid,
+    // GetUserId(), ACL_EXECUTE). If the calling user lacks EXECUTE, decline to
+    // inline so the un-inlined FuncExpr survives to the executor, where
+    // ExecInitFunc raises the real "permission denied for function" error.
+    // FmgrHookIsNeeded(funcid) (clauses.c:4602) installs no hooks in this tree.
+    let aclresult = backend_catalog_aclchk_seams::object_aclcheck::call(
+        types_core::catalog::PROCEDURE_RELATION_ID,
+        funcid,
+        backend_utils_init_miscinit_seams::get_user_id::call(),
+        types_acl::ACL_EXECUTE,
+    )?;
+    if aclresult != types_acl::ACLCHECK_OK {
+        return Ok(None);
+    }
 
     // Fetch the function body (clauses.c:4628/4646): prosrc + the cooked
     // prosqlbody (NULL for the classic `AS 'SELECT ...'` form).
