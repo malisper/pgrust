@@ -84,6 +84,69 @@ impl SignTsVector {
             _ => &mut [],
         }
     }
+
+    /// Decode a `SignTSVector` varlena body — the bytes AFTER the 4-byte varlena
+    /// header (`VARDATA_ANY`), i.e. `flag` (`int32`) followed by `data[]`.
+    /// `body_len` is `VARSIZE_ANY_EXHDR(x)` (`VARSIZE - VARHDRSZ`), so the
+    /// `data[]` payload length is `body_len - sizeof(int32)`. C reads this with
+    /// `ARRNELEM(x)` = `(VARSIZE(x) - GTHDRSIZE) / sizeof(int32)` for an `ARRKEY`
+    /// and `GETSIGLEN(x)` = `VARSIZE(x) - GTHDRSIZE` for a `SIGNKEY`.
+    ///
+    /// Returns `None` if the body is too short to hold the `flag` word or the
+    /// `ARRKEY` payload is not a whole number of `int32`s (a corrupt key).
+    pub fn from_image(body: &[u8]) -> Option<SignTsVector> {
+        const I32: usize = core::mem::size_of::<i32>();
+        if body.len() < I32 {
+            return None;
+        }
+        let flag = i32::from_ne_bytes([body[0], body[1], body[2], body[3]]);
+        let payload = &body[I32..];
+        let data = if flag & ARRKEY != 0 {
+            if payload.len() % I32 != 0 {
+                return None;
+            }
+            let mut arr = Vec::with_capacity(payload.len() / I32);
+            for chunk in payload.chunks_exact(I32) {
+                arr.push(i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+            SignTsVectorData::Arr(arr)
+        } else if flag & ALLISTRUE != 0 {
+            SignTsVectorData::AllTrue
+        } else {
+            SignTsVectorData::Sign(payload.to_vec())
+        };
+        Some(SignTsVector { flag, data })
+    }
+
+    /// Encode this key as a complete `SignTSVector` varlena image: the 4-byte
+    /// `vl_len_` header (`SET_VARSIZE`) followed by `flag` (`int32`) and the
+    /// `data[]` payload. Mirrors the C `palloc(CALCGTSIZE(flag, len))` /
+    /// `SET_VARSIZE` layout exactly; native-endian `int32`s match the on-disk /
+    /// in-memory form the C side reads back with `GETARR`/`GETSIGN`.
+    pub fn to_image(&self) -> Vec<u8> {
+        const I32: usize = core::mem::size_of::<i32>();
+        let payload_len = match &self.data {
+            SignTsVectorData::Arr(a) => a.len() * I32,
+            SignTsVectorData::Sign(s) => s.len(),
+            SignTsVectorData::AllTrue => 0,
+        };
+        let total = 4 + I32 + payload_len;
+        let mut out = Vec::with_capacity(total);
+        // SET_VARSIZE(res, total): 4-byte length header (native endian, as the
+        // unpacked 4-byte varlena form the fmgr by-ref lane round-trips).
+        out.extend_from_slice(&(total as i32).to_ne_bytes());
+        out.extend_from_slice(&self.flag.to_ne_bytes());
+        match &self.data {
+            SignTsVectorData::Arr(a) => {
+                for &v in a {
+                    out.extend_from_slice(&v.to_ne_bytes());
+                }
+            }
+            SignTsVectorData::Sign(s) => out.extend_from_slice(s),
+            SignTsVectorData::AllTrue => {}
+        }
+        out
+    }
 }
 
 /// The owned result of `gtsvector_picksplit`, replacing the C `GIST_SPLITVEC`'s
@@ -103,3 +166,67 @@ pub struct PickSplitResult {
 /// One detoasted `tsvector` lexeme handed to `gtsvector_compress`'s leaf branch:
 /// the lexeme's raw bytes (the C `words + ptr->pos`, length `ptr->len`).
 pub type LexemeBytes<'a> = &'a [u8];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    fn roundtrip(v: &SignTsVector) {
+        let img = v.to_image();
+        // The 4-byte header records the full image length (SET_VARSIZE).
+        let total = i32::from_ne_bytes([img[0], img[1], img[2], img[3]]) as usize;
+        assert_eq!(total, img.len());
+        // from_image consumes the body (header stripped), as the fmgr by-ref lane
+        // hands it after VARDATA.
+        let back = SignTsVector::from_image(&img[4..]).expect("decode");
+        assert_eq!(*v, back);
+    }
+
+    #[test]
+    fn arrkey_roundtrips() {
+        roundtrip(&SignTsVector {
+            flag: ARRKEY,
+            data: SignTsVectorData::Arr(vec![-5, 0, 7, 1024]),
+        });
+    }
+
+    #[test]
+    fn signkey_roundtrips() {
+        roundtrip(&SignTsVector {
+            flag: SIGNKEY,
+            data: SignTsVectorData::Sign(vec![0x00, 0xff, 0xa5, 0x10]),
+        });
+    }
+
+    #[test]
+    fn alltrue_roundtrips() {
+        roundtrip(&SignTsVector {
+            flag: SIGNKEY | ALLISTRUE,
+            data: SignTsVectorData::AllTrue,
+        });
+    }
+
+    #[test]
+    fn arrkey_layout_matches_calcgtsize() {
+        // CALCGTSIZE(ARRKEY, n) = VARHDRSZ + sizeof(int32) /*flag*/ + n*sizeof(int32).
+        let v = SignTsVector {
+            flag: ARRKEY,
+            data: SignTsVectorData::Arr(vec![1, 2, 3]),
+        };
+        assert_eq!(v.to_image().len(), 4 + 4 + 3 * 4);
+    }
+
+    #[test]
+    fn truncated_body_is_none() {
+        assert!(SignTsVector::from_image(&[0u8; 2]).is_none());
+        // ARRKEY payload not a whole number of int32s.
+        let mut img = SignTsVector {
+            flag: ARRKEY,
+            data: SignTsVectorData::Arr(vec![9]),
+        }
+        .to_image();
+        img.pop();
+        assert!(SignTsVector::from_image(&img[4..]).is_none());
+    }
+}

@@ -492,6 +492,7 @@ pub fn init_all() {
     backend_utils_adt_mcxtfuncs::init_seams();
     backend_utils_adt_oracle_compat::init_seams();
     backend_utils_adt_tsginidx::init_seams();
+    backend_utils_adt_tsgistidx::init_seams();
     backend_utils_adt_varbit::init_seams();
     backend_utils_adt_xid8funcs::init_seams();
     backend_utils_adt_name::init_seams();

@@ -17,3 +17,6 @@ types-reloptions = { path = "../types-reloptions" }
 backend-utils-adt-tsvector-core-seams = { path = "../backend-utils-adt-tsvector-core-seams" }
 backend-utils-hash-small-seams = { path = "../backend-utils-hash-small-seams" }
 backend-access-common-reloptions-seams = { path = "../backend-access-common-reloptions-seams" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

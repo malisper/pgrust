@@ -358,8 +358,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3577, "pg_logical_emit_message_text", BuiltinGapKind::NotRegistered),
     (3578, "pg_logical_emit_message_bytea", BuiltinGapKind::NotRegistered),
     (3583, "pg_last_committed_xact", BuiltinGapKind::NotRegistered),
-    (3646, "gtsvectorin", BuiltinGapKind::NotRegistered),
-    (3647, "gtsvectorout", BuiltinGapKind::NotRegistered),
     (3648, "gtsvector_compress", BuiltinGapKind::NotRegistered),
     (3649, "gtsvector_decompress", BuiltinGapKind::NotRegistered),
     (3650, "gtsvector_picksplit", BuiltinGapKind::NotRegistered),

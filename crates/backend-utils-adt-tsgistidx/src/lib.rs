@@ -29,6 +29,15 @@ use types_tsearch::tsgistidx::{
 
 use TSTernaryValue::{TS_MAYBE, TS_NO};
 
+mod fmgr_builtins;
+
+/// Install this crate's seams. Registers the SQL-callable `gtsvector` I/O
+/// builtins (`gtsvectorin`/`gtsvectorout`) so `fmgr_info` / by-OID dispatch
+/// resolve them (C: their `fmgr_builtins[]` rows).
+pub fn init_seams() {
+    fmgr_builtins::register_tsgistidx_builtins();
+}
+
 // ===========================================================================
 // Constants and helpers (tsgistidx.c:28-84)
 // ===========================================================================

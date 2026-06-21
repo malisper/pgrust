@@ -483,6 +483,7 @@ backend-utils-adt-amutils = { path = "../backend-utils-adt-amutils" }
 backend-utils-adt-mcxtfuncs = { path = "../backend-utils-adt-mcxtfuncs" }
 backend-utils-adt-oracle-compat = { path = "../backend-utils-adt-oracle-compat" }
 backend-utils-adt-tsginidx = { path = "../backend-utils-adt-tsginidx" }
+backend-utils-adt-tsgistidx = { path = "../backend-utils-adt-tsgistidx" }
 backend-utils-adt-varbit = { path = "../backend-utils-adt-varbit" }
 backend-utils-adt-xid8funcs = { path = "../backend-utils-adt-xid8funcs" }
 backend-utils-adt-name = { path = "../backend-utils-adt-name" }

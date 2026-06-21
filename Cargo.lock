@@ -21355,10 +21355,13 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-reloptions-seams",
  "backend-utils-adt-tsvector-core-seams",
+ "backend-utils-fmgr-core",
  "backend-utils-hash-small-seams",
  "mcx",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-reloptions",
  "types-tsearch",
 ]
@@ -25024,6 +25027,7 @@ dependencies = [
  "backend-utils-adt-skipsupport",
  "backend-utils-adt-ts-small",
  "backend-utils-adt-tsginidx",
+ "backend-utils-adt-tsgistidx",
  "backend-utils-adt-tsquery-core",
  "backend-utils-adt-tsrank",
  "backend-utils-adt-tsvector-core",
