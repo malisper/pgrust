@@ -2560,15 +2560,6 @@ seam_core::seam!(
     pub fn publication_rel_ids(pubrelid: Oid) -> PgResult<Option<(Oid, Oid)>>
 );
 
-seam_core::seam!(
-    /// `GetAttrDefaultColumnAddress(attrdefoid)` (pg_attrdef.c): scan
-    /// `pg_attrdef` by OID and project `GETSTRUCT`'s `(adrelid, adnum)`
-    /// (`Form_pg_attrdef`), from which the caller rebuilds the column
-    /// `ObjectAddress` (`RelationRelationId`, `adrelid`, `adnum`). `Ok(None)`
-    /// when no such attrdef row exists (the C `InvalidObjectAddress`).
-    pub fn attrdef_column(attrdefoid: Oid) -> PgResult<Option<(Oid, i16)>>
-);
-
 /* ------------------------------------------------------------------------
  *  pg_constraint reads/writes for backend-catalog-pg-constraint
  *  (SearchSysCache1(CONSTROID) + pg_class relchecks read/decrement, plus the

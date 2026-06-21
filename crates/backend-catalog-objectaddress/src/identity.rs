@@ -277,7 +277,7 @@ fn get_object_identity_parts_inner<'mcx>(
             }
         }
     } else if class_id == AttrDefaultRelationId {
-        let col = syscache::attrdef_column::call(object.objectId)?;
+        let col = syscache::attr_default_column::call(object.objectId)?;
         match col {
             None => {
                 if !missing_ok {
