@@ -473,6 +473,7 @@ pub fn init_all() {
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_misc2::init_seams();
     backend_utils_adt_misc::init_seams();
+    backend_utils_adt_pgstatfuncs::init_seams();
     backend_catalog_aclchk::init_seams();
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_catalog_perm::init_seams();

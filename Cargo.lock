@@ -19003,8 +19003,10 @@ dependencies = [
  "backend-utils-activity-shmem-seams",
  "backend-utils-activity-small",
  "backend-utils-adt-timestamp-seams",
+ "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
  "backend-utils-mmgr-dsa-seams",
+ "port-pgstrcasecmp",
  "types-core",
  "types-dsa",
  "types-error",
@@ -20960,6 +20962,24 @@ dependencies = [
  "types-core",
  "types-error",
  "types-locale",
+]
+
+[[package]]
+name = "backend-utils-adt-pgstatfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xlogprefetcher",
+ "backend-catalog-catalog-seams",
+ "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-replslot",
+ "backend-utils-activity-pgstat-slru",
+ "backend-utils-fmgr-core",
+ "backend-utils-init-small-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-pgstat",
 ]
 
 [[package]]
@@ -25164,6 +25184,7 @@ dependencies = [
  "backend-utils-adt-pg-locale",
  "backend-utils-adt-pg-locale-builtin",
  "backend-utils-adt-pg-locale-icu",
+ "backend-utils-adt-pgstatfuncs",
  "backend-utils-adt-pseudorandomfuncs",
  "backend-utils-adt-pseudotypes",
  "backend-utils-adt-quote",

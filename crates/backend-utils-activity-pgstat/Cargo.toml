@@ -26,3 +26,5 @@ backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-s
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 backend-utils-activity-shmem-seams = { path = "../backend-utils-activity-shmem-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }

@@ -31,7 +31,7 @@ use backend_storage_lmgr_lwlock_seams as lwlock;
 use backend_storage_lmgr_proc_seams as proc_seams;
 use backend_utils_adt_timestamp_seams as timestamp;
 use backend_utils_mmgr_dsa_seams as dsa;
-use types_storage::LW_SHARED;
+use types_storage::{LW_EXCLUSIVE, LW_SHARED};
 
 /// `PGSTAT_MIN_INTERVAL` (`pgstat.c`) — minimum ms between stats reports.
 const PGSTAT_MIN_INTERVAL: i64 = 1000;
@@ -49,6 +49,19 @@ thread_local! {
     // `pgstat_report_stat` is treated as forced even when nothing appears
     // pending. Per-backend state, hence thread_local (not a shared Mutex).
     static FORCE_NEXT_FLUSH: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    // C file-static `force_stats_snapshot_clear` (pgstat.c:256): set by the
+    // `stats_fetch_consistency` GUC assign hook when the value changes, so the
+    // next snapshot read clears the stale snapshot first; cleared in
+    // `pgstat_clear_snapshot`. Per-backend, hence thread_local.
+    static FORCE_STATS_SNAPSHOT_CLEAR: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// `assign_stats_fetch_consistency` tail (`pgstat.c:2074`) — when the GUC value
+/// changes, force the next snapshot read to clear the current (possibly
+/// inconsistent) snapshot first. Called from the `stats_fetch_consistency` GUC
+/// assign hook.
+pub fn pgstat_force_snapshot_clear() {
+    FORCE_STATS_SNAPSHOT_CLEAR.with(|c| c.set(true));
 }
 
 /// `pgstat_force_next_flush(void)` (`pgstat.c:813`) — force locally pending
@@ -403,6 +416,9 @@ pub fn pgstat_clear_snapshot() {
         s.prepared = false;
         s.stats.clear();
     });
+
+    // Reset this flag, as it may be possible that a cleanup was forced.
+    FORCE_STATS_SNAPSHOT_CLEAR.with(|c| c.set(false));
 }
 
 /// `pgstat_build_snapshot_fixed(kind)` (`pgstat.c`) — materialize a fixed-kind
@@ -782,6 +798,200 @@ pub fn pgstat_reset_entry(
     // Release the content lock.
     shmem::pgstat_unlock_entry(er)?;
     Ok(())
+}
+
+/// `shared_stat_reset_contents(kind, header, ts)` (`pgstat_shmem.c`) — zero the
+/// kind-specific stats body following the common header, then stamp the reset
+/// timestamp through the kind's `reset_timestamp_cb`. The caller holds the
+/// header's content lock exclusively.
+///
+/// # Safety
+/// `header` must point at a live `PgStatShared_Common` in shared memory whose
+/// content lock is held exclusively; `kind` must be its registered kind.
+unsafe fn shared_stat_reset_contents(
+    kind: PgStat_Kind,
+    header: *mut PgStatShared_Common,
+    ts: TimestampTz,
+) {
+    let kind_info = match registry::pgstat_get_kind_info(kind) {
+        Some(ki) => ki,
+        None => return,
+    };
+
+    // memset(pgstat_get_entry_data(kind, header), 0, pgstat_get_entry_len(kind)):
+    // zero the per-kind stats following the common header at the kind's
+    // registered offset (NOT size_of::<PgStatShared_Common>(), which differs
+    // from shared_data_off by alignment padding — see `entry_data_bytes`).
+    let data_off = kind_info.info.shared_data_off as usize;
+    let data_len = kind_info.info.shared_data_len as usize;
+    if data_len > 0 {
+        let base = (header as *mut u8).add(data_off);
+        core::ptr::write_bytes(base, 0, data_len);
+    }
+
+    // if (kind_info->reset_timestamp_cb) kind_info->reset_timestamp_cb(header, ts).
+    if let Some(cb) = &kind_info.cb.reset_timestamp_cb {
+        cb(&mut *header, ts);
+    }
+}
+
+/// `pgstat_reset_matching_entries(do_reset, match_data, ts)` (`pgstat_shmem.c`)
+/// — walk the shared dshash and reset every live (non-dropped) entry for which
+/// `do_reset(entry, match_data)` returns true, under each entry's content lock.
+fn pgstat_reset_matching_entries(
+    do_reset: impl Fn(&PgStatShared_HashEntry) -> bool,
+    ts: TimestampTz,
+) -> PgResult<()> {
+    let (area, dsh) = local::with_local(|l| (l.dsa, l.shared_hash));
+    if dsh.is_null() {
+        // Shared stats not attached: nothing to reset.
+        return Ok(());
+    }
+
+    // dshash entry is not modified (only the body under its own lock), take a
+    // shared lock on the hash partition.
+    let mut hstat = dshash::dshash_seq_init(dsh, false);
+    loop {
+        let entry = dshash::dshash_seq_next(&mut hstat)?;
+        let p = match entry {
+            Some(e) => e as *mut PgStatShared_HashEntry,
+            None => break,
+        };
+
+        // SAFETY: dshash_seq_next returns a live, locked entry address.
+        let pref = unsafe { &*p };
+        if pref.dropped {
+            continue;
+        }
+        if !do_reset(pref) {
+            continue;
+        }
+        let kind = pref.key.kind;
+
+        // header = dsa_get_address(pgStatLocal.dsa, p->body).
+        let body = pref.body;
+        let header =
+            dsa::dsa_get_address_ptr::call(area, body)? as usize as *mut PgStatShared_Common;
+        if header.is_null() {
+            continue;
+        }
+
+        // LWLockAcquire(&header->lock, LW_EXCLUSIVE).
+        // SAFETY: header points at a live PgStatShared_Common with a valid LWLock.
+        let lock = unsafe { &(*header).lock };
+        let guard =
+            lwlock::lwlock_acquire::call(lock, LW_EXCLUSIVE, proc_seams::my_proc_number::call())?;
+
+        // shared_stat_reset_contents(p->key.kind, header, ts).
+        // SAFETY: content lock held exclusively; kind matches header.
+        unsafe { shared_stat_reset_contents(kind, header, ts) };
+
+        // LWLockRelease(&header->lock).
+        drop(guard);
+    }
+    dshash::dshash_seq_term(&mut hstat)?;
+    Ok(())
+}
+
+/// `pgstat_reset_entries_of_kind(kind, ts)` (`pgstat_shmem.c`) — reset all
+/// variable-numbered entries of the given `kind`.
+pub fn pgstat_reset_entries_of_kind(kind: PgStat_Kind, ts: TimestampTz) -> PgResult<()> {
+    // match_kind: p->key.kind == kind.
+    pgstat_reset_matching_entries(move |p| p.key.kind == kind, ts)
+}
+
+/// `pgstat_reset_counters(void)` (`pgstat.c`) — reset every counter for the
+/// current database (the `pg_stat_reset()` SQL function).
+pub fn pgstat_reset_counters() -> PgResult<()> {
+    let ts = timestamp::get_current_timestamp::call();
+    let my_db = backend_utils_init_small_seams::my_database_id::call();
+
+    // match_db_entries: entry->key.dboid == MyDatabaseId.
+    pgstat_reset_matching_entries(move |p| p.key.dboid == my_db, ts)
+}
+
+/// `pgstat_reset_of_kind(kind)` (`pgstat.c`) — reset every entry of `kind`. For
+/// a fixed-numbered kind this runs its `reset_all_cb`; for a variable-numbered
+/// kind it resets all matching dshash entries.
+pub fn pgstat_reset_of_kind(kind: PgStat_Kind) -> PgResult<()> {
+    let kind_info = match registry::pgstat_get_kind_info(kind) {
+        Some(ki) => ki,
+        // A kind whose owner crate is not yet ported has no registered info,
+        // exactly as a C kind with NULL callbacks contributes nothing.
+        None => return Ok(()),
+    };
+    let ts = timestamp::get_current_timestamp::call();
+
+    if kind_info.info.fixed_amount {
+        // kind_info->reset_all_cb(ts): project the field of the shared control
+        // block (same dispatch shape as pgstat_reset_after_failure).
+        if let Some(cb) = &kind_info.cb.reset_all_cb {
+            local::with_local(|l| -> PgResult<()> {
+                if let Some(ctl) = l.shmem.as_deref_mut() {
+                    cb(ctl, ts)?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    } else {
+        pgstat_reset_entries_of_kind(kind, ts)
+    }
+}
+
+/// `pgstat_get_stat_snapshot_timestamp(have_snapshot)` (`pgstat.c`) — the
+/// timestamp at which the current consistent snapshot was taken. Returns
+/// `None` when no snapshot is held (consistency mode is not SNAPSHOT).
+pub fn pgstat_get_stat_snapshot_timestamp() -> Option<TimestampTz> {
+    if FORCE_STATS_SNAPSHOT_CLEAR.with(|c| c.get()) {
+        pgstat_clear_snapshot();
+    }
+
+    local::with_local(|l| {
+        if l.snapshot.mode == PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {
+            Some(l.snapshot.snapshot_timestamp)
+        } else {
+            None
+        }
+    })
+}
+
+/// `pgstat_have_entry(kind, dboid, objid)` (`pgstat.c`) — whether stats exist
+/// for `(kind, dboid, objid)`. Fixed-numbered kinds always exist; variable
+/// kinds exist iff a (non-creating) entry-ref lookup finds the shared entry.
+pub fn pgstat_have_entry(kind: PgStat_Kind, dboid: Oid, objid: u64) -> PgResult<bool> {
+    // fixed-numbered stats always exist.
+    if let Some(ki) = registry::pgstat_get_kind_info(kind) {
+        if ki.info.fixed_amount {
+            return Ok(true);
+        }
+    }
+    shmem::pgstat_get_entry_ref_exists(kind, dboid, objid)
+}
+
+/// `pgstat_get_kind_from_str(kind_str)` (`pgstat.c`) — map a stats-kind name
+/// (case-insensitive) to its [`PgStat_Kind`]; errors if unrecognized (mirrors
+/// C, whose lookup is wrapped by callers that ereport on an invalid kind).
+pub fn pgstat_get_kind_from_str(kind_str: &str) -> PgResult<PgStat_Kind> {
+    let needle = kind_str.as_bytes();
+    let mut kind = PGSTAT_KIND_BUILTIN_MIN.0;
+    while kind <= PGSTAT_KIND_BUILTIN_MAX.0 {
+        let k = PgStat_Kind(kind);
+        if let Some(ki) = registry::pgstat_get_kind_info(k) {
+            if port_pgstrcasecmp::pg_strcasecmp(needle, ki.info.name.as_bytes()) == 0 {
+                return Ok(k);
+            }
+        }
+        kind += 1;
+    }
+
+    // C asserts a valid kind here (callers validate the string first); the
+    // SQL-exposed `pg_stat_have_stats` validates its `stats_type` argument, so
+    // an unknown name is a user-facing invalid-parameter error.
+    Err(types_error::PgError::error(format!(
+        "invalid statistics kind \"{kind_str}\""
+    ))
+    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
 // ---------------------------------------------------------------------------
