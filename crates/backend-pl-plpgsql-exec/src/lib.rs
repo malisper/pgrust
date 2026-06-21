@@ -2963,18 +2963,22 @@ fn exec_stmt_execsql(
         exec_seams::SPI_OK_INSERT
             | exec_seams::SPI_OK_UPDATE
             | exec_seams::SPI_OK_DELETE
+            | exec_seams::SPI_OK_MERGE
             | exec_seams::SPI_OK_INSERT_RETURNING
             | exec_seams::SPI_OK_UPDATE_RETURNING
             | exec_seams::SPI_OK_DELETE_RETURNING
+            | exec_seams::SPI_OK_MERGE_RETURNING
     );
     match code {
         exec_seams::SPI_OK_SELECT => exec_set_found(estate, processed != 0),
         exec_seams::SPI_OK_INSERT
         | exec_seams::SPI_OK_UPDATE
         | exec_seams::SPI_OK_DELETE
+        | exec_seams::SPI_OK_MERGE
         | exec_seams::SPI_OK_INSERT_RETURNING
         | exec_seams::SPI_OK_UPDATE_RETURNING
-        | exec_seams::SPI_OK_DELETE_RETURNING => exec_set_found(estate, processed != 0),
+        | exec_seams::SPI_OK_DELETE_RETURNING
+        | exec_seams::SPI_OK_MERGE_RETURNING => exec_set_found(estate, processed != 0),
         exec_seams::SPI_OK_SELINTO | exec_seams::SPI_OK_UTILITY => {}
         exec_seams::SPI_OK_REWRITTEN => exec_set_found(estate, false),
         exec_seams::SPI_ERROR_COPY => {
@@ -3240,9 +3244,11 @@ fn exec_stmt_dynexecute(
         | exec_seams::SPI_OK_INSERT
         | exec_seams::SPI_OK_UPDATE
         | exec_seams::SPI_OK_DELETE
+        | exec_seams::SPI_OK_MERGE
         | exec_seams::SPI_OK_INSERT_RETURNING
         | exec_seams::SPI_OK_UPDATE_RETURNING
         | exec_seams::SPI_OK_DELETE_RETURNING
+        | exec_seams::SPI_OK_MERGE_RETURNING
         | exec_seams::SPI_OK_UTILITY
         | exec_seams::SPI_OK_REWRITTEN => {}
         // A zero return implies the querystring contained no commands.

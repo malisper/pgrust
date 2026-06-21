@@ -98,6 +98,8 @@ pub const SPI_OK_INSERT_RETURNING: int32 = 11;
 pub const SPI_OK_DELETE_RETURNING: int32 = 12;
 pub const SPI_OK_UPDATE_RETURNING: int32 = 13;
 pub const SPI_OK_REWRITTEN: int32 = 14;
+pub const SPI_OK_MERGE: int32 = 18;
+pub const SPI_OK_MERGE_RETURNING: int32 = 19;
 
 /// The assembled fields of the `ereport` `exec_stmt_raise` throws (`pl_exec.c`):
 /// the elog level, the (possibly-zero) packed SQLSTATE, the primary message, and

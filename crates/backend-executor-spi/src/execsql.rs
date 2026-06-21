@@ -494,6 +494,13 @@ fn run_one_execsql_stmt<'mcx>(
                 SPI_OK_UPDATE
             }
         }
+        CmdType::CMD_MERGE => {
+            if stmt.hasReturning {
+                SPI_OK_MERGE_RETURNING
+            } else {
+                SPI_OK_MERGE
+            }
+        }
         CmdType::CMD_UTILITY => SPI_OK_UTILITY,
         _ => SPI_ERROR_OPUNKNOWN,
     };
