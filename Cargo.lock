@@ -13987,6 +13987,7 @@ dependencies = [
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-mb-mbutils-seams",
  "mcx",
  "seam-core",
  "types-catalog",

@@ -149,17 +149,28 @@ fn get_typ_typrelid(typid: Oid) -> PgResult<Oid> {
     backend_utils_cache_lsyscache_seams::get_typ_typrelid::call(typid)
 }
 
-/// `parser_errposition(pstate, location)` — the cursor position to attach to an
-/// ereport (the C macro returns a `errposition()`-ready offset). A no-op
-/// returning 0 when `location < 0`; otherwise the byte offset's 1-based column.
-/// Mirrors the trimmed-ParseState convention used across the ported parser.
-#[inline]
+/// `parser_errposition(pstate, location)` (parse_node.c) — the cursor position
+/// to attach to an ereport. Returns 0 (no position) when `location < 0` or the
+/// ParseState carries no source text; otherwise the 1-based *character* column
+/// of the byte offset in `p_sourcetext`. The source-text guard matters: callers
+/// that run with a throwaway `make_parsestate(NULL)` pstate (no `p_sourcetext`,
+/// e.g. `transformPartitionSpec`) must emit no `LINE`/caret — returning the raw
+/// offset there prints a spurious cursor line real PostgreSQL omits.
 fn parser_errposition(pstate: Option<&ParseState<'_>>, location: i32) -> i32 {
-    let _ = pstate;
     if location < 0 {
         return 0;
     }
-    location + 1
+    let sourcetext = match pstate.and_then(|p| p.p_sourcetext.as_ref()) {
+        Some(s) => s,
+        None => return 0,
+    };
+    match backend_utils_mb_mbutils_seams::pg_mbstrlen_with_len::call(
+        sourcetext.as_bytes(),
+        location,
+    ) {
+        Ok(n) => n + 1,
+        Err(_) => 0,
+    }
 }
 
 /// `exprLocation` over a `Node *` (here the `p_last_srf` carrier). The SRF node

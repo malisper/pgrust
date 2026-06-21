@@ -197,6 +197,7 @@ fn transformPartitionSpec<'mcx>(
 #[allow(clippy::type_complexity)]
 fn ComputePartitionAttrs<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: &types_nodes::parsestmt::ParseState<'mcx>,
     rel: &types_rel::RelationData<'mcx>,
     part_params: &[types_nodes::nodes::NodePtr<'mcx>],
     strategy: PartitionStrategy,
@@ -241,6 +242,7 @@ fn ComputePartitionAttrs<'mcx>(
                     .errmsg(format!(
                         "column \"{name}\" named in partition key does not exist"
                     ))
+                    .errposition(backend_parser_small1::parser_errposition(pstate, pelem.location))
                     .finish(here("ComputePartitionAttrs"))
                     .map(|()| unreachable!());
             }
@@ -256,6 +258,7 @@ fn ComputePartitionAttrs<'mcx>(
                     .errmsg(format!(
                         "cannot use system column \"{name}\" in partition key"
                     ))
+                    .errposition(backend_parser_small1::parser_errposition(pstate, pelem.location))
                     .finish(here("ComputePartitionAttrs"))
                     .map(|()| unreachable!());
             }
@@ -267,6 +270,7 @@ fn ComputePartitionAttrs<'mcx>(
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("cannot use generated column in partition key")
                     .errdetail(format!("Column \"{name}\" is a generated column."))
+                    .errposition(backend_parser_small1::parser_errposition(pstate, pelem.location))
                     .finish(here("ComputePartitionAttrs"))
                     .map(|()| unreachable!());
             }
@@ -363,6 +367,7 @@ fn ComputePartitionAttrs<'mcx>(
                                 "Column \"{}\" is a generated column.",
                                 cname.as_ref().map(|s| s.as_str()).unwrap_or("")
                             ))
+                            .errposition(backend_parser_small1::parser_errposition(pstate, pelem.location))
                             .finish(here("ComputePartitionAttrs"))
                             .map(|()| unreachable!());
                     }
@@ -531,7 +536,7 @@ pub fn define_relation_partspec<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::RelationData<'mcx>,
     partspec: &PartitionSpec<'mcx>,
-    _query_string: Option<&str>,
+    query_string: Option<&str>,
 ) -> PgResult<()> {
     let partnatts = partspec.partParams.len();
 
@@ -547,13 +552,34 @@ pub fn define_relation_partspec<'mcx>(
     }
 
     /*
+     * pstate = make_parsestate(NULL); pstate->p_sourcetext = queryString;
+     * addRangeTableEntryForRelation / addNSItemToQuery (tablecmds.c:1219-1238) —
+     * the ParseState whose source text lets ComputePartitionAttrs report a parse
+     * position for its errors.
+     */
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+    if let Some(qs) = query_string {
+        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(qs, mcx)?);
+    }
+    let nsitem = backend_parser_relation::addRangeTableEntryForRelation(
+        mcx,
+        &mut pstate,
+        rel,
+        types_storage::lock::AccessShareLock,
+        None,
+        false,
+        true,
+    )?;
+    backend_parser_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
+
+    /*
      * We need to transform the raw parsetrees corresponding to partition
      * expressions into executable expression trees.
      */
     let newspec = transformPartitionSpec(mcx, rel, partspec)?;
 
     let (partattrs, partexprs, partopclass, partcollation) =
-        ComputePartitionAttrs(mcx, rel, &newspec.partParams, newspec.strategy)?;
+        ComputePartitionAttrs(mcx, &pstate, rel, &newspec.partParams, newspec.strategy)?;
 
     /* Assemble the partexprs List node (None if no expressions). */
     let partexprs_node = if partexprs.is_empty() {

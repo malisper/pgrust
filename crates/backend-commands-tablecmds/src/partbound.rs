@@ -142,6 +142,7 @@ pub fn transformPartitionBound<'mcx>(
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("invalid bound specification for a hash partition")
+                    .errposition(backend_parser_small1::parser_errposition(pstate, spec.location))
                     .finish(here("transformPartitionBound"))
                     .map(|()| unreachable!());
             }
@@ -173,6 +174,7 @@ pub fn transformPartitionBound<'mcx>(
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("invalid bound specification for a list partition")
+                    .errposition(backend_parser_small1::parser_errposition(pstate, spec.location))
                     .finish(here("transformPartitionBound"))
                     .map(|()| unreachable!());
             }
@@ -222,6 +224,7 @@ pub fn transformPartitionBound<'mcx>(
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("invalid bound specification for a range partition")
+                    .errposition(backend_parser_small1::parser_errposition(pstate, spec.location))
                     .finish(here("transformPartitionBound"))
                     .map(|()| unreachable!());
             }
@@ -340,20 +343,23 @@ fn transformPartitionRangeBounds<'mcx>(
 
         let mut prd = prd.expect("prd is set on all paths");
         // prd->location = exprLocation(expr);
-        prd.location = backend_nodes_core::nodefuncs::expr_location(expr_node.as_expr())?;
+        prd.location = bound_value_location(expr_node);
 
         result.push(alloc_in(mcx, Node::mk_partition_range_datum(mcx, prd)?)?);
     }
 
     // Once we see MINVALUE or MAXVALUE for one column, the rest must match.
-    validateInfiniteBounds(&result)?;
+    validateInfiniteBounds(pstate, &result)?;
 
     Ok(result)
 }
 
 /// `validateInfiniteBounds(pstate, blist)` (parse_utilcmd.c) — a MAXVALUE or
 /// MINVALUE bound must be followed only by more of the same.
-fn validateInfiniteBounds(blist: &[NodePtr<'_>]) -> PgResult<()> {
+fn validateInfiniteBounds(
+    pstate: &ParseState<'_>,
+    blist: &[NodePtr<'_>],
+) -> PgResult<()> {
     let mut kind = PartitionRangeDatumKind::Value;
 
     for node in blist.iter() {
@@ -375,6 +381,10 @@ fn validateInfiniteBounds(blist: &[NodePtr<'_>]) -> PgResult<()> {
                 return ereport(ERROR)
                     .errcode(ERRCODE_DATATYPE_MISMATCH)
                     .errmsg("every bound following MAXVALUE must also be MAXVALUE")
+                    .errposition(backend_parser_small1::parser_errposition(
+                        pstate,
+                        prd.location,
+                    ))
                     .finish(here("validateInfiniteBounds"))
                     .map(|()| unreachable!());
             }
@@ -382,6 +392,10 @@ fn validateInfiniteBounds(blist: &[NodePtr<'_>]) -> PgResult<()> {
                 return ereport(ERROR)
                     .errcode(ERRCODE_DATATYPE_MISMATCH)
                     .errmsg("every bound following MINVALUE must also be MINVALUE")
+                    .errposition(backend_parser_small1::parser_errposition(
+                        pstate,
+                        prd.location,
+                    ))
                     .finish(here("validateInfiniteBounds"))
                     .map(|()| unreachable!());
             }
@@ -389,6 +403,35 @@ fn validateInfiniteBounds(blist: &[NodePtr<'_>]) -> PgResult<()> {
     }
 
     Ok(())
+}
+
+/// `exprLocation(val)` (nodeFuncs.c) for the raw parse-node forms that can appear
+/// as a partition bound value. The generic `expr_location` accepts only analyzed
+/// `Expr` nodes; a bound value is still a raw grammar node (`A_Const`,
+/// `TypeCast`, `ColumnRef`, …) at this point, so we read its own location token —
+/// exactly the leaf cases C's `exprLocation` returns for these tags. Falls back
+/// to the `Expr` path (and then -1) for anything else.
+fn bound_value_location(val: &Node<'_>) -> i32 {
+    if let Some(c) = val.as_a_const() {
+        return c.location;
+    }
+    if let Some(cr) = val.as_columnref() {
+        return cr.location;
+    }
+    if let Some(tc) = val.as_typecast() {
+        return tc.location;
+    }
+    if let Some(ae) = val.as_a_expr() {
+        return ae.location;
+    }
+    if let Some(fc) = val.as_funccall() {
+        return fc.location;
+    }
+    if let Some(aa) = val.as_a_arrayexpr() {
+        return aa.location;
+    }
+    backend_nodes_core::nodefuncs::expr_location(val.as_expr())
+        .unwrap_or(-1)
 }
 
 /// `transformPartitionBoundValue(pstate, val, colName, colType, colTypmod,
@@ -403,7 +446,7 @@ fn transformPartitionBoundValue<'mcx>(
     col_typmod: i32,
     part_collation: Oid,
 ) -> PgResult<Const> {
-    let val_location = backend_nodes_core::nodefuncs::expr_location(val.as_expr())?;
+    let val_location = bound_value_location(val);
 
     // value = transformExpr(pstate, val, EXPR_KIND_PARTITION_BOUND);
     let transformed = backend_parser_parse_expr::transformExpr(
@@ -443,6 +486,7 @@ fn transformPartitionBoundValue<'mcx>(
                     type_name.as_str(),
                     col_name
                 ))
+                .errposition(backend_parser_small1::parser_errposition(pstate, val_location))
                 .finish(here("transformPartitionBoundValue"))
                 .map(|()| unreachable!());
         }
