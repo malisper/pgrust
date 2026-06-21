@@ -87,6 +87,7 @@ use backend_executor_execUtils_seams as execUtils_seams;
 use backend_tcop_dest_seams as dest;
 use backend_access_transam_xact_seams as xact_seams;
 use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_catalog_namespace_seams as namespace_seam;
 use backend_utils_init_miscinit_seams as miscinit;
 
 // `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h) — the column-bitmap
@@ -147,14 +148,13 @@ pub fn standard_ExecutorStart(query_desc: &mut QueryDesc, mut eflags: i32) -> Pg
     // EXPLAIN-only), check for writes to non-temp tables.
     //   if ((XactReadOnly || IsInParallelMode()) && !EXPLAIN_ONLY)
     //       ExecCheckXactReadOnly(queryDesc->plannedstmt);
-    //
-    // `XactReadOnly` / `IsInParallelMode()` reach the xact owner (unported on
-    // this frontier). They are only consulted when `!EXPLAIN_ONLY`, and for a
-    // plain SELECT in a normal read-write, non-parallel transaction both are
-    // false so the gate is not entered (a faithful no-op here). When the xact
-    // owner lands, `(XactReadOnly || IsInParallelMode()) && !EXPLAIN_ONLY`
-    // (EXEC_FLAG_EXPLAIN_ONLY = 0x0001) calls
-    // `ExecCheckXactReadOnly(queryDesc->plannedstmt)`.
+    if (xact_seams::xact_read_only::call() || xact_seams::is_in_parallel_mode::call())
+        && (eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0
+    {
+        query_desc
+            .work
+            .with(|w| ExecCheckXactReadOnly(&w.plannedstmt))?;
+    }
 
     let operation = query_desc.operation;
     let params = query_desc.params.clone();
@@ -969,18 +969,73 @@ fn result_tupdesc<'a, 'mcx>(
 // Permission checks (the self-contained, fully-portable surface).
 // ===========================================================================
 
-/// `ExecCheckXactReadOnly(plannedstmt)` (execMain.c) — read-only / parallel
-/// gate, restricted to what the trimmed `PlannedStmt`/`RTEPermissionInfo`
-/// expose.
-pub fn ExecCheckXactReadOnly(plannedstmt: &PlannedStmt<'_>) {
-    if plannedstmt.permInfos.as_ref().is_some_and(|p| !p.is_empty()) {
-        panic!(
-            "execMain ExecCheckXactReadOnly per-rel write-permission classification needs \
-             RTEPermissionInfo.requiredPerms (trimmed; lands with the full ExecCheckPermissions \
-             consumer) — #167 F0d"
-        );
+/// `CreateCommandName((Node *) plannedstmt)` (tcop/utility.h + cmdtag.c) for the
+/// `PlannedStmt` node — `GetCommandTagName(CreateCommandTag(...))`. Only the
+/// plannable command types (the ones `ExecCheckXactReadOnly` /
+/// `PreventCommandIfParallelMode` name) are reachable here; a `CMD_UTILITY`
+/// PlannedStmt never reaches the executor's read-only gate (utility statements
+/// are gated in ProcessUtility). The SELECT branch reproduces CreateCommandTag's
+/// rowMark-strength refinement so complaints about read-only SELECT FOR UPDATE
+/// statements read faithfully.
+fn create_command_name(plannedstmt: &PlannedStmt<'_>) -> &'static str {
+    // `LockClauseStrength` values (nodes/lockoptions.h): LCS_FORKEYSHARE = 1,
+    // LCS_FORSHARE = 2, LCS_FORNOKEYUPDATE = 3, LCS_FORUPDATE = 4.
+    match plannedstmt.commandType {
+        CmdType::CMD_SELECT => {
+            // We take a little extra care here so that the result will be useful
+            // for complaints about read-only statements.
+            if let Some(strength) = plannedstmt
+                .rowMarks
+                .as_ref()
+                .and_then(|m| m.first())
+                .map(|rm| rm.strength)
+            {
+                match strength {
+                    1 => "SELECT FOR KEY SHARE",
+                    2 => "SELECT FOR SHARE",
+                    3 => "SELECT FOR NO KEY UPDATE",
+                    4 => "SELECT FOR UPDATE",
+                    _ => "SELECT",
+                }
+            } else {
+                "SELECT"
+            }
+        }
+        CmdType::CMD_UPDATE => "UPDATE",
+        CmdType::CMD_INSERT => "INSERT",
+        CmdType::CMD_DELETE => "DELETE",
+        CmdType::CMD_MERGE => "MERGE",
+        _ => "???",
     }
-    let _ = plannedstmt.commandType;
+}
+
+/// `ExecCheckXactReadOnly(plannedstmt)` (execMain.c) — fail if write permissions
+/// are requested in parallel mode for any table (temp or non-temp), otherwise
+/// fail for any non-temp table; then forbid non-SELECT / modifying-CTE plans in
+/// parallel mode.
+pub fn ExecCheckXactReadOnly(plannedstmt: &PlannedStmt<'_>) -> PgResult<()> {
+    // Fail if write permissions are requested in parallel mode for table (temp
+    // or non-temp), otherwise fail for any non-temp table.
+    if let Some(perm_infos) = plannedstmt.permInfos.as_ref() {
+        for perminfo in perm_infos.iter() {
+            if (perminfo.requiredPerms & !ACL_SELECT) == 0 {
+                continue;
+            }
+
+            let nspid = lsyscache::get_rel_namespace::call(perminfo.relid)?;
+            if namespace_seam::is_temp_namespace::call(nspid)? {
+                continue;
+            }
+
+            xact_seams::prevent_command_if_read_only::call(create_command_name(plannedstmt))?;
+        }
+    }
+
+    if plannedstmt.commandType != CmdType::CMD_SELECT || plannedstmt.hasModifyingCTE {
+        xact_seams::prevent_command_if_parallel_mode::call(create_command_name(plannedstmt))?;
+    }
+
+    Ok(())
 }
 
 /// `ExecCheckOneRelPerms` for the SELECT-on-columns case (execMain.c), used by

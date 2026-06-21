@@ -43,6 +43,7 @@ backend-executor-execJunk = { path = "../backend-executor-execJunk" }
 backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
 types-dest = { path = "../types-dest" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 
 # Seam crate this unit OWNS (the executor-driver / EvalPlanQual / constraint /
 # CteScan-leader surface). F0a installs only the self-contained

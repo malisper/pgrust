@@ -9546,6 +9546,7 @@ dependencies = [
  "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-catalog",
+ "backend-catalog-namespace-seams",
  "backend-catalog-objectaddress-seams",
  "backend-catalog-partition-seams",
  "backend-commands-matview-seams",
