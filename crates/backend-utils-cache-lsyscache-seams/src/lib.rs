@@ -663,6 +663,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The single-byte name of operator `opno` when its `pg_operator.oprname` is
+    /// exactly one character long, else `None`. Allocation-free (the byte is
+    /// returned by value), so ruleutils' `isSimpleNode` precedence oracle can
+    /// consult it without an `Mcx`. Mirrors the only information C's
+    /// `get_simple_binary_op_name` uses (`strlen(op) == 1` then `op[0]`); a
+    /// single-char operator name never re-parses to a different operator, so it
+    /// equals what `generate_operator_name` would emit. `None` also on cache miss.
+    pub fn get_op_name_single_byte(opno: Oid) -> PgResult<Option<u8>>
+);
+
+seam_core::seam!(
     /// `op_mergejoinable(opno, inputtype)` (lsyscache.c): whether the operator
     /// is potentially mergejoinable (rep. for `array_eq`/`record_eq` via the
     /// typcache; otherwise `pg_operator.oprcanmerge`).

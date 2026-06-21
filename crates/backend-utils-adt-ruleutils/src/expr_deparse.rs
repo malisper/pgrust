@@ -3947,21 +3947,19 @@ fn isSimpleNode_inner_opt(expr: Option<&Expr>, parent_expr: Option<&Expr>, prett
         Expr::OpExpr(op) => {
             if (pretty_flags & PRETTYFLAG_PAREN) != 0 {
                 if let Some(Expr::OpExpr(parent_op)) = parent_expr {
-                    let op_name = match get_simple_binary_op_name(op) {
-                        Some(s) => s,
+                    let opb = match get_simple_binary_op_name(op) {
+                        Some(b) => b,
                         None => return false,
                     };
-                    let opb = op_name.as_bytes()[0];
                     let is_lopriop = opb == b'+' || opb == b'-';
                     let is_hipriop = opb == b'*' || opb == b'/' || opb == b'%';
                     if !(is_lopriop || is_hipriop) {
                         return false;
                     }
-                    let parent_op_name = match get_simple_binary_op_name(parent_op) {
-                        Some(s) => s,
+                    let pb = match get_simple_binary_op_name(parent_op) {
+                        Some(b) => b,
                         None => return false,
                     };
-                    let pb = parent_op_name.as_bytes()[0];
                     let is_lopriparent = pb == b'+' || pb == b'-';
                     let is_hipriparent = pb == b'*' || pb == b'/' || pb == b'%';
                     if !(is_lopriparent || is_hipriparent) {
@@ -4066,20 +4064,24 @@ fn op_is_first_arg(op: &OpExpr, parent_op: &OpExpr) -> bool {
 }
 
 /// `static const char *get_simple_binary_op_name(OpExpr *expr)` — C 8819-8841.
-/// Returns the operator name iff `expr` is a 2-arg OpExpr (else None).
-fn get_simple_binary_op_name(op: &OpExpr) -> Option<String> {
+/// Returns the operator's name byte iff `expr` is a 2-arg OpExpr whose name is a
+/// single character (C: `generate_operator_name(...)` then `strlen(op) == 1`).
+///
+/// C calls `generate_operator_name(expr->opno, exprType(arg1), exprType(arg2))`
+/// and keeps the result only when one byte long. `isSimpleNode` has no `Mcx`, so
+/// instead of allocating the qualified name we read `pg_operator.oprname`
+/// directly through the allocation-free `get_op_name_single_byte` seam: a
+/// single-character operator name never requires schema qualification, so it
+/// equals `generate_operator_name`'s output. The downstream precedence test only
+/// inspects this single byte, so no information is lost.
+fn get_simple_binary_op_name(op: &OpExpr) -> Option<u8> {
     if op.args.len() != 2 {
         return None;
     }
-    // op = generate_operator_name(expr->opno, exprType(arg1), exprType(arg2));
-    // We need an Mcx to call the seam; isSimpleNode has none. The only
-    // information used is the operator name's *first* byte for the +-*/% test,
-    // which generate_operator_name preserves (it never re-quotes the operator
-    // symbol). The owner seam is uninstalled in F1, so this returns None — which
-    // makes isSimpleNode conservatively keep parens for OpExpr-in-OpExpr pretty
-    // mode (the C `if (!op) return false;` path), the safe behavior. (Filled
-    // when generate_operator_name lands with the catalog-def family.)
-    None
+    match backend_utils_cache_lsyscache_seams::get_op_name_single_byte::call(op.opno) {
+        Ok(b) => b,
+        Err(_) => None,
+    }
 }
 
 /* -------------------------------------------------------------------------- *

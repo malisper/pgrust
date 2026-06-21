@@ -92,6 +92,7 @@ pub fn init_seams() {
     seams::comparison_ops_are_compatible::set(opfamily_operator::comparison_ops_are_compatible);
     seams::get_opname::set(opfamily_operator::get_opname);
     seams::get_op_rettype::set(opfamily_operator::get_op_rettype);
+    seams::get_op_name_single_byte::set(opfamily_operator::get_op_name_single_byte);
     seams::op_mergejoinable::set(opfamily_operator::op_mergejoinable);
     seams::op_hashjoinable::set(opfamily_operator::op_hashjoinable);
     seams::op_volatile::set(opfamily_operator::op_volatile);

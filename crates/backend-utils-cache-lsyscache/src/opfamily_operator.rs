@@ -681,6 +681,27 @@ pub fn get_oper_name_namespace_kind(
     }
 }
 
+/// The single-byte name of operator `opno` when its `pg_operator.oprname` is
+/// exactly one character (one byte) long, else `None`. Used by ruleutils'
+/// `isSimpleNode` precedence oracle (its `get_simple_binary_op_name` helper),
+/// which only ever inspects single-char operator names (`+ - * / %`); for those
+/// the unqualified name equals `generate_operator_name`'s output, so this is a
+/// faithful, allocation-free stand-in for the C `strlen(op) == 1 ? op[0]` test.
+pub fn get_op_name_single_byte(opno: Oid) -> PgResult<Option<u8>> {
+    let scratch = MemoryContext::new("get_op_name_single_byte");
+    match pg_operator_form(scratch.mcx(), opno)? {
+        Some(optup) => {
+            let bytes = optup.oprname.as_bytes();
+            if bytes.len() == 1 {
+                Ok(Some(bytes[0]))
+            } else {
+                Ok(None)
+            }
+        }
+        None => Ok(None),
+    }
+}
+
 /// `get_op_rettype(opno)` (lsyscache.c): the operator's result type, or
 /// `InvalidOid`.
 pub fn get_op_rettype(opno: Oid) -> PgResult<Oid> {
