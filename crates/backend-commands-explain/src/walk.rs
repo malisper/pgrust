@@ -956,40 +956,55 @@ pub fn ExplainNode<'es, 'p>(
             )?;
         }
         ntag::T_Agg => {
-            // show_agg_keys: when numCols > 0 (and no grouping sets), the key
-            // columns refer to the *child* plan's tlist. Group Key has no
-            // sort-order arrays.
+            // show_agg_keys (explain.c:2477): when numCols > 0 OR grouping sets
+            // are present, the key columns refer to the *child* plan's tlist.
             let agg = plan_node.expect_agg();
-            if agg.grouping_sets.as_ref().map(|g| !g.is_empty()).unwrap_or(false) {
-                panic!(
-                    "ExplainNode: show_grouping_sets (GROUPING SETS / ROLLUP / CUBE) \
-                     detail unported — structural EXPLAIN only"
-                );
-            }
-            if agg.num_cols > 0 {
+            let has_gsets = agg
+                .grouping_sets
+                .as_ref()
+                .map(|g| !g.is_empty())
+                .unwrap_or(false);
+            if agg.num_cols > 0 || has_gsets {
+                // ancestors = lcons(plan, ancestors): prepend this Agg node
+                // (cloned into the 'es formatting arena) so the children's
+                // deparse can resolve OUTER_VAR/PARAM through it.
+                let mut agg_ancestors: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
+                agg_ancestors
+                    .try_reserve(ancestors.len() + 1)
+                    .map_err(|_| mcx.oom(0))?;
+                agg_ancestors.push(mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?);
+                for a in ancestors.iter() {
+                    agg_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+                }
+
                 let child_plan = planstate
                     .outer_plan_state()
                     .and_then(|c| c.ps_head().plan)
                     .expect("show_agg_keys: outerPlanState(astate)->plan");
                 let child = child_plan.plan_head();
-                let grp = agg
-                    .grp_col_idx
-                    .as_ref()
-                    .expect("show_agg_keys: grpColIdx with numCols>0");
-                show_sort_group_keys(
-                    es,
-                    mcx,
-                    child_plan,
-                    child,
-                    ancestors,
-                    "Group Key",
-                    agg.num_cols,
-                    0,
-                    grp,
-                    None,
-                    None,
-                    None,
-                )?;
+
+                if has_gsets {
+                    show_grouping_sets(es, mcx, child_plan, child, agg, &agg_ancestors)?;
+                } else {
+                    let grp = agg
+                        .grp_col_idx
+                        .as_ref()
+                        .expect("show_agg_keys: grpColIdx with numCols>0");
+                    show_sort_group_keys(
+                        es,
+                        mcx,
+                        child_plan,
+                        child,
+                        &agg_ancestors,
+                        "Group Key",
+                        agg.num_cols,
+                        0,
+                        grp,
+                        None,
+                        None,
+                        None,
+                    )?;
+                }
             }
         }
         ntag::T_Group => {
@@ -1784,6 +1799,179 @@ fn show_sort_group_keys<'es, 'p>(
             result_presorted.iter().map(|s| s.as_str()).collect();
         fmt::ExplainPropertyList("Presorted Key", &pview, es)?;
     }
+    Ok(())
+}
+
+/// `show_grouping_sets` (explain.c:2509). Render the grouping-set key lists for
+/// an Agg plan that carries `groupingSets` (GROUPING SETS / ROLLUP / CUBE).
+/// `context_plan`/`context_plan_head` are the *child* (outer) plan whose tlist
+/// the key indexes reference — mirroring C's `planstate = outerPlanState(astate)`.
+fn show_grouping_sets<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    context_plan: &Node<'p>,
+    context_plan_head: &Plan<'p>,
+    agg: &types_nodes::nodeagg::Agg<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+) -> PgResult<()> {
+    // C sets up the deparse context once here; in the seam model the context is
+    // re-derived per key inside show_grouping_set_keys (via deparse_expr_for_plan),
+    // so there is nothing to precompute. useprefix is computed there as well.
+
+    fmt::ExplainOpenGroup("Grouping Sets", Some("Grouping Sets"), false, es)?;
+
+    // First the top Agg node's own grouping sets (no sort node).
+    show_grouping_set_keys(
+        es,
+        mcx,
+        context_plan,
+        context_plan_head,
+        agg,
+        None,
+        ancestors,
+    )?;
+
+    // Then each chained Agg/Sort node.
+    if let Some(chain) = agg.chain.as_ref() {
+        for aggnode in chain.iter() {
+            // Sort *sortnode = (Sort *) aggnode->plan.lefttree;
+            let sortnode = aggnode
+                .plan
+                .lefttree
+                .as_deref()
+                .and_then(|n| n.as_sort());
+            show_grouping_set_keys(
+                es,
+                mcx,
+                context_plan,
+                context_plan_head,
+                aggnode,
+                sortnode,
+                ancestors,
+            )?;
+        }
+    }
+
+    fmt::ExplainCloseGroup("Grouping Sets", Some("Grouping Sets"), false, es)?;
+    Ok(())
+}
+
+/// `show_grouping_set_keys` (explain.c:2542). Render one grouping-set node's key
+/// lists: optionally a "Sort Key" (when a `sortnode` is present), then the
+/// "Group Keys"/"Hash Keys" group holding each grouping set's key list (deparsed
+/// against the child plan's targetlist).
+#[allow(clippy::too_many_arguments)]
+fn show_grouping_set_keys<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    context_plan: &Node<'p>,
+    context_plan_head: &Plan<'p>,
+    aggnode: &types_nodes::nodeagg::Agg<'p>,
+    sortnode: Option<&types_nodes::nodesort::Sort<'p>>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+) -> PgResult<()> {
+    use types_nodes::nodeagg::AggStrategy;
+
+    let gsets = aggnode
+        .grouping_sets
+        .as_ref()
+        .expect("show_grouping_set_keys: aggnode->groupingSets");
+    // keycols may be absent (grpColIdx == NULL when numCols == 0); in that case
+    // every grouping set is empty so it is never indexed.
+    let keycols = aggnode.grp_col_idx.as_ref();
+
+    let (keyname, keysetname) = match aggnode.aggstrategy {
+        AggStrategy::AggHashed | AggStrategy::AggMixed => ("Hash Key", "Hash Keys"),
+        _ => ("Group Key", "Group Keys"),
+    };
+
+    fmt::ExplainOpenGroup("Grouping Set", None, true, es)?;
+
+    if let Some(sort) = sortnode {
+        show_sort_group_keys(
+            es,
+            mcx,
+            context_plan,
+            context_plan_head,
+            ancestors,
+            "Sort Key",
+            sort.numCols,
+            0,
+            &sort.sortColIdx,
+            Some(&sort.sortOperators),
+            Some(&sort.collations),
+            Some(&sort.nullsFirst),
+        )?;
+        if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+            es.indent += 1;
+        }
+    }
+
+    fmt::ExplainOpenGroup(keysetname, Some(keysetname), false, es)?;
+
+    // Deparse context: the child plan, cloned into the 'es formatting arena
+    // (matching es->pstmt), as show_sort_group_keys / show_qual do.
+    let useprefix = es.rtable_size > 1 || es.verbose;
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, context_plan.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse")
+        .clone_in(mcx)?;
+    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
+    let tlist = context_plan_head.targetlist.as_ref();
+
+    for gset in gsets.iter() {
+        let mut result: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+
+        for &i in gset.iter() {
+            // AttrNumber keyresno = keycols[i];
+            let keyresno = keycols
+                .expect("show_grouping_set_keys: grpColIdx indexed with NULL")
+                [i as usize];
+            // TargetEntry *target = get_tle_by_resno(plan->targetlist, keyresno);
+            let target = tlist
+                .and_then(|tl| tl.iter().find(|tle| tle.resno == keyresno))
+                .unwrap_or_else(|| {
+                    panic!("no tlist entry for key {keyresno}")
+                });
+            let target_expr = target
+                .expr
+                .as_deref()
+                .expect("show_grouping_set_keys: TargetEntry has no expr");
+
+            // Deparse the expression, showing any top-level cast (showImplicit=true).
+            let expr_node = Node::mk_expr(mcx, target_expr.clone_in(mcx)?)?;
+            let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+                mcx,
+                &es_pstmt,
+                &es.rtable_names,
+                &plan_owned,
+                ancestors,
+                &expr_node,
+                useprefix,
+                true,
+            )?;
+            result.push(alloc::string::String::from(exprstr.as_str()));
+        }
+
+        // if (!result && es->format == TEXT) ExplainPropertyText(keyname, "()")
+        // else ExplainPropertyListNested(keyname, result).
+        if result.is_empty() && es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+            fmt::ExplainPropertyText(keyname, "()", es)?;
+        } else {
+            let view: alloc::vec::Vec<&str> = result.iter().map(|s| s.as_str()).collect();
+            fmt::ExplainPropertyListNested(keyname, &view, es)?;
+        }
+    }
+
+    fmt::ExplainCloseGroup(keysetname, Some(keysetname), false, es)?;
+
+    if sortnode.is_some() && es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        es.indent -= 1;
+    }
+
+    fmt::ExplainCloseGroup("Grouping Set", None, true, es)?;
     Ok(())
 }
 
