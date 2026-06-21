@@ -175,7 +175,18 @@ pub fn transformTargetEntry<'mcx>(
 
     let colname = if colname.is_none() && !resjunk {
         // Generate a suitable column name for a column without explicit AS.
-        FigureColname(node.as_ref())
+        //
+        // C's FigureColname runs on the same node object transformExpr just
+        // mutated in place, so its EXPR_SUBLINK branch reads a SubLink whose
+        // subselect is already the analyzed Query (transformSubLink rewrites
+        // sublink->subselect from raw SelectStmt to Query in place — see
+        // parse_target.c:1845 "The subquery has probably already been
+        // transformed").  This port clones the node before transforming, so the
+        // raw `node` still carries the un-analyzed SelectStmt; recover C's
+        // behavior by reading the column name off the transformed `expr` for the
+        // EXPR_SUBLINK case (the only node kind whose name depends on a field
+        // transformExpr mutates).
+        figure_colname_for_target(node.as_ref(), expr.as_ref())
     } else {
         colname
     };
@@ -1894,6 +1905,35 @@ pub fn FigureColname(node: Option<&Node<'_>>) -> Option<String> {
     let mut name: Option<String> = None;
     let _ = FigureColnameInternal(node, &mut name);
     Some(name.unwrap_or_else(|| String::from("?column?")))
+}
+
+/// Like [`FigureColname`], but for a target-list entry where the raw `node` has
+/// already been transformed into `expr`.  C's `FigureColname` reads the node
+/// `transformExpr` mutated in place, so for an `EXPR_SUBLINK` it sees the
+/// analyzed `Query` embedded in `sublink->subselect`.  This port transforms a
+/// clone, leaving the raw `node`'s subselect un-analyzed, so `FigureColname`
+/// applied to the raw node can't recover the subquery's column name.  Recover it
+/// from the transformed `expr` (the only naming difference a transform causes:
+/// every other `FigureColnameInternal` arm reads parse-time fields that
+/// transformExpr leaves untouched).
+fn figure_colname_for_target(node: Option<&Node<'_>>, expr: Option<&Expr>) -> Option<String> {
+    // Mirror FigureColnameInternal's EXPR_SUBLINK branch on the transformed node:
+    // the analyzed Query is reachable through the transformed SubLink, not the
+    // raw one.  All other node kinds keep the raw-node naming.
+    if let (Some(n), Some(Expr::SubLink(sl))) = (node, expr) {
+        if n.node_tag() == ntag::T_SubLink
+            && sl.subLinkType == SubLinkType::Expr
+        {
+            if let Some(query) = sl.subselect.as_deref() {
+                if let Some(te) = query.targetList.first() {
+                    if let Some(resname) = te.resname.as_deref() {
+                        return Some(String::from(resname));
+                    }
+                }
+            }
+        }
+    }
+    FigureColname(node)
 }
 
 /// `FigureIndexColname(node)` — like `FigureColname`, but returns `None` if no
