@@ -126,3 +126,52 @@ seam_core::seam!(
     /// `Err` carries the delete ereport surface.
     pub fn delete_transaction_owner() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `AtSubStart_ResourceOwner()` (xact.c:1283): create the subtransaction's
+    /// `"SubTransaction"` resource owner as a child of the immediate parent's
+    /// (`= the current CurTransactionResourceOwner`), then publish it to the
+    /// `CurTransactionResourceOwner`/`CurrentResourceOwner` globals. Pins taken
+    /// during the subtransaction are tracked on this owner so a subtransaction
+    /// abort can release them independently of the parent. `Err` carries the
+    /// `ResourceOwnerCreate` ereport surface.
+    pub fn at_substart_resource_owner() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerRelease(s->curTransactionOwner, RESOURCE_RELEASE_BEFORE_LOCKS,
+    /// false, is_commit)` — the first subtransaction-end resource-owner release
+    /// leg of `CommitSubTransaction`/`AbortSubTransaction` (xact.c), issued
+    /// before the per-subxact relcache/inval calls. This is the leg that
+    /// releases buffer pins held by the subtransaction. `Err` carries the
+    /// release ereport surface.
+    pub fn release_subxact_owner_before_locks(is_commit: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerRelease(s->curTransactionOwner, RESOURCE_RELEASE_LOCKS,
+    /// false, is_commit)` then `ResourceOwnerRelease(..., AFTER_LOCKS, ...)` —
+    /// the second subtransaction-end resource-owner release legs of
+    /// `CommitSubTransaction`/`AbortSubTransaction` (xact.c). `Err` carries the
+    /// release surface.
+    pub fn release_subxact_owner_locks(is_commit: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CurrentResourceOwner = s->curTransactionOwner` (xact.c:1316,
+    /// `AtSubAbort_ResourceOwner`): re-establish a valid `CurrentResourceOwner`
+    /// (the subtransaction owner, = the live `CurTransactionResourceOwner`)
+    /// before the abort cleanup that may consult `CurrentResourceOwner`.
+    pub fn set_current_to_cur_transaction()
+);
+
+seam_core::seam!(
+    /// `CurrentResourceOwner = s->parent->curTransactionOwner;
+    /// CurTransactionResourceOwner = s->parent->curTransactionOwner;
+    /// ResourceOwnerDelete(s->curTransactionOwner); s->curTransactionOwner = NULL`
+    /// — the final subtransaction-end delete/restore leg of
+    /// `CommitSubTransaction`/`AbortSubTransaction`/`CleanupSubTransaction`
+    /// (xact.c): restore the parent's owner to the Cur/Current globals and free
+    /// the subtransaction owner. `Err` carries the delete ereport surface.
+    pub fn cleanup_subxact_owner() -> PgResult<()>
+);

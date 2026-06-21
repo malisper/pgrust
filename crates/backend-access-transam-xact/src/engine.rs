@@ -2124,7 +2124,7 @@ fn StartSubTransaction() -> PgResult<()> {
     // Initialize subsystems for the new subtransaction; resource-management
     // stuff first.
     AtSubStart_Memory();
-    AtSubStart_ResourceOwner();
+    AtSubStart_ResourceOwner()?;
     trigger_seams::after_trigger_begin_sub_xact::call()?;
 
     xs(|s| s.current_mut().state = TRANS_INPROGRESS);
@@ -2184,19 +2184,23 @@ fn CommitSubTransaction() -> PgResult<()> {
 
     CallSubXactCallbacks(SUBXACT_EVENT_COMMIT_SUB, my, parent)?;
 
-    // ResourceOwnerRelease(BEFORE_LOCKS) dissolves.
+    // ResourceOwnerRelease(s->curTransactionOwner, BEFORE_LOCKS, true, false).
+    backend_utils_resowner_resowner_seams::release_subxact_owner_before_locks::call(true)?;
     relcache_seams::at_eosubxact_relation_cache::call(true, my, parent)?;
     typcache_seams::at_eosubxact_type_cache::call();
     inval_seams::at_eosubxact_inval::call(true)?;
     storage_seams::at_subcommit_smgr::call();
 
     // The only lock we actually release here is the subtransaction XID lock.
+    // (CurrentResourceOwner = s->curTransactionOwner — already the live owner.)
     if xs(|s| s.current().full_transaction_id.is_valid()) {
         let xid = xs(|s| s.current().full_transaction_id.xid());
         backend_storage_lmgr_lmgr_seams::xact_lock_table_delete::call(xid)?;
     }
 
-    // Other locks transfer to the parent resource owner (dissolved).
+    // Other locks transfer to the parent resource owner.
+    // ResourceOwnerRelease(LOCKS) + ResourceOwnerRelease(AFTER_LOCKS).
+    backend_utils_resowner_resowner_seams::release_subxact_owner_locks::call(true)?;
 
     let (guc_nest_level, nesting_level) =
         xs(|s| (s.current().guc_nest_level, s.current().nesting_level));
@@ -2214,8 +2218,12 @@ fn CommitSubTransaction() -> PgResult<()> {
     // state in place).
     xs(|s| {
         s.XactReadOnly = s.current().prev_xact_read_only;
-        s.current_mut().has_resource_owner = false;
     });
+
+    // CurrentResourceOwner = CurTransactionResourceOwner = s->parent->
+    // curTransactionOwner; ResourceOwnerDelete(s->curTransactionOwner).
+    backend_utils_resowner_resowner_seams::cleanup_subxact_owner::call()?;
+    xs(|s| s.current_mut().has_resource_owner = false);
 
     AtSubCommit_Memory()?;
 
@@ -2309,12 +2317,15 @@ fn AbortSubTransaction() -> PgResult<()> {
 
         CallSubXactCallbacks(SUBXACT_EVENT_ABORT_SUB, my, parent)?;
 
-        // ResourceOwnerRelease(BEFORE_LOCKS) dissolves.
+        // ResourceOwnerRelease(s->curTransactionOwner, BEFORE_LOCKS, false,
+        // false) — releases the subtransaction's buffer pins, etc.
+        backend_utils_resowner_resowner_seams::release_subxact_owner_before_locks::call(false)?;
         aio_seams::at_eoxact_aio::call(false);
         relcache_seams::at_eosubxact_relation_cache::call(false, my, parent)?;
         typcache_seams::at_eosubxact_type_cache::call();
         inval_seams::at_eosubxact_inval::call(false)?;
-        // ResourceOwnerRelease(LOCKS / AFTER_LOCKS) dissolve.
+        // ResourceOwnerRelease(LOCKS) + ResourceOwnerRelease(AFTER_LOCKS).
+        backend_utils_resowner_resowner_seams::release_subxact_owner_locks::call(false)?;
         storage_seams::at_subabort_smgr::call()?;
 
         let (guc_nest_level, nesting_level) =
@@ -2351,7 +2362,11 @@ fn CleanupSubTransaction() -> PgResult<()> {
     let (my, _parent) = subxact_ids();
     portal_seams::at_subcleanup_portals::call(my)?;
 
-    // resource owner deletion dissolves
+    // CurrentResourceOwner = CurTransactionResourceOwner = parent's owner;
+    // if (s->curTransactionOwner) ResourceOwnerDelete(s->curTransactionOwner).
+    if xs(|s| s.current().has_resource_owner) {
+        backend_utils_resowner_resowner_seams::cleanup_subxact_owner::call()?;
+    }
     xs(|s| s.current_mut().has_resource_owner = false);
 
     AtSubCleanup_Memory();

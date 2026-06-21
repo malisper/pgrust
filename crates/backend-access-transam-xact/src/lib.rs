@@ -934,12 +934,16 @@ pub(crate) fn AtSubStart_Memory() {
     });
 }
 
-/// `AtSubStart_ResourceOwner` (xact.c:1283) — see `AtStart_ResourceOwner`.
-pub(crate) fn AtSubStart_ResourceOwner() {
+/// `AtSubStart_ResourceOwner` (xact.c:1283) — see `AtStart_ResourceOwner`. The
+/// real "SubTransaction" owner (a child of the parent's owner) is created in the
+/// resowner unit and published to the Cur/Current globals so pins taken during
+/// the subtransaction are tracked on it and can be released on subxact abort.
+pub(crate) fn AtSubStart_ResourceOwner() -> PgResult<()> {
     xs(|s| {
         debug_assert!(s.is_subxact());
         s.current_mut().has_resource_owner = true;
     });
+    backend_utils_resowner_resowner_seams::at_substart_resource_owner::call()
 }
 
 /// `AtCCI_LocalCache` (xact.c:1579)
@@ -1045,8 +1049,12 @@ pub(crate) fn AtSubAbort_Memory() {
 /// TopTransactionResourceOwner` dissolves with the ambient owner.
 pub(crate) fn AtAbort_ResourceOwner() {}
 
-/// `AtSubAbort_ResourceOwner` (xact.c:1929) — likewise.
-pub(crate) fn AtSubAbort_ResourceOwner() {}
+/// `AtSubAbort_ResourceOwner` (xact.c:1929) — `CurrentResourceOwner =
+/// s->curTransactionOwner`: re-establish a valid current owner (the subxact
+/// owner) so the subsequent abort cleanup is valid.
+pub(crate) fn AtSubAbort_ResourceOwner() {
+    backend_utils_resowner_resowner_seams::set_current_to_cur_transaction::call();
+}
 
 /// `AtSubAbort_childXids` (xact.c:1942)
 pub(crate) fn AtSubAbort_childXids() {

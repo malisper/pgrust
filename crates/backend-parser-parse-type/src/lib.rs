@@ -1194,9 +1194,25 @@ pub fn rich_variablesetstmt_to_parse(
         RichKind::VAR_RESET => FlatKind::Reset,
         RichKind::VAR_RESET_ALL => FlatKind::ResetAll,
     };
+    // Each `args` member is an `A_Const` literal (or a `DefElem` for
+    // VAR_SET_MULTI). The flat parsenodes universe has no `A_Const`; by
+    // convention the inner value node is carried directly (mirrors the GUC
+    // owner's `set_arg_from_nodes` flattener). Unwrap A_Const to its `val`.
     let mut args: Vec<types_parsenodes::Node> = Vec::with_capacity(vss.args.len());
     for n in vss.args.iter() {
-        args.push(rich_node_to_parse(n)?);
+        if n.node_tag() == types_nodes::nodes::ntag::T_A_Const {
+            let c = n.expect_a_const();
+            match c.val.as_deref() {
+                Some(v) => args.push(rich_node_to_parse(v)?),
+                // A NULL A_Const has no value node; SET literals are never NULL,
+                // but carry an empty String to stay total.
+                None => args.push(types_parsenodes::Node::String(
+                    types_parsenodes::StringNode { sval: None },
+                )),
+            }
+        } else {
+            args.push(rich_node_to_parse(n)?);
+        }
     }
     Ok(types_parsenodes::VariableSetStmt {
         kind,

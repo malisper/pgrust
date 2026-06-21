@@ -208,6 +208,59 @@ pub fn install() {
         Ok(())
     });
 
+    // `AtSubStart_ResourceOwner()` (xact.c:1283): create the subtransaction's
+    // resource owner as a child of the immediate parent's (the current
+    // CurTransactionResourceOwner), and publish it to Cur/Current.
+    rr::at_substart_resource_owner::set(|| {
+        let parent = crate::CurTransactionResourceOwner();
+        let owner = ResourceOwnerCreate(parent, "SubTransaction")?;
+        SetCurTransactionResourceOwner(Some(owner));
+        SetCurrentResourceOwner(Some(owner));
+        Ok(())
+    });
+
+    // `ResourceOwnerRelease(s->curTransactionOwner, BEFORE_LOCKS, false,
+    // is_commit)` — releases the subtransaction's buffer pins (etc.). The owner
+    // released is the live CurTransactionResourceOwner (= the subxact owner,
+    // re-established by AtSubAbort_ResourceOwner/CurrentResourceOwner before this
+    // runs).
+    rr::release_subxact_owner_before_locks::set(|is_commit| {
+        if let Some(owner) = crate::CurTransactionResourceOwner() {
+            crate::ResourceOwnerRelease(owner, RESOURCE_RELEASE_BEFORE_LOCKS, is_commit, false)?;
+        }
+        Ok(())
+    });
+
+    // `ResourceOwnerRelease(s->curTransactionOwner, LOCKS, false, is_commit)`
+    // then `ResourceOwnerRelease(..., AFTER_LOCKS, ...)`.
+    rr::release_subxact_owner_locks::set(|is_commit| {
+        if let Some(owner) = crate::CurTransactionResourceOwner() {
+            crate::ResourceOwnerRelease(owner, RESOURCE_RELEASE_LOCKS, is_commit, false)?;
+            crate::ResourceOwnerRelease(owner, RESOURCE_RELEASE_AFTER_LOCKS, is_commit, false)?;
+        }
+        Ok(())
+    });
+
+    // `CurrentResourceOwner = s->curTransactionOwner` (AtSubAbort_ResourceOwner):
+    // re-establish a valid CurrentResourceOwner (the subxact owner).
+    rr::set_current_to_cur_transaction::set(|| {
+        SetCurrentResourceOwner(crate::CurTransactionResourceOwner());
+    });
+
+    // `CurrentResourceOwner = CurTransactionResourceOwner = s->parent->
+    // curTransactionOwner; ResourceOwnerDelete(s->curTransactionOwner)` — restore
+    // the parent owner and free the subxact owner. The parent is the subxact
+    // owner's parent in the owner tree.
+    rr::cleanup_subxact_owner::set(|| {
+        if let Some(owner) = crate::CurTransactionResourceOwner() {
+            let parent = ResourceOwnerGetParent(owner);
+            SetCurrentResourceOwner(parent);
+            SetCurTransactionResourceOwner(parent);
+            ResourceOwnerDelete(owner)?;
+        }
+        Ok(())
+    });
+
     // --- resowner-seams ----------------------------------------------------
     rs::resource_owner_create_portal::set(|| {
         // C's `CreatePortal` (portalmem.c) creates the portal's resource owner as
