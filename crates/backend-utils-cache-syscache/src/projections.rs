@@ -4703,7 +4703,18 @@ pub(crate) fn object_owner_acl<'mcx>(
     // ownerId = DatumGetObjectId(SysCacheGetAttrNotNull(cacheid, tuple,
     //                            get_object_attnum_owner(classid))).
     let owner = getattr_oid(mcx, cacheid, &tup, owner_attnum as i32)?;
-    let acl = getattr_acl(mcx, cacheid, &tup, acl_attnum as i32)?;
+    // Catalogs without an ACL column (e.g. pg_statistic_ext) pass
+    // `acl_attnum == InvalidAttrNumber (0)`. C never reads the ACL in that
+    // case: `object_ownercheck` reads only the owner, and `object_aclmask_ext`
+    // is only invoked for classes that have an ACL column. Reading attnum 0
+    // here would call `heap_getattr(tuple, 0, ...)` and error
+    // `invalid attnum: 0`. Treat a missing ACL column as a NULL/absent ACL so
+    // the aclmask path falls back to `acldefault`.
+    let acl = if acl_attnum <= 0 {
+        None
+    } else {
+        getattr_acl(mcx, cacheid, &tup, acl_attnum as i32)?
+    };
     ReleaseSysCache(tup);
     Ok(Some(ObjectOwnerAcl { owner, acl }))
 }
