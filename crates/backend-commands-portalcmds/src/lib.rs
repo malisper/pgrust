@@ -767,10 +767,39 @@ fn persist_holdable_portal_try(portal: &Portal) -> PgResult<()> {
     tstore::set_tuplestore_dest_receiver_params::call(dest, portal, true)?;
 
     // Fetch the result set into the tuplestore.
+    //
+    // C drives the executor through `portal->queryDesc` (a raw pointer), so the
+    // portal struct is never borrow-locked while `ExecutorRun` runs. In the
+    // owned model the executor re-enters the portal subsystem on this thread:
+    // the tuplestore DestReceiver's per-row callback does `portal.borrow_mut()`
+    // to append to `portal->holdStore`. Holding a `borrow_mut()` across the run
+    // would make that a double-borrow panic (a panic during the executor ->
+    // backend kill). So move `queryDesc` out for the duration of the call and
+    // restore it afterwards; a Drop guard restores it even if the run unwinds
+    // (the moved field must always be put back, exactly as C's raw pointer is
+    // always valid). This mirrors pquery's `with_portal_query_desc`.
     {
-        let mut p = portal.borrow_mut();
-        let qd = p.queryDesc.as_mut().unwrap();
-        executor::executor_run::call(qd, direction, 0)?;
+        struct Restore<'p> {
+            portal: &'p Portal,
+            qd: Option<types_nodes::querydesc::QueryDesc>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                if let Some(qd) = self.qd.take() {
+                    self.portal.borrow_mut().queryDesc = Some(qd);
+                }
+            }
+        }
+        let taken = portal
+            .borrow_mut()
+            .queryDesc
+            .take()
+            .expect("persist_holdable_portal_try: queryDesc is NULL while executor is active");
+        let mut guard = Restore {
+            portal,
+            qd: Some(taken),
+        };
+        executor::executor_run::call(guard.qd.as_mut().unwrap(), direction, 0)?;
     }
 
     //   queryDesc->dest->rDestroy(queryDesc->dest);  queryDesc->dest = NULL;
