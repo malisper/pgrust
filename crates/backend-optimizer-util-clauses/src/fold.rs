@@ -1585,6 +1585,12 @@ fn inline_function(
 
     // Parse/analyze + gate + substitute (the parser-dependent body) via the
     // seam. Returns the SUBSTITUTED expression, NOT yet re-simplified.
+    //
+    // C installs `sql_inline_error_callback` on `error_context_stack` across the
+    // whole body parse/analyze/check (clauses.c:4641, popped at `fail:`). Under
+    // this tree's attach-on-propagation model that callback runs as a `map_err`
+    // wrapping the seam call: any error that propagates out of the body
+    // parse/analyze gets the same transposition + context line C produces.
     let substituted = clauses_seam::inline_sql_function::call(
         ctx.mcx,
         form,
@@ -1597,7 +1603,8 @@ fn inline_function(
         args,
         funcvariadic,
         ctx.estimate,
-    )?;
+    )
+    .map_err(|e| sql_inline_error_callback(e, &form.proname, prosrc.as_str()))?;
     let newexpr = match substituted {
         Some(e) => e,
         None => return Ok(None),
@@ -1610,6 +1617,34 @@ fn inline_function(
     let result = mutate(newexpr, ctx);
     ctx.active_fns.pop();
     result.map(Some)
+}
+
+/// `sql_inline_error_callback` (clauses.c:4920) — the error-context callback C
+/// installs on `error_context_stack` while parsing/analyzing/checking a SQL
+/// function body for inlining. Under this tree's attach-on-propagation model it
+/// runs as a `map_err` at the boundary where C pushed the callback.
+///
+/// If the propagating error carries a (cursor) error position, it is a syntax
+/// error in the body source: transpose it to an *internal* error report
+/// (`errposition(0)` + `internalerrposition(syntaxerrposition)` +
+/// `internalerrquery(prosrc)`) so the report points at the function body, not at
+/// the call site in the outer query. Then append the
+/// `SQL function "%s" during inlining` context line.
+fn sql_inline_error_callback(mut err: PgError, proname: &str, prosrc: &str) -> PgError {
+    // syntaxerrposition = geterrposition();
+    if let Some(syntaxerrposition) = err.cursor_position() {
+        if syntaxerrposition > 0 {
+            // errposition(0); internalerrposition(syntaxerrposition);
+            // internalerrquery(prosrc);
+            err = err
+                .with_cursor_position(0)
+                .with_internal_position(syntaxerrposition)
+                .with_internal_query(prosrc.to_string());
+        }
+    }
+
+    // errcontext("SQL function \"%s\" during inlining", proname);
+    err.add_context(format!("SQL function \"{proname}\" during inlining"))
 }
 
 /// `PROKIND_FUNCTION` (`pg_proc.h`).

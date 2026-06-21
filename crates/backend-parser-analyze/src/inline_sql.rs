@@ -46,6 +46,15 @@ const RECORDOID: Oid = 2249;
 const PROVOLATILE_IMMUTABLE: u8 = b'i';
 const PROVOLATILE_STABLE: u8 = b's';
 
+/// `TYPTYPE_*` (pg_type.h) — `typtype` bytes, as classified by
+/// `check_sql_fn_retval` (functions.c:2245).
+const TYPTYPE_BASE: u8 = b'b';
+const TYPTYPE_COMPOSITE: u8 = b'c';
+const TYPTYPE_DOMAIN: u8 = b'd';
+const TYPTYPE_ENUM: u8 = b'e';
+const TYPTYPE_RANGE: u8 = b'r';
+const TYPTYPE_MULTIRANGE: u8 = b'm';
+
 /// The `inline_sql_function` seam body. See module docs.
 #[allow(clippy::too_many_arguments)]
 pub fn inline_sql_function<'mcx>(
@@ -177,6 +186,30 @@ pub fn inline_sql_function<'mcx>(
         Some(e) => e.clone(),
         None => return Ok(None),
     };
+
+    // check_sql_fn_retval classifies the declared return type by its typtype
+    // (functions.c:2245). Only BASE/DOMAIN/ENUM/RANGE/MULTIRANGE take the scalar
+    // coercion leg below; COMPOSITE / RECORD take the rowtype leg (handled by the
+    // RECORDOID short-circuit in the coercion that follows); anything else —
+    // notably a polymorphic pseudo-type like `anyarray` that the call could not
+    // resolve to a concrete type (e.g. an `anyarray`-typed input column) — is
+    // rejected with "return type %s is not supported for SQL functions". This
+    // error fires during inlining and the caller attaches the
+    // `SQL function "<name>" during inlining` context line.
+    let fn_typtype = backend_utils_cache_lsyscache_seams::get_typtype::call(result_type)?;
+    let is_scalar = fn_typtype == TYPTYPE_BASE
+        || fn_typtype == TYPTYPE_DOMAIN
+        || fn_typtype == TYPTYPE_ENUM
+        || fn_typtype == TYPTYPE_RANGE
+        || fn_typtype == TYPTYPE_MULTIRANGE;
+    let is_rowtype = fn_typtype == TYPTYPE_COMPOSITE || result_type == RECORDOID;
+    if !is_scalar && !is_rowtype {
+        let tyname =
+            backend_utils_adt_format_type_seams::format_type_be::call(mcx, result_type)?;
+        return Err(PgError::error(format!(
+            "return type {tyname} is not supported for SQL functions"
+        )));
+    }
 
     // check_sql_fn_retval scalar leg: coerce the tlist expr to rettype
     // (COERCION_ASSIGNMENT / COERCE_IMPLICIT_CAST). On failure C raises a
