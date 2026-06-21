@@ -35,6 +35,7 @@ dependencies = [
 name = "backend-access-brin-bloom"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-reloptions",
  "backend-access-index-indexam-seams",
  "backend-utils-cache-typcache-seams",
  "backend-utils-error",
@@ -149,6 +150,8 @@ dependencies = [
  "backend-access-brin-entry-seams",
  "backend-access-brin-inclusion",
  "backend-access-brin-minmax-multi",
+ "backend-access-common-reloptions",
+ "backend-access-common-reloptions-seams",
  "backend-access-index-indexam-seams",
  "backend-utils-adt-scalar-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -174,6 +177,7 @@ name = "backend-access-brin-minmax-multi"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-entry-seams",
+ "backend-access-common-reloptions",
  "backend-access-index-indexam-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-numeric-seams",

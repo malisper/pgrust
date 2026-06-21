@@ -384,12 +384,15 @@ fn bloom_get_false_positive_rate(opts: Option<&BloomOptions>) -> f64 {
 
 /// `DatumGetUInt32(FunctionCall1Coll(hashFn, colloid, value))` reduced to the
 /// repo's by-OID call seam. `function_id` is the cached hash-procedure OID.
-fn call_hash(function_id: Oid, colloid: Oid, value: &Datum) -> PgResult<u32> {
-    let r = fmgr::function_call1_coll::call(
-        function_id,
-        colloid,
-        types_datum::Datum::from_usize(value.as_usize()),
-    )?;
+///
+/// The hash support procedure operates on the indexed column's type, which may
+/// be pass-by-reference (text/bytea/numeric/uuid/...). The value-carrying
+/// `function_call1_coll_datum` seam crosses a `ByRef` argument as its detoasted
+/// bytes through the fmgr by-reference side channel; the bare-word
+/// `function_call1_coll` would panic on a by-ref value (its scalar accessor
+/// reads a by-reference image as a machine word).
+fn call_hash(mcx: Mcx<'_>, function_id: Oid, colloid: Oid, value: &Datum) -> PgResult<u32> {
+    let r = fmgr::function_call1_coll_datum::call(mcx, function_id, colloid, value.clone_in(mcx)?)?;
     Ok(r.as_u32())
 }
 
@@ -516,7 +519,7 @@ pub fn brin_bloom_add_value<'mcx>(
     // Compute the hash of the new value with the supplied hash function and add
     // the hash to the bloom filter.
     let hash_fn = bloom_get_procinfo(bdesc, attno, PROCNUM_HASH)?;
-    let hash_value = call_hash(hash_fn, colloid, newval)?;
+    let hash_value = call_hash(mcx, hash_fn, colloid, newval)?;
 
     filter.add_value(hash_value, &mut updated);
 
@@ -535,6 +538,7 @@ pub fn brin_bloom_add_value<'mcx>(
 /// the multi-key signature (`PG_NARGS() == 4`); stops on the first eliminating
 /// key. `colloid` is `PG_GET_COLLATION()`.
 pub fn brin_bloom_consistent<'mcx>(
+    mcx: Mcx<'mcx>,
     bdesc: &BrinDesc<'mcx>,
     column: &BrinValues<'mcx>,
     keys: &[ScanKeyData<'mcx>],
@@ -557,7 +561,7 @@ pub fn brin_bloom_consistent<'mcx>(
             BLOOM_EQUAL_STRATEGY_NUMBER => {
                 // Return the range if the bloom filter seems to contain the value.
                 let finfo = bloom_get_procinfo(bdesc, attno, PROCNUM_HASH)?;
-                let hash_value = call_hash(finfo, colloid, value)?;
+                let hash_value = call_hash(mcx, finfo, colloid, value)?;
                 matches &= filter.contains_value(hash_value);
             }
             // shouldn't happen
@@ -676,16 +680,51 @@ fn bloom_get_procinfo(bdesc: &BrinDesc<'_>, attno: AttrNumber, procnum: u16) -> 
 /// here are `BLOOM_DEFAULT_NDISTINCT_PER_RANGE` (range `-1.0 .. INT_MAX`) and
 /// `BLOOM_DEFAULT_FALSE_POSITIVE_RATE` (range `BLOOM_MIN_.. BLOOM_MAX_`).
 pub fn brin_bloom_options() -> BloomOptions {
-    // add_local_real_reloption(relopts, "n_distinct_per_range", ...,
-    //   BLOOM_DEFAULT_NDISTINCT_PER_RANGE, -1.0, INT_MAX, ...);
-    // add_local_real_reloption(relopts, "false_positive_rate", ...,
-    //   BLOOM_DEFAULT_FALSE_POSITIVE_RATE,
-    //   BLOOM_MIN_FALSE_POSITIVE_RATE, BLOOM_MAX_FALSE_POSITIVE_RATE, ...);
     let _ = (BLOOM_MIN_FALSE_POSITIVE_RATE, BLOOM_MAX_FALSE_POSITIVE_RATE);
     BloomOptions {
         n_distinct_per_range: BLOOM_DEFAULT_NDISTINCT_PER_RANGE,
         false_positive_rate: BLOOM_DEFAULT_FALSE_POSITIVE_RATE,
     }
+}
+
+/// `pg_proc.dat` OID of the `brin_bloom_options` opclass-options support proc.
+pub const F_BRIN_BLOOM_OPTIONS: types_core::primitive::Oid = 4595;
+
+/// `sizeof(BloomOptions)` in the C ABI: `int32 vl_len_` padded to 8, then two
+/// `double`s — 24 bytes, with `nDistinctPerRange` at offset 8 and
+/// `falsePositiveRate` at offset 16.
+const BLOOM_OPTIONS_STRUCT_SIZE: usize = 24;
+const BLOOM_OFFSET_NDISTINCT: i32 = 8;
+const BLOOM_OFFSET_FPR: i32 = 16;
+
+/// The body of `brin_bloom_options` (brin_bloom.c:745) operating directly on a
+/// `LocalRelOpts`: register the two real reloptions with their C bounds and
+/// struct offsets. The opclass-options support proc is invoked by
+/// `index_opclass_options` with a pointer to the stack `local_relopts`; the
+/// owned model dispatches by the proc's OID to this builder instead of crossing
+/// an `internal`-pointer Datum through fmgr.
+pub fn brin_bloom_fill_local_reloptions(
+    relopts: &mut backend_access_common_reloptions::LocalRelOpts,
+) {
+    backend_access_common_reloptions::init_local_reloptions(relopts, BLOOM_OPTIONS_STRUCT_SIZE);
+    backend_access_common_reloptions::add_local_real_reloption(
+        relopts,
+        "n_distinct_per_range",
+        Some("number of distinct items expected in a BRIN page range"),
+        BLOOM_DEFAULT_NDISTINCT_PER_RANGE,
+        -1.0,
+        i32::MAX as f64,
+        BLOOM_OFFSET_NDISTINCT,
+    );
+    backend_access_common_reloptions::add_local_real_reloption(
+        relopts,
+        "false_positive_rate",
+        Some("desired false-positive rate for the bloom filters"),
+        BLOOM_DEFAULT_FALSE_POSITIVE_RATE,
+        BLOOM_MIN_FALSE_POSITIVE_RATE,
+        BLOOM_MAX_FALSE_POSITIVE_RATE,
+        BLOOM_OFFSET_FPR,
+    );
 }
 
 /// `brin_bloom_summary_in` (brin_bloom.c:775): input is disallowed.

@@ -667,14 +667,40 @@ pub struct MinMaxMultiOptions {
 /// offsetof(MinMaxMultiOptions, valuesPerRange))`; the default and bounds
 /// (`8 .. 256`) are reproduced here. Mirrors `brin_bloom_options`.
 pub fn brin_minmax_multi_options() -> MinMaxMultiOptions {
-    // add_local_int_reloption(relopts, "values_per_range", ...,
-    //   MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE, 8, 256, ...);
-    const MINMAX_MULTI_MIN_VALUES_PER_RANGE: i32 = 8;
-    const MINMAX_MULTI_MAX_VALUES_PER_RANGE: i32 = 256;
-    let _ = (MINMAX_MULTI_MIN_VALUES_PER_RANGE, MINMAX_MULTI_MAX_VALUES_PER_RANGE);
     MinMaxMultiOptions {
         values_per_range: MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE,
     }
+}
+
+/// `pg_proc.dat` OID of the `brin_minmax_multi_options` opclass-options proc.
+pub const F_BRIN_MINMAX_MULTI_OPTIONS: types_core::primitive::Oid = 4620;
+
+/// `sizeof(MinMaxMultiOptions)`: `int32 vl_len_` then `int valuesPerRange` —
+/// 8 bytes, `valuesPerRange` at offset 4.
+const MINMAX_MULTI_OPTIONS_STRUCT_SIZE: usize = 8;
+const MINMAX_MULTI_OFFSET_VALUES_PER_RANGE: i32 = 4;
+
+/// The body of `brin_minmax_multi_options` (brin_minmax_multi.c:2954) operating
+/// directly on a `LocalRelOpts`: register the `values_per_range` int reloption
+/// with its C bounds (`8 .. 256`) and struct offset. See
+/// `brin_bloom_fill_local_reloptions` for why the owned model dispatches by OID
+/// to this builder rather than crossing an `internal`-pointer Datum.
+pub fn brin_minmax_multi_fill_local_reloptions(
+    relopts: &mut backend_access_common_reloptions::LocalRelOpts,
+) {
+    backend_access_common_reloptions::init_local_reloptions(
+        relopts,
+        MINMAX_MULTI_OPTIONS_STRUCT_SIZE,
+    );
+    backend_access_common_reloptions::add_local_int_reloption(
+        relopts,
+        "values_per_range",
+        Some("number of values stored in a BRIN page range"),
+        MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE,
+        8,
+        256,
+        MINMAX_MULTI_OFFSET_VALUES_PER_RANGE,
+    );
 }
 
 /// `brin_minmax_multi_summary_in` (brin_minmax_multi.c:2976): input is

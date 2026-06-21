@@ -1051,21 +1051,6 @@ mod recurrence_guard {
         // calls itself; the guard's outward-seam exclusion covers it, so no
         // allowlist entry is needed (its real owner is the unported SQL-function
         // parse/rewrite path). DESIGN_DEBT TD-SRF-INLINE-QUERY.
-        // DESIGN_DEBT (TD-INDEX-OPCLASS-OPTIONS): `index_build_local_reloptions`
-        // is the `local_relopts` tail of indexam.c's `index_opclass_options`:
-        // `init_local_reloptions(&relopts, 0)` +
-        // `FunctionCall1(procinfo, PointerGetDatum(&relopts))` +
-        // `build_local_reloptions(&relopts, attoptions, validate)`. The reloptions
-        // owner HAS the two helper bodies (`init_local_reloptions`,
-        // `build_local_reloptions`), but the middle leg invokes the opclass's
-        // options-parsing SUPPORT PROCEDURE through fmgr (`FunctionCall1`), passing
-        // a *pointer* to the stack `LocalRelOpts` as a Datum that the proc mutates
-        // in place. The reloptions crate has no fmgr dependency, and the bare-word
-        // `Datum(usize)` model has no pointer lane to carry `&mut LocalRelOpts`
-        // through the call — the same fmgr-Datum-pointer bridge that is unported
-        // workspace-wide. Installing would just relocate the runtime panic into the
-        // fmgr leg. Pay down once the pointer-Datum/fmgr dispatch bridge lands.
-        ("backend_access_common_reloptions", "index_build_local_reloptions"),
         // DESIGN_DEBT (TD-GIN-OPCLASS-DISPATCH): the GIN opclass support-proc
         // dispatch family — `gin_extract_query` (extractQueryFn,
         // `FunctionCall7Coll`, ginscan.c `ginNewScanKey`), `gin_compare_partial`
