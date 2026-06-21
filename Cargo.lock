@@ -8525,6 +8525,7 @@ dependencies = [
  "backend-catalog-pg-type",
  "backend-catalog-pg-type-seams",
  "backend-commands-aggregatecmds",
+ "backend-commands-collationcmds",
  "backend-commands-define-seams",
  "backend-commands-functioncmds-seams",
  "backend-commands-opclasscmds-seams",

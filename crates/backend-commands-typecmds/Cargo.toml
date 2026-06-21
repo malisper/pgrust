@@ -31,6 +31,7 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 backend-commands-operatorcmds = { path = "../backend-commands-operatorcmds" }
 backend-commands-aggregatecmds = { path = "../backend-commands-aggregatecmds" }
 backend-commands-tsearchcmds = { path = "../backend-commands-tsearchcmds" }
+backend-commands-collationcmds = { path = "../backend-commands-collationcmds" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 

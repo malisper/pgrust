@@ -4990,8 +4990,8 @@ fn define_stmt_seam<'mcx>(
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
     use types_nodes::parsenodes::{
-        OBJECT_AGGREGATE, OBJECT_OPERATOR, OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY,
-        OBJECT_TSPARSER, OBJECT_TSTEMPLATE, OBJECT_TYPE,
+        OBJECT_AGGREGATE, OBJECT_COLLATION, OBJECT_OPERATOR, OBJECT_TSCONFIGURATION,
+        OBJECT_TSDICTIONARY, OBJECT_TSPARSER, OBJECT_TSTEMPLATE, OBJECT_TYPE,
     };
 
     let ds = match stmt.as_definestmt() {
@@ -5071,6 +5071,16 @@ fn define_stmt_seam<'mcx>(
                 &ds.defnames,
                 &ds.definition,
                 &mut copied,
+            )
+        }
+        OBJECT_COLLATION => {
+            // Assert(stmt->args == NIL).
+            let names = decode_name_list(&ds.defnames);
+            backend_commands_collationcmds::DefineCollation(
+                mcx,
+                &names,
+                &definition,
+                ds.if_not_exists,
             )
         }
         _ => Err(PgError::error(format!(
