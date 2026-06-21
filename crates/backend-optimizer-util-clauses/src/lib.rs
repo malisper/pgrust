@@ -230,6 +230,26 @@ pub fn init_seams() {
         grounded::contain_window_function(Some(clause)).expect("contain_window_function")
     });
 
+    // get_eclass_for_sort_expr / generate_join_implied_equalities (equivclass.c)
+    // reach `is_parallel_safe(root, (Node *) em->em_expr)` when building partial
+    // (parallel) paths — `require_parallel_safe` gates an EquivalenceMember's
+    // expr. clauses.c owns the predicate; the ext-seams contract passes one
+    // rootless `&Expr` plus `root` (for the planner globals the C reads off
+    // `root->glob` / the init-plan chain). Compute the C inputs off `root` (same
+    // derivation as `is_parallel_safe_nodes`) and run the grounded walk. A
+    // propagated planner error is a loud panic (mirrors C's elog/ereport).
+    backend_optimizer_path_equivclass_ext_seams::is_parallel_safe::set(|root, expr| {
+        let (max_parallel_hazard_glob, param_exec_types_is_empty, safe_param_ids) =
+            is_parallel_safe_inputs(root);
+        grounded::is_parallel_safe(
+            max_parallel_hazard_glob,
+            param_exec_types_is_empty,
+            safe_param_ids,
+            Some(expr),
+        )
+        .expect("is_parallel_safe")
+    });
+
     // joininfo.c / restrictinfo.c reach `contain_leaked_vars((Node *) clause)`
     // (clauses.c) over a rootless `&Expr` through the joininfo-ext consumer-side
     // seam crate (no owner directory). clauses.c owns it; the grounded impl
@@ -338,10 +358,14 @@ pub fn init_seams() {
 /// (which takes one `&Expr`) per list element is equivalent to walking the C
 /// `List` node (the walker recurses element-wise). A propagated planner error is
 /// a loud panic (mirrors C's elog/ereport).
-fn is_parallel_safe_nodes(
+/// Compute the C `is_parallel_safe` inputs that the `Expr` model does not
+/// thread — `root->glob->maxParallelHazard`, whether `glob->paramExecTypes` is
+/// empty, and the init-plan `setParam` ids of this query level and every parent
+/// level (`for (proot = root; proot; proot = proot->parent_root) foreach
+/// init_plans: concat initsubplan->setParam`).
+fn is_parallel_safe_inputs(
     root: &types_pathnodes::PlannerInfo,
-    nodes: &[types_pathnodes::NodeId],
-) -> bool {
+) -> (u8, bool, alloc::vec::Vec<i32>) {
     let glob = root
         .glob
         .as_ref()
@@ -349,10 +373,6 @@ fn is_parallel_safe_nodes(
     let max_parallel_hazard_glob = glob.max_parallel_hazard as u8;
     let param_exec_types_is_empty = glob.param_exec_types.is_empty();
 
-    // `safe_param_ids` = the setParam ids of every init SubPlan at this query
-    // level and all parent levels (computed once; the same set applies to each
-    // list element). C: `for (proot = root; proot; proot = proot->parent_root)
-    // foreach init_plans: concat initsubplan->setParam`.
     let mut safe_param_ids: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
     let mut proot: Option<&types_pathnodes::PlannerInfo> = Some(root);
     while let Some(pr) = proot {
@@ -363,6 +383,19 @@ fn is_parallel_safe_nodes(
         }
         proot = pr.parent_root.as_deref();
     }
+    (
+        max_parallel_hazard_glob,
+        param_exec_types_is_empty,
+        safe_param_ids,
+    )
+}
+
+fn is_parallel_safe_nodes(
+    root: &types_pathnodes::PlannerInfo,
+    nodes: &[types_pathnodes::NodeId],
+) -> bool {
+    let (max_parallel_hazard_glob, param_exec_types_is_empty, safe_param_ids) =
+        is_parallel_safe_inputs(root);
 
     for &nid in nodes {
         let expr = root.node(nid);
