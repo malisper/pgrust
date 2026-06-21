@@ -274,7 +274,7 @@ impl<'a> JsonPathLexer<'a> {
             let value = Some(self.scanstring.clone());
             self.state = State::Initial;
             let tok = check_keyword(&self.scanstring);
-            return Ok(Step::Emit(Lexeme { token: tok, value }));
+            return Ok(Step::Emit(Lexeme { token: tok, value, start: 0, end: 0 }));
         }
 
         // <xnq>{other}+
@@ -298,7 +298,7 @@ impl<'a> JsonPathLexer<'a> {
             let value = Some(self.scanstring.clone());
             self.state = State::Initial;
             let tok = check_keyword(&self.scanstring);
-            return Ok(Step::Emit(Lexeme { token: tok, value }));
+            return Ok(Step::Emit(Lexeme { token: tok, value, start: 0, end: 0 }));
         }
 
         // <xnq>\/\* (comment start)
@@ -316,7 +316,7 @@ impl<'a> JsonPathLexer<'a> {
             let value = Some(self.scanstring.clone());
             self.state = State::Initial;
             let tok = check_keyword(&self.scanstring);
-            return Ok(Step::Emit(Lexeme { token: tok, value }));
+            return Ok(Step::Emit(Lexeme { token: tok, value, start: 0, end: 0 }));
         }
 
         // Unreachable for well-formed 8-bit input; treat as other-byte append.
@@ -348,7 +348,7 @@ impl<'a> JsonPathLexer<'a> {
             self.pos += 1;
             let value = Some(self.scanstring.clone());
             self.state = State::Initial;
-            return Ok(Step::Emit(Lexeme { token: Token::STRING_P, value }));
+            return Ok(Step::Emit(Lexeme { token: Token::STRING_P, value, start: 0, end: 0 }));
         }
 
         // <xq,xvq>[^\\\"]+
@@ -392,7 +392,7 @@ impl<'a> JsonPathLexer<'a> {
             self.pos += 1;
             let value = Some(self.scanstring.clone());
             self.state = State::Initial;
-            return Ok(Step::Emit(Lexeme { token: Token::VARIABLE_P, value }));
+            return Ok(Step::Emit(Lexeme { token: Token::VARIABLE_P, value, start: 0, end: 0 }));
         }
 
         // <xq,xvq>[^\\\"]+

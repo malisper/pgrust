@@ -101,6 +101,12 @@ pub enum Token {
 pub struct Lexeme {
     pub token: Token,
     pub value: Option<JsonPathString>,
+    /// Byte span of the matched lexeme in the original input (`yytext`'s
+    /// position). The scanner's `next_token` fills this after the scan rule
+    /// emits; it is what `jsonpath_yyerror` uses to format the `"at or near
+    /// \"%s\""` clause on a parse error.
+    pub start: usize,
+    pub end: usize,
 }
 
 /// The flex start condition (`INITIAL` plus the four exclusive states).

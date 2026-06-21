@@ -160,6 +160,12 @@ impl<'a> JsonPathLexer<'a> {
         escontext: &mut Option<&mut SoftErrorContext>,
     ) -> PgResult<Option<Lexeme>> {
         loop {
+            // Token start = cursor at the top of the iteration that emits. A
+            // `Step::Continue` (whitespace/comment skip) advances `self.pos` and
+            // loops, so on the emitting iteration `start` is the matched
+            // lexeme's start and `self.pos` (post-scan) is its end. This is the
+            // `yytext` span C's `jsonpath_yyerror` reports on a parse error.
+            let start = self.pos;
             let step = match self.state {
                 State::Initial => self.scan_initial(escontext)?,
                 State::Xnq => self.scan_xnq(escontext)?,
@@ -168,7 +174,11 @@ impl<'a> JsonPathLexer<'a> {
                 State::Xc => self.scan_xc(escontext)?,
             };
             match step {
-                Step::Emit(lex) => return Ok(Some(lex)),
+                Step::Emit(mut lex) => {
+                    lex.start = start;
+                    lex.end = self.pos;
+                    return Ok(Some(lex));
+                }
                 Step::Continue => continue,
                 Step::Terminate => return Ok(None),
             }
@@ -243,7 +253,7 @@ impl<'a> JsonPathLexer<'a> {
             self.scanstring.addchar(false, 0);
             self.pos = q;
             let value = Some(self.scanstring.clone());
-            return Ok(Step::Emit(Lexeme { token: Token::VARIABLE_P, value }));
+            return Ok(Step::Emit(Lexeme { token: Token::VARIABLE_P, value, start: 0, end: 0 }));
         }
 
         // \$\"  -> begin xvq
@@ -285,7 +295,7 @@ impl<'a> JsonPathLexer<'a> {
         if crate::is_special(s[p]) {
             let c = s[p];
             self.pos += 1;
-            return Ok(Step::Emit(Lexeme { token: Token::Char(c), value: None }));
+            return Ok(Step::Emit(Lexeme { token: Token::Char(c), value: None, start: 0, end: 0 }));
         }
 
         // {blank}+  -> ignore
@@ -427,14 +437,14 @@ impl<'a> JsonPathLexer<'a> {
                 self.scanstring.addchar(false, 0);
                 self.pos = p + best_len;
                 let value = Some(self.scanstring.clone());
-                Ok(Some(Step::Emit(Lexeme { token: Token::NUMERIC_P, value })))
+                Ok(Some(Step::Emit(Lexeme { token: Token::NUMERIC_P, value, start: 0, end: 0 })))
             }
             Kind::Int => {
                 self.scanstring.addstring(true, &s[p..p + best_len]);
                 self.scanstring.addchar(false, 0);
                 self.pos = p + best_len;
                 let value = Some(self.scanstring.clone());
-                Ok(Some(Step::Emit(Lexeme { token: Token::INT_P, value })))
+                Ok(Some(Step::Emit(Lexeme { token: Token::INT_P, value, start: 0, end: 0 })))
             }
             Kind::RealFail => {
                 // {realfail} -> yyerror "invalid numeric literal"; yyterminate.
@@ -461,5 +471,5 @@ impl<'a> JsonPathLexer<'a> {
 }
 
 fn emit(token: Token) -> Step {
-    Step::Emit(Lexeme { token, value: None })
+    Step::Emit(Lexeme { token, value: None, start: 0, end: 0 })
 }

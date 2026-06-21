@@ -32,7 +32,9 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use backend_utils_adt_jsonpath_scan::{jsonpath_yyerror, JsonPathLexer, Lexeme, Token};
+use backend_utils_adt_jsonpath_scan::{
+    jsonpath_yyerror, jsonpath_yyerror_yytext, JsonPathLexer, Lexeme, Token,
+};
 use mcx::MemoryContext;
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 use types_error::{ERRCODE_INVALID_REGULAR_EXPRESSION, ERRCODE_SYNTAX_ERROR};
@@ -1323,6 +1325,12 @@ pub fn parsejsonpath(
         let parsed = parser.parse_result()?;
         let aborted = parser.aborted;
         let consumed_all = parser.peek().is_none();
+        // The lookahead token the parser could not accept — C's bison `yytext`
+        // at the point `jsonpath_yyerror` fires. Its exact byte span gives the
+        // `at or near "<lexeme>"` near-text; when the parser stopped at end of
+        // input (no lookahead) there is no span and yyerror reports "at end of
+        // jsonpath input".
+        let err_span: Option<(usize, usize)> = parser.peek().map(|l| (l.start, l.end));
         // Release the parser's borrow of `escontext_ref` before re-borrowing it
         // for the error path below (the parser's job is done).
         drop(parser);
@@ -1335,7 +1343,23 @@ pub fn parsejsonpath(
                 // (jsonpath_gram.c). If a soft error is already set (e.g. from a
                 // makeItem* action), yyerror leaves it intact.
                 if !escontext_ref.as_ref().is_some_and(|c| c.error_occurred()) {
-                    jsonpath_yyerror(escontext_ref.as_deref_mut(), str, str.len(), "syntax error")?;
+                    match err_span {
+                        Some((s, e)) if s < e && e <= str.len() => {
+                            jsonpath_yyerror_yytext(
+                                escontext_ref.as_deref_mut(),
+                                &str[s..e],
+                                "syntax error",
+                            )?;
+                        }
+                        _ => {
+                            jsonpath_yyerror(
+                                escontext_ref.as_deref_mut(),
+                                str,
+                                str.len(),
+                                "syntax error",
+                            )?;
+                        }
+                    }
                 }
                 Ok(None)
             }

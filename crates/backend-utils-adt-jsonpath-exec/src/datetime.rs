@@ -348,9 +348,9 @@ pub fn datetime_method_cast(
     use backend_utils_adt_datetime::date::{
         date2timestamp, date2timestamptz, time_timetz, timestamp_date, timestamptz_date,
     };
-    use backend_utils_adt_datetime::time::{anytime_typmod_check, AdjustTimeForTypmod};
+    use backend_utils_adt_datetime::time::AdjustTimeForTypmod;
     use backend_utils_adt_datetime::timestamp::{
-        anytimestamp_typmod_check, timestamp2timestamptz, timestamp_time, timestamptz_time,
+        timestamp2timestamptz, timestamp_time, timestamptz_time,
         timestamptz_timetz, timestamptz2timestamp, AdjustTimestampForTypmod,
     };
     use backend_utils_adt_datetime::timetz::timetz_time;
@@ -409,7 +409,7 @@ pub fn datetime_method_cast(
             }
 
             if time_precision != -1 {
-                time_precision = anytime_typmod_check(false, time_precision)?;
+                time_precision = anytime_typmod_check_warn(false, time_precision)?;
                 let mut result: TimeADT = value.as_i64();
                 AdjustTimeForTypmod(&mut result, time_precision);
                 value = Datum::from_i64(result);
@@ -436,7 +436,7 @@ pub fn datetime_method_cast(
             }
 
             if time_precision != -1 {
-                time_precision = anytime_typmod_check(true, time_precision)?;
+                time_precision = anytime_typmod_check_warn(true, time_precision)?;
                 let mut tt = TimeTzADT {
                     time: value.as_i64(),
                     zone: tz,
@@ -462,7 +462,7 @@ pub fn datetime_method_cast(
             }
 
             if time_precision != -1 {
-                time_precision = anytimestamp_typmod_check(false, time_precision)?;
+                time_precision = anytimestamp_typmod_check_warn(false, time_precision)?;
                 let mut result: Timestamp = value.as_i64();
                 if AdjustTimestampForTypmod(&mut result, time_precision).is_err() {
                     // C: "should not happen" — a hard error regardless of soft mode.
@@ -520,7 +520,7 @@ pub fn datetime_method_cast(
             }
 
             if time_precision != -1 {
-                time_precision = anytimestamp_typmod_check(true, time_precision)?;
+                time_precision = anytimestamp_typmod_check_warn(true, time_precision)?;
                 let mut result: TimestampTz = value.as_i64();
                 if AdjustTimestampForTypmod(&mut result, time_precision).is_err() {
                     return Err(timestamp_precision_invalid(target)?);
@@ -581,6 +581,54 @@ fn timestamp_precision_invalid(target: JsonPathItemType) -> PgResult<PgError> {
             "time precision of jsonpath item method .{name}() is invalid"
         ))
         .into_error())
+}
+
+/// `anytime_typmod_check(istz, typmod)` (date.c:72) wrapper that emits the
+/// `ereport(WARNING, "TIME(%d)%s precision reduced to maximum allowed, %d")`
+/// that the leaf `backend-utils-adt-datetime` arithmetic core (which has no
+/// backend ereport facility) defers to its caller. C emits this WARNING inside
+/// `anytime_typmod_check` itself; here we reproduce it at the jsonpath_exec
+/// call site, identically gated on `typmod > MAX_TIME_PRECISION`.
+fn anytime_typmod_check_warn(istz: bool, typmod: i32) -> PgResult<i32> {
+    use backend_utils_adt_datetime::time::anytime_typmod_check;
+    use types_datetime::MAX_TIME_PRECISION;
+    if typmod > MAX_TIME_PRECISION {
+        ereport(types_error::WARNING)
+            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(alloc::format!(
+                "TIME({typmod}){} precision reduced to maximum allowed, {MAX_TIME_PRECISION}",
+                if istz { " WITH TIME ZONE" } else { "" }
+            ))
+            .finish(types_error::ErrorLocation::new(
+                "date.c",
+                83,
+                "anytime_typmod_check",
+            ))?;
+    }
+    anytime_typmod_check(istz, typmod)
+}
+
+/// `anytimestamp_typmod_check(istz, typmod)` (timestamp.c:120) wrapper emitting
+/// the `ereport(WARNING, "TIMESTAMP(%d)%s precision reduced to maximum allowed,
+/// %d")` deferred by the leaf datetime core, identically gated on
+/// `typmod > MAX_TIMESTAMP_PRECISION`.
+fn anytimestamp_typmod_check_warn(istz: bool, typmod: i32) -> PgResult<i32> {
+    use backend_utils_adt_datetime::timestamp::anytimestamp_typmod_check;
+    use types_datetime::MAX_TIMESTAMP_PRECISION;
+    if typmod > MAX_TIMESTAMP_PRECISION {
+        ereport(types_error::WARNING)
+            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(alloc::format!(
+                "TIMESTAMP({typmod}){} precision reduced to maximum allowed, {MAX_TIMESTAMP_PRECISION}",
+                if istz { " WITH TIME ZONE" } else { "" }
+            ))
+            .finish(types_error::ErrorLocation::new(
+                "timestamp.c",
+                136,
+                "anytimestamp_typmod_check",
+            ))?;
+    }
+    anytimestamp_typmod_check(istz, typmod)
 }
 
 /// Route a hard `PgError` either to a throw (`Err`) or, in soft mode, to the
