@@ -93,6 +93,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_get_expr_worker(exprstr, relid, prettyFlags)` (ruleutils.c 2709) —
+    /// the shared body of `pg_get_expr`: parse the `pg_node_tree` text in
+    /// `exprstr` into a node tree and reverse-compile it to source text in
+    /// the deparse context of `relid` (a single-relation context when
+    /// `relid` is valid). Returns `Ok(None)` when the relation has gone away
+    /// (C returns NULL). Reads the catalog / deparses, so it can
+    /// `ereport(ERROR)`; `Err` also carries OOM.
+    pub fn pg_get_expr_worker<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        exprstr: &str,
+        relid: types_core::Oid,
+        pretty_flags: i32,
+    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `select_rtable_names_for_explain(rtable, rels_used)` (ruleutils.c):
     /// choose the unique alias name to display for each RTE actually referenced
     /// in the plan (`rels_used`), returning a `List *` of `char *` (a `None`

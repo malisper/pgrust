@@ -180,6 +180,14 @@ pub fn init_seams() {
         crate::partconstrdef::pg_get_partconstrdef_string(mcx, pk_relid, "pk")
     });
 
+    // pg_get_expr_worker(exprstr, relid, prettyFlags): the shared body of the
+    // SQL `pg_get_expr` builtin, exposed for callers (e.g. catalog
+    // `constraints_equivalent`) that must reverse-compile a stored `conbin`
+    // node-tree string to canonical source text.
+    backend_utils_adt_ruleutils_seams::pg_get_expr_worker::set(|mcx, exprstr, relid, pretty| {
+        crate::pg_get_expr_worker(mcx, exprstr, relid, pretty)
+    });
+
     // Register the SQL-callable deparser builtins (C: their `fmgr_builtins[]`
     // rows) so by-OID fmgr dispatch resolves them.
     crate::register_ruleutils_builtins();

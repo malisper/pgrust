@@ -26,6 +26,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-adt-domains-seams = { path = "../backend-utils-adt-domains-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 backend-utils-cache-inval-pc-seams = { path = "../backend-utils-cache-inval-pc-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-access-common-next = { path = "../backend-access-common-next" }

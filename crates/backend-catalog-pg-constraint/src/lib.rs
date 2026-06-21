@@ -73,6 +73,7 @@ use backend_commands_indexcmds_seams as indexcmds_seams;
 use backend_nodes_core::bitmapset::{bms_add_member, bms_is_subset};
 use backend_utils_adt_format_type_seams as format_type_seams;
 use backend_utils_adt_varlena_seams as varlena_seams;
+use backend_utils_adt_ruleutils_seams as ruleutils_seams;
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_cache_syscache_seams as syscache_seams;
 
@@ -3131,19 +3132,65 @@ pub fn constraint_connoinherit(mcx: Mcx<'_>, tup: &FormedTuple<'_>) -> PgResult<
     Ok(form.connoinherit)
 }
 
+/// `decompile_conbin(contup, tupdesc)` (tablecmds.c:17436) — reverse-compile a
+/// CHECK constraint's stored `conbin` (`pg_node_tree`) into its source string,
+/// via `pg_get_expr(conbin, conrelid)`. `elog(ERROR)` on a null `conbin`.
+fn decompile_conbin<'mcx>(
+    mcx: Mcx<'mcx>,
+    htup: &FormedTuple<'mcx>,
+    constraintrel: &RelationData<'mcx>,
+    conrelid: Oid,
+) -> PgResult<String> {
+    let cols = heap_deform_tuple(mcx, &htup.tuple, &constraintrel.rd_att, &htup.data)?;
+    let idx = Anum_pg_constraint_conbin as usize - 1;
+    let is_null = cols.get(idx).map(|(_, n)| *n).unwrap_or(true);
+    if is_null {
+        return Err(PgError::new(ERROR, "null conbin for constraint".to_string()));
+    }
+    let (conbin_datum, _) = &cols[idx];
+    // pg_get_expr expects the pg_node_tree text; text_to_cstring detoasts.
+    let exprstr = varlena_seams::text_to_cstring_v::call(mcx, conbin_datum)?
+        .as_str()
+        .to_string();
+    // DirectFunctionCall2(pg_get_expr, attr, conrelid) — prettyFlags = 0.
+    let src = ruleutils_seams::pg_get_expr_worker::call(mcx, &exprstr, conrelid, 0)?
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+    Ok(src)
+}
+
+/// `constraints_equivalent(a, b, tupleDesc)` (tablecmds.c:17470) — two CHECK
+/// constraints are functionally equivalent when their deferral flags agree and
+/// they reverse-compile to the same source string. Enforceability is ignored.
+fn constraints_equivalent(
+    a_condeferrable: bool,
+    a_condeferred: bool,
+    a_src: &Option<String>,
+    b_condeferrable: bool,
+    b_condeferred: bool,
+    b_src: &Option<String>,
+) -> bool {
+    if a_condeferrable != b_condeferrable || a_condeferred != b_condeferred {
+        return false;
+    }
+    match (a_src, b_src) {
+        (Some(a), Some(b)) => a == b,
+        // A null conbin would have errored in decompile_conbin; treat a missing
+        // source as non-equivalent defensively.
+        _ => false,
+    }
+}
+
 /// `MergeConstraintsIntoExisting(child_rel, parent_rel)` (tablecmds.c:17638) —
 /// match the parent's inheritable CHECK / NOT NULL constraints to the child and
 /// bump each matched child constraint's `coninhcount` (and clear `conislocal`
 /// for a partitioned parent). Lives here because the `Form_pg_constraint` deform
 /// + `pg_constraint` scan/write substrate is owned by this crate.
 ///
-/// NOT NULL constraints are matched by attribute number and fully ported. CHECK
-/// constraints are matched by name; the C compares their *definitions* via
-/// `constraints_equivalent` (reverse-compile to source through `pg_get_expr`),
-/// which needs the ruleutils deparser (unported). When both parent and child
-/// carry a same-named CHECK constraint, this raises a precise error noting that
-/// gap rather than risk an unverified merge; a parent with no CHECK constraints
-/// (the ATTACH / partition common case) never reaches it.
+/// NOT NULL constraints are matched by attribute number; CHECK constraints are
+/// matched by name and verified equivalent via `constraints_equivalent`
+/// (reverse-compile both `conbin`s to source through `pg_get_expr` and compare,
+/// plus the deferral flags).
 pub fn merge_constraints_into_existing<'mcx>(
     mcx: Mcx<'mcx>,
     child_rel: &RelationData<'mcx>,
@@ -3171,7 +3218,14 @@ pub fn merge_constraints_into_existing<'mcx>(
         contype: i8,
         conname: [u8; NAMEDATALEN],
         connoinherit: bool,
+        convalidated: bool,
+        conenforced: bool,
+        condeferrable: bool,
+        condeferred: bool,
         attno: AttrNumber, /* for NOT NULL */
+        /// For CHECK: the reverse-compiled `conbin` source string (the
+        /// `constraints_equivalent` comparison key). `None` for NOT NULL.
+        check_src: Option<String>,
     }
     let mut parent_cons: Vec<ParentCon> = Vec::new();
     {
@@ -3189,11 +3243,21 @@ pub fn merge_constraints_into_existing<'mcx>(
             } else {
                 InvalidAttrNumber
             };
+            let check_src = if ct == CONSTRAINT_CHECK {
+                Some(decompile_conbin(mcx, &row.htup, &constraintrel, parent_relid)?)
+            } else {
+                None
+            };
             parent_cons.push(ParentCon {
                 contype: ct,
                 conname: row.form.conname,
                 connoinherit: row.form.connoinherit,
+                convalidated: row.form.convalidated,
+                conenforced: row.form.conenforced,
+                condeferrable: row.form.condeferrable,
+                condeferred: row.form.condeferred,
                 attno,
+                check_src,
             });
             Ok(true)
         })?;
@@ -3202,44 +3266,63 @@ pub fn merge_constraints_into_existing<'mcx>(
     for parent_con in parent_cons.iter() {
         let mut found = false;
 
-        // For a CHECK constraint matched by name, the C verifies equivalence via
-        // the deparser — unported.
-        if parent_con.contype == CONSTRAINT_CHECK {
-            constraintrel.close(RowExclusiveLock)?;
-            return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-                .errmsg(
-                    "ATTACH/INHERIT merging an inherited CHECK constraint is not yet \
-                     supported (constraints_equivalent needs the ruleutils pg_get_expr \
-                     deparser, unported)"
-                        .to_string(),
-                )
-                .into_error());
-        }
-
-        // NOT NULL: match the child constraint by attribute number.
+        // Search for a child constraint matching this one. CHECK constraints are
+        // matched by constraint name, NOT NULL ones by attribute number.
         let child_key = [oid_key(Anum_pg_constraint_conrelid, child_rel.rd_id)?];
-        let mut matched: Option<(ItemPointerData, FormData_pg_constraint, FormedTuple<'mcx>)> = None;
+        let mut matched: Option<(ItemPointerData, FormData_pg_constraint, Option<String>)> = None;
         systable_scan_foreach(&constraintrel, ConstraintRelidTypidNameIndexId, &child_key, |row| {
             if row.form.contype != parent_con.contype {
                 return Ok(true);
             }
-            // NOT NULL matched by attribute number.
-            let child_attno = extractNotNullColumn(&row.htup)?;
-            // parent_attno != attmap->attnums[child_attno - 1] ⇒ skip.
-            let mapped = attmap
-                .attnums
-                .get((child_attno - 1) as usize)
-                .copied()
-                .unwrap_or(InvalidAttrNumber);
-            if parent_con.attno != mapped {
-                return Ok(true);
+            if parent_con.contype == CONSTRAINT_CHECK {
+                // Matched by constraint name.
+                if name_str(&row.form.conname) != name_str(&parent_con.conname) {
+                    return Ok(true);
+                }
+                let src = decompile_conbin(mcx, &row.htup, &constraintrel, child_rel.rd_id)?;
+                matched = Some((row.tid, row.form.clone(), Some(src)));
+                Ok(false)
+            } else {
+                // NOT NULL matched by attribute number.
+                let child_attno = extractNotNullColumn(&row.htup)?;
+                // parent_attno != attmap->attnums[child_attno - 1] ⇒ skip.
+                let mapped = attmap
+                    .attnums
+                    .get((child_attno - 1) as usize)
+                    .copied()
+                    .unwrap_or(InvalidAttrNumber);
+                if parent_con.attno != mapped {
+                    return Ok(true);
+                }
+                matched = Some((row.tid, row.form.clone(), None));
+                Ok(false)
             }
-            matched = Some((row.tid, row.form.clone(), row.htup.clone_in(mcx)?));
-            Ok(false)
         })?;
 
-        if let Some((tid, mut child_form, _htup)) = matched {
+        if let Some((tid, mut child_form, child_check_src)) = matched {
+            // A CHECK constraint matched by name must reverse-compile to the
+            // same source as the parent's, else it is a different definition.
+            if parent_con.contype == CONSTRAINT_CHECK
+                && !constraints_equivalent(
+                    parent_con.condeferrable,
+                    parent_con.condeferred,
+                    &parent_con.check_src,
+                    child_form.condeferrable,
+                    child_form.condeferred,
+                    &child_check_src,
+                )
+            {
+                constraintrel.close(RowExclusiveLock)?;
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg(format!(
+                        "child table \"{}\" has different definition for check constraint \"{}\"",
+                        child_rel_name(child_rel),
+                        name_str(&parent_con.conname)
+                    ))
+                    .into_error());
+            }
+
             // If the child constraint is NO INHERIT, cannot merge.
             if child_form.connoinherit {
                 constraintrel.close(RowExclusiveLock)?;
@@ -3247,6 +3330,34 @@ pub fn merge_constraints_into_existing<'mcx>(
                     .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg(format!(
                         "constraint \"{}\" conflicts with non-inherited constraint on child table \"{}\"",
+                        name_str(&child_form.conname),
+                        child_rel_name(child_rel)
+                    ))
+                    .into_error());
+            }
+
+            // If the child constraint is "not valid" then cannot merge with a
+            // valid parent constraint.
+            if parent_con.convalidated && child_form.conenforced && !child_form.convalidated {
+                constraintrel.close(RowExclusiveLock)?;
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg(format!(
+                        "constraint \"{}\" conflicts with NOT VALID constraint on child table \"{}\"",
+                        name_str(&child_form.conname),
+                        child_rel_name(child_rel)
+                    ))
+                    .into_error());
+            }
+
+            // A NOT ENFORCED child constraint cannot be merged with an ENFORCED
+            // parent constraint. The reverse (child ENFORCED) is allowed.
+            if parent_con.conenforced && !child_form.conenforced {
+                constraintrel.close(RowExclusiveLock)?;
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg(format!(
+                        "constraint \"{}\" conflicts with NOT ENFORCED constraint on child table \"{}\"",
                         name_str(&child_form.conname),
                         child_rel_name(child_rel)
                     ))
@@ -3286,17 +3397,28 @@ pub fn merge_constraints_into_existing<'mcx>(
         }
 
         if !found {
-            // NOT NULL: the child is missing the constraint.
             constraintrel.close(RowExclusiveLock)?;
-            let colname = lsyscache_seams::get_attname::call(mcx, parent_relid, parent_con.attno, false)?
-                .map(|s| s.as_str().to_string())
-                .unwrap_or_default();
+            // NOT NULL gives a specific "must be marked NOT NULL" message; any
+            // other (CHECK) constraint falls through to "missing constraint".
+            if parent_con.contype == CONSTRAINT_NOTNULL {
+                let colname =
+                    lsyscache_seams::get_attname::call(mcx, parent_relid, parent_con.attno, false)?
+                        .map(|s| s.as_str().to_string())
+                        .unwrap_or_default();
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg(format!(
+                        "column \"{}\" in child table \"{}\" must be marked NOT NULL",
+                        colname,
+                        child_rel_name(child_rel)
+                    ))
+                    .into_error());
+            }
             return Err(ereport(ERROR)
                 .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
                 .errmsg(format!(
-                    "column \"{}\" in child table \"{}\" must be marked NOT NULL",
-                    colname,
-                    child_rel_name(child_rel)
+                    "child table is missing constraint \"{}\"",
+                    name_str(&parent_con.conname)
                 ))
                 .into_error());
         }
