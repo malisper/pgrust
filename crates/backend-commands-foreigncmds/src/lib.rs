@@ -1828,6 +1828,33 @@ fn alter_user_mapping_seam<'mcx>(
     AlterUserMapping(mcx, &flat)
 }
 
+/// Outward-seam adapter for `RemoveUserMapping(stmt)` (DROP USER MAPPING).
+fn remove_user_mapping_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<()> {
+    let s = match stmt.as_dropusermappingstmt() {
+        Some(s) => s,
+        None => return Err(PgError::error("remove_user_mapping_seam: not a DropUserMappingStmt")),
+    };
+    let user = match &s.user {
+        Some(u) => rich_rolespec_to_flat(mcx, u)?,
+        None => return Err(PgError::error("DROP USER MAPPING: missing user")),
+    };
+    let servername = match s.servername.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("DROP USER MAPPING: missing server name")),
+    };
+    let flat = DropUserMappingStmt {
+        user: mcx::alloc_in(mcx, user)?,
+        servername,
+        missing_ok: s.missing_ok,
+    };
+    // No commands stashed for DROP; the dropped OID is unused by the slow path.
+    RemoveUserMapping(mcx, &flat)?;
+    Ok(())
+}
+
 /// Outward-seam adapter for `ImportForeignSchema(stmt)`.
 fn import_foreign_schema_seam<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1908,6 +1935,7 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::alter_foreign_server::set(alter_foreign_server_seam);
     backend_tcop_utility_out_seams::create_user_mapping::set(create_user_mapping_seam);
     backend_tcop_utility_out_seams::alter_user_mapping::set(alter_user_mapping_seam);
+    backend_tcop_utility_out_seams::remove_user_mapping::set(remove_user_mapping_seam);
     backend_tcop_utility_out_seams::import_foreign_schema::set(import_foreign_schema_seam);
 }
 

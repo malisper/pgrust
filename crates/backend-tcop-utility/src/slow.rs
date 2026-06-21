@@ -607,6 +607,13 @@ fn process_utility_slow_body<'mcx>(
             address = rt::alter_user_mapping::call(mcx, parsetree)?;
         }
 
+        t if t == ntag::T_DropUserMappingStmt => {
+            // DROP USER MAPPING.
+            rt::remove_user_mapping::call(mcx, parsetree)?;
+            // no commands stashed for DROP
+            command_collected = true;
+        }
+
         t if t == ntag::T_ImportForeignSchemaStmt => {
             // IMPORT FOREIGN SCHEMA. Commands are stashed inside
             // ImportForeignSchema; no address is returned.

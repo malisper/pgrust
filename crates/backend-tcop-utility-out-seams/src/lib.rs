@@ -849,6 +849,11 @@ seam!(
     ) -> PgResult<ObjectAddress>
 );
 seam!(
+    /// `RemoveUserMapping(stmt)` (foreigncmds.c) — DROP USER MAPPING. No commands
+    /// stashed for DROP; the returned OID is unused by the slow path.
+    pub fn remove_user_mapping<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
+);
+seam!(
     /// `ImportForeignSchema(stmt)` (foreigncmds.c) — IMPORT FOREIGN SCHEMA.
     /// Stashes its own commands; returns no address.
     pub fn import_foreign_schema<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
