@@ -1746,28 +1746,39 @@ pub fn seam_amcostestimate<'mcx>(
             .relam
     };
     let mcx = run.mcx();
-    match relam {
-        // BTREE_AM_OID (pg_am.h) — the btree access method.
-        403 => btcostestimate(mcx, run, root, path_id, loop_count)
+    // In C, `info->amcostestimate` is the `amcostestimate` function pointer
+    // copied from the AM's `IndexAmRoutine` (plancat.c, resolved through the
+    // AM's `amhandler`). Dispatch must therefore key on the AM's *handler*
+    // function, not on the AM's OID: a user-created access method (e.g. the
+    // `create_am` test's `gist2`, defined `HANDLER gisthandler`) has its own
+    // `pg_am.oid` but shares a built-in handler, and must reach that handler's
+    // cost estimator. Resolve `relam -> amhandler` (SearchSysCache AMOID,
+    // amform->amhandler) and dispatch on the well-known built-in handler OID,
+    // mirroring `GetIndexAmRoutine`'s handler-OID dispatch in amapi.c.
+    let amhandler = backend_utils_cache_syscache_seams::search_am_handler::call(relam)
+        .expect("amcostestimate: search_am_handler")
+        .unwrap_or_else(|| {
+            panic!("amcostestimate: cache lookup failed for access method {relam}")
+        });
+    // F_*HANDLER (pg_proc.dat): bthandler=330, hashhandler=331, gisthandler=332,
+    // ginhandler=333, spghandler=334, brinhandler=335.
+    match amhandler {
+        330 => btcostestimate(mcx, run, root, path_id, loop_count)
             .expect("btcostestimate"),
-        // HASH_AM_OID (pg_am.h) — the hash access method.
-        405 => hashcostestimate(mcx, run, root, path_id, loop_count)
+        331 => hashcostestimate(mcx, run, root, path_id, loop_count)
             .expect("hashcostestimate"),
-        // GIST_AM_OID (pg_am.h) — the GiST access method.
-        783 => gistcostestimate(mcx, run, root, path_id, loop_count)
+        332 => gistcostestimate(mcx, run, root, path_id, loop_count)
             .expect("gistcostestimate"),
-        // SPGIST_AM_OID (pg_am.h) — the SP-GiST access method.
-        4000 => spgcostestimate(mcx, run, root, path_id, loop_count)
+        334 => spgcostestimate(mcx, run, root, path_id, loop_count)
             .expect("spgcostestimate"),
-        // BRIN_AM_OID (pg_am.h) — the BRIN access method.
-        3580 => brincostestimate(mcx, run, root, path_id, loop_count)
+        335 => brincostestimate(mcx, run, root, path_id, loop_count)
             .expect("brincostestimate"),
-        // GIN_AM_OID (pg_am.h) — the GIN access method.
-        2742 => gincostestimate(mcx, run, root, path_id, loop_count)
+        333 => gincostestimate(mcx, run, root, path_id, loop_count)
             .expect("gincostestimate"),
         other => panic!(
-            "amcostestimate: no cost estimator ported for index AM oid {}",
-            other
+            "amcostestimate: no cost estimator ported for index AM handler oid \
+             {} (am oid {})",
+            other, relam
         ),
     }
 }
