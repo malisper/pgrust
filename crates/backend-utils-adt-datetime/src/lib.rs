@@ -253,6 +253,28 @@ pub(crate) fn test_install_seams() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        // get_share_path (common/path.c): the tzdb loader (pg_open_tzfile ->
+        // pg_TZDIR) resolves `<sharedir>/timezone` through this seam. In the
+        // running server it is installed by `backend-utils-init-miscinit`
+        // (`boot_paths::get_share_path`); that crate is far above us in the
+        // dependency graph, so for the unit-test harness we install a faithful
+        // local port of `make_relative_path` (relativizing the build-baked
+        // PGSHAREDIR/PGBINDIR against `my_exec_path`) so the tzdb resolves.
+        common_path_seams::get_share_path::set(test_get_share_path::get_share_path);
+        // read_dir_names_logged (storage/fd.c): pgtz's case-insensitive
+        // tzfile open scans `<sharedir>/timezone`. Production install is in
+        // `backend-storage-file-fd`; for tests we read the directory directly
+        // (the same OS call), returning the entry names minus "."/"..".
+        backend_storage_file_fd_seams::read_dir_names_logged::set(|dir| {
+            match std::fs::read_dir(dir) {
+                Ok(rd) => rd
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n != "." && n != "..")
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        });
         // pg_localtime (consumed by the timezone-rotation legs).
         backend_timezone_localtime::init_seams();
         // pg_open_tzfile (tzdb loader used by pg_tzset / pg_tzset_offset).
@@ -261,4 +283,152 @@ pub(crate) fn test_install_seams() {
         // SetParallelStartTimestamps / GetCurrent*StartTimestamp.
         backend_access_transam_parallel::init_seams();
     });
+}
+
+/// Faithful test-only port of `get_share_path` (`src/port/path.c`), used solely
+/// to back `common_path_seams::get_share_path` in the datetime unit tests (the
+/// production install lives in `backend-utils-init-miscinit`). Mirrors
+/// `make_relative_path` / `trim_directory` / `canonicalize_path` against the
+/// build-baked `PGRUST_PGSHAREDIR` / `PGRUST_PGBINDIR` (defaulting to the
+/// documented `/usr/local/pgsql/...` literals when unset) so the tzdb resolves
+/// `<sharedir>/timezone` for the running test binary.
+#[cfg(test)]
+mod test_get_share_path {
+    /// `MAXPGPATH` (`pg_config_manual.h`).
+    const MAXPGPATH: usize = 1024;
+
+    const DEFAULT_PGBINDIR: &str = "/usr/local/pgsql/bin";
+    const DEFAULT_PGSHAREDIR: &str = "/usr/local/pgsql/share";
+
+    #[inline]
+    fn configured_pgbindir() -> &'static str {
+        option_env!("PGRUST_PGBINDIR").unwrap_or(DEFAULT_PGBINDIR)
+    }
+
+    #[inline]
+    fn configured_sharedir() -> &'static str {
+        option_env!("PGRUST_PGSHAREDIR").unwrap_or(DEFAULT_PGSHAREDIR)
+    }
+
+    /// `IS_DIR_SEP(ch)` (Unix build): `/`.
+    #[inline]
+    fn is_dir_sep(ch: u8) -> bool {
+        ch == b'/'
+    }
+
+    /// `trim_directory(path)` (`path.c`): strip the last path component in
+    /// place (`skip_drive` is the identity on Unix).
+    fn trim_directory(path: &mut Vec<u8>) {
+        if path.is_empty() {
+            return;
+        }
+        while path.len() > 1 && is_dir_sep(*path.last().unwrap()) {
+            path.pop();
+        }
+        while let Some(&c) = path.last() {
+            if is_dir_sep(c) {
+                break;
+            }
+            path.pop();
+        }
+        while path.len() > 1 && is_dir_sep(*path.last().unwrap()) {
+            path.pop();
+        }
+    }
+
+    /// `canonicalize_path(path)` (`path.c`): collapse `.`/`..`/duplicate
+    /// separators. Sufficient for the (already-canonical) share/tzdb paths the
+    /// tests produce.
+    fn canonicalize_path(input: &str) -> String {
+        let bytes = input.as_bytes();
+        if bytes.is_empty() {
+            return String::new();
+        }
+        let absolute = is_dir_sep(bytes[0]);
+        let mut comps: Vec<&[u8]> = Vec::new();
+        for comp in bytes.split(|&b| is_dir_sep(b)) {
+            match comp {
+                b"" | b"." => {}
+                b".." => {
+                    if matches!(comps.last(), Some(&c) if c != b"..") {
+                        comps.pop();
+                    } else if !absolute {
+                        comps.push(b"..");
+                    }
+                }
+                other => comps.push(other),
+            }
+        }
+        let joined = comps
+            .iter()
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        if absolute {
+            format!("/{joined}")
+        } else if joined.is_empty() {
+            ".".to_string()
+        } else {
+            joined
+        }
+    }
+
+    /// `make_relative_path(ret, target, bin, my_exec_path)` (`path.c`).
+    fn make_relative_path(target_path: &str, bin_path: &str, my_exec_path: &str) -> String {
+        let target = target_path.as_bytes();
+        let bin = bin_path.as_bytes();
+
+        let mut prefix_len = 0usize;
+        let mut i = 0usize;
+        while i < target.len() && i < bin.len() {
+            if is_dir_sep(target[i]) && is_dir_sep(bin[i]) {
+                prefix_len = i + 1;
+            } else if target[i] != bin[i] {
+                break;
+            }
+            i += 1;
+        }
+        if prefix_len == 0 {
+            return canonicalize_path(target_path);
+        }
+        let tail_len = bin.len() - prefix_len;
+
+        let mut ret: Vec<u8> = my_exec_path.as_bytes().to_vec();
+        if ret.len() >= MAXPGPATH {
+            ret.truncate(MAXPGPATH - 1);
+        }
+        trim_directory(&mut ret); // remove the executable name
+        let canon = canonicalize_path(&String::from_utf8_lossy(&ret));
+        let ret = canon.as_bytes();
+
+        let tail_start = ret.len() as isize - tail_len as isize;
+        if tail_start > 0 {
+            let ts = tail_start as usize;
+            if is_dir_sep(ret[ts - 1]) && ret[ts..] == bin[prefix_len..] {
+                let mut head = ret[..ts].to_vec();
+                while head.len() > 1 && is_dir_sep(*head.last().unwrap()) {
+                    head.pop();
+                }
+                let head_str = String::from_utf8_lossy(&head).into_owned();
+                let target_tail = &target_path[prefix_len..];
+                let joined = if head_str.is_empty() {
+                    target_tail.to_string()
+                } else {
+                    format!("{head_str}/{target_tail}")
+                };
+                return canonicalize_path(&joined);
+            }
+        }
+
+        canonicalize_path(target_path)
+    }
+
+    /// `get_share_path(my_exec_path, ret)` (`path.c`):
+    /// `make_relative_path(ret, PGSHAREDIR, PGBINDIR, my_exec_path)`. The seam
+    /// passes `my_exec_path` explicitly (pgtz reads the global and forwards it);
+    /// `make_relative_path` tolerates an empty exec path, falling back to the
+    /// build-baked PGSHAREDIR when it shares no prefix with PGBINDIR.
+    pub fn get_share_path(my_exec_path: &str) -> String {
+        make_relative_path(configured_sharedir(), configured_pgbindir(), my_exec_path)
+    }
 }

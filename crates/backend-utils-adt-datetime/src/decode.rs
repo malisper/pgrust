@@ -3711,7 +3711,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs tzdb via get_share_path (common/path.c) which is not yet ported"]
     fn malformed_string_is_bad_format() {
         crate::test_install_seams();
         let (mut field, mut ftype, nf, rc) = parse("not a date");

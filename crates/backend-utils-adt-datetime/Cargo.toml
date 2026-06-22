@@ -37,3 +37,15 @@ backend-utils-adt-arrayutils-seams = { path = "../backend-utils-adt-arrayutils-s
 
 [dev-dependencies]
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
+# The `get_share_path` (`common/path.c`) seam, installed by the test harness
+# (`test_install_seams`) so the tzdb-backed timezone tests resolve
+# `<sharedir>/timezone` exactly as the server does. The production owner
+# (`backend-utils-init-miscinit`) is far higher in the stack, so the unit-test
+# harness installs a faithful local `get_share_path` body (a port of
+# `make_relative_path`) against the build-baked `PGRUST_PGSHAREDIR`/`PGRUST_PGBINDIR`.
+common-path-seams = { path = "../common-path-seams" }
+# `read_dir_names_logged` (`storage/fd.c`): pgtz scans `<sharedir>/timezone`
+# case-insensitively through this seam. Production owner is
+# `backend-storage-file-fd`; the test harness installs a `std::fs::read_dir`
+# body (the same OS call) so the tzdb scan resolves.
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }

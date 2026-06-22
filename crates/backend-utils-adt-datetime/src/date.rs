@@ -1004,7 +1004,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs tzdb via get_share_path (common/path.c) which is not yet ported"]
     fn time_timetz_uses_session_zone_offset() {
         crate::test_install_seams();
         use crate::time::time_in;

@@ -2846,7 +2846,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs tzdb via get_share_path (common/path.c) which is not yet ported"]
     fn timestamp_cmp_timestamptz_low_overflow_tiebreak() {
         crate::test_install_seams();
         use backend_timezone_pgtz::pg_tzset_offset;

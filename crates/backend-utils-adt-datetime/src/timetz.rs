@@ -548,7 +548,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs tzdb via get_share_path (common/path.c) which is not yet ported"]
     fn timetz_in_maps_dterr_to_specific_sqlstate() {
         crate::test_install_seams();
         use types_error::{
@@ -663,7 +662,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs tzdb via get_share_path (common/path.c) which is not yet ported"]
     fn timetz_zone_no_resolver_unknown_name_errors() {
         crate::test_install_seams();
         let _g = crate::tz_resolver::TZ_RESOLVER_TEST_LOCK
