@@ -22112,6 +22112,7 @@ version = "0.0.0"
 dependencies = [
  "backend-utils-adt-xml",
  "backend-utils-adt-xml-libxml-seams",
+ "backend-utils-error-elog-seams",
  "libc",
  "seam-core",
  "types-core",

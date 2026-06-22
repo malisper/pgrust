@@ -16,10 +16,13 @@ path = "src/lib.rs"
 # touch the parse/serialize seams. When ON, `init_seams` binds the system
 # libxml2 and installs every libxml2 FFI seam.
 default = ["with-libxml"]
-with-libxml = []
+with-libxml = ["dep:backend-utils-error-elog-seams"]
 
 [dependencies]
 libc = "0.2"
+# WARNING channel for buffered libxml warnings (xml_errorHandler ereport(WARNING),
+# xml.c:2253); only needed when the libxml provider is compiled.
+backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams", optional = true }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

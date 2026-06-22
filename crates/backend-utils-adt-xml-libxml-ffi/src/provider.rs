@@ -383,6 +383,12 @@ struct XmlErrCtx {
     strictness: i32,
     err_occurred: bool,
     err_buf: String,
+    /// Warning-level diagnostics collected during the current libxml operation.
+    /// C's `xml_errorHandler` ereport(WARNING)s these immediately, but doing so
+    /// from inside an `extern "C"` callback that libxml invoked mid-parse is
+    /// unsafe in our unwind model, so we buffer them and `flush_xml_warnings`
+    /// emits them at the seam boundary once libxml has returned.
+    pending_warnings: Vec<String>,
 }
 
 std::thread_local! {
@@ -391,8 +397,19 @@ std::thread_local! {
             strictness: 0,
             err_occurred: false,
             err_buf: String::new(),
+            pending_warnings: Vec::new(),
         })
     };
+}
+
+/// Emit any warnings buffered by `xml_error_handler` during the just-completed
+/// libxml operation, as real `ereport(WARNING, errmsg_internal("%s", text))`
+/// (port of xml.c:2253). Called at each seam boundary after libxml returns.
+fn flush_xml_warnings() {
+    let warnings = XML_ERR_CTX.with(|c| std::mem::take(&mut c.borrow_mut().pending_warnings));
+    for w in warnings {
+        let _ = backend_utils_error_elog_seams::ereport_msg::call(types_error::WARNING, w, None);
+    }
 }
 
 /// Append a line separator the way C's `appendStringInfoLineSeparator` does:
@@ -606,15 +623,15 @@ unsafe extern "C" fn xml_error_handler(_user_data: *mut c_void, error: *mut c_vo
             c.err_occurred = true;
         });
     } else if level >= XML_ERR_WARNING {
-        // Warnings/notices report immediately. We have no ereport(WARNING)
-        // channel from inside the FFI callback; surface them on stderr-free,
-        // recording into the buffer is wrong (it would become a DETAIL). PG
-        // emits a real WARNING here. We approximate by dropping the warning
-        // text (the WARNING line is a libxml-binding gap, same family as the
-        // file-context lines), keeping err_occurred unset so the parse still
-        // succeeds, matching the not-an-error outcome.
+        // C ereport(WARNING, errmsg_internal("%s", errorBuf->data)) immediately
+        // (xml.c:2253). We can't ereport from inside the libxml-invoked callback
+        // safely, so buffer the text; flush_xml_warnings emits it once libxml
+        // has returned to the seam. err_occurred stays unset, so the parse still
+        // succeeds — matching the not-an-error outcome.
+        XML_ERR_CTX.with(|c| c.borrow_mut().pending_warnings.push(msg));
     } else {
-        // notice: dropped, as above.
+        // notice: dropped (we have no NOTICE channel that survives the callback;
+        // notices never affect xml.sql output).
     }
 }
 
@@ -626,6 +643,7 @@ fn xml_err_reset(strictness: i32) {
         c.strictness = strictness;
         c.err_occurred = false;
         c.err_buf.clear();
+        c.pending_warnings.clear();
     });
 }
 
@@ -1320,6 +1338,10 @@ fn xpath_eval(
                 ERRCODE_INVALID_XML_DOCUMENT,
             ));
         }
+        // The parse succeeded; emit any buffered libxml WARNINGs now (e.g. the
+        // relative-namespace warning), matching C's immediate ereport(WARNING)
+        // ordering before the XPath result is produced.
+        flush_xml_warnings();
 
         let xpathctx = xmlXPathNewContext(doc);
         if xpathctx.is_null() {
