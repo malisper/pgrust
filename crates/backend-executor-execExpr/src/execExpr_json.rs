@@ -588,11 +588,10 @@ pub(crate) fn exec_init_json_constructor<'mcx>(
 
     if let Some(func) = ctor.func.as_deref() {
         // The whole constructor is a plain function call (e.g. an aggregate's
-        // finalfn wrapper). Recurse into it.
-        return exec_init_expr_rec(mcx, func, state, resv);
-    }
-
-    if (ctor.r#type == JsonConstructorType::JSCTOR_JSON_PARSE && !ctor.unique)
+        // finalfn wrapper). Recurse into it. The RETURNING-type coercion below
+        // (if any) is still applied to the func's result.
+        exec_init_expr_rec(mcx, func, state, resv)?;
+    } else if (ctor.r#type == JsonConstructorType::JSCTOR_JSON_PARSE && !ctor.unique)
         || ctor.r#type == JsonConstructorType::JSCTOR_JSON_SERIALIZE
     {
         // Use the value of the first argument as result.
