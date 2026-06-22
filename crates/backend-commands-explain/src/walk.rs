@@ -2111,6 +2111,76 @@ fn show_modifytable_info<'es, 'p>(
                 // is EXPLAIN-ANALYZE-only instrumentation, not part of this slice.
             }
         }
+    } else if node.operation == CmdType::CMD_MERGE {
+        // explain.c:4682 — EXPLAIN ANALYZE display of tuples processed by MERGE.
+        // Emit `Tuples: inserted=.. updated=.. deleted=.. skipped=..` from the
+        // runtime ModifyTableState's mt_merge_* counters plus the source-row
+        // count taken from the outer (source) plan's instrument->ntuples.
+        if let PlanStateNode::ModifyTable(mtstate) = planstate {
+            let analyze = es.analyze;
+            let mt_instrument = mtstate.ps.instrument.is_some();
+            if analyze && mt_instrument {
+                // InstrEndLoop(outerPlanState(mtstate)->instrument): fold the
+                // current in-progress cycle into ntuples, reproducing the local
+                // InstrEndLoop arithmetic used elsewhere in this file.
+                let total = match planstate.outer_plan_state() {
+                    Some(outer) => match outer.ps_head().instrument.as_deref() {
+                        Some(i) => {
+                            if i.running {
+                                if !i.starttime.is_zero() {
+                                    return Err(backend_utils_error::ereport(
+                                        types_error::ERROR,
+                                    )
+                                    .errmsg_internal(
+                                        "InstrEndLoop called on running node",
+                                    )
+                                    .into_error());
+                                }
+                                i.ntuples + i.tuplecount
+                            } else {
+                                i.ntuples
+                            }
+                        }
+                        None => 0.0,
+                    },
+                    None => 0.0,
+                };
+
+                let insert_path = mtstate.mt_merge_inserted;
+                let update_path = mtstate.mt_merge_updated;
+                let delete_path = mtstate.mt_merge_deleted;
+                let skipped_path = total - insert_path - update_path - delete_path;
+
+                if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                    if total > 0.0 {
+                        fmt::ExplainIndentText(es)?;
+                        es.str.try_push_str("Tuples:")?;
+                        if insert_path > 0.0 {
+                            es.str
+                                .try_push_str(&format!(" inserted={insert_path:.0}"))?;
+                        }
+                        if update_path > 0.0 {
+                            es.str
+                                .try_push_str(&format!(" updated={update_path:.0}"))?;
+                        }
+                        if delete_path > 0.0 {
+                            es.str
+                                .try_push_str(&format!(" deleted={delete_path:.0}"))?;
+                        }
+                        if skipped_path > 0.0 {
+                            es.str
+                                .try_push_str(&format!(" skipped={skipped_path:.0}"))?;
+                        }
+                        es.str.try_push('\n')?;
+                    }
+                } else {
+                    fmt::ExplainPropertyFloat("Tuples Inserted", None, insert_path, 0, es)?;
+                    fmt::ExplainPropertyFloat("Tuples Updated", None, update_path, 0, es)?;
+                    fmt::ExplainPropertyFloat("Tuples Deleted", None, delete_path, 0, es)?;
+                    fmt::ExplainPropertyFloat("Tuples Skipped", None, skipped_path, 0, es)?;
+                }
+            }
+        }
     }
     Ok(())
 }
