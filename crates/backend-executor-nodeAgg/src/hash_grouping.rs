@@ -5,7 +5,7 @@
 use backend_executor_nodeHash_seams as nodeHash_seams;
 use mcx::Mcx;
 use types_error::PgResult;
-use types_nodes::nodeagg::{do_aggsplit_skipfinal, AggStrategy, TupleHashEntryData};
+use types_nodes::nodeagg::{do_aggsplit_skipfinal, AggStrategy};
 use crate::aggstate::{AggStateData, AggStatePerGroupData};
 use types_nodes::{EStateData, SlotId};
 
@@ -158,8 +158,12 @@ pub fn build_hash_table<'mcx>(
     );
 
     // additionalsize = aggstate->numtrans * sizeof(AggStatePerGroupData);
-    let additionalsize =
-        aggstate.numtrans as usize * core::mem::size_of::<AggStatePerGroupData<'_>>();
+    // Use C's ABI struct size (16B), not Rust's owned-`Datum`-enum `size_of`, so
+    // the per-entry `additional` region and the resulting runtime hashentrysize /
+    // spill-threshold memory accounting match C exactly. (The Rust port only
+    // stores a 4-byte side-table index in this region; the size governs the
+    // entry's MAXALIGN'd footprint, which must mirror C for memory accounting.)
+    let additionalsize = aggstate.numtrans as usize * SIZEOF_AGGSTATEPERGROUPDATA;
 
     // use_variable_hash_iv = DO_AGGSPLIT_SKIPFINAL(aggstate->aggsplit);
     let use_variable_hash_iv = do_aggsplit_skipfinal(aggstate.aggsplit);
@@ -1413,9 +1417,14 @@ pub fn hash_agg_entry_size(num_trans: i32, tuple_width: usize, transition_space:
     //     ? CHUNKHDRSZ + pg_nextpower2_size_t(transitionSpace) : 0;
     // return TupleHashEntrySize() + tupleChunkSize + pergroupChunkSize + transitionChunkSize;
     //
-    // tupleSize = MAXALIGN(SizeofMinimalTupleHeader) + tupleWidth.
-    let tuple_size = SizeofMinimalTupleHeader + tuple_width;
-    let pergroup_size = num_trans as usize * core::mem::size_of::<AggStatePerGroupData<'_>>();
+    // tupleSize = MAXALIGN(SizeofMinimalTupleHeader) + tupleWidth (C exactly:
+    // the header is MAXALIGNed BEFORE adding the width).
+    let tuple_size = maxalign(SizeofMinimalTupleHeader) + tuple_width;
+    // sizeof(AggStatePerGroupData): C's ABI struct is { Datum (8B word); bool;
+    // bool } == 16 bytes after padding. Rust's `AggStatePerGroupData` carries an
+    // owned-heap `Datum<'mcx>` enum whose `size_of` is unrelated to C's on-the-
+    // wire layout, so this estimate must use the C ABI size, NOT `size_of`.
+    let pergroup_size = num_trans as usize * SIZEOF_AGGSTATEPERGROUPDATA;
 
     // Entries use the Bump allocator, so chunk sizes equal requested sizes.
     let tuple_chunk_size = maxalign(tuple_size);
@@ -1428,12 +1437,21 @@ pub fn hash_agg_entry_size(num_trans: i32, tuple_width: usize, transition_space:
         0
     };
 
-    // TupleHashEntrySize() == sizeof(TupleHashEntryData) (executor.h:165).
-    core::mem::size_of::<TupleHashEntryData>()
-        + tuple_chunk_size
-        + pergroup_chunk_size
-        + transition_chunk_size
+    // TupleHashEntrySize() == sizeof(TupleHashEntryData) (executor.h:165). C's
+    // struct is { MinimalTuple ptr (8B); uint32 status; uint32 hash } == 16B.
+    // The Rust `TupleHashEntryData` carries an owned `FormedMinimalTuple` +
+    // `PgVec`, so again use the C ABI size, NOT `size_of`.
+    SIZEOF_TUPLEHASHENTRYDATA + tuple_chunk_size + pergroup_chunk_size + transition_chunk_size
 }
+
+/// `sizeof(AggStatePerGroupData)` in C: `{ Datum transValue; bool
+/// transValueIsNull; bool noTransValue; }` == 16 bytes (8-byte Datum + two
+/// bools, padded to 8-byte alignment).
+const SIZEOF_AGGSTATEPERGROUPDATA: usize = 16;
+
+/// `sizeof(TupleHashEntryData)` in C: `{ MinimalTuple firstTuple; uint32
+/// status; uint32 hash; }` == 16 bytes (8-byte pointer + two uint32s).
+const SIZEOF_TUPLEHASHENTRYDATA: usize = 16;
 
 /// `SizeofMinimalTupleHeader` == `offsetof(MinimalTupleData, t_bits)`
 /// (`access/htup_details.h`) == `SizeofHeapTupleHeader - MINIMAL_TUPLE_OFFSET`.
