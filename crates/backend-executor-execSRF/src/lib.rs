@@ -109,6 +109,7 @@ mod pg_get_aios;
 mod pg_get_backend_memory_contexts;
 mod pg_get_wait_events;
 mod pg_timezone;
+mod show_all_file_settings;
 mod show_all_settings;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
@@ -354,6 +355,9 @@ pub fn init_seams() {
     // (OID 3083): the control-file directory walk SRFs (the parse + version-graph
     // live in their extension.c owner).
     pg_available_extensions::register_pg_available_extensions();
+    // show_all_file_settings() (OID 3329): the pg_file_settings view SRF over the
+    // parsed config-file ConfigVariable list.
+    show_all_file_settings::register_show_all_file_settings();
 }
 
 // ===========================================================================

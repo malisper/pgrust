@@ -78,7 +78,7 @@ pub use name::{
     convert_guc_name_for_parameter_acl, guc_name_compare, guc_name_eq, guc_name_hash,
     guc_name_match, MAP_OLD_GUC_NAMES,
 };
-pub use process_config::{apply_config_variables, ConfigItem};
+pub use process_config::{apply_config_variables, show_all_file_settings_items, ConfigItem};
 pub use registry::{
     get_config_option_by_name, get_config_option_flags, parse_and_validate_value, reset_all_options,
     reset_value_string, set_config_option, show_guc_option, GucAction, GucRegistry, GucVariable,

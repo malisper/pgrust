@@ -51,6 +51,33 @@ pub fn process_config_file_internal(
     apply_settings: bool,
     elevel: ErrorLevel,
 ) -> PgResult<bool> {
+    process_config_file_collect(context, apply_settings, elevel, None)
+}
+
+/// `show_all_file_settings()` (guc_funcs.c) data half: run
+/// `ProcessConfigFileInternal(PGC_SIGHUP, false, DEBUG3)` — i.e. parse the config
+/// files and run the apply *checks* (which set each item's `applied`/`errmsg`)
+/// without mutating the live GUC store — and return the resulting post-check
+/// `ConfigItem` list (the C `conf` list `show_all_file_settings` iterates into
+/// the `pg_file_settings` view). The executor-frame SRF adapter lives in
+/// `backend-executor-execSRF`.
+pub fn show_all_file_settings_items(elevel: ErrorLevel) -> PgResult<Vec<ConfigItem>> {
+    let mut items: Vec<ConfigItem> = Vec::new();
+    process_config_file_collect(PGC_SIGHUP, false, elevel, Some(&mut items))?;
+    Ok(items)
+}
+
+/// The shared core of [`process_config_file_internal`] /
+/// [`show_all_file_settings_items`]: parse + (apply-or-check). When `out_items`
+/// is `Some`, the post-apply `ConfigItem` list (with `applied`/`errmsg` filled by
+/// the apply phase) is captured into it — the `conf` list C's
+/// `show_all_file_settings` walks.
+fn process_config_file_collect(
+    context: GucContext,
+    apply_settings: bool,
+    elevel: ErrorLevel,
+    mut out_items: Option<&mut Vec<ConfigItem>>,
+) -> PgResult<bool> {
     use backend_utils_misc_guc_file::{ConfigVariable, ParseConfigFile};
 
     // ConfigFileName (the `config_file` GUC string).
@@ -133,14 +160,23 @@ pub fn process_config_file_internal(
 
     let reload_time = backend_utils_adt_timestamp_seams::get_current_timestamp::call();
 
-    apply_config_variables(
+    let result = apply_config_variables(
         &mut items,
         context,
         apply_settings,
         elevel,
         &mut conf_file_with_error,
         reload_time,
-    )
+    );
+
+    // For show_all_file_settings(): capture the post-apply item list (with each
+    // item's `applied`/`errmsg` set by the apply checks). C iterates this `conf`
+    // list into the pg_file_settings view.
+    if let Some(out) = out_items.as_deref_mut() {
+        *out = items;
+    }
+
+    result
 }
 
 /// The GUC core's minimal view of one parsed config-file entry (the relevant
