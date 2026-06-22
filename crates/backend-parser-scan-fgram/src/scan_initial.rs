@@ -312,7 +312,8 @@ impl<'a> Scanner<'a> {
                 self.set_yylloc();
                 self.yyless(1); // throw back all but initial u/U
                 // treat it as {identifier}: downcase_truncate_identifier("u")
-                let ident = self.downcase_truncate(self.yytext())?;
+                let yytext = self.yytext();
+                let ident = self.downcase_truncate(yytext)?;
                 Ok(Some(self.make_token(tokens::IDENT, CoreYYSTYPE::Str(ident))))
             }
             InitialRule::Typecast => {
@@ -444,7 +445,8 @@ impl<'a> Scanner<'a> {
                     .expect("keyword index valid");
                     Ok(Some(self.keyword_token(kwnum as usize, kw)))
                 } else {
-                    let ident = self.downcase_truncate(self.yytext())?;
+                    let yytext = self.yytext();
+                    let ident = self.downcase_truncate(yytext)?;
                     Ok(Some(self.make_token(tokens::IDENT, CoreYYSTYPE::Str(ident))))
                 }
             }

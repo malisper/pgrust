@@ -194,6 +194,7 @@ impl<'a> BaseLexer<'a> {
     /// reported through `scanner_errposition`).
     fn core_yylex(&mut self) -> Result<Token, ParseError> {
         let warned = self.scanner.warnings.len();
+        let noticed = self.scanner.notices.len();
         match self.scanner.core_yylex() {
             Ok(tok) => {
                 // Emit any newly-collected scanner warnings. scan.l
@@ -205,6 +206,11 @@ impl<'a> BaseLexer<'a> {
                 // the literal-start `errposition` (`lexer_errposition()`).
                 if self.scanner.warnings.len() > warned {
                     self.emit_scanner_warnings(warned);
+                }
+                // Likewise replay deferred NOTICEs (`truncate_identifier`'s
+                // "identifier will be truncated", scansup.c).
+                if self.scanner.notices.len() > noticed {
+                    self.emit_scanner_notices(noticed);
                 }
                 Ok(tok)
             }
@@ -248,6 +254,29 @@ impl<'a> BaseLexer<'a> {
                     "scan.l",
                     1424,
                     "check_string_escape_warning",
+                ));
+        }
+    }
+
+    /// Replay the deferred scanner NOTICEs at indices `from..` as
+    /// `ereport(NOTICE, ...)`. Mirrors scansup.c's `truncate_identifier`, which
+    /// emits the inline "identifier \"%s\" will be truncated to \"%s\"" NOTICE
+    /// (`ERRCODE_NAME_TOO_LONG`) while scanning an over-length identifier; the
+    /// safe-Rust scanner defers it onto `scanner.notices` so we replay it on the
+    /// live client error path here. scansup.c reports this NOTICE with only
+    /// errcode + errmsg (no `parser_errposition`), so we omit the cursor —
+    /// attaching one would print a spurious `LINE n: ... ^` context. A NOTICE
+    /// does not longjmp, so `finish` returns `Ok(())`; an unexpected error while
+    /// emitting is dropped (the C path cannot fail here either).
+    fn emit_scanner_notices(&self, from: usize) {
+        for n in &self.scanner.notices[from..] {
+            let _ = backend_utils_error_live::ereport(types_error_live::error::NOTICE)
+                .errcode(types_error_live::SqlState(n.sqlstate.0))
+                .errmsg(n.message.clone())
+                .finish(types_error_live::pg_error::ErrorLocation::new(
+                    "scansup.c",
+                    102,
+                    "truncate_identifier",
                 ));
         }
     }

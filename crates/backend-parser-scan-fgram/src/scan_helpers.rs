@@ -42,7 +42,15 @@ impl<'a> Scanner<'a> {
 
     /// `downcase_truncate_identifier(yytext, yyleng, true)` returning the
     /// downcased/truncated identifier bytes (no trailing NUL).
-    fn downcase_truncate(&self, ident: &[u8]) -> Result<Vec<u8>, LexError> {
+    ///
+    /// scan.l passes `warn = true`, so when the identifier is truncated the C
+    /// scansup routine fires an inline `ereport(NOTICE)` ("identifier \"%s\"
+    /// will be truncated to \"%s\""). The safe-Rust scanner cannot emit to the
+    /// live client error path mid-scan, so we call scansup with `warn = false`
+    /// and *defer* the NOTICE onto `self.notices` for the parser-driver to
+    /// replay — mirroring how the escape `ereport(WARNING)`s are deferred onto
+    /// `self.warnings`.
+    fn downcase_truncate(&mut self, ident: &[u8]) -> Result<Vec<u8>, LexError> {
         // The scansup routine downcases/truncates against the database
         // encoding; it operates within a memory context and returns a palloc'd
         // result. We bridge through a transient owned context, then copy out
@@ -55,10 +63,35 @@ impl<'a> Scanner<'a> {
             &scope,
             ident,
             ident.len() as core::ffi::c_int,
-            true,
+            false,
         )
         .map_err(|_| self.lexerr("identifier downcasing failed"))?;
-        Ok(id.as_bytes().to_vec())
+        let truncated_bytes = id.as_bytes().to_vec();
+        // If the input was long enough to be truncated, reconstruct the NOTICE
+        // text exactly as scansup's truncate_identifier does: both the "full"
+        // and "truncated to" spellings use the *downcased* buffer.
+        if ident.len() >= pgrust_pg_ffi::NAMEDATALEN as usize {
+            let full = backend_parser_scansup::downcase_identifier(
+                &scope,
+                ident,
+                ident.len() as core::ffi::c_int,
+                false,
+                false,
+            )
+            .map_err(|_| self.lexerr("identifier downcasing failed"))?;
+            if full.as_bytes().len() != truncated_bytes.len() {
+                let full_s = String::from_utf8_lossy(full.as_bytes());
+                let clip_s = String::from_utf8_lossy(&truncated_bytes);
+                self.notices.push(crate::Notice {
+                    sqlstate: make_sqlstate(*b"42622"),
+                    message: format!(
+                        "identifier \"{full_s}\" will be truncated to \"{clip_s}\""
+                    ),
+                    location: self.yylloc,
+                });
+            }
+        }
+        Ok(truncated_bytes)
     }
 
     // -----------------------------------------------------------------------

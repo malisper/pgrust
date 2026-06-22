@@ -159,6 +159,26 @@ fn core_yylex<'mcx>(
         .core_yylex()
         .map_err(|e| scan_lex_error(&scanner, e))?;
 
+    // scan.l emits some diagnostics inline while scanning (e.g.
+    // `truncate_identifier`'s "identifier \"%s\" will be truncated to \"%s\""
+    // `ereport(NOTICE)`). The safe-Rust scanner cannot reach the live client
+    // error path mid-scan, so it defers them onto `scanner.notices`; replay them
+    // here on the live path. scansup.c's `truncate_identifier` reports the NOTICE
+    // with only errcode + errmsg (no `parser_errposition`), so we omit the cursor
+    // — adding one would print a spurious `LINE n: ... ^` context. A NOTICE never
+    // longjmps (`finish` returns Ok), and a failure to emit is dropped (the C
+    // path cannot fail here either).
+    for n in &scanner.notices {
+        let _ = backend_utils_error::ereport(types_error::error::NOTICE)
+            .errcode(SqlState(n.sqlstate.0))
+            .errmsg(n.message.clone())
+            .finish(types_error::ErrorLocation::new(
+                "scansup.c",
+                102,
+                "truncate_identifier",
+            ));
+    }
+
     let mut str_value: PgVec<'mcx, u8> = PgVec::new_in(mcx);
     match &tok.value {
         CoreYYSTYPE::Str(bytes) => {

@@ -14184,6 +14184,7 @@ dependencies = [
  "backend-parser-gram-seams",
  "backend-parser-scan-fgram",
  "backend-parser-scan-seams",
+ "backend-utils-error",
  "mcx",
  "pgrust-gram-c2rust-fgram",
  "pgrust-pg-ffi-fgram",

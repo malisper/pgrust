@@ -378,6 +378,11 @@ pub struct Scanner<'a> {
     /// `check_*escape_warning`).  Recorded so callers can observe them; the C
     /// code emits them directly via `ereport`.
     pub warnings: Vec<Warning>,
+
+    /// NOTICE-level diagnostics emitted during scanning (the
+    /// `truncate_identifier` "will be truncated" `ereport(NOTICE)`).  Like
+    /// `warnings`, recorded for the driver to replay through the live error path.
+    pub notices: Vec<Notice>,
 }
 
 /// A `WARNING`-level diagnostic emitted by the scanner.
@@ -386,6 +391,21 @@ pub struct Warning {
     pub sqlstate: SqlState,
     pub message: &'static str,
     pub hint: &'static str,
+    pub location: i32,
+}
+
+/// A `NOTICE`-level diagnostic emitted by the scanner with a dynamically-built
+/// message (currently only `truncate_identifier`'s
+/// "identifier \"%s\" will be truncated to \"%s\"" text, scansup.c:102).
+///
+/// scan.l's `downcase_truncate_identifier(..., true)` emits this `ereport(NOTICE)`
+/// inline while scanning; the safe-Rust scanner instead defers it here so the
+/// parser-driver can replay it through the live client error path (mirroring how
+/// `Warning` defers the escape `ereport(WARNING)`s).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub sqlstate: SqlState,
+    pub message: String,
     pub location: i32,
 }
 
@@ -429,6 +449,7 @@ impl<'a> Scanner<'a> {
             yylloc: 0,
             unicode_seam,
             warnings: Vec::new(),
+            notices: Vec::new(),
         }
     }
 

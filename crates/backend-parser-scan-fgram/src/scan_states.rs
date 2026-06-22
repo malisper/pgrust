@@ -544,14 +544,30 @@ impl<'a> Scanner<'a> {
     }
 
     /// `truncate_identifier(ident, literallen, true)` for `<xd>` identifiers.
-    fn truncate_xd_identifier(&self, ident: Vec<u8>) -> Result<Vec<u8>, LexError> {
+    ///
+    /// As in `downcase_truncate`, scan.l passes `warn = true`; we run scansup
+    /// with `warn = false` and defer the "will be truncated" `ereport(NOTICE)`
+    /// onto `self.notices` for the parser-driver to replay on the live error
+    /// path (mid-scan ereport does not reach the client here).
+    fn truncate_xd_identifier(&mut self, ident: Vec<u8>) -> Result<Vec<u8>, LexError> {
         let len = ident.len();
         if len >= pgrust_pg_ffi::NAMEDATALEN as usize {
             let mut buf = ident.clone();
             buf.push(0);
-            backend_parser_scansup::truncate_identifier(&mut buf, len as core::ffi::c_int, true)
+            backend_parser_scansup::truncate_identifier(&mut buf, len as core::ffi::c_int, false)
                 .map_err(|_| self.lexerr("identifier truncation failed"))?;
             let nul = buf.iter().position(|&b| b == 0).unwrap_or(len);
+            if nul != len {
+                let full_s = String::from_utf8_lossy(&ident);
+                let clip_s = String::from_utf8_lossy(&buf[..nul]);
+                self.notices.push(crate::Notice {
+                    sqlstate: make_sqlstate(*b"42622"),
+                    message: format!(
+                        "identifier \"{full_s}\" will be truncated to \"{clip_s}\""
+                    ),
+                    location: self.yylloc,
+                });
+            }
             Ok(buf[..nul].to_vec())
         } else {
             Ok(ident)
