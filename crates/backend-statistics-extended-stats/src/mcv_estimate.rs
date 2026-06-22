@@ -379,9 +379,18 @@ fn statext_is_compatible_clause<'mcx>(
     }
 
     if !leakproof {
-        // The permission check (pull_varattnos + all_rows_selectable) owner is
-        // not yet ported. Reject conservatively rather than expose values the
-        // user may not be permitted to read.
+        // The clause uses a non-leakproof operator, so C's
+        // statext_is_compatible_clause checks the user can read all required
+        // attributes (pull_varattnos + all_rows_selectable, i.e.
+        // pg_class_aclcheck(ACL_SELECT) and a securityQuals/RLS check). That ACL
+        // machinery is not yet ported here; crucially, the table-level
+        // ACL_SELECT enforcement that would have errored out a forbidden query
+        // *before* the planner is also not yet enforced, so we cannot assume a
+        // clause reaching this point is permitted. Reject conservatively rather
+        // than risk leaking MCV values past a permission/securityQual the
+        // executor does not yet enforce. (This is the only blocker for the
+        // expression-statistics MCV estimates that use non-leakproof operators,
+        // e.g. numeric_eq from `mod(<numeric>, k) = c`.)
         return Ok(false);
     }
 
