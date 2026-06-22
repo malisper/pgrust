@@ -1791,6 +1791,32 @@ where
         Expr::InferenceElem(n) => on_box!(n.expr),
         Expr::ReturningExpr(r) => on_box!(r.retexpr),
         Expr::PlaceHolderVar(phv) => on_box!(phv.phexpr),
+        // C `expression_tree_mutator` T_SubPlan: mutate `testexpr` then `args`
+        // (the correlation Var/Param exprs); the planned sub-`Plan` is not a
+        // child here. The immutable `expression_tree_walker` walks the same set
+        // (`walk_pgbox_opt(testexpr)` / `walk_pgvec_box(args)`); the in-place
+        // walker must match so callers like `map_variable_attnos` can rewrite
+        // the correlation Vars of a MULTIEXPR / correlated ON CONFLICT SET
+        // sub-SELECT when adjusting for a partition's differing rowtype.
+        Expr::SubPlan(sp) => {
+            let subplan = &mut sp.0;
+            if let Some(b) = subplan.testexpr.as_deref_mut() {
+                f(b);
+            }
+            for a in subplan.args.iter_mut() {
+                f(&mut **a);
+            }
+        }
+        Expr::AlternativeSubPlan(asp) => {
+            for subplan in asp.0.subplans.iter_mut() {
+                if let Some(b) = subplan.testexpr.as_deref_mut() {
+                    f(b);
+                }
+                for a in subplan.args.iter_mut() {
+                    f(&mut **a);
+                }
+            }
+        }
         // primitive / context-allocated / TargetEntry-bearing: no in-tree
         // Box/Vec<Expr> children to descend
         _ => {}
