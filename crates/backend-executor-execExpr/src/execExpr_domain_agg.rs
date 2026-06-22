@@ -842,6 +842,22 @@ pub fn exec_build_agg_trans<'mcx>(
 
     exec_ready_expr(&mut state)?;
 
+    // C: `ExecInitSubPlan` appends every SubPlan compiled into this transition
+    // program onto `state->parent->subPlan` (where `state->parent` is
+    // `&aggstate->ss.ps`). An aggregate ARGUMENT can itself contain a correlated
+    // SubPlan — e.g. `max((SELECT i.unique2 FROM tenk1 i WHERE i.unique1 =
+    // o.unique1))` (sublink within an outer-level aggregate, aggregates.sql) —
+    // and those SubPlans are discovered while `exec_init_expr_rec` walks the
+    // aggref args here. In the owned model the discovery rides the ExprState's
+    // `found_subplan_ids` channel; drain it into the AggState's PlanState head
+    // `sub_plan_ids` (the owned-model split of `PlanState.subPlan`) so EXPLAIN
+    // walks the SubPlan body and ExecReScanAgg propagates chgParam into it. The
+    // standard qual/projection compiles drain via the `ExecInitQual` /
+    // `ExecBuildProjectionInfo` entry points; the transition program is built
+    // directly here and so must drain explicitly, exactly as the C does at
+    // SubPlan-init time.
+    core::drain_found_subplan_ids(mcx, &mut aggstate.ss.ps, &mut state)?;
+
     mcx::alloc_in(mcx, state)
 }
 
