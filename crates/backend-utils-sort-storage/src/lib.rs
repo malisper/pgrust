@@ -76,6 +76,7 @@ fn install_tuplestore_seams() {
         tuplestore::tuplestore_alloc_read_pointer(state, eflags)
     });
     seams::tuplestore_ateof::set(tuplestore::tuplestore_ateof);
+    seams::tuplestore_get_stats::set(tuplestore::tuplestore_get_stats_ref);
     seams::tuplestore_advance::set(|state, forward| tuplestore::tuplestore_advance(state, forward));
     seams::tuplestore_gettupleslot::set(|state, forward, copy, slot, estate| {
         tuplestore::tuplestore_gettupleslot(state, forward, copy, slot, estate)

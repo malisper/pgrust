@@ -1527,6 +1527,14 @@ pub fn ExplainNode<'es, 'p>(
             // show_upper_qual.
             let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
             show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
+
+            // explain.c:2211: show_windowagg_info(castNode(WindowAggState,
+            // planstate), es) — under EXPLAIN ANALYZE emit the tuplestore
+            // storage method + peak space (`Storage: Memory  Maximum Storage:
+            // NkB`) from the WindowAgg's row buffer.
+            if plan_node.node_tag() == ntag::T_WindowAgg {
+                show_windowagg_info(es, planstate)?;
+            }
         }
         ntag::T_Gather => {
             // explain.c:2022-2044: Filter + Workers Planned/Launched + Single Copy.
@@ -3030,6 +3038,32 @@ fn show_sort_group_keys<'es, 'p>(
 /// `BYTES_TO_KILOBYTES(b)` — `(b + 1023) / 1024` (memutils.h).
 fn bytes_to_kilobytes(b: i64) -> i64 {
     (b + (1024 - 1)) / 1024
+}
+
+/// `show_windowagg_info(winstate, es)` (explain.c:3489) — under EXPLAIN ANALYZE,
+/// emit the WindowAgg row-buffer tuplestore's storage method + peak space
+/// (`Storage: Memory  Maximum Storage: NkB`). Nothing is shown if ANALYZE wasn't
+/// requested or the buffer was never created.
+fn show_windowagg_info(es: &mut ExplainState<'_>, planstate: &PlanStateNode<'_>) -> PgResult<()> {
+    if !es.analyze {
+        return Ok(());
+    }
+
+    // Tuplestorestate *tupstore = winstate->buffer; if (tupstore == NULL) return;
+    // On the structural slice the runtime buffer is available only when the
+    // executing PlanState is a WindowAgg node that got as far as creating it.
+    let winstate = match planstate.as_window_agg_state() {
+        Some(w) => w,
+        None => return Ok(()),
+    };
+    let Some(buffer) = winstate.buffer.as_deref() else {
+        return Ok(());
+    };
+
+    let (max_storage_type, max_space_used) =
+        backend_utils_sort_storage_seams::tuplestore_get_stats::call(buffer);
+    crate::details::show_storage_info(es, max_storage_type, max_space_used)?;
+    Ok(())
 }
 
 /// `show_memoize_info(mstate, ancestors, es)` (explain.c:3582). Deparse the

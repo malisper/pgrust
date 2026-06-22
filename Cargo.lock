@@ -7192,6 +7192,7 @@ dependencies = [
  "backend-utils-error-fgram",
  "backend-utils-misc-guc-tables",
  "backend-utils-mmgr-fgram",
+ "backend-utils-sort-storage-seams",
  "backend-utils-sort-tuplesort",
  "backend-utils-sort-tuplesort-seams",
  "backend-utils-time-snapmgr-seams",

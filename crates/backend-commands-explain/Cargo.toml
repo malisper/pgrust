@@ -52,6 +52,8 @@ backend-executor-execTuples = { path = "../backend-executor-execTuples" }
 backend-utils-sort-tuplesort = { path = "../backend-utils-sort-tuplesort" }
 # tuplesort_get_stats seam for show_sort_info (plain Sort node EXPLAIN ANALYZE).
 backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
+# tuplestore_get_stats seam for show_windowagg_info / show_material_info storage line.
+backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 types-slot = { path = "../types-slot" }

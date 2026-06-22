@@ -1081,6 +1081,22 @@ pub fn tuplestore_in_memory(carrier: &types_nodes::Tuplestorestate<'_>) -> bool 
     with_store_ref(carrier, |state| state.status == TSS_INMEM)
 }
 
+/// `tuplestore_get_stats` read-only core (`&self`): the seam contract hands a
+/// `&Tuplestorestate` (EXPLAIN ANALYZE holds the plan-state tree immutably).
+/// C's `tuplestore_get_stats` calls `tuplestore_updatemax` before reading, but
+/// every state-changing path (dump, `tuplestore_end`, `puttuple` after a flush)
+/// already ran `tuplestore_updatemax`, so by the time EXPLAIN reads the finished
+/// tuplestore the `usedDisk`/`maxSpace` fields are current and a pure field read
+/// reports the same `(maxStorageType, maxSpaceUsed)` the `&mut` path would.
+pub fn tuplestore_get_stats_ref(
+    carrier: &types_nodes::Tuplestorestate<'_>,
+) -> (&'static str, i64) {
+    with_store_ref(carrier, |state| {
+        let max_storage_type = if state.usedDisk { "Disk" } else { "Memory" };
+        (max_storage_type, state.maxSpace)
+    })
+}
+
 // ----------------------------------------------------------------------------
 // Tape interface routines
 // ----------------------------------------------------------------------------

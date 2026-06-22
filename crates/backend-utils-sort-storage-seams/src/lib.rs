@@ -144,6 +144,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tuplestore_get_stats(state, &maxStorageType, &maxSpaceUsed)`
+    /// (tuplestore.c): obtain the maximum-space statistics — the storage method
+    /// (`"Memory"`/`"Disk"`) and peak space in bytes — used by EXPLAIN ANALYZE
+    /// (`show_storage_info`). The C entry takes a non-const `state` to call
+    /// `tuplestore_updatemax`; by the time EXPLAIN reads it the execution has
+    /// finished and the final `tuplestore_updatemax` has already run at every
+    /// dump/shutdown, so the read-only fields `usedDisk`/`maxSpace` are current.
+    pub fn tuplestore_get_stats(
+        state: &types_nodes::Tuplestorestate<'_>,
+    ) -> (&'static str, i64)
+);
+
+seam_core::seam!(
     /// `tuplestore_advance(state, forward)` (tuplestore.c): move the active
     /// read pointer one step without fetching; returns `false` if it ran off
     /// the end.
