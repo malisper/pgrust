@@ -3346,13 +3346,47 @@ fn clean_up_removed_plan_level<'mcx>(
     mcx: Mcx<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     // Move any parent initplans to the child (+ initplan cost / parallel safety).
+    // C (setrefs.c:1554): if (parent->initPlan) { SS_compute_initplan_cost(...);
+    //   child->startup_cost += initplan_cost; child->total_cost += initplan_cost;
+    //   if (unsafe_initplans) child->parallel_safe = false;
+    //   child->initPlan = list_concat(parent->initPlan, child->initPlan); }
     if parent.initPlan.as_ref().map(|p| !p.is_empty()).unwrap_or(false) {
-        // SS_compute_initplan_cost + the initPlan list concat are the subselect
-        // keystone — LOUD, never silently dropped.
-        return Err(PgError::error(
-            "clean_up_removed_plan_level: moving parent initPlans to the child \
-             (SS_compute_initplan_cost) is owned by the subselect cohort and not ported",
-        ));
+        // SS_compute_initplan_cost(parent->initPlan, &initplan_cost,
+        // &unsafe_initplans): the per-plan cost of each init SubPlan is
+        // startup_cost + per_call_cost; parallel-unsafe if any SubPlan is.
+        let parent_init = parent.initPlan.as_ref().unwrap();
+        let mut initplan_cost = 0.0_f64;
+        let mut unsafe_initplans = false;
+        for sp in parent_init.iter() {
+            initplan_cost += sp.startup_cost + sp.per_call_cost;
+            if !sp.parallel_safe {
+                unsafe_initplans = true;
+            }
+        }
+        // Clone the parent's initPlan SubPlans into the child's memory context.
+        let mut moved: PgVec<types_nodes::primnodes::SubPlan> = PgVec::new_in(mcx);
+        for sp in parent_init.iter() {
+            moved.push(sp.clone_in(mcx)?);
+        }
+        let cbase = child.plan_head_mut();
+        cbase.startup_cost += initplan_cost;
+        cbase.total_cost += initplan_cost;
+        if unsafe_initplans {
+            cbase.parallel_safe = false;
+        }
+        // child->initPlan = list_concat(parent->initPlan, child->initPlan):
+        // parent's initplans come first, then any pre-existing child initplans.
+        match cbase.initPlan.take() {
+            Some(child_init) => {
+                for sp in child_init.into_iter() {
+                    moved.push(sp);
+                }
+                cbase.initPlan = Some(moved);
+            }
+            None => {
+                cbase.initPlan = Some(moved);
+            }
+        }
     }
     // apply_tlist_labeling(child->targetlist, parent->targetlist): copy
     // resname/ressortgroupref/resorig*/resjunk by position.
