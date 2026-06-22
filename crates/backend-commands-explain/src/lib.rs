@@ -605,6 +605,10 @@ fn explain_print_plan<'es>(
         es.es_subplanstates_len = w.estate.es_subplanstates.len();
         es.es_initplan_ptr = w.estate.es_initplan.as_ptr() as *const ();
         es.es_initplan_len = w.estate.es_initplan.len();
+        es.es_result_rel_pool_ptr = w.estate.es_result_rel_pool.as_ptr() as *const ();
+        es.es_result_rel_pool_len = w.estate.es_result_rel_pool.len();
+        es.es_unpruned_relids_ptr =
+            (&w.estate.es_unpruned_relids) as *const _ as *const ();
         let plannedstmt: &PlannedStmt<'_> = &w.plannedstmt;
         let planstate = w
             .planstate

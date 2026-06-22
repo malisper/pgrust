@@ -1483,11 +1483,10 @@ pub fn ExplainNode<'es, 'p>(
         }
         ntag::T_ModifyTable => {
             // explain.c:2242 / show_modifytable_info (explain.c:4520): the
-            // Target Tables / FDW labeling (labeltargets) and EXPLAIN ANALYZE
-            // path counts are runtime/FDW-only; the ON CONFLICT block (Conflict
-            // Resolution / Conflict Arbiter Indexes / Conflict Filter) is the
-            // plan-shape detail exercised by EXPLAIN of an INSERT ... ON CONFLICT.
-            show_modifytable_info(es, mcx, plan_node, ancestors)?;
+            // Target Tables labeling (labeltargets) for multi-target (inherited /
+            // partitioned) ModifyTable, plus the ON CONFLICT block (Conflict
+            // Resolution / Conflict Arbiter Indexes / Conflict Filter).
+            show_modifytable_info(es, mcx, planstate, plan_node, ancestors)?;
         }
         _ => {}
     }
@@ -1932,12 +1931,116 @@ fn show_tablesample<'es, 'p>(
 fn show_modifytable_info<'es, 'p>(
     es: &mut ExplainState<'es>,
     mcx: Mcx<'es>,
+    planstate: &PlanStateNode<'p>,
     plan_node: &Node<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
 ) -> PgResult<()> {
     use types_nodes::nodes::OnConflictAction;
 
     let node = plan_node.expect_modifytable();
+
+    // explain.c:4565 labeltargets — show the per-target relation labeling for a
+    // multi-target (inherited / partitioned) ModifyTable, or a single target
+    // that is not the nominal relation (e.g. all but one child pruned). Reach the
+    // runtime ModifyTableState's resultRelInfo ids and resolve them through the
+    // EState's result-rel pool via the non-owning back-pointers EXPLAIN stamped.
+    let operation = match node.operation {
+        CmdType::CMD_INSERT => "Insert",
+        CmdType::CMD_UPDATE => "Update",
+        CmdType::CMD_DELETE => "Delete",
+        CmdType::CMD_MERGE => "Merge",
+        _ => "???",
+    };
+    let foperation = match node.operation {
+        CmdType::CMD_INSERT => "Foreign Insert",
+        CmdType::CMD_UPDATE => "Foreign Update",
+        CmdType::CMD_DELETE => "Foreign Delete",
+        CmdType::CMD_MERGE => "Foreign Merge",
+        _ => "Foreign ???",
+    };
+
+    if let PlanStateNode::ModifyTable(mtstate) = planstate {
+        // Collect (ri_RangeTableIndex, ri_has_fdw_routine) for each result rel,
+        // resolving RriId -> ResultRelInfo through the EState pool back-pointer.
+        let mut targets: alloc::vec::Vec<(types_core::primitive::Index, bool)> =
+            alloc::vec::Vec::new();
+        if !es.es_result_rel_pool_ptr.is_null() {
+            // SAFETY: aliases EState.es_result_rel_pool for the synchronous walk.
+            let pool: &[types_nodes::execnodes::ResultRelInfo<'_>] = unsafe {
+                core::slice::from_raw_parts(
+                    es.es_result_rel_pool_ptr
+                        as *const types_nodes::execnodes::ResultRelInfo<'_>,
+                    es.es_result_rel_pool_len,
+                )
+            };
+            for rri_id in mtstate.resultRelInfo.iter() {
+                let idx = rri_id.0 as usize;
+                if let Some(rri) = pool.get(idx) {
+                    targets.push((rri.ri_RangeTableIndex, rri.ri_has_fdw_routine));
+                }
+            }
+        }
+
+        let nrels = targets.len();
+        // labeltargets = (mt_nrels > 1 || (mt_nrels == 1 && rti != nominalRelation
+        //                 && bms_is_member(rti, es_unpruned_relids)))
+        let labeltargets = nrels > 1
+            || (nrels == 1 && {
+                let (rti, _) = targets[0];
+                rti != node.nominalRelation && {
+                    if es.es_unpruned_relids_ptr.is_null() {
+                        false
+                    } else {
+                        // SAFETY: aliases EState.es_unpruned_relids for the walk.
+                        let unpruned: &Option<
+                            PgBox<'_, types_nodes::bitmapset::Bitmapset<'_>>,
+                        > = unsafe {
+                            &*(es.es_unpruned_relids_ptr
+                                as *const Option<
+                                    PgBox<'_, types_nodes::bitmapset::Bitmapset<'_>>,
+                                >)
+                        };
+                        backend_nodes_core::bitmapset::bms_is_member(
+                            rti as i32,
+                            unpruned.as_deref(),
+                        )
+                    }
+                }
+            });
+
+        if labeltargets {
+            fmt::ExplainOpenGroup("Target Tables", Some("Target Tables"), false, es)?;
+        }
+
+        for (rti, has_fdw) in targets.iter().copied() {
+            if labeltargets {
+                fmt::ExplainOpenGroup("Target Table", None, true, es)?;
+
+                if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                    fmt::ExplainIndentText(es)?;
+                    es.str.try_push_str(if has_fdw { foperation } else { operation })?;
+                }
+
+                crate::scantarget::ExplainTargetRel(es, plan_node, rti)?;
+
+                if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                    es.str.try_push('\n')?;
+                    es.indent += 1;
+                }
+
+                // FDW ExplainForeignModify is out of this slice's scope.
+
+                if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                    es.indent -= 1;
+                }
+                fmt::ExplainCloseGroup("Target Table", None, true, es)?;
+            }
+        }
+
+        if labeltargets {
+            fmt::ExplainCloseGroup("Target Tables", Some("Target Tables"), false, es)?;
+        }
+    }
 
     // explain.c:4632 — gather arbiter index names via get_rel_name.
     let mut idx_names: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();

@@ -159,6 +159,20 @@ pub struct ExplainState<'mcx> {
     pub es_subplanstates_len: usize,
     pub es_initplan_ptr: *const (),
     pub es_initplan_len: usize,
+
+    /// Owned-model back-pointers into the running `EState`'s result-rel pool and
+    /// the unpruned-relids bitmapset, so `show_modifytable_info` can implement
+    /// the `labeltargets` per-target-relation labeling (explain.c:4565). In C the
+    /// labeling reads `mtstate->resultRelInfo[j].ri_RangeTableIndex` /
+    /// `ri_FdwRoutine` and `estate->es_unpruned_relids`; the owned model keeps the
+    /// `ResultRelInfo`s in `EState.es_result_rel_pool` (addressed by `RriId`) and
+    /// the bitmapset on the EState, so EXPLAIN reaches them through these
+    /// non-owning back-pointers. Set by `ExplainPrintPlan`; valid for the
+    /// synchronous walk. `(null, 0)` / `null` when unset.
+    pub es_result_rel_pool_ptr: *const (),
+    pub es_result_rel_pool_len: usize,
+    /// Non-owning pointer to `EState.es_unpruned_relids` (`*const Option<PgBox<Bitmapset>>`).
+    pub es_unpruned_relids_ptr: *const (),
 }
 
 impl<'mcx> ExplainState<'mcx> {
@@ -196,6 +210,9 @@ impl<'mcx> ExplainState<'mcx> {
             es_subplanstates_len: 0,
             es_initplan_ptr: core::ptr::null(),
             es_initplan_len: 0,
+            es_result_rel_pool_ptr: core::ptr::null(),
+            es_result_rel_pool_len: 0,
+            es_unpruned_relids_ptr: core::ptr::null(),
         }
     }
 }
