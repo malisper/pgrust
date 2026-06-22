@@ -1974,7 +1974,52 @@ fn figure_colname_for_target(node: Option<&Node<'_>>, expr: Option<&Expr<'_>>) -
             }
         }
     }
+
+    // FigureColnameInternal's T_A_Indirection arm recurses into `ind->arg` when
+    // the indirection holds only subscripts (no field name).  In C, the SubLink
+    // under `ind->arg` was transformed in-place by transformExpr, so the raw
+    // walk reaches an analyzed Query; in the owned model transformSubLink does
+    // NOT mutate the raw node, so the analyzed SubLink is only reachable through
+    // the transformed `expr` (a SubscriptingRef whose refexpr is the SubLink).
+    // Consult it here so e.g. `(SELECT ARRAY[1,2,3])[1]` is named `array` /
+    // `(SELECT f1 FROM ...)[1]` takes the subquery target's name, matching C.
+    if let Some(n) = node {
+        if n.node_tag() == ntag::T_A_Indirection {
+            let ind = n.expect_a_indirection();
+            // Only when the indirection carries no field name (pure subscripts).
+            if !ind.indirection.iter().any(|f| is_string(f)) {
+                if let Some(name) = figure_colname_from_transformed_sublink(expr) {
+                    return Some(name);
+                }
+            }
+        }
+    }
+
     FigureColname(node)
+}
+
+/// Mirror FigureColnameInternal's SubLink arm but over a *transformed* `Expr`
+/// (used when the raw SubLink was not mutated in place — see
+/// [`figure_colname_for_target`]).  Descends a `SubscriptingRef`'s `refexpr` to
+/// reach the underlying analyzed SubLink, then names it as
+/// FigureColnameInternal would (`exists`/`array`/EXPR-subquery-target-name).
+fn figure_colname_from_transformed_sublink(expr: Option<&Expr<'_>>) -> Option<String> {
+    match expr {
+        Some(Expr::SubscriptingRef(sref)) => {
+            figure_colname_from_transformed_sublink(sref.refexpr.as_deref())
+        }
+        Some(Expr::SubLink(sl)) => match sl.subLinkType {
+            SubLinkType::Exists => Some(String::from("exists")),
+            SubLinkType::Array => Some(String::from("array")),
+            SubLinkType::Expr => {
+                let query = sl.subselect.as_deref()?;
+                let te = query.targetList.first()?;
+                te.resname.as_deref().map(String::from)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// `FigureIndexColname(node)` — like `FigureColname`, but returns `None` if no

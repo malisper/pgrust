@@ -61,21 +61,21 @@ SELECT (((SELECT 2)) UNION SELECT 2);
 (1 row)
 
 SELECT (SELECT ARRAY[1,2,3])[1];
- ?column? 
-----------
-        1
+ array 
+-------
+     1
 (1 row)
 
 SELECT ((SELECT ARRAY[1,2,3]))[2];
- ?column? 
-----------
-        2
+ array 
+-------
+     2
 (1 row)
 
 SELECT (((SELECT ARRAY[1,2,3])))[3];
- ?column? 
-----------
-        3
+ array 
+-------
+     3
 (1 row)
 
 -- Set up some simple test tables
@@ -921,7 +921,12 @@ create temp table inner_text (c1 text, c2 text);
 insert into inner_text values ('a', null);
 insert into inner_text values ('123', '456');
 select * from outer_text where (f1, f2) not in (select * from inner_text);
-ERROR:  Datum: scalar accessor called on a by-reference value
+ f1 | f2 
+----+----
+ b  | a
+ b  | 
+(2 rows)
+
 --
 -- Another test case for cross-type hashed subplans: comparison of
 -- inner-side values must be done with appropriate operator
