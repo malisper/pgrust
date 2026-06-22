@@ -22,6 +22,12 @@ types-sortsupport = { path = "../types-sortsupport" }
 # from the `_bt_mkscankey` scankey `sk_flags`).
 types-scan = { path = "../types-scan" }
 mcx = { path = "../mcx" }
+# `top_memory_context()` — the process-global `TopMemoryContext` the C
+# `sortcontext` (`AllocSetContextCreate(CurrentMemoryContext, ...)`) is rooted
+# under, so the sort's contexts are reachable from the live `MemoryContext` tree
+# `pg_get_backend_memory_contexts()` walks (the "Caller tuples" bump child must
+# be observable while a cursor keeps a sort open). Seams crate (decls only).
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 # Direct dependency on the now-landed real LogicalTapeSet engine (logtape.c).
 # `backend-utils-sort-storage` does NOT depend on tuplesort, so this edge is
 # acyclic; tuplesort calls `logtape::*` directly (no new tape seams needed).

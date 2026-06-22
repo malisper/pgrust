@@ -553,10 +553,17 @@ fn with_state<R>(f: impl for<'mcx> FnOnce(&mut TypCacheState<'mcx>) -> R) -> R {
         {
             let mut slot = s.borrow_mut();
             if slot.is_none() {
+                // C: the typcache lives under `CacheMemoryContext`. Create this
+                // state's context as a child of the process `CacheMemoryContext`
+                // so it appears as one of its children in
+                // pg_get_backend_memory_contexts() (faithful tree shape).
                 let owned =
-                    McxOwned::<TypCacheStateTy>::try_new(MemoryContext::new("CacheMemoryContext"), |mcx| {
-                        Ok(TypCacheState::new(mcx))
-                    })
+                    McxOwned::<TypCacheStateTy>::try_new(
+                        backend_utils_cache_relcache_seams::cache_memory_context::call()
+                            .context()
+                            .new_child("TypCacheContext"),
+                        |mcx| Ok(TypCacheState::new(mcx)),
+                    )
                     .expect("allocating the empty typcache state cannot fail");
                 *slot = Some(owned);
             }

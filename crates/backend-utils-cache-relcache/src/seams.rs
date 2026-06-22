@@ -19,6 +19,11 @@ use types_error::{PgError, PgResult};
 
 /// Install every relcache seam. Called once from `seams-init::init_all`.
 pub fn init_seams() {
+    // `CacheMemoryContext` accessor for the other catalog-cache subsystems
+    // (catcache/typcache) so their long-lived per-cache contexts are created as
+    // children of this process's `CacheMemoryContext`.
+    sx::cache_memory_context::set(|| crate::derived::cache_memory_context());
+
     // --- core-entry-store ---
     sx::relation_id_get_relation::set(relation_id_get_relation);
     sx::relation_project_existing::set(relation_project_existing);

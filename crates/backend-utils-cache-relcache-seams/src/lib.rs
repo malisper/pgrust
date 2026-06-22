@@ -1287,3 +1287,15 @@ seam_core::seam!(
         index_oid: types_core::primitive::Oid,
     ) -> types_error::PgResult<ReplidentIndexInfo>
 );
+
+seam_core::seam!(
+    /// `CacheMemoryContext` (`utils/cache/relcache.c` —
+    /// `CreateCacheMemoryContext`): the process-lifetime catalog-cache context.
+    /// The relcache owner creates it as a child of `TopMemoryContext` and leaks
+    /// it (never freed, exactly like C), returning its `Mcx<'static>`. Other
+    /// cache subsystems (catcache, typcache) source it here so their long-lived
+    /// per-cache contexts are created as **children of `CacheMemoryContext`**,
+    /// reproducing the C tree shape `pg_get_backend_memory_contexts()` reports
+    /// (CacheMemoryContext with multiple children). Infallible.
+    pub fn cache_memory_context() -> mcx::Mcx<'static>
+);

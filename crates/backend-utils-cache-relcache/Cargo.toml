@@ -12,6 +12,10 @@ path = "src/lib.rs"
 pgrust-trace = { path = "../pgrust-trace" }
 # Inward seam crate this unit owns + installs.
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+# `top_memory_context()` — `CacheMemoryContext` is created as a child of
+# `TopMemoryContext` (CreateCacheMemoryContext) so it is reachable from the live
+# `MemoryContext` tree pg_get_backend_memory_contexts() walks.
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 # Lazy-vacuum driver's relcache-field read seams (RelationGetNamespace /
 # RelationGetRelationName / relisshared / reltuples / RelationNeedsWAL /
 # RelationUsesLocalBuffers / RelationGetNumberOfBlocks) home in vacuumlazy-seams

@@ -49,7 +49,116 @@ enum Backend {
     /// `aset.c` / `generation.c` / `slab.c` semantics: individually freed chunks.
     Malloc,
     /// `bump.c` semantics via bumpalo: no per-chunk free; `reset` reclaims all.
-    Bump(bumpalo::Bump),
+    /// The `BumpBlocks` model tracks `bump.c`'s block structure
+    /// (`mem_allocated` / `nblocks` / current-block free space) deterministically
+    /// alongside the bumpalo arena, so `MemoryContextStats`-style reads report a
+    /// real `Bump` context's `totalspace`/`freespace`/`nblocks` as `bump.c` does
+    /// (bumpalo's internal chunk geometry is unrelated to `bump.c`'s block
+    /// algorithm and cannot be used directly).
+    Bump(bumpalo::Bump, RefCell<BumpBlocks>),
+}
+
+/// `ALLOCSET_DEFAULT_INITSIZE` (memutils.h) — `bump.c` keeper/first block size.
+const BUMP_INIT_BLOCK_SIZE: usize = 8 * 1024;
+/// `ALLOCSET_DEFAULT_MAXSIZE` (memutils.h) — max block size before a request is
+/// served from a dedicated (large) block.
+const BUMP_MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
+/// `Bump_BLOCKHDRSZ` analog: per-block bookkeeping overhead counted into
+/// `mem_allocated`. `MAXALIGN(sizeof(BumpBlock))` is small and fixed; the exact
+/// value is immaterial to the SRF (which only observes `total_bytes > 0` /
+/// `free_bytes > 0`), but counting it keeps `totalspace` strictly above the
+/// requested-byte sum the way `bump.c` does.
+const BUMP_BLOCK_HDR_SZ: usize = 40;
+
+/// A faithful model of `bump.c`'s block list: enough to report
+/// `context->mem_allocated` (total block bytes), the block count, and the
+/// current (head) block's remaining free space. Mirrors `BumpAlloc` /
+/// `BumpAllocLarge` / `BumpAllocFromNewBlock` block decisions without holding
+/// the actual memory (bumpalo owns that).
+struct BumpBlocks {
+    /// `context->mem_allocated` — total bytes of all blocks (incl. headers).
+    mem_allocated: usize,
+    /// Number of blocks currently allocated (== `bump.c`'s block-list length).
+    nblocks: usize,
+    /// Remaining free bytes in the current (head) block — the block new small
+    /// chunks are bump-allocated from.
+    head_free: usize,
+    /// `set->allocChunkLimit`: requests larger than this get a dedicated block
+    /// (`BumpAllocLarge`); see `BumpContextCreate`.
+    alloc_chunk_limit: usize,
+    /// `set->nextBlockSize`: size of the next non-large block (doubles up to
+    /// `maxBlockSize`).
+    next_block_size: usize,
+}
+
+impl BumpBlocks {
+    /// `BumpContextCreate`: one keeper block of `initBlockSize`, and the
+    /// `allocChunkLimit` halving loop.
+    fn new() -> Self {
+        // allocChunkLimit = Min(maxBlockSize, MEMORYCHUNK_MAX_VALUE); halve while
+        // (allocChunkLimit + CHUNKHDRSZ) > (maxBlockSize - BLOCKHDRSZ) / 8.
+        let mut alloc_chunk_limit = BUMP_MAX_BLOCK_SIZE;
+        let bound = (BUMP_MAX_BLOCK_SIZE - BUMP_BLOCK_HDR_SZ) / 8;
+        while alloc_chunk_limit > bound {
+            alloc_chunk_limit >>= 1;
+        }
+        BumpBlocks {
+            // Keeper block allocated with the context (initBlockSize).
+            mem_allocated: BUMP_INIT_BLOCK_SIZE,
+            nblocks: 1,
+            head_free: BUMP_INIT_BLOCK_SIZE - BUMP_BLOCK_HDR_SZ,
+            alloc_chunk_limit,
+            // BumpContextCreate sets nextBlockSize = initBlockSize.
+            next_block_size: BUMP_INIT_BLOCK_SIZE,
+        }
+    }
+
+    /// `BumpAlloc(context, size)` block bookkeeping for a chunk of `size` bytes.
+    fn alloc(&mut self, size: usize) {
+        // MAXALIGN(size); CHUNKHDRSZ is 0 in a non-checking build.
+        let chunk_size = (size + 7) & !7;
+
+        if chunk_size > self.alloc_chunk_limit {
+            // BumpAllocLarge: a dedicated, completely-full block (no free space).
+            let blksize = chunk_size + BUMP_BLOCK_HDR_SZ;
+            self.mem_allocated += blksize;
+            self.nblocks += 1;
+            // The current (head) block is unchanged — its free space stays.
+            return;
+        }
+
+        if chunk_size <= self.head_free {
+            // Fits in the current block; bump the freeptr.
+            self.head_free -= chunk_size;
+            return;
+        }
+
+        // BumpAllocFromNewBlock: grow nextBlockSize toward maxBlockSize until the
+        // chunk fits, allocate the new block, make it the head.
+        let mut blksize = self.next_block_size;
+        let required = chunk_size + BUMP_BLOCK_HDR_SZ;
+        while blksize < required {
+            blksize = (blksize * 2).min(BUMP_MAX_BLOCK_SIZE);
+            if blksize >= required {
+                break;
+            }
+            if blksize == BUMP_MAX_BLOCK_SIZE {
+                // Can't grow further; the block must still fit the chunk.
+                blksize = required;
+                break;
+            }
+        }
+        self.mem_allocated += blksize;
+        self.nblocks += 1;
+        self.head_free = blksize - BUMP_BLOCK_HDR_SZ - chunk_size;
+        // nextBlockSize doubles, capped at maxBlockSize.
+        self.next_block_size = (self.next_block_size * 2).min(BUMP_MAX_BLOCK_SIZE);
+    }
+
+    /// `BumpReset`: keep the keeper block, drop the rest.
+    fn reset(&mut self) {
+        *self = BumpBlocks::new();
+    }
 }
 
 /// The accounting node: one per context, linked into a tree that is
@@ -80,6 +189,20 @@ struct Acct {
     /// (surfacing through `try_` collection APIs), mirroring
     /// `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)`.
     limit: Cell<usize>,
+    /// Backend arena footprint (`bump.c` block bytes), snapshotted on each bump
+    /// allocate/grow. `0` for malloc-backed contexts (their footprint == the
+    /// per-chunk `self_used`). This lives on `Acct` (not just on the backend in
+    /// `MemoryContext`) so the accounting-tree walk `stats_tree()` — which has
+    /// only `Acct`, not the owning `MemoryContext` — can report a bump context's
+    /// real `totalspace`/`freespace`/`nblocks` the way C's `BumpStats` does.
+    arena_footprint: Cell<usize>,
+    /// Backend block count (`bump.c` `nblocks`), snapshotted alongside
+    /// `arena_footprint`. `0` for malloc.
+    arena_nblocks: Cell<usize>,
+    /// `true` for a `bump.c`-backed context — the stats walk (which sees only
+    /// `Acct`) reports `type` = `"Bump"` and sources
+    /// `totalspace`/`freespace`/`nblocks` from the block model.
+    is_bump: bool,
     parent: Option<alloc::rc::Rc<Acct>>,
     children: RefCell<alloc::vec::Vec<alloc::rc::Weak<Acct>>>,
 }
@@ -117,7 +240,7 @@ impl MemoryContext {
     /// is a no-op; memory is reclaimed wholesale by [`reset`](Self::reset) /
     /// drop.
     pub fn new_bump(name: &'static str) -> Self {
-        Self::with_backend(name, Backend::Bump(bumpalo::Bump::new()), None)
+        Self::with_backend(name, Backend::Bump(bumpalo::Bump::new(), RefCell::new(BumpBlocks::new())), None)
     }
 
     /// Child context for accounting purposes: its allocations also count
@@ -131,7 +254,7 @@ impl MemoryContext {
 
     /// [`new_child`](Self::new_child) with a bump backend.
     pub fn new_child_bump(&self, name: &'static str) -> MemoryContext {
-        Self::with_backend(name, Backend::Bump(bumpalo::Bump::new()), Some(self.acct.clone()))
+        Self::with_backend(name, Backend::Bump(bumpalo::Bump::new(), RefCell::new(BumpBlocks::new())), Some(self.acct.clone()))
     }
 
     fn with_backend(
@@ -139,6 +262,16 @@ impl MemoryContext {
         backend: Backend,
         parent: Option<alloc::rc::Rc<Acct>>,
     ) -> Self {
+        // A bump context starts with its keeper block (BumpContextCreate),
+        // present even before any allocation — so an empty "Caller tuples"
+        // already reports nblocks=1 and a positive footprint, as C does.
+        let (is_bump, init_footprint, init_nblocks) = match &backend {
+            Backend::Malloc => (false, 0usize, 0usize),
+            Backend::Bump(_, blocks) => {
+                let b = blocks.borrow();
+                (true, b.mem_allocated, b.nblocks)
+            }
+        };
         let acct = alloc::rc::Rc::new(Acct {
             name,
             ident: RefCell::new(None),
@@ -147,6 +280,9 @@ impl MemoryContext {
             self_peak: Cell::new(0),
             subtree_peak: Cell::new(0),
             limit: Cell::new(usize::MAX),
+            arena_footprint: Cell::new(init_footprint),
+            arena_nblocks: Cell::new(init_nblocks),
+            is_bump,
             parent,
             children: RefCell::new(alloc::vec::Vec::new()),
         });
@@ -238,8 +374,17 @@ impl MemoryContext {
             self.acct.name,
             self.acct.self_used.get(),
         );
-        if let Backend::Bump(bump) = &mut self.backend {
+        if let Backend::Bump(bump, blocks) = &mut self.backend {
             bump.reset();
+            blocks.get_mut().reset();
+        }
+        // Reset the block-footprint snapshot the accounting tree reads.
+        self.acct.arena_footprint.set(0);
+        self.acct.arena_nblocks.set(0);
+        if let Backend::Bump(_, blocks) = &self.backend {
+            let b = blocks.borrow();
+            self.acct.arena_footprint.set(b.mem_allocated);
+            self.acct.arena_nblocks.set(b.nblocks);
         }
         // High-water marks restart; subtree_peak can't drop below what
         // descendants still hold.
@@ -260,7 +405,7 @@ impl MemoryContext {
             limit: self.acct.limit.get(),
             arena_footprint: match &self.backend {
                 Backend::Malloc => self.acct.self_used.get(),
-                Backend::Bump(b) => b.allocated_bytes(),
+                Backend::Bump(_, blocks) => blocks.borrow().mem_allocated,
             },
         }
     }
@@ -286,6 +431,9 @@ impl MemoryContext {
                 subtree_used: acct.subtree_used.get(),
                 subtree_peak: acct.subtree_peak.get(),
                 limit: acct.limit.get(),
+                is_bump: acct.is_bump,
+                arena_footprint: acct.arena_footprint.get(),
+                nblocks: acct.arena_nblocks.get(),
                 children,
             }
         }
@@ -413,8 +561,12 @@ pub struct ContextStats {
 }
 
 /// Hierarchical stats: one context's numbers plus its accounting children's.
-/// (No `arena_footprint` — backends live with each owned context, not in the
-/// accounting tree.)
+///
+/// The bump-arena footprint is surfaced here (snapshotted into `Acct` on each
+/// bump allocate/grow) so a tree walk that has only `Acct` — not the owning
+/// `MemoryContext` that holds the backend — can still report a `bump.c`
+/// context's real `totalspace`/`freespace`/`nblocks` (`MemoryContextStats` /
+/// `pg_get_backend_memory_contexts`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeStats {
     pub name: &'static str,
@@ -424,6 +576,14 @@ pub struct TreeStats {
     pub subtree_used: usize,
     pub subtree_peak: usize,
     pub limit: usize,
+    /// `true` for a `bump.c`-backed context (`type` = `"Bump"` in the SRF;
+    /// `totalspace`/`freespace`/`nblocks` come from the block model below).
+    pub is_bump: bool,
+    /// `context->mem_allocated` for a bump context (total block bytes); `0` for
+    /// malloc-backed (its footprint == `used`).
+    pub arena_footprint: usize,
+    /// `bump.c` block count (`nblocks`); `0` for malloc-backed.
+    pub nblocks: usize,
     pub children: alloc::vec::Vec<TreeStats>,
 }
 
@@ -482,7 +642,18 @@ unsafe impl Allocator for Mcx<'_> {
         self.0.charge(layout.size())?;
         let result = match &self.0.backend {
             Backend::Malloc => Global.allocate(layout),
-            Backend::Bump(bump) => bump.allocate(layout),
+            Backend::Bump(bump, blocks) => {
+                let r = bump.allocate(layout);
+                if r.is_ok() {
+                    // Model bump.c's block decision for this chunk and refresh
+                    // the Acct footprint/nblocks snapshot the stats walk reads.
+                    let mut b = blocks.borrow_mut();
+                    b.alloc(layout.size());
+                    self.0.acct.arena_footprint.set(b.mem_allocated);
+                    self.0.acct.arena_nblocks.set(b.nblocks);
+                }
+                r
+            }
         };
         if result.is_err() {
             self.0.uncharge(layout.size());
@@ -494,7 +665,9 @@ unsafe impl Allocator for Mcx<'_> {
         self.0.uncharge(layout.size());
         match &self.0.backend {
             Backend::Malloc => Global.deallocate(ptr, layout),
-            Backend::Bump(bump) => bump.deallocate(ptr, layout),
+            // bump.c never frees individual chunks (reset reclaims wholesale), so
+            // the block model is untouched on deallocate.
+            Backend::Bump(bump, _) => bump.deallocate(ptr, layout),
         }
     }
 
@@ -508,7 +681,21 @@ unsafe impl Allocator for Mcx<'_> {
         self.0.charge(delta)?;
         let result = match &self.0.backend {
             Backend::Malloc => Global.grow(ptr, old_layout, new_layout),
-            Backend::Bump(bump) => bump.grow(ptr, old_layout, new_layout),
+            Backend::Bump(bump, blocks) => {
+                let r = bump.grow(ptr, old_layout, new_layout);
+                if r.is_ok() {
+                    // bump.c can't grow in place; bumpalo bump-allocates the
+                    // grown buffer. Charge only the incremental bytes to the
+                    // block model (the moved-from bytes become dead arena space,
+                    // already counted), so a growing collection doesn't spuriously
+                    // multiply the block count.
+                    let mut b = blocks.borrow_mut();
+                    b.alloc(delta);
+                    self.0.acct.arena_footprint.set(b.mem_allocated);
+                    self.0.acct.arena_nblocks.set(b.nblocks);
+                }
+                r
+            }
         };
         if result.is_err() {
             self.0.uncharge(delta);
@@ -524,7 +711,7 @@ unsafe impl Allocator for Mcx<'_> {
     ) -> Result<NonNull<[u8]>, AllocError> {
         let result = match &self.0.backend {
             Backend::Malloc => Global.shrink(ptr, old_layout, new_layout),
-            Backend::Bump(bump) => bump.shrink(ptr, old_layout, new_layout),
+            Backend::Bump(bump, _) => bump.shrink(ptr, old_layout, new_layout),
         };
         if result.is_ok() {
             self.0.uncharge(old_layout.size() - new_layout.size());

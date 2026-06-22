@@ -84,8 +84,14 @@ fn with_tupdesc_store<R>(f: impl for<'mcx> FnOnce(&mut TupdescStore<'mcx>) -> R)
         {
             let mut slot = s.borrow_mut();
             if slot.is_none() {
+                // C: the catcache tuple descriptors live in `CacheMemoryContext`.
+                // Create this store's context as a child of the process
+                // `CacheMemoryContext` so it shows up as one of its children in
+                // pg_get_backend_memory_contexts() (faithful tree shape).
                 let owned = McxOwned::<TupdescStoreTy>::try_new(
-                    MemoryContext::new("CacheMemoryContext"),
+                    backend_utils_cache_relcache_seams::cache_memory_context::call()
+                        .context()
+                        .new_child("CatCacheContext"),
                     |mcx| Ok(TupdescStore::new(mcx)),
                 )
                 .expect("allocating the empty catcache tupdesc store cannot fail");

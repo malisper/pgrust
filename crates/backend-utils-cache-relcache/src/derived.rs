@@ -1361,8 +1361,24 @@ thread_local! {
     /// never-freed `CacheMemoryContext`. The relcache entry's owned node trees
     /// (`rd_rules` and, as later campaigns land them, the other node payloads)
     /// allocate here.
-    static CACHE_MEMORY_CONTEXT: &'static MemoryContext =
-        Box::leak(Box::new(MemoryContext::new("CacheMemoryContext")));
+    static CACHE_MEMORY_CONTEXT: &'static MemoryContext = Box::leak(Box::new(
+        // `CreateCacheMemoryContext`: a child of `TopMemoryContext`, so the
+        // catalog-cache subtree is reachable from the live `MemoryContext` tree
+        // `pg_get_backend_memory_contexts()` walks. The parent link is an `Rc`
+        // clone of the leaked process-global `TopMemoryContext` accounting node
+        // (Weak back link, decoupled from ownership/Drop); the context itself is
+        // leaked here, never freed, exactly as C's `CacheMemoryContext`. When the
+        // `top_memory_context` seam is not installed (leaf-crate unit tests with
+        // no workspace seam wiring), fall back to a disconnected root — the
+        // accounting is identical; only the tree-reachability link is absent.
+        if backend_utils_mmgr_mcxt_seams::top_memory_context::is_installed() {
+            backend_utils_mmgr_mcxt_seams::top_memory_context::call()
+                .context()
+                .new_child("CacheMemoryContext")
+        } else {
+            MemoryContext::new("CacheMemoryContext")
+        },
+    ));
 }
 
 /// The process-lifetime `Mcx<'static>` standing in for C's `CacheMemoryContext`.

@@ -500,6 +500,20 @@ pub struct TuplesortStateImpl<'mcx> {
 
     /// `int64 abbrevNext`.
     pub abbrevNext: i64,
+
+    /// `MemoryContext tuplecontext` (tuplesort.c): the per-tuple working
+    /// context holding the tuple *bodies* (`stup.tuple`). In C it is a child of
+    /// `sortcontext` and, for an unbounded sort, a `bump.c` context named
+    /// **"Caller tuples"** (`BumpContextCreate(sortcontext, "Caller tuples",
+    /// ...)`); `tuplesort_begin_batch` creates it and `tuplesort_reset` resets
+    /// it. We model it faithfully as an owned bump child of the engine's
+    /// `sortcontext` so the tuple bodies are charged to (and observable as) a
+    /// real "Caller tuples" bump context in the live `MemoryContext` tree
+    /// `pg_get_backend_memory_contexts()` walks. It is `None` only on the
+    /// (unreachable on the serial path) bounded-sort leg, where C uses the
+    /// `sortcontext` itself for tuple bodies; [`tuplemcx`](Self::tuplemcx) falls
+    /// back to the sort context in that case.
+    pub(crate) tuplecontext: Option<MemoryContext>,
 }
 
 impl<'mcx> TuplesortStateImpl<'mcx> {
@@ -509,6 +523,26 @@ impl<'mcx> TuplesortStateImpl<'mcx> {
     #[inline]
     fn mcx(&self) -> Mcx<'mcx> {
         *self.memtuples.allocator()
+    }
+
+    /// The C `base->tuplecontext` ("Caller tuples") handle — where tuple
+    /// *bodies* are allocated (`COPYTUP` / `tuplesort_puttupleslot`'s
+    /// `ExecCopySlotMinimalTuple`). Re-tagged to the engine's `'mcx`: the
+    /// `tuplecontext` is owned by this state (it lives in the `McxOwned` box
+    /// alongside the engine and is dropped *with* the state, before the
+    /// `sortcontext`), so its allocations share the engine's lifetime exactly as
+    /// the sort context's do. Falls back to the sort context if the bump child
+    /// was not created (bounded-sort leg).
+    #[inline]
+    fn tuplemcx(&self) -> Mcx<'mcx> {
+        match &self.tuplecontext {
+            // SAFETY: `tuplecontext` is heap-stable inside the `McxOwned` box and
+            // dropped before the `sortcontext` (state drops before ctx), so
+            // re-tagging its handle to the engine's `'mcx` is sound — identical
+            // reasoning to `McxOwned::try_new`'s sort-context erasure.
+            Some(tc) => unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'mcx>>(tc.mcx()) },
+            None => self.mcx(),
+        }
     }
 
     /// `SERIAL(state)` — `state->shared == NULL`.
@@ -616,6 +650,9 @@ pub fn tuplesort_begin_common<'a>(
         nParticipants: -1,
         // state->abbrevNext = 10;
         abbrevNext: 10,
+        // base->tuplecontext ("Caller tuples"): created in begin_batch (C
+        // creates it there, after the sort context is established).
+        tuplecontext: None,
     };
 
     tuplesort_begin_batch(&mut state)?;
@@ -647,6 +684,20 @@ fn tuplesort_begin_batch<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult
     // SortedInMem with slabAllocatorUsed still true and trips the gettuple assert.
     state.slabAllocatorUsed = false;
     state.memtuples = vec_with_capacity_in(state.mcx(), state.memtupsize as usize)?;
+
+    // C: create the dedicated per-tuple working context ("Caller tuples") as a
+    // child of the sort context. For an unbounded sort it is a bump.c context
+    // (TupleSortUseBumpTupleCxt); for a bounded sort a regular aset.c context
+    // (tuples can be pfree'd in any order). `new_child_bump`/`new_child` link it
+    // into the live `MemoryContext` tree under the sort context, so it (and its
+    // tuple-body charges) are observable in pg_get_backend_memory_contexts().
+    let sortcxt = state.mcx().context();
+    let tuplecxt = if state.base.sortopt & TUPLESORT_ALLOWBOUNDED == 0 {
+        sortcxt.new_child_bump("Caller tuples")
+    } else {
+        sortcxt.new_child("Caller tuples")
+    };
+    state.tuplecontext = Some(tuplecxt);
 
     // USEMEM(state, GetMemoryChunkSpace(state->memtuples)): account for the
     // memtuples array. We charge the byte size of the reserved array.
@@ -3632,6 +3683,20 @@ mcx::bind!(pub TuplesortStateImplBind => TuplesortStateImpl<'mcx>);
 /// [`types_nodes::Tuplesortstate`] carrier.
 pub type OwnedSort = McxOwned<TuplesortStateImplBind>;
 
+/// The C `sortcontext` (`AllocSetContextCreate(CurrentMemoryContext,
+/// "Tuplesort main"/sort, ...)`): a fresh context for one sort, created as a
+/// child of `TopMemoryContext` so it (and its "Caller tuples" bump child) are
+/// reachable from the live `MemoryContext` tree `pg_get_backend_memory_contexts`
+/// walks while a cursor keeps the sort open. The parent link is an `Rc` clone of
+/// the leaked process-global `TopMemoryContext`'s accounting node (a `Weak` back
+/// link, decoupled from ownership/Drop): the sort context is still owned by the
+/// returned [`OwnedSort`] and freed when it drops (the C
+/// `MemoryContextDelete(maincontext)` in `tuplesort_end`).
+fn sort_context() -> MemoryContext {
+    let top = backend_utils_mmgr_mcxt_seams::top_memory_context::call();
+    top.context().new_child("TupleSort sort")
+}
+
 /// Build the engine bundle (`tuplesort_begin_common` inside its own
 /// `sortcontext`). `work_mem` is in kB. The bundle context is a child of (and
 /// accounting-linked to) the C `CurrentMemoryContext` — modeled here as a new
@@ -3646,7 +3711,7 @@ pub fn begin_state(
     // accounting (which `grow_memtuples` / `LACKMEM` enforce), NOT a context
     // limit. So the bundle context is unlimited; do not conflate the soft sort
     // budget with a hard allocator ceiling.
-    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), |sx| {
+    OwnedSort::try_new(sort_context(), |sx| {
         tuplesort_begin_common(sx, work_mem, sortopt, variant)
     })
 }
@@ -3766,7 +3831,7 @@ fn tuplesort_begin_heap_state(
     let sort_collations: std::vec::Vec<Oid> = sort_collations.to_vec();
     let nulls_first_flags: std::vec::Vec<bool> = nulls_first_flags.to_vec();
 
-    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+    OwnedSort::try_new(sort_context(), move |sx| {
         let mut state = tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::Heap)?;
 
         state.base.nKeys = nkeys;
@@ -3822,7 +3887,7 @@ fn tuplesort_begin_datum_state(
     let (typlen, typbyval) =
         backend_utils_cache_lsyscache_seams::get_typlenbyval::call(datum_type)?;
 
-    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+    OwnedSort::try_new(sort_context(), move |sx| {
         let mut state = tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::Datum)?;
 
         state.base.nKeys = 1; // always a one-column sort
@@ -3976,7 +4041,7 @@ fn tuplesort_begin_index_btree_state(
     let heap_rel_engine: Relation<'static> = unsafe { relation_into_engine(heap_rel) };
     let index_rel_engine: Relation<'static> = unsafe { relation_into_engine(index_rel) };
 
-    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+    OwnedSort::try_new(sort_context(), move |sx| {
         let mut state =
             tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::IndexBtree)?;
 
@@ -4067,7 +4132,7 @@ fn tuplesort_begin_cluster_state(
     // SortSupport against `sx`.
     let index_rel_engine: Relation<'static> = unsafe { relation_into_engine(index_rel) };
 
-    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+    OwnedSort::try_new(sort_context(), move |sx| {
         let mut state = tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::Cluster)?;
 
         state.base.nKeys = nkeys;
@@ -4123,7 +4188,7 @@ fn tuplesort_begin_index_hash_state(
     let heap_rel_engine: Relation<'static> = unsafe { relation_into_engine(heap_rel) };
     let index_rel_engine: Relation<'static> = unsafe { relation_into_engine(index_rel) };
 
-    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+    OwnedSort::try_new(sort_context(), move |sx| {
         let mut state =
             tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::IndexHash)?;
 
@@ -4189,7 +4254,7 @@ fn tuplesort_begin_index_gist_state(
     let heap_rel_engine: Relation<'static> = unsafe { relation_into_engine(heap_rel) };
     let index_rel_engine: Relation<'static> = unsafe { relation_into_engine(index_rel) };
 
-    OwnedSort::try_new(MemoryContext::new("TupleSort sort"), move |sx| {
+    OwnedSort::try_new(sort_context(), move |sx| {
         // GiST shares the index_btree subcase comparetup/writetup/readtup.
         let mut state =
             tuplesort_begin_common(sx, work_mem, sortopt, SortVariantKind::IndexBtree)?;
@@ -4344,6 +4409,10 @@ fn tuplesort_puttupleslot_impl<'mcx>(
     slot: &TupleTableSlot<'mcx>,
 ) -> PgResult<()> {
     let mcx = state.mcx();
+    // The tuple *body* (`ExecCopySlotMinimalTuple`) is charged to the C
+    // `tuplecontext` ("Caller tuples"); only the sort key (`datum1`) lives in
+    // the sort context.
+    let tuplemcx = state.tuplemcx();
     let tup_desc = match &state.base.arg {
         SortVariantArg::Heap { tupDesc } => tupDesc,
         _ => {
@@ -4355,9 +4424,9 @@ fn tuplesort_puttupleslot_impl<'mcx>(
 
     // copy the tuple into sort storage: ExecCopySlotMinimalTuple(slot). The
     // owned slot carries the deformed value/null arrays; form a MinimalTuple
-    // over them in the sort context.
+    // over them in the C `tuplecontext` ("Caller tuples").
     let tuple: FormedMinimalTuple<'mcx> = heaptuple::heap_form_minimal_tuple(
-        mcx,
+        tuplemcx,
         tup_desc,
         &slot.tts_values,
         &slot.tts_isnull,

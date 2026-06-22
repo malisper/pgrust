@@ -74,6 +74,9 @@ struct NodeSnap {
     name: Option<Vec<u8>>,
     /// `context->ident` (raw bytes).
     ident: Option<Vec<u8>>,
+    /// `context->type` (`T_AllocSetContext` vs `T_BumpContext`): bump-backed
+    /// `mcx` contexts (e.g. tuplesort's "Caller tuples") report `"Bump"`.
+    context_type: MemoryContextType,
     /// per-context counters (`methods->stats`).
     stats: MemoryContextCounters,
 }
@@ -136,10 +139,11 @@ fn seam_context_node(context: MemoryContextRef) -> PgResult<MemoryContextNode> {
             nextchild: n.nextchild.map(handle_of),
             name: n.name.clone(),
             ident: n.ident.clone(),
-            // pgrust `mcx` contexts collapse C's per-backend `NodeTag`
-            // distinction; every accounting context is an `AllocSet`-equivalent
-            // domain.
-            context_type: MemoryContextType::AllocSet,
+            // `mcx` distinguishes the bump backend (`bump.c`) from the
+            // malloc-backed `AllocSet`-equivalent; surface that as the C
+            // `NodeTag`-derived `type` string (e.g. tuplesort's "Caller tuples"
+            // reports "Bump").
+            context_type: n.context_type,
         })
     })
 }
@@ -237,11 +241,29 @@ fn snapshot_context_tree() -> Vec<NodeSnap> {
     // go. `to_counters` maps the `mcx` exact-byte accounting onto the C
     // `MemoryContextCounters` the SRF emits.
     fn counters(t: &TreeStats) -> MemoryContextCounters {
-        MemoryContextCounters {
-            totalspace: t.used,
-            nblocks: 0,
-            freespace: 0,
-            freechunks: 0,
+        if t.is_bump {
+            // `bump.c` `BumpStats`: totalspace = sum of block sizes
+            // (`mem_allocated`), freespace = the unused tail of the current
+            // block, nblocks = block count, freechunks = 0 (bump never tracks
+            // free chunks). `freespace` is derived as footprint minus the live
+            // requested bytes, which is always positive while a block has a
+            // non-full tail (so a populated "Caller tuples" reports free_bytes>0).
+            let freespace = t.arena_footprint.saturating_sub(t.used);
+            MemoryContextCounters {
+                totalspace: t.arena_footprint,
+                nblocks: t.nblocks,
+                freespace,
+                freechunks: 0,
+            }
+        } else {
+            // Malloc-backed: the exact-byte model has no block/free bookkeeping;
+            // totalspace == used, freespace/nblocks/freechunks == 0.
+            MemoryContextCounters {
+                totalspace: t.used,
+                nblocks: 0,
+                freespace: 0,
+                freechunks: 0,
+            }
         }
     }
 
@@ -253,6 +275,11 @@ fn snapshot_context_tree() -> Vec<NodeSnap> {
             nextchild: None,
             name: Some(t.name.as_bytes().to_vec()),
             ident: t.ident.as_ref().map(|s| s.as_bytes().to_vec()),
+            context_type: if t.is_bump {
+                MemoryContextType::Bump
+            } else {
+                MemoryContextType::AllocSet
+            },
             stats: counters(t),
         });
 
