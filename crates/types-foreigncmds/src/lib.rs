@@ -567,6 +567,16 @@ pub struct PgForeignTableInsertRow {
     pub options: Option<Vec<(String, String)>>,
 }
 
+/// Update carrier for one `pg_foreign_table` row (`ATExecGenericOptions`).
+/// `ftrelid` is the row key. `options` is the outer `Option` "replace?" /
+/// inner `Option` "NULL?" idiom (`repl_repl`/`repl_null`).
+#[derive(Clone, Debug)]
+pub struct PgForeignTableUpdateRow {
+    /// `ftoptions`: `Some(Some(pairs))` ⇒ replace with the array;
+    /// `Some(None)` ⇒ replace with SQL NULL; `None` ⇒ leave unchanged.
+    pub options: Option<Option<Vec<(String, String)>>>,
+}
+
 /* ---------------------------------------------------------------------------
  * IMPORT FOREIGN SCHEMA loop carriers.
  *

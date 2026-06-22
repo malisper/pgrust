@@ -2761,6 +2761,29 @@ fn catalog_tuple_update_pg_user_mapping(
     modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
 }
 
+fn catalog_tuple_update_pg_foreign_table(
+    rel: &RelationData<'_>,
+    ftrelid: Oid,
+    row: &types_foreigncmds::PgForeignTableUpdateRow,
+) -> PgResult<()> {
+    use types_foreigncmds as fc;
+    let ctx = MemoryContext::new("catalog_tuple_update_pg_foreign_table");
+    let mcx = ctx.mcx();
+    let r = reopen(mcx, rel)?;
+    let oldtup = fetch_by_oid(mcx, &r, fc::Anum_pg_foreign_table_ftrelid, ftrelid)?
+        .ok_or_else(|| PgError::error("cache lookup failed for foreign table"))?;
+    let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+    if let Some(opts) = &row.options {
+        let col = fc::Anum_pg_foreign_table_ftoptions;
+        match options_array_datum(mcx, opts)? {
+            Some(d) => set_col(&mut values, &mut nulls, &mut replaces, col, d),
+            None => set_null_col(&mut values, &mut nulls, &mut replaces, col),
+        }
+    }
+    modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
+}
+
 fn catalog_tuple_insert_pg_foreign_table(
     rel: &RelationData<'_>,
     row: &types_foreigncmds::PgForeignTableInsertRow,
@@ -3367,6 +3390,7 @@ pub fn install() {
     s::catalog_tuple_insert_pg_user_mapping::set(catalog_tuple_insert_pg_user_mapping);
     s::catalog_tuple_update_pg_user_mapping::set(catalog_tuple_update_pg_user_mapping);
     s::catalog_tuple_insert_pg_foreign_table::set(catalog_tuple_insert_pg_foreign_table);
+    s::catalog_tuple_update_pg_foreign_table::set(catalog_tuple_update_pg_foreign_table);
 
     // pg_db_role_setting.
     s::decode_db_role_setting_setconfig::set(decode_db_role_setting_setconfig);

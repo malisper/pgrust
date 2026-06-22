@@ -1213,6 +1213,122 @@ pub fn ATExecAlterColumnGenericOptions<'mcx>(
     Ok(object_address_subset(RelationRelationId, rel.rd_id, attnum as i32))
 }
 
+/// `ATExecGenericOptions(rel, options)` (tablecmds.c:18663) — ALTER FOREIGN
+/// TABLE ... OPTIONS (...) on a foreign table. Determines the FDW validator for
+/// the foreign table's server, merges the SET/ADD/DROP option actions into the
+/// table's current `ftoptions` (via `transformGenericOptions`), writes the
+/// resulting `text[]` back to `pg_foreign_table.ftoptions`, invalidates the
+/// relcache, and fires the post-alter hook.
+///
+/// `options` is the `(List *) cmd->def` — a `Node::List` of `Node::DefElem`.
+/// Returns void in C (`AT_GenericOptions` keeps the InvalidObjectAddress).
+pub fn ATExecGenericOptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    options: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    use backend_commands_foreigncmds_seams as fc_seam;
+    use backend_foreign_foreign_seams as ff_seam;
+
+    // Collect the new options: (name, value, defaction). if (options == NIL) return;
+    let mut new_options: Vec<(String, Option<String>, i32)> = Vec::new();
+    if let Some(def) = options {
+        if let Some(items) = def.as_list() {
+            for it in items.iter() {
+                if let Some(de) = it.as_defelem() {
+                    let name = de
+                        .defname
+                        .as_ref()
+                        .map(|s| s.as_str().to_string())
+                        .ok_or_else(|| {
+                            backend_utils_error::PgError::error("DefElem has no defname")
+                        })?;
+                    let value = match de.arg.as_deref() {
+                        None => None,
+                        Some(node) => Some(node.expect_string().sval.as_str().to_string()),
+                    };
+                    new_options.push((name, value, de.defaction as i32));
+                }
+            }
+        }
+    }
+    if new_options.is_empty() {
+        // C: `if (options == NIL) return;`
+        return Ok(());
+    }
+
+    // ftrel = table_open(ForeignTableRelationId, RowExclusiveLock);
+    // tuple = SearchSysCacheCopy1(FOREIGNTABLEREL, rel->rd_id);
+    // server = GetForeignServer(tableform->ftserver);
+    // fdw = GetForeignDataWrapper(server->fdwid);  → fdw->fdwvalidator
+    // (a missing pg_foreign_table row → "foreign table does not exist").
+    let fdwvalidator = fc_seam::foreign_table_fdwvalidator::call(rel.rd_id, &rel.name())?;
+
+    // Extract the current options (datum = SysCacheGetAttr(ftoptions); isnull → NIL).
+    let old_options_pairs = match ff_seam::foreign_table_options::call(rel.rd_id)? {
+        Some(p) => p,
+        None => {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!("foreign table \"{}\" does not exist", rel.name()))
+                .finish(here("ATExecGenericOptions"))
+                .map(|()| ());
+        }
+    };
+    let old_options: Vec<(String, Option<String>)> = old_options_pairs
+        .into_iter()
+        .map(|(n, v)| (n, Some(v)))
+        .collect();
+
+    // datum = transformGenericOptions(ForeignTableRelationId, datum, options,
+    //                                 fdw->fdwvalidator);
+    let merged = fc_seam::transform_generic_options::call(
+        types_foreigncmds::ForeignTableRelationId,
+        &old_options,
+        &new_options,
+        fdwvalidator,
+    )?;
+
+    // if (PointerIsValid(DatumGetPointer(datum))) repl_val[ftoptions] = datum;
+    // else repl_null[ftoptions] = true;  — empty merged ⇒ SQL NULL.
+    let pairs: Option<Vec<(String, String)>> = if merged.is_empty() {
+        None
+    } else {
+        Some(
+            merged
+                .into_iter()
+                .map(|(n, v)| (n, v.unwrap_or_default()))
+                .collect(),
+        )
+    };
+
+    // ftrel = table_open(ForeignTableRelationId, RowExclusiveLock);
+    let ftrel = relation_open(
+        mcx,
+        types_foreigncmds::ForeignTableRelationId,
+        RowExclusiveLock,
+    )?;
+    // tuple = heap_modify_tuple(...); CatalogTupleUpdate(ftrel, &tuple->t_self, tuple);
+    let row = types_foreigncmds::PgForeignTableUpdateRow {
+        options: Some(pairs),
+    };
+    indexing_seam::catalog_tuple_update_pg_foreign_table::call(&ftrel, rel.rd_id, &row)?;
+
+    // CacheInvalidateRelcache(rel);
+    backend_utils_cache_inval_seams::cache_invalidate_relcache::call(rel.rd_id)?;
+
+    // InvokeObjectPostAlterHook(ForeignTableRelationId, RelationGetRelid(rel), 0);
+    objaccess_seam::invoke_object_post_alter_hook::call(
+        types_foreigncmds::ForeignTableRelationId,
+        rel.rd_id,
+        0,
+    )?;
+
+    // table_close(ftrel, RowExclusiveLock) — RAII.
+    drop(ftrel);
+    Ok(())
+}
+
 /// `ATExecSetCompression(rel, column, newValue, lockmode)` (tablecmds.c) —
 /// ALTER COLUMN SET COMPRESSION. Resolves the named compression method via
 /// `GetAttributeCompression`, writes `pg_attribute.attcompression`, then

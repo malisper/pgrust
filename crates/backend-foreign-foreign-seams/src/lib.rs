@@ -612,3 +612,11 @@ seam_core::seam!(
     /// table does not exist" branch, raised by the caller).
     pub fn foreign_table_server_oid(relid: Oid) -> PgResult<Option<Oid>>
 );
+
+seam_core::seam!(
+    /// `SearchSysCacheCopy1(FOREIGNTABLEREL, relid)` →
+    /// `SysCacheGetAttr(ftoptions)` decoded to `(name, value)` pairs
+    /// (`ATExecGenericOptions`, tablecmds.c:18696): the foreign table's current
+    /// generic options. `None` when `relid` has no `pg_foreign_table` row.
+    pub fn foreign_table_options(relid: Oid) -> PgResult<Option<Vec<(String, String)>>>
+);

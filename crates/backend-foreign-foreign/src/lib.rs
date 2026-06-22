@@ -306,6 +306,31 @@ pub fn GetForeignTable<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<ForeignTabl
     })
 }
 
+/// Seam body for `foreign_table_options`: the foreign table's current
+/// `ftoptions` decoded into owned `(name, value)` pairs (`None` ⇒ no
+/// `pg_foreign_table` row). Strings are owned, so the per-call context is
+/// freed before returning.
+fn foreign_table_options_impl(relid: Oid) -> PgResult<Option<Vec<(String, String)>>> {
+    let ctx = MemoryContext::new("foreign_table_options");
+    let mcx = ctx.mcx();
+    let form = syscache::foreign_table_form::call(mcx, relid)?;
+    let Some((_serverid, raw_options)) = form else {
+        return Ok(None);
+    };
+    let pairs = match raw_options {
+        Some(bytes) => {
+            backend_access_common_reloptions::untransformRelOptions(mcx, Some(bytes.as_slice()))?
+        }
+        None => Vec::new(),
+    };
+    Ok(Some(
+        pairs
+            .into_iter()
+            .map(|(n, v)| (n, v.unwrap_or_default()))
+            .collect(),
+    ))
+}
+
 /// `GetForeignColumnOptions(relid, attnum)` — get `attfdwoptions` of a given
 /// relation/attnum as a list of options.
 pub fn GetForeignColumnOptions<'mcx>(
@@ -1418,6 +1443,8 @@ pub fn init_seams() {
         // foreign table has no pg_foreign_table row.
         syscache::foreign_table_server_by_relid::call(relid)
     });
+
+    inward::foreign_table_options::set(|relid| foreign_table_options_impl(relid));
 
     inward::get_foreign_server::set(|mcx, serverid| {
         // GetForeignServer raises (Err) on a missing server (flags = 0); the

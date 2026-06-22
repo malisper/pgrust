@@ -928,6 +928,18 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
+seam_core::seam!(
+    /// `heap_modify_tuple` + `CatalogTupleUpdate` for one `pg_foreign_table`
+    /// row keyed by `ftrelid` (`ATExecGenericOptions`). `row.options` is the
+    /// outer-"replace?"/inner-"NULL?" idiom: `Some(Some(pairs))` writes the
+    /// `ftoptions` array, `Some(None)` writes SQL NULL, `None` leaves it.
+    pub fn catalog_tuple_update_pg_foreign_table(
+        rel: &RelationData<'_>,
+        ftrelid: Oid,
+        row: &types_foreigncmds::PgForeignTableUpdateRow,
+    ) -> PgResult<()>
+);
+
 /* ---- get_catalog_object_by_oid scan primitive (objectaddress.c) ----------- */
 
 seam_core::seam!(

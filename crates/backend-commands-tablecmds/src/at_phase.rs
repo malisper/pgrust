@@ -1179,7 +1179,8 @@ pub(crate) fn ATPrepCmd<'mcx>(
         }
         AT_GenericOptions => {
             ATSimplePermissions(cmd.subtype, rel, ATT_FOREIGN_TABLE)?;
-            unported("OPTIONS (foreign table generic options)");
+            /* No command-specific prep needed */
+            pass = AT_PASS_MISC;
         }
         AT_AttachPartition => {
             ATSimplePermissions(
@@ -2125,7 +2126,11 @@ fn ATExecCmd<'mcx>(
             // ATExecForceNoForceRowSecurity(rel, false)
             _address = crate::at_column::ATExecForceNoForceRowSecurity(rel, false)?;
         }
-        AT_GenericOptions => unported("OPTIONS (ATExecGenericOptions)"),
+        AT_GenericOptions => {
+            // ATExecGenericOptions(rel, (List *) cmd->def) — returns void, so
+            // `_address` stays the InvalidObjectAddress the loop initialized.
+            crate::at_column::ATExecGenericOptions(mcx, rel, cmd.def.as_deref())?;
+        }
         AT_AttachPartition => {
             // cmd = ATParseTransformCmd(wqueue, tab, rel, cmd, false, ...): transform
             // the FOR VALUES bound (raw A_Const → PartitionRangeDatum/Const) before
