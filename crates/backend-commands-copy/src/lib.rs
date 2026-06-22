@@ -1338,6 +1338,7 @@ fn copy_from_driver<'mcx>(
         attnumlist,
         range_table,
         rteperminfos,
+        fmt.freeze,
         stmt.filename.as_deref(),
         stmt.is_program,
         // DoCopy (the SQL `COPY ... FROM` path) never supplies a programmatic
