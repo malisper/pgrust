@@ -405,6 +405,50 @@ fn jt_joinexpr_at<'a, 'mcx>(
         .unwrap_or_else(|| unreachable!("jt_joinexpr_at: node is not a JoinExpr"))
 }
 
+/// Read-only resolver: `&Node` for `path` within `parse.jointree`.
+fn jt_node_ref<'a, 'mcx>(parse: &'a Query<'mcx>, path: &JtPath<'_, 'mcx>) -> &'a Node<'mcx> {
+    match path {
+        JtPath::Detached(_) => {
+            unreachable!("jt_node_ref(Detached): a detached node is handled inline by the recursion")
+        }
+        JtPath::Top => {
+            unreachable!("jt_node_ref(Top): the top FromExpr is addressed via its fromlist")
+        }
+        JtPath::From { parent, index } => &*jt_fromexpr_ref(parse, parent).fromlist[*index],
+        JtPath::Larg { parent } => jt_joinexpr_ref(parse, parent)
+            .larg
+            .as_deref()
+            .expect("JoinExpr with NULL larg"),
+        JtPath::Rarg { parent } => jt_joinexpr_ref(parse, parent)
+            .rarg
+            .as_deref()
+            .expect("JoinExpr with NULL rarg"),
+    }
+}
+
+/// Read-only resolver: `&FromExpr` for the FromExpr node at `path`.
+fn jt_fromexpr_ref<'a, 'mcx>(parse: &'a Query<'mcx>, path: &JtPath<'_, 'mcx>) -> &'a FromExpr<'mcx> {
+    match path {
+        JtPath::Top => parse
+            .jointree
+            .as_deref()
+            .expect("pull_up_subqueries: top jointree must be a FromExpr"),
+        _ => jt_node_ref(parse, path)
+            .as_fromexpr()
+            .unwrap_or_else(|| unreachable!("jt_fromexpr_ref: node is not a FromExpr")),
+    }
+}
+
+/// Read-only resolver: `&JoinExpr` for the JoinExpr node at `path`.
+fn jt_joinexpr_ref<'a, 'mcx>(
+    parse: &'a Query<'mcx>,
+    path: &JtPath<'_, 'mcx>,
+) -> &'a types_nodes::rawnodes::JoinExpr<'mcx> {
+    jt_node_ref(parse, path)
+        .as_joinexpr()
+        .unwrap_or_else(|| unreachable!("jt_joinexpr_ref: node is not a JoinExpr"))
+}
+
 // ===========================================================================
 // pull_up_subqueries_recurse (prepjointree.c:1127)
 // ===========================================================================
@@ -425,7 +469,7 @@ fn pull_up_subqueries_recurse<'mcx>(
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
     path: &JtPath<'_, 'mcx>,
-    lowest_outer_join: Option<&LowestOuterJoin<'mcx>>,
+    lowest_outer_join: Option<&LowestOuterJoin<'_, 'mcx>>,
     containing_appendrel: Option<usize>,
 ) -> PgResult<()> {
     // Since this function recurses, it could be driven to stack overflow.
@@ -561,22 +605,21 @@ fn pull_up_subqueries_recurse<'mcx>(
             // Recurse, being careful to tell myself when inside an outer join.
             let jointype = jt_joinexpr_at(parse, path).jointype;
             // For the INNER case, pass down the *existing* lowest_outer_join; for
-            // the outer cases pass down a snapshot of this JoinExpr.
-            let inner_arg: Option<LowestOuterJoin<'mcx>> = match jointype {
+            // the outer cases pass down a *live* locator for this JoinExpr (so
+            // that an in-place pull-up on the larg arm is reflected when the rarg
+            // arm later queries `get_relids_in_jointree`).
+            let inner_arg: Option<LowestOuterJoin<'_, 'mcx>> = match jointype {
                 JoinType::JOIN_INNER => None,
                 JoinType::JOIN_LEFT
                 | JoinType::JOIN_SEMI
                 | JoinType::JOIN_ANTI
                 | JoinType::JOIN_FULL
-                | JoinType::JOIN_RIGHT => {
-                    let j = jt_joinexpr_at(parse, path);
-                    Some(LowestOuterJoin::snapshot(mcx, j)?)
-                }
+                | JoinType::JOIN_RIGHT => Some(LowestOuterJoin { path }),
                 _ => {
                     return Err(types_error::PgError::error("unrecognized join type"));
                 }
             };
-            let pass: Option<&LowestOuterJoin<'mcx>> = match jointype {
+            let pass: Option<&LowestOuterJoin<'_, 'mcx>> = match jointype {
                 JoinType::JOIN_INNER => lowest_outer_join,
                 _ => inner_arg.as_ref(),
             };
@@ -611,22 +654,26 @@ fn jt_store<'mcx>(parse: &mut Query<'mcx>, path: &JtPath<'_, 'mcx>, new: Node<'m
     }
 }
 
-/// A snapshot of the lowest containing outer join's jointree shape — all that
-/// `is_simple_subquery` / `is_safe_append_member` read of it
-/// (`get_relids_in_jointree((Node *) lowest_outer_join, true, true)`).
-struct LowestOuterJoin<'mcx> {
-    /// The outer-join jointree node (an owned clone of the live `JoinExpr`'s
-    /// larg/rarg/rtindex structure, sufficient for `get_relids_in_jointree`).
-    node: Node<'mcx>,
+/// A *live* locator for the lowest containing outer join. The C threads a bare
+/// `Node *lowest_outer_join` that aliases the jointree being mutated in place;
+/// crucially, when a sibling subquery on the larg side is pulled up, the live
+/// node's shape changes (the pulled-up subquery's RTE is replaced inline by its
+/// own jointree), so a later `get_relids_in_jointree((Node *) lowest_outer_join,
+/// true, true)` for the rarg side sees the *updated* relids. We must reproduce
+/// that: hold a [`JtPath`] to the live JoinExpr and re-resolve+clone its shape
+/// from `parse` at each point of use (rather than snapshotting at descent time,
+/// which would freeze a stale pre-pull-up shape).
+struct LowestOuterJoin<'p, 'mcx> {
+    /// Path to the live outer JoinExpr node within `parse.jointree`.
+    path: &'p JtPath<'p, 'mcx>,
 }
 
-impl<'mcx> LowestOuterJoin<'mcx> {
-    /// Build a shape snapshot of `j` for relids extraction. We only need its
-    /// jointree structure (RangeTblRef/JoinExpr/FromExpr indexes), so clone the
-    /// arms recursively.
-    fn snapshot(mcx: Mcx<'mcx>, j: &types_nodes::rawnodes::JoinExpr<'mcx>) -> PgResult<Self> {
-        let node = clone_jointree_shape(mcx, &Node::mk_join_expr(mcx, clone_joinexpr_shape(mcx, j)?)?)?;
-        Ok(LowestOuterJoin { node })
+impl<'p, 'mcx> LowestOuterJoin<'p, 'mcx> {
+    /// Clone the *current* shape of the live outer JoinExpr at `self.path`,
+    /// reflecting any in-place pull-ups that have happened on sibling arms.
+    fn live_shape(&self, mcx: Mcx<'mcx>, parse: &Query<'mcx>) -> PgResult<Node<'mcx>> {
+        let j = jt_joinexpr_ref(parse, self.path);
+        clone_jointree_shape(mcx, &Node::mk_join_expr(mcx, clone_joinexpr_shape(mcx, j)?)?)
     }
 }
 
@@ -699,7 +746,7 @@ fn pull_up_simple_subquery<'mcx>(
     parse: &mut Query<'mcx>,
     jtnode: Node<'mcx>,
     varno: i32,
-    lowest_outer_join: Option<&LowestOuterJoin<'mcx>>,
+    lowest_outer_join: Option<&LowestOuterJoin<'_, 'mcx>>,
     containing_appendrel: Option<usize>,
 ) -> PgResult<Node<'mcx>> {
     // Make a modifiable copy of the subquery to hack on, so that the RTE will be
@@ -2166,10 +2213,10 @@ fn node_contains_vars_of_level(node: &Node, level: i32) -> bool {
 fn is_simple_subquery<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
-    _parse: &Query<'mcx>,
+    parse: &Query<'mcx>,
     subquery: &Query<'mcx>,
     rte: &RangeTblEntry<'mcx>,
-    lowest_outer_join: Option<&LowestOuterJoin<'mcx>>,
+    lowest_outer_join: Option<&LowestOuterJoin<'_, 'mcx>>,
 ) -> PgResult<bool> {
     // Let's just make sure it's a valid subselect.
     if subquery.commandType != types_nodes::nodes::CmdType::CMD_SELECT {
@@ -2211,8 +2258,9 @@ fn is_simple_subquery<'mcx>(
         let safe_upper_varnos: Relids<'mcx>;
         if let Some(loj) = lowest_outer_join {
             restricted = true;
+            let loj_node = loj.live_shape(mcx, parse)?;
             safe_upper_varnos =
-                result_rtes::get_relids_in_jointree(mcx, &loj.node, true, true)?;
+                result_rtes::get_relids_in_jointree(mcx, &loj_node, true, true)?;
         } else {
             restricted = false;
             safe_upper_varnos = None; // doesn't matter
