@@ -43,3 +43,4 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 backend-optimizer-prep-prepqual-seams = { path = "../backend-optimizer-prep-prepqual-seams" }
 backend-optimizer-util-predtest-seams = { path = "../backend-optimizer-util-predtest-seams" }
 backend-utils-cache-partcache = { path = "../backend-utils-cache-partcache" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

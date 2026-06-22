@@ -852,12 +852,14 @@ fn prune_append_rel_partitions<'mcx>(
     Ok(bms_to_relids(&result))
 }
 
-/// `enable_partition_pruning` GUC (cost.c). Defaults true; the gate is honored
-/// here. (Reading the live GUC requires the cost.c knob; until that seam is
-/// available this returns the C default — pruning enabled — which is the
-/// behavior every regression file that exercises pruning expects.)
+/// `enable_partition_pruning` GUC (cost.c). Reads the live GUC slot so that
+/// `set enable_partition_pruning = off` disables plan-time pruning (matching C
+/// `prune_append_rel_partitions`, which returns all partitions when the GUC is
+/// off). Defaults true (boot value) before the accessor is installed.
 fn enable_partition_pruning() -> bool {
-    true
+    (backend_utils_misc_guc_tables::vars::enable_partition_pruning
+        .get()
+        .get)()
 }
 
 /// Inputs gathered for pruning, decoupled from the `&mut PlannerInfo` borrow.
