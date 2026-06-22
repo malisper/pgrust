@@ -1843,35 +1843,40 @@ fn set_param_references<'mcx>(
     };
 
     // initSetParam = union over (proot up parent_root chain) of all
-    // init_plans' setParam. The init_plans list carries opaque NodeId handles
-    // (SubPlan node space owned by subselect); the per-init-plan setParam read
-    // is not reachable from the lifetime-free PlannerInfo handles here.
-    //
-    // bms_intersect(extParam, initSetParam): when there are NO init plans at
-    // any level (the common case), initSetParam is empty and the intersect is
-    // NULL. We compute that case faithfully; a non-empty init_plans chain is
-    // owned by the subselect cohort.
-    let _ = (ext_param, mcx);
-    let has_init = {
-        let mut any = false;
-        let mut proot: Option<&PlannerInfo> = Some(root);
-        while let Some(p) = proot {
-            if !p.init_plans.is_empty() {
-                any = true;
-                break;
+    // init_plans' SubPlan.setParam members.
+    //   for (proot = root; proot; proot = proot->parent_root)
+    //     foreach initsubplan in proot->init_plans
+    //       foreach pid in initsubplan->setParam
+    //         initSetParam = bms_add_member(initSetParam, pid);
+    // The init_plans list carries NodeId handles into the SubPlan node space;
+    // resolve each via `proot.node(id).as_subplan()` (same access as the
+    // planner's safe_param_ids construction).
+    let mut init_set_param: Option<PgBox<'mcx, types_nodes::bitmapset::Bitmapset<'mcx>>> = None;
+    let mut proot: Option<&PlannerInfo> = Some(root);
+    while let Some(p) = proot {
+        for &ipl in &p.init_plans {
+            if let Some(sp) = p.node(ipl).as_subplan() {
+                for &pid in sp.0.setParam.iter() {
+                    init_set_param =
+                        Some(backend_nodes_core::bitmapset::bms_add_member(
+                            mcx,
+                            init_set_param.take(),
+                            pid,
+                        )?);
+                }
             }
-            proot = p.parent_root.as_deref();
         }
-        any
-    };
-    if has_init {
-        return Err(PgError::error(
-            "set_param_references: Gather initParam over a non-empty init_plans \
-             chain (subselect SubPlan.setParam read) is not ported",
-        ));
+        proot = p.parent_root.as_deref();
     }
-    // initSetParam empty ⇒ bms_intersect(extParam, {}) = NULL.
-    Ok(None)
+
+    // bms_intersect(plan->lefttree->extParam, initSetParam): the set of extern
+    // initplan params used by the Gather's children that some initplan above
+    // sets — the leader serializes exactly these for the workers.
+    backend_nodes_core::bitmapset::bms_intersect(
+        mcx,
+        Some(ext_param),
+        init_set_param.as_deref(),
+    )
 }
 
 // ===========================================================================

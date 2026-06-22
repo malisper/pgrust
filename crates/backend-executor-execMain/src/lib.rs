@@ -4092,6 +4092,7 @@ pub fn init_seams() {
     seams::mark_param_execplan_pending::set(mark_param_execplan_pending);
     seams::clear_param_execplan::set(clear_param_execplan);
     seams::param_execplan_pending::set(param_execplan_pending);
+    seams::exec_set_param_plan_for_pending::set(exec_set_param_plan_for_pending);
 
     // The parallel executor's `execParallel-support` PARAM_EXEC reads/writes and
     // `QueryDesc` lifecycle accessors — all over the owned `EState`/`QueryDesc`
@@ -4198,6 +4199,54 @@ fn param_execplan_pending(estate: &types_nodes::EStateData<'_>, paramid: i32) ->
         .es_param_exec_vals
         .get(paramid as usize)
         .is_some_and(|prm| prm.execPlan.is_some())
+}
+
+/// `ExecSetParamPlan(prm->execPlan, econtext)` for a not-yet-evaluated
+/// PARAM_EXEC `paramid` (`ExecSetParamPlanMulti`). The C dereferences the
+/// param's `execPlan` (a `SubPlanState *`) and re-enters
+/// `nodeSubplan::ExecSetParamPlan`. In the owned model `execPlan` is an
+/// `ExecPlanLink { plan_id }` identity into the `EState`'s `es_initplan`
+/// registry (keyed by the 1-based `plan_id`): resolve it back to the owning
+/// `SubPlanState`, run the initplan (which writes the output param value(s) and
+/// clears `execPlan`), then restore the `SubPlanState`. This is the same
+/// resolution `ExecEvalParamExec` performs for the lazy single-param read; here
+/// it is driven by the leader's parallel initplan-forcing pass.
+fn exec_set_param_plan_for_pending<'mcx>(
+    econtext: types_nodes::EcxtId,
+    paramid: i32,
+    estate: &mut types_nodes::EStateData<'mcx>,
+) -> PgResult<()> {
+    let plan_id = estate
+        .es_param_exec_vals
+        .get(paramid as usize)
+        .and_then(|prm| prm.execPlan.map(|link| link.plan_id))
+        .ok_or_else(|| {
+            types_error::PgError::error(
+                "exec_set_param_plan_for_pending: PARAM_EXEC has no pending execPlan",
+            )
+            .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR)
+        })?;
+
+    // es_initplan is 1-based by plan_id; take the SubPlanState out for the call
+    // (estate is also borrowed mutably by it) and put it back afterwards.
+    let idx = (plan_id as usize).saturating_sub(1);
+    let mut sstate = estate
+        .es_initplan
+        .get_mut(idx)
+        .and_then(|slot| slot.take())
+        .ok_or_else(|| {
+            types_error::PgError::error(
+                "exec_set_param_plan_for_pending: initplan not found for pending PARAM_EXEC",
+            )
+            .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR)
+        })?;
+    let r = backend_executor_nodeSubplan_seams::exec_set_param_plan::call(
+        &mut sstate,
+        econtext,
+        estate,
+    );
+    estate.es_initplan[idx] = Some(sstate);
+    r
 }
 
 /// The process-lifetime context backing the `'static` `ParamExecValue` /
