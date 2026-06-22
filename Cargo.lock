@@ -9969,6 +9969,7 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-transam-multixact",
  "backend-access-transam-twophase",
+ "backend-access-transam-xlogfuncs",
  "backend-access-transam-xlogprefetcher",
  "backend-catalog-namespace-seams",
  "backend-catalog-partition-seams",
@@ -18947,6 +18948,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-fmgr",
+ "types-storage",
  "types-tuple",
  "types-wchar",
 ]
