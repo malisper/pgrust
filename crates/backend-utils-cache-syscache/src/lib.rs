@@ -1019,6 +1019,7 @@ pub fn init_seams() {
         projections::rel_relhastriggers,
     );
     backend_utils_cache_syscache_seams::pg_proc_form::set(projections::pg_proc_form);
+    backend_utils_cache_syscache_seams::proc_prosrc::set(projections::proc_prosrc);
     backend_utils_cache_syscache_seams::pg_type_form::set(projections::pg_type_form);
     backend_utils_cache_syscache_seams::type_form::set(projections::type_form);
     backend_utils_cache_syscache_seams::search_type_attr_info::set(

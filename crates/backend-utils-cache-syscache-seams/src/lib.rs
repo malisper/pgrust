@@ -1612,6 +1612,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, funcid)` + `TextDatumGetCString(
+    /// SysCacheGetAttr(.., Anum_pg_proc_prosrc))`: the function's `prosrc` text
+    /// (the C-language symbol name / internal builtin name). Used to route a
+    /// dynamically-created planner support function (whose `prosupport` OID is
+    /// assigned at `CREATE FUNCTION` time, so it cannot be keyed by a fixed
+    /// builtin OID) to its kernel by symbol name — mirroring how fmgr's
+    /// C-language loader resolves a function by its `prosrc` symbol. `Ok(None)`
+    /// on a cache miss or a SQL-null `prosrc`. The installer owns the
+    /// `ReleaseSysCache`.
+    pub fn proc_prosrc<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
     /// + `GETSTRUCT(Form_pg_attribute)` projected to the fixed-width row
     /// (`get_attgenerated` / `get_atttype` / `get_atttypetypmodcoll`).

@@ -827,6 +827,16 @@ seam_core::seam!(
     pub fn get_func_support(funcid: Oid) -> PgResult<Oid>
 );
 
+seam_core::seam!(
+    /// The function's `prosrc` text (the C-language symbol / internal builtin
+    /// name) copied into `mcx`, or `Ok(None)` on a cache miss / SQL-null
+    /// `prosrc`. Used to route a planner support function whose `prosupport` OID
+    /// was assigned dynamically at `CREATE FUNCTION` time — and therefore cannot
+    /// be keyed by a fixed builtin OID — to its kernel by symbol name (mirroring
+    /// the fmgr C-language loader's by-`prosrc` resolution).
+    pub fn get_func_prosrc<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<PgString<'mcx>>>
+);
+
 // ---- relation (pg_class) --------------------------------------------------
 
 seam_core::seam!(

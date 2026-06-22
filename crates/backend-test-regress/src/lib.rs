@@ -19,7 +19,7 @@
 //! `fetch_finfo_record` would have produced.
 
 use types_datum::Datum;
-use types_error::PgError;
+use types_error::{PgError, PgResult};
 use types_fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
 
 /// The simple (suffix-free, directory-free) name of the regression-test loadable
@@ -1577,22 +1577,71 @@ fn make_tuple_indirect_impl(
  * `SupportRequestCost` / `SupportRequestRows` request node by `internal`
  * pointer, fills in its estimate fields in place, and returns it.
  *
- * UNPORTED — genuinely blocked, not a stub: the port decomposes planner-support
- * into per-Oid kernel function tables (`backend-optimizer-util-clauses`
- * `support_cost`/`support_rows`/`support_simplify`) rather than passing a
- * mutable `SupportRequest*` `Node` across the fmgr `internal` lane, so there is
- * no `SupportRequestSelectivity`/`SupportRequestCost`/`SupportRequestRows`
- * carrier to receive and mutate here (confirmed by substrate audit).  The
- * symbol resolves so `CREATE FUNCTION test_support_func(internal)` validates;
- * invoking it raises a precise feature error until a `SupportRequest*` Node
- * carrier crosses the fmgr `internal` boundary.
+ * The port decomposes planner-support into kernel function tables
+ * (`backend-optimizer-util-clauses` `support_cost`/`support_rows`, and the
+ * `SupportRequestSelectivity` leg in selfuncs) rather than passing a mutable
+ * `SupportRequest*` `Node` across the fmgr `internal` lane. Because this is a
+ * *dynamically-OID'd* (user-created C-language) support function — its
+ * `prosupport` OID is assigned at `CREATE FUNCTION` time, so it cannot be keyed
+ * by a fixed builtin OID like the in-tree support functions — its kernels are
+ * registered by the `prosrc` symbol `"test_support_func"` in [`init_seams`].
+ * The dispatch (`get_function_rows`/`add_function_cost` in plancat; the
+ * `SupportRequestSelectivity` leg in selfuncs) resolves the support OID's
+ * `prosrc` symbol and routes here, the faithful counterpart of fmgr running
+ * `OidFunctionCall1(prosupport, &req)` over a C-language function resolved by
+ * its `prosrc`.
+ *
+ * `fc_test_support_func` itself is never invoked through the one-shot fmgr
+ * boundary (no `SupportRequest*` carrier crosses it); the symbol resolves so
+ * `CREATE FUNCTION test_support_func(internal)` validates.
  * ========================================================================= */
 
 fn fc_test_support_func(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     raise(PgError::error(
-        "test_support_func is not supported: planner SupportRequest* node carrier \
-         does not cross the fmgr `internal` lane in this port",
+        "test_support_func is not invoked through the fmgr `internal` lane; its \
+         SupportRequest{Selectivity,Cost,Rows} legs are routed by `prosrc` symbol \
+         through the decomposed planner-support registries",
     ));
+}
+
+/// `test_support_func`'s `SupportRequestRows` leg (regress.c): assume the target
+/// is `generate_series_int4`; if `req->node` is a `FuncExpr` whose first two
+/// arguments are non-NULL `Const`s, `req->rows = val2 - val1 + 1`. Otherwise
+/// decline.
+fn test_support_func_rows(
+    _funcid: types_core::Oid,
+    node: &types_nodes::primnodes::Expr,
+) -> PgResult<Option<f64>> {
+    // if (req->node && IsA(req->node, FuncExpr))  /* be paranoid */
+    let Some(fexpr) = node.as_funcexpr() else {
+        return Ok(None);
+    };
+    let args = &fexpr.args;
+    if args.len() < 2 {
+        return Ok(None);
+    }
+    // arg1 = linitial(args); arg2 = lsecond(args);
+    let (Some(a1), Some(a2)) = (args[0].as_const(), args[1].as_const()) else {
+        return Ok(None);
+    };
+    if a1.constisnull || a2.constisnull {
+        return Ok(None);
+    }
+    // val1 = DatumGetInt32(arg1->constvalue); val2 = DatumGetInt32(arg2->constvalue);
+    let val1 = a1.constvalue.as_i32();
+    let val2 = a2.constvalue.as_i32();
+    // req->rows = val2 - val1 + 1;
+    Ok(Some((val2 - val1 + 1) as f64))
+}
+
+/// `test_support_func`'s `SupportRequestCost` leg (regress.c): a generic
+/// estimate — `startup = 0`, `per_tuple = 2 * cpu_operator_cost`.
+fn test_support_func_cost(
+    _funcid: types_core::Oid,
+    _node: Option<&types_nodes::primnodes::Expr>,
+) -> PgResult<Option<(f64, f64)>> {
+    let cpu_operator_cost = backend_optimizer_path_costsize_seams::cpu_operator_cost::call();
+    Ok(Some((0.0, 2.0 * cpu_operator_cost)))
 }
 
 /// Resolve a symbol of the `regress` module to its ported `PGFunction` (the
@@ -1648,5 +1697,21 @@ pub fn init_seams() {
             name: LIBRARY,
             lookup,
         },
+    );
+
+    // `test_support_func` (regress.c) is a user-created C-language planner
+    // support function: its `prosupport` OID is assigned at `CREATE FUNCTION`
+    // time and so cannot be keyed by a fixed builtin OID. Register its
+    // `SupportRequestRows`/`SupportRequestCost` kernels under its `prosrc` symbol
+    // so the decomposed planner-support dispatch can route to them by symbol
+    // (the `SupportRequestSelectivity` leg is handled in selfuncs by the same
+    // symbol resolution). Mirrors fmgr's by-`prosrc` C-language resolution.
+    backend_optimizer_util_clauses::support_rows::register_support_rows_by_symbol(
+        "test_support_func",
+        test_support_func_rows,
+    );
+    backend_optimizer_util_clauses::support_cost::register_support_cost_by_symbol(
+        "test_support_func",
+        test_support_func_cost,
     );
 }

@@ -729,6 +729,32 @@ pub(crate) fn proc_cost_rows(
     Ok(row)
 }
 
+/// `SearchSysCache1(PROCOID, funcid)` + `TextDatumGetCString(SysCacheGetAttr(..,
+/// Anum_pg_proc_prosrc))`: the function's `prosrc` text (the C-language symbol /
+/// internal builtin name), copied into `mcx`. `Ok(None)` on a cache miss or a
+/// SQL-null `prosrc`. Used to route a dynamically-OID'd planner support function
+/// to its kernel by symbol name.
+pub(crate) fn proc_prosrc<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let (prosrc_datum, prosrc_isnull) = SysCacheGetAttr(mcx, PROCOID, &tup, Anum_pg_proc_prosrc)?;
+    let result = if prosrc_isnull {
+        None
+    } else {
+        Some(PgString::from_str_in(
+            varlena_seams::text_to_cstring_v::call(mcx, &prosrc_datum)?.as_str(),
+            mcx,
+        )?)
+    };
+    ReleaseSysCache(tup);
+    Ok(result)
+}
+
 /// `SearchSysCache1(PROCOID, funcoid)` + `GETSTRUCT->(prorettype, pronargs,
 /// proargtypes)` (pg_proc.c:851-882, `fmgr_sql_validator`). `Ok(None)` on a
 /// cache miss — the caller raises `cache lookup failed for function %u`.

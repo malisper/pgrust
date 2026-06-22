@@ -332,6 +332,9 @@ pub fn init_seams() {
     backend_optimizer_util_clauses_seams::call_support_rows::set(
         support_rows::call_support_rows,
     );
+    backend_optimizer_util_clauses_seams::call_support_rows_by_symbol::set(
+        support_rows::call_support_rows_by_symbol,
+    );
 
     // `SupportRequestOptimizeWindowClause` dispatch (planner.c:5848), used by
     // `optimize_window_clauses` to narrow a WindowClause's frame options through
@@ -349,6 +352,9 @@ pub fn init_seams() {
     // `pg_proc.procost`.
     backend_optimizer_util_clauses_seams::call_support_cost::set(
         support_cost::call_support_cost,
+    );
+    backend_optimizer_util_clauses_seams::call_support_cost_by_symbol::set(
+        support_cost::call_support_cost_by_symbol,
     );
 }
 

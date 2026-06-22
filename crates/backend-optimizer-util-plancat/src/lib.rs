@@ -1505,6 +1505,26 @@ pub fn add_function_cost(
         {
             return Ok((startup, per_tuple));
         }
+        // by-OID dispatch missed; retry by the support function's `prosrc`
+        // symbol for a dynamically-OID'd support function (see
+        // `call_support_rows_by_prosrc`).
+        {
+            let scratch = mcx::MemoryContext::new("add_function_cost prosrc");
+            let prosrc: Option<alloc::string::String> =
+                lsyscache::get_func_prosrc::call(scratch.mcx(), form.prosupport)?
+                    .map(|s| s.as_str().to_string());
+            if let Some(prosrc) = prosrc {
+                if let Some((startup, per_tuple)) =
+                    backend_optimizer_util_clauses_seams::call_support_cost_by_symbol::call(
+                        &prosrc,
+                        funcid,
+                        None,
+                    )?
+                {
+                    return Ok((startup, per_tuple));
+                }
+            }
+        }
     }
 
     // cost->per_tuple += procform->procost * cpu_operator_cost;
@@ -1801,9 +1821,35 @@ fn seam_get_function_rows_by_node<'mcx>(funcid: Oid, node: &Expr<'mcx>) -> PgRes
         {
             return Ok(rows);
         }
+        // The by-OID dispatch missed; if `prosupport` is a dynamically-OID'd
+        // support function (e.g. `... SUPPORT test_support_func`), resolve its
+        // `prosrc` symbol and retry the symbol-keyed dispatch — the faithful
+        // counterpart of fmgr running `OidFunctionCall1(prosupport, &req)` over
+        // a C-language function resolved by its `prosrc` symbol.
+        if let Some(rows) = call_support_rows_by_prosrc(form.prosupport, funcid, node)? {
+            return Ok(rows);
+        }
     }
     // No support function, or it declined, so rely on prorows.
     Ok(form.prorows as f64)
+}
+
+/// Resolve `prosupport`'s `prosrc` symbol and run the symbol-keyed
+/// `SupportRequestRows` dispatch. `Ok(None)` when the OID has no `prosrc` or no
+/// kernel is registered under its symbol.
+fn call_support_rows_by_prosrc<'mcx>(
+    prosupport: Oid,
+    funcid: Oid,
+    node: &Expr<'mcx>,
+) -> PgResult<Option<f64>> {
+    let scratch = mcx::MemoryContext::new("call_support_rows_by_prosrc");
+    let prosrc: Option<alloc::string::String> =
+        lsyscache::get_func_prosrc::call(scratch.mcx(), prosupport)?
+            .map(|s| s.as_str().to_string());
+    let Some(prosrc) = prosrc else {
+        return Ok(None);
+    };
+    backend_optimizer_util_clauses_seams::call_support_rows_by_symbol::call(&prosrc, funcid, node)
 }
 
 fn seam_add_function_cost(

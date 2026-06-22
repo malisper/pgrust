@@ -203,3 +203,10 @@ pub fn get_func_support(funcid: Oid) -> PgResult<Oid> {
         None => Ok(InvalidOid),
     }
 }
+
+/// The function's `prosrc` text copied into `mcx`, or `Ok(None)` on a cache miss
+/// / SQL-null `prosrc`. Routes a dynamically-OID'd planner support function to
+/// its kernel by symbol name.
+pub fn get_func_prosrc<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<PgString<'mcx>>> {
+    syscache_seam::proc_prosrc::call(mcx, funcid)
+}

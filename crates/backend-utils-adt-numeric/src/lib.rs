@@ -123,6 +123,11 @@ pub fn init_seams() {
         F_NUMERIC_SUPPORT,
         numeric_support_simplify,
     );
+
+    // `generate_series_numeric_support`'s pg_proc OID (6357). `get_function_rows`
+    // (plancat.c) reaches this via the `call_support_rows` boundary to estimate
+    // `generate_series(numeric, numeric [, numeric])`'s rowcount.
+    series_srf::register_series_support_rows();
 }
 
 /// `SupportSimplifyFn` adapter for `numeric_support` (numeric.c:1195). The

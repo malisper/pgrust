@@ -225,6 +225,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SupportRequestRows` dispatch by the support function's `prosrc` symbol —
+    /// the dynamic-OID fallback used when `prosupport` was assigned at
+    /// `CREATE FUNCTION` time (e.g. `my_gen_series ... SUPPORT test_support_func`)
+    /// and so is not a fixed builtin OID. `Ok(Some)` is the estimate, `Ok(None)`
+    /// declines (no kernel under the symbol). Owner:
+    /// `backend-optimizer-util-clauses` (the symbol-keyed support-rows registry;
+    /// per-function kernels register their symbol from their crates).
+    pub fn call_support_rows_by_symbol<'mcx>(prosrc: &str, funcid: Oid, node: &Expr<'mcx>) -> PgResult<Option<f64>>
+);
+
+seam_core::seam!(
     /// `SupportRequestCost` dispatch (plancat.c:2137): call the function's
     /// planner support function `prosupport` to refine a `(startup, per_tuple)`
     /// cost. `node` is the call's `FuncExpr`/`OpExpr` (or `None`). `Ok(Some)` is
@@ -235,6 +246,18 @@ seam_core::seam!(
     /// support-cost registry; per-function kernels register from their crates).
     pub fn call_support_cost(
         prosupport: Oid,
+        funcid: Oid,
+        node: Option<&Expr<'static>>,
+    ) -> PgResult<Option<(f64, f64)>>
+);
+
+seam_core::seam!(
+    /// `SupportRequestCost` dispatch by the support function's `prosrc` symbol —
+    /// the dynamic-OID fallback (see [`call_support_rows_by_symbol`]). `Ok(Some)`
+    /// is the refined `(startup, per_tuple)` cost; `Ok(None)` declines. Owner:
+    /// `backend-optimizer-util-clauses` (the symbol-keyed support-cost registry).
+    pub fn call_support_cost_by_symbol(
+        prosrc: &str,
         funcid: Oid,
         node: Option<&Expr<'static>>,
     ) -> PgResult<Option<(f64, f64)>>

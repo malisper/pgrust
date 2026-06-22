@@ -43,7 +43,6 @@ use types_tuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 
 use types_nodes::primnodes::Expr;
-use types_pathnodes::PlannerInfo;
 use backend_nodes_core::nodefuncs::{expr_typmod, relabel_to_typmod};
 use backend_optimizer_util_clauses::estimate_expression_value;
 
@@ -303,9 +302,9 @@ pub fn numeric_support<'mcx>(args: &[Expr<'mcx>]) -> PgResult<Option<Expr<'mcx>>
 ///
 /// The C `SupportRequestRows` is decomposed: `args` is the invoked call's
 /// argument list (`req->node`'s `FuncExpr->args`, already known a funcclause by
-/// the dispatcher) and `root` is `req->root`. `Ok(Some(rows))` stores the
-/// estimate into the request (C's `req->rows = rows`); `Ok(None)` declines (C's
-/// `NULL`).
+/// the dispatcher). `Ok(Some(rows))` stores the estimate into the request (C's
+/// `req->rows = rows`); `Ok(None)` declines (C's `NULL`). The `req->root` field
+/// is unused by this support function (C never reads it), so it is not threaded.
 ///
 /// The argument folding routes through the real `estimate_expression_value`
 /// (clauses.c) and the row arithmetic runs over real `NumericVar`s. The only
@@ -314,7 +313,6 @@ pub fn numeric_support<'mcx>(args: &[Expr<'mcx>]) -> PgResult<Option<Expr<'mcx>>
 /// calls this fn with the decomposed request.
 pub fn generate_series_numeric_support<'mcx>(
     mcx: Mcx<'mcx>,
-    _root: &PlannerInfo,
     args: &[Expr<'mcx>],
 ) -> PgResult<Option<f64>> {
     let nargs = args.len();
@@ -357,8 +355,8 @@ pub fn generate_series_numeric_support<'mcx>(
 
         // If any argument is NaN or infinity, generate_series() will error out,
         // so we needn't produce an estimate.
-        let start_bytes = unsafe { numeric_bytes_from_datum(start_dat.clone()) };
-        let stop_bytes = unsafe { numeric_bytes_from_datum(stop_dat.clone()) };
+        let start_bytes = numeric_bytes_from_datum(start_dat);
+        let stop_bytes = numeric_bytes_from_datum(stop_dat);
 
         if numeric_is_special(start_bytes) || numeric_is_special(stop_bytes) {
             return Ok(None);
@@ -366,7 +364,7 @@ pub fn generate_series_numeric_support<'mcx>(
 
         // step defaults to const_one.
         let step = if let Some(d) = step_dat {
-            let step_bytes = unsafe { numeric_bytes_from_datum(d.clone()) };
+            let step_bytes = numeric_bytes_from_datum(d);
             if numeric_is_special(step_bytes) {
                 return Ok(None);
             }
@@ -405,6 +403,42 @@ pub fn generate_series_numeric_support<'mcx>(
     Ok(None)
 }
 
+/// `generate_series_numeric_support`'s pg_proc OID (`fmgroids.h`
+/// `F_GENERATE_SERIES_NUMERIC_SUPPORT`).
+pub const GENERATE_SERIES_NUMERIC_SUPPORT: types_core::Oid = 6357;
+
+/// The [`SupportRowsFn`](backend_optimizer_util_clauses::support_rows::SupportRowsFn)
+/// adapter for `generate_series_numeric_support`: decompose the request's
+/// (const-folded) `FuncExpr` `node` into its argument list and run the kernel in
+/// a transient context. Mirrors the C dispatch reading `((FuncExpr *)
+/// req->node)->args`.
+fn generate_series_numeric_support_rows(
+    _funcid: types_core::Oid,
+    node: &Expr,
+) -> PgResult<Option<f64>> {
+    // if (req->node && IsA(req->node, FuncExpr))
+    let Expr::FuncExpr(fexpr) = node else {
+        return Ok(None);
+    };
+    let cx = mcx::MemoryContext::new("generate_series_numeric_support rows");
+    // Re-home the call's argument Exprs into the transient context (C reads
+    // `((FuncExpr *) req->node)->args` directly; the kernel folds owned clones).
+    let mut args: alloc::vec::Vec<Expr> = alloc::vec::Vec::with_capacity(fexpr.args.len());
+    for a in fexpr.args.iter() {
+        args.push(a.clone_in(cx.mcx())?);
+    }
+    generate_series_numeric_support(cx.mcx(), &args)
+}
+
+/// Register the `generate_series_numeric_support` `SupportRequestRows` kernel
+/// under its pg_proc OID. Called from this crate's `init_seams`.
+pub fn register_series_support_rows() {
+    backend_optimizer_util_clauses::support_rows::register_support_rows(
+        GENERATE_SERIES_NUMERIC_SUPPORT,
+        generate_series_numeric_support_rows,
+    );
+}
+
 /// One folded `generate_series` argument, classified as C's
 /// `IsA(arg, Const)` / `constisnull` triple needs.
 enum ConstArg<'mcx> {
@@ -425,20 +459,25 @@ fn as_const<'mcx>(expr: &Expr<'mcx>) -> ConstArg<'mcx> {
     }
 }
 
-/// Recover the on-disk `numeric` byte image a pointer-bearing `Const` `Datum`
-/// refers to (`DatumGetNumeric`). Mirrors `ops_sql::numeric_bytes_from_datum`.
-///
-/// # Safety
-/// `d` must point to a 4-byte-header (`VARATT_IS_4B_U`) `numeric` varlena that
-/// outlives the returned slice. The planner const Datums are already-detoasted.
-unsafe fn numeric_bytes_from_datum<'a>(d: Datum<'_>) -> &'a [u8] {
-    use types_datum::VARHDRSZ;
-    let ptr = d.as_usize() as *const u8;
-    let header = core::slice::from_raw_parts(ptr, VARHDRSZ);
-    let word = u32::from_ne_bytes([header[0], header[1], header[2], header[3]]);
-    #[cfg(target_endian = "little")]
-    let len = ((word >> 2) & 0x3FFF_FFFF) as usize;
-    #[cfg(target_endian = "big")]
-    let len = (word & 0x3FFF_FFFF) as usize;
-    core::slice::from_raw_parts(ptr, len)
+/// Recover the on-disk `numeric` byte image a `Const` `Datum` refers to
+/// (`DatumGetNumeric`). The planner's `Const` numeric carries its varlena image
+/// in the canonical `Datum::ByRef` arm (already-detoasted, 4-byte header), so
+/// the bytes are borrowed straight from the Datum — no raw pointer chasing. A
+/// legacy `ByVal` pointer-Datum is still handled for the by-value lane.
+fn numeric_bytes_from_datum<'a>(d: &'a Datum<'a>) -> &'a [u8] {
+    if let Datum::ByRef(_) | Datum::Cstring(_) = d {
+        return d.as_ref_bytes();
+    }
+    // Legacy by-value pointer Datum (the c2rust model): chase the pointer.
+    unsafe {
+        use types_datum::VARHDRSZ;
+        let ptr = d.as_usize() as *const u8;
+        let header = core::slice::from_raw_parts(ptr, VARHDRSZ);
+        let word = u32::from_ne_bytes([header[0], header[1], header[2], header[3]]);
+        #[cfg(target_endian = "little")]
+        let len = ((word >> 2) & 0x3FFF_FFFF) as usize;
+        #[cfg(target_endian = "big")]
+        let len = (word & 0x3FFF_FFFF) as usize;
+        core::slice::from_raw_parts(ptr, len)
+    }
 }

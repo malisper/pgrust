@@ -242,8 +242,8 @@ pub fn call_func_selectivity_support<'mcx>(
     inputcollid: Oid,
     is_join: bool,
     var_relid: i32,
-    _jointype: i16,
-    _sjinfo: Option<&SpecialJoinInfo>,
+    jointype: i16,
+    sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<Option<f64>> {
     crate::patternsel::func_selectivity_support(
         run.mcx(),
@@ -254,11 +254,13 @@ pub fn call_func_selectivity_support<'mcx>(
         var_relid,
         inputcollid,
         is_join,
+        jointype,
+        sjinfo,
     )
 }
 
 /// Map the wire `int16` jointype back to the planner [`JoinType`] enum.
-fn jointype_from_i16(jt: i16) -> types_pathnodes::JoinType {
+pub(crate) fn jointype_from_i16(jt: i16) -> types_pathnodes::JoinType {
     use types_pathnodes::{
         JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_SEMI,
         JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER,

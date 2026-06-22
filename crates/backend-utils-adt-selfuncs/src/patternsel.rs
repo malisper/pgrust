@@ -1095,6 +1095,7 @@ pub fn like_regex_support_selectivity<'mcx>(
 /// type. Returns `Some(selectivity)` when this unit owns the support function;
 /// `None` (the C "support function fails, use default" path) otherwise.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn func_selectivity_support<'mcx>(
     mcx: Mcx<'mcx>,
     run: &PlannerRun<'mcx>,
@@ -1104,6 +1105,8 @@ pub fn func_selectivity_support<'mcx>(
     var_relid: i32,
     inputcollid: Oid,
     is_join: bool,
+    jointype: i16,
+    sjinfo: Option<&types_pathnodes::SpecialJoinInfo>,
 ) -> PgResult<Option<f64>> {
     let prosupport = lsc::get_func_support::call(funcid)?;
     // Map the function's prosupport (the C `*_support` entry point that bakes in
@@ -1116,7 +1119,17 @@ pub fn func_selectivity_support<'mcx>(
         x if x == F_TEXTREGEXEQ_SUPPORT => PatternType::Regex,
         x if x == F_TEXTICREGEXEQ_SUPPORT => PatternType::RegexIc,
         x if x == F_TEXT_STARTS_WITH_SUPPORT => PatternType::Prefix,
-        _ => return Ok(None),
+        // Not a like_support.c pattern support function. Resolve the support
+        // function's `prosrc` symbol and route a dynamically-OID'd support
+        // function's `SupportRequestSelectivity` leg by symbol — the faithful
+        // counterpart of fmgr running `OidFunctionCall1(prosupport, &req)` over a
+        // C-language function resolved by its `prosrc`.
+        _ => {
+            return func_selectivity_support_by_prosrc(
+                mcx, run, root, prosupport, args, var_relid, inputcollid, is_join, jointype,
+                sjinfo,
+            );
+        }
     };
     let sel = like_regex_support_selectivity(
         mcx,
@@ -1130,6 +1143,66 @@ pub fn func_selectivity_support<'mcx>(
         ptype,
     )?;
     Ok(Some(sel))
+}
+
+/// `Int4EqualOperator` (`pg_operator.dat`) — the `int4 = int4` operator OID,
+/// baked into `test_support_func`'s `SupportRequestSelectivity` leg.
+const INT4_EQUAL_OPERATOR: Oid = 96;
+
+/// The dynamic-OID `SupportRequestSelectivity` fallback: resolve the support
+/// function's `prosrc` symbol and run its kernel. Currently the regress test's
+/// `test_support_func` (regress.c) is the only such function — its selectivity
+/// leg assumes the target is `int4eq` and delegates to
+/// `restriction_selectivity`/`join_selectivity` with `Int4EqualOperator`,
+/// exactly as the C body does. Any other symbol returns `None` (the historical
+/// 0.3333333 default).
+#[allow(clippy::too_many_arguments)]
+fn func_selectivity_support_by_prosrc<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    prosupport: Oid,
+    args: &[NodeId],
+    var_relid: i32,
+    inputcollid: Oid,
+    is_join: bool,
+    jointype: i16,
+    sjinfo: Option<&types_pathnodes::SpecialJoinInfo>,
+) -> PgResult<Option<f64>> {
+    let Some(prosrc) = lsc::get_func_prosrc::call(mcx, prosupport)? else {
+        return Ok(None);
+    };
+    match prosrc.as_str() {
+        "test_support_func" => {
+            // Resolve the call's argument node handles to owned Exprs (the
+            // restriction/join-selectivity seams take `&[Expr]`; C passes
+            // `req->args` straight through).
+            let arg_exprs: alloc::vec::Vec<Expr> =
+                args.iter().map(|&id| root.node(id).clone()).collect();
+            let sel = if is_join {
+                backend_optimizer_path_small_seams::join_selectivity::call(
+                    run,
+                    root,
+                    INT4_EQUAL_OPERATOR,
+                    &arg_exprs,
+                    inputcollid,
+                    crate::dispatch::jointype_from_i16(jointype),
+                    sjinfo,
+                )?
+            } else {
+                backend_optimizer_path_small_seams::restriction_selectivity::call(
+                    run,
+                    root,
+                    INT4_EQUAL_OPERATOR,
+                    &arg_exprs,
+                    inputcollid,
+                    var_relid,
+                )?
+            };
+            Ok(Some(sel))
+        }
+        _ => Ok(None),
+    }
 }
 
 macro_rules! patternsel_entry {

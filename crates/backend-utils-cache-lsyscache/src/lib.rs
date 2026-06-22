@@ -136,6 +136,7 @@ pub fn init_seams() {
     seams::get_func_prokind::set(function::get_func_prokind);
     seams::get_func_leakproof::set(function::get_func_leakproof);
     seams::get_func_support::set(function::get_func_support);
+    seams::get_func_prosrc::set(function::get_func_prosrc);
 
     // -- relation -----------------------------------------------------------
     seams::get_rel_name::set(relation::get_rel_name);
