@@ -124,7 +124,14 @@ pub fn ComputeIndexAttrs<'mcx>(
             // Simple index attribute.
             debug_assert!(attribute.expr.is_none());
             let name = name.as_str();
-            match syscache::search_attname_attnum::call(rel_id, name)? {
+            // SearchSysCacheAttName(relId, name): the ATTNAME syscache (like
+            // get_attnum) excludes dropped columns, so a dropped column's
+            // mangled name ("........pg.dropped.N........") must be treated as
+            // not found here — not resolved to its zeroed pg_attribute row
+            // (which would carry atttypid == 0 and later fail at type lookup).
+            match syscache::search_attname_attnum::call(rel_id, name)?
+                .filter(|(_attnum, attisdropped)| !attisdropped)
+            {
                 Some((attnum, _attisdropped)) => {
                     let attform = syscache::pg_attribute_form::call(rel_id, attnum)?
                         .expect("ComputeIndexAttrs: attname found but attribute form missing");
