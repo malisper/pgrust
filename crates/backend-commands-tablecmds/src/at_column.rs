@@ -1647,8 +1647,10 @@ fn SetIndexStorageProperties<'mcx>(
         }
 
         if indattnum == 0 {
-            // index_close(indrel, lockmode);
-            drop(indrel);
+            // index_close(indrel, lockmode) — release the lock acquired by
+            // index_open above (a bare Drop keeps it via NoLock, leaving a
+            // spurious AccessExclusiveLock on the unrelated index).
+            indrel.close(lockmode)?;
             continue;
         }
 
@@ -1676,8 +1678,9 @@ fn SetIndexStorageProperties<'mcx>(
             // heap_freetuple(tuple) — RAII drop.
         }
 
-        // index_close(indrel, lockmode) — RAII drop.
-        drop(indrel);
+        // index_close(indrel, lockmode) — release the lock too (Drop alone uses
+        // NoLock and would leak the index lock C releases here).
+        indrel.close(lockmode)?;
     }
     Ok(())
 }
