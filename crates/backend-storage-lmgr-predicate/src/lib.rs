@@ -186,38 +186,15 @@ pub fn init_seams() {
             .unwrap_or(false)
     });
 
-    seams::heap_check_for_serializable_conflict_out::set(
-        |visible, relation_oid, tuple, _buffer, snapshot| {
-            // HeapCheckForSerializableConflictOut(visible, rel, tuple, buf, snap):
-            // when !visible the tuple's xmax (deleting/locking xact) is the
-            // conflict xid; when visible it's the xmin (inserting xact). C's
-            // wrapper resolves the top xid via SubTransGetTopmostTransaction;
-            // here we pass the tuple's relevant raw xid as the conflict xid.
-            let f = rel_fields(relation_oid)?;
-            let xid = match &tuple.t_data {
-                None => return Ok(()),
-                Some(hdr) => {
-                    if visible {
-                        types_tuple::heaptuple::HeapTupleHeaderGetXmin(hdr)
-                    } else {
-                        // !visible: the deleting/locking xact is the conflict.
-                        match &hdr.t_choice {
-                            types_tuple::heaptuple::HeapTupleHeaderChoice::THeap(t_heap) => {
-                                t_heap.t_xmax
-                            }
-                            types_tuple::heaptuple::HeapTupleHeaderChoice::TDatum(_) => {
-                                return Ok(())
-                            }
-                        }
-                    }
-                }
-            };
-            if !types_core::xact::TransactionIdIsValid(xid) {
-                return Ok(());
-            }
-            engine::CheckForSerializableConflictOut(f.rd_id, f.uses_local_buffers, xid, snapshot)
-        },
-    );
+    // `CheckForSerializableConflictOut(relation, xid, snapshot)` — the
+    // predicate.c engine entry. `HeapCheckForSerializableConflictOut` (heapam.c)
+    // resolves the conflicting `xid` off the tuple's visibility (it owns the
+    // tuple/buffer/HeapTupleSatisfiesVacuum) and calls this with the already
+    // top-level, non-self, in-range `xid`.
+    seams::check_for_serializable_conflict_out::set(|relation_oid, xid, snapshot| {
+        let f = rel_fields(relation_oid)?;
+        engine::CheckForSerializableConflictOut(f.rd_id, f.uses_local_buffers, xid, snapshot)
+    });
 
     seams::check_table_for_serializable_conflict_in::set(|relation| {
         // C: CheckTableForSerializableConflictIn(Relation) reads

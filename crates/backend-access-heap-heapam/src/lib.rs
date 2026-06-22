@@ -548,6 +548,23 @@ pub fn init_seams() {
         },
     );
 
+    // `HeapCheckForSerializableConflictOut(visible, relation, tuple, buffer,
+    // snapshot)` (heapam.c): the per-tuple read-side rw-conflict check. heapam
+    // owns it (it consults HeapTupleSatisfiesVacuum + the tuple's update xid),
+    // then hands the resolved conflict xid to predicate.c's
+    // CheckForSerializableConflictOut.
+    backend_storage_lmgr_predicate_seams::heap_check_for_serializable_conflict_out::set(
+        |visible, relation_oid, tuple, buffer, snapshot| {
+            scan::HeapCheckForSerializableConflictOut(
+                visible,
+                relation_oid,
+                tuple,
+                buffer,
+                snapshot,
+            )
+        },
+    );
+
     // VACUUM: `HeapTupleSatisfiesVacuum(tuple, OldestXmin, buffer)` for the
     // page-resident tuple at `(buffer, offnum)` (vacuumlazy.c
     // heap_page_is_all_visible second-pass recheck). Builds the HeapTupleData

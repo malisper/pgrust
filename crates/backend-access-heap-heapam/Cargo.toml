@@ -29,6 +29,7 @@ backend-rmgrdesc-next = { path = "../backend-rmgrdesc-next" }
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
 backend-access-heap-heapam-visibility = { path = "../backend-access-heap-heapam-visibility" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-access-transam-subtrans-seams = { path = "../backend-access-transam-subtrans-seams" }
 backend-access-transam-transam-seams = { path = "../backend-access-transam-transam-seams" }
 backend-utils-time-combocid-seams = { path = "../backend-utils-time-combocid-seams" }
 backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc-seams" }

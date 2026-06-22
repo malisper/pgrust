@@ -1528,6 +1528,7 @@ dependencies = [
  "backend-access-table-tableam",
  "backend-access-transam-multixact-seams",
  "backend-access-transam-parallel",
+ "backend-access-transam-subtrans-seams",
  "backend-access-transam-transam",
  "backend-access-transam-transam-seams",
  "backend-access-transam-xact-seams",

@@ -123,6 +123,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CheckForSerializableConflictOut(relation, xid, snapshot)` (predicate.c):
+    /// the predicate.c engine entry that registers the read-side rw-conflict for
+    /// a tuple written by transaction `xid`. `HeapCheckForSerializableConflictOut`
+    /// (heapam.c) resolves the conflicting `xid` off the tuple's visibility and
+    /// calls this. Keyed by the relation OID; `Err` carries the
+    /// serialization-failure `ereport(ERROR)`.
+    pub fn check_for_serializable_conflict_out(
+        relation_oid: types_core::primitive::Oid,
+        xid: types_core::primitive::TransactionId,
+        snapshot: &types_snapshot::SnapshotData,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `CheckForSerializableConflictIn(relation, NULL, InvalidBlockNumber)`
     /// (predicate.c): the relation-granularity rw-conflict check
     /// `index_insert` performs when the AM does not handle predicate locks

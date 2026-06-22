@@ -85,6 +85,91 @@ use backend_access_heap_heapam_visibility::HeapTupleSatisfiesVisibility;
 use backend_nodes_core_tidbitmap_seams as tidbitmap_seam;
 use crate::fetch;
 
+/// `HeapCheckForSerializableConflictOut(visible, relation, tuple, buffer,
+/// snapshot)` (heapam.c). The read-side rw-conflict check a heap scan performs
+/// per tuple in a serializable transaction.
+///
+/// It inspects the tuple's `HeapTupleSatisfiesVacuum` status to resolve the
+/// *correct* conflicting xid: for a tuple that is visible to us but has been
+/// concurrently updated/deleted (RECENTLY_DEAD / DELETE_IN_PROGRESS), the
+/// conflict is the *updater's* xid (`HeapTupleHeaderGetUpdateXid`), not the
+/// inserter's xmin — this is the edge that lets write-skew against a concurrent
+/// (or prepared) writer be detected. The resolved top-level, non-self,
+/// in-range xid is handed to predicate.c's `CheckForSerializableConflictOut`.
+pub fn HeapCheckForSerializableConflictOut(
+    visible: bool,
+    relation_oid: types_core::primitive::Oid,
+    tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    buffer: Buffer,
+    snapshot: &SnapshotData,
+) -> PgResult<()> {
+    use types_core::xact::{
+        TransactionIdEquals, TransactionIdIsValid, TransactionIdPrecedes,
+    };
+    use types_snapshot::snapshot::HTSV_Result;
+    use backend_access_heap_heapam_visibility::htup::HeapTupleHeaderGetXmin;
+
+    // if (!CheckForSerializableConflictOutNeeded(relation, snapshot)) return;
+    if !predicate_seam::check_for_serializable_conflict_out_needed::call(relation_oid, snapshot) {
+        return Ok(());
+    }
+
+    // HeapTupleSatisfiesVacuum(tuple, TransactionXmin, buffer)
+    let transaction_xmin = backend_utils_time_snapmgr_pc_seams::transaction_xmin::call()?;
+    let mut htup = tuple.clone();
+    let htsv = backend_access_heap_heapam_visibility::HeapTupleSatisfiesVacuum(
+        &mut htup,
+        transaction_xmin,
+        buffer,
+    )?;
+
+    let hdr = match &htup.t_data {
+        Some(h) => h,
+        // No header (shouldn't happen for an on-page tuple); nothing to check.
+        None => return Ok(()),
+    };
+
+    let xid: types_core::primitive::TransactionId = match htsv {
+        HTSV_Result::HEAPTUPLE_LIVE => {
+            if visible {
+                return Ok(());
+            }
+            HeapTupleHeaderGetXmin(hdr)
+        }
+        HTSV_Result::HEAPTUPLE_RECENTLY_DEAD | HTSV_Result::HEAPTUPLE_DELETE_IN_PROGRESS => {
+            let x = if visible {
+                backend_access_heap_heapam_visibility::HeapTupleHeaderGetUpdateXid(hdr)?
+            } else {
+                HeapTupleHeaderGetXmin(hdr)
+            };
+            if TransactionIdPrecedes(x, transaction_xmin) {
+                // This is like the HEAPTUPLE_DEAD case.
+                debug_assert!(!visible);
+                return Ok(());
+            }
+            x
+        }
+        HTSV_Result::HEAPTUPLE_INSERT_IN_PROGRESS => HeapTupleHeaderGetXmin(hdr),
+        HTSV_Result::HEAPTUPLE_DEAD => {
+            debug_assert!(!visible);
+            return Ok(());
+        }
+    };
+
+    debug_assert!(TransactionIdIsValid(xid));
+
+    // Find top level xid. Bail out if too early or if it's our own xid.
+    if TransactionIdEquals(xid, xact_seam::get_top_transaction_id_if_any::call()) {
+        return Ok(());
+    }
+    let xid = backend_access_transam_subtrans_seams::sub_trans_get_topmost_transaction::call(xid)?;
+    if TransactionIdPrecedes(xid, transaction_xmin) {
+        return Ok(());
+    }
+
+    predicate_seam::check_for_serializable_conflict_out::call(relation_oid, xid, snapshot)
+}
+
 /// `OffsetNumberNext(offsetNumber)` (`storage/off.h`).
 #[inline]
 fn OffsetNumberNext(offset: OffsetNumber) -> OffsetNumber {
