@@ -1954,25 +1954,25 @@ fn scan_query_sublinks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
     //      walk's private scratch `MemoryContext`, freed when the walk returns.
     //      Stashing a `&Query` into it for use after the walk is a use-after-free.
     //      Recursing in-walker keeps the borrow live exactly as long as it is read.
+    //
+    // C's `query_tree_walker` calls `ScanQueryWalker` only on the *top* expression
+    // nodes of the Query (target-list exprs, qual roots, …); `ScanQueryWalker`
+    // then RECURSES into each node's expression children itself
+    // (`expression_tree_walker(node, ScanQueryWalker, …)`) to find SubLinks nested
+    // arbitrarily deep inside an expression — e.g. the temporal-FK NO ACTION check
+    // `… NOT coalesce(… <@ (SELECT range_agg(r) FROM (SELECT … FROM tpk … FOR KEY
+    // SHARE OF y) …), false) FOR KEY SHARE OF x`, whose inner `FOR KEY SHARE`
+    // RowShareLock on the PK table lives in a SubLink buried under the qual's
+    // BoolExpr/OpExpr. A closure that merely matched a top SubLink and returned
+    // `false` never descended into those children, so that RowShareLock was never
+    // re-acquired on cached-plan revalidation — the executor then opened the
+    // relation `NoLock` without the lock held, tripping the
+    // `CheckRelationLockedByMe` assert in `ExecGetRangeTableRelation`. We therefore
+    // mirror C exactly: a recursive `scan_query_walker` that handles the SubLink
+    // and then descends via `expression_tree_walker`.
     let mut err: Option<types_error::PgError> = None;
     {
-        let mut walker = |node: &Node<'_>| -> bool {
-            if let Some(q) = node
-                .as_expr()
-                .and_then(|e| e.as_sublink())
-                .and_then(|sl| sl.subselect.as_deref())
-            {
-                // castNode(Query, sub->subselect): recurse now, while the wrapper
-                // (and its scratch-cloned subselect) is still borrowed.
-                if let Err(e) = ScanQueryForLocks(q, acquire) {
-                    err = Some(e);
-                    return true; // abort the walk
-                }
-            }
-            // expression_tree_walker recursion is handled by query_tree_walker
-            // itself; do NOT recurse into Query nodes (ScanQueryForLocks does).
-            false
-        };
+        let mut walker = |node: &Node<'_>| -> bool { scan_query_walker(node, acquire, &mut err) };
         backend_nodes_core::node_walker::query_tree_walker(
             parsetree,
             &mut walker,
@@ -1984,6 +1984,39 @@ fn scan_query_sublinks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// `ScanQueryWalker(node, acquire)` (plancache.c) — handle a `SubLink` by
+/// recursing `ScanQueryForLocks` into its sub-select, then descend into the
+/// node's expression children to find SubLinks nested deeper in the expression
+/// tree. Mirrors C's `return expression_tree_walker(node, ScanQueryWalker, …)`.
+/// Does NOT recurse into `Query` nodes — `ScanQueryForLocks` already processed
+/// subselects of subselects via the rtable/cteList walks.
+fn scan_query_walker(
+    node: &Node<'_>,
+    acquire: bool,
+    err: &mut Option<types_error::PgError>,
+) -> bool {
+    if err.is_some() {
+        return true;
+    }
+    if let Some(q) = node
+        .as_expr()
+        .and_then(|e| e.as_sublink())
+        .and_then(|sl| sl.subselect.as_deref())
+    {
+        // castNode(Query, sub->subselect): recurse now, while the wrapper
+        // (and its scratch-cloned subselect) is still borrowed.
+        if let Err(e) = ScanQueryForLocks(q, acquire) {
+            *err = Some(e);
+            return true; // abort the walk
+        }
+        // Fall through to process the lefthand args of the SubLink and any
+        // SubLinks nested within them.
+    }
+    backend_nodes_core::node_walker::expression_tree_walker(node, &mut |n| {
+        scan_query_walker(n, acquire, err)
+    })
 }
 
 /* ==========================================================================
