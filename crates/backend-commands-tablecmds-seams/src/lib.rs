@@ -825,3 +825,24 @@ seam_core::seam!(
     /// `String` value nodes).
     pub fn rename_constraint_domain_typid(names: &[String]) -> PgResult<Oid>
 );
+
+seam_core::seam!(
+    /// The `AT_ReAddDomainConstraint` executor leg of `ATExecCmd`
+    /// (tablecmds.c:5477): `AlterDomainAddConstraint(((AlterDomainStmt *)
+    /// cmd->def)->typeName, ((AlterDomainStmt *) cmd->def)->def, NULL)`. The
+    /// `cmd->def` AlterDomainStmt was synthesized by `ATPostAlterTypeParse`
+    /// (tablecmds.c:15783) to re-add a pre-existing domain CHECK constraint when
+    /// the domain's base composite type changed under an `ALTER TYPE ... ALTER
+    /// ATTRIBUTE`. `names` is the domain `typeName` namelist (decoded from the
+    /// AlterDomainStmt's `typeName` List of String value nodes) and
+    /// `new_constraint` is the `def` Constraint node. The body
+    /// (`AlterDomainAddConstraint`) lives in `backend-commands-typecmds`, which
+    /// installs this seam; the `tablecmds` crate cannot take a `typecmds`
+    /// dependency without a cycle. `Err` carries the constraint-add
+    /// `ereport(ERROR)`s.
+    pub fn re_add_domain_constraint<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        names: &[String],
+        new_constraint: &types_nodes::nodes::Node<'mcx>,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);

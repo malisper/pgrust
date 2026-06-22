@@ -1803,7 +1803,34 @@ fn ATExecCmd<'mcx>(
             wqueue[ti].rel = Some(owned_rel);
             _address = exec?;
         }
-        AT_ReAddDomainConstraint => unported("ReAdd DOMAIN CONSTRAINT (AlterDomainAddConstraint)"),
+        AT_ReAddDomainConstraint => {
+            // Re-add a pre-existing domain CHECK constraint:
+            //   address = AlterDomainAddConstraint(
+            //       ((AlterDomainStmt *) cmd->def)->typeName,
+            //       ((AlterDomainStmt *) cmd->def)->def, NULL);
+            // cmd->def is the AlterDomainStmt synthesized by ATPostAlterTypeParse.
+            let ads = cmd
+                .def
+                .as_deref()
+                .expect("AT_ReAddDomainConstraint: cmd.def is NULL")
+                .as_alterdomainstmt()
+                .expect("AT_ReAddDomainConstraint: cmd.def is not an AlterDomainStmt");
+            // typeName: List of String value nodes -> Vec<String>.
+            let mut names: Vec<String> = Vec::with_capacity(ads.typeName.len());
+            for n in ads.typeName.iter() {
+                let s = n
+                    .as_string()
+                    .expect("AT_ReAddDomainConstraint: typeName element is not a String");
+                names.push(s.sval.as_str().to_string());
+            }
+            let def = ads
+                .def
+                .as_deref()
+                .expect("AT_ReAddDomainConstraint: AlterDomainStmt.def is NULL");
+            _address = backend_commands_tablecmds_seams::re_add_domain_constraint::call(
+                mcx, &names, def,
+            )?;
+        }
         AT_ReAddComment => unported("ReAdd COMMENT (CommentObject)"),
         AT_AddIndexConstraint => {
             // ATExecAddIndexConstraint(tab, rel, (IndexStmt *) cmd->def, lockmode).

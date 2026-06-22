@@ -4881,6 +4881,26 @@ pub fn init_seams() {
     // ProcessUtilitySlow `T_AlterEnumStmt` dispatch target (utility.c) — ALTER
     // TYPE … ADD VALUE / RENAME VALUE.
     backend_tcop_utility_out_seams::alter_enum::set(alter_enum_seam);
+
+    // ATExecCmd (tablecmds.c) AT_ReAddDomainConstraint leg calls
+    // AlterDomainAddConstraint here via this seam (tablecmds cannot take a
+    // typecmds dependency without a cycle); the body lives here.
+    backend_commands_tablecmds_seams::re_add_domain_constraint::set(
+        re_add_domain_constraint_seam,
+    );
+}
+
+/// Seam adapter for the `AT_ReAddDomainConstraint` leg of `ATExecCmd`
+/// (tablecmds.c:5477): `AlterDomainAddConstraint(typeName, def, NULL)`. The
+/// out-parameter (`&constrAddr`) is NULL at this call site, so `want_constr_addr`
+/// is false and only the primary `ObjectAddress` is returned.
+fn re_add_domain_constraint_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[String],
+    new_constraint: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let (addr, _) = AlterDomainAddConstraint(mcx, names, new_constraint, false)?;
+    Ok(addr)
 }
 
 /// Outward-seam adapter for `AlterEnum((AlterEnumStmt *) stmt)`
