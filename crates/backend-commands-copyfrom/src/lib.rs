@@ -46,8 +46,8 @@ use std::collections::HashMap;
 
 use mcx::Mcx;
 use types_copy::{
-    AttrValue, CopyFileHandle, CopyGetDataResult, CopyParseOptions, CopyParseState,
-    CopySource, EolType, INPUT_BUF_SIZE, RAW_BUF_SIZE,
+    AttrValue, CopyFileHandle, CopyGetDataResult, CopyLogVerbosityChoice, CopyOnErrorChoice,
+    CopyParseOptions, CopyParseState, CopySource, EolType, INPUT_BUF_SIZE, RAW_BUF_SIZE,
 };
 use types_core::primitive::{AttrNumber, Oid};
 use types_tuple::backend_access_common_heaptuple::Datum as RichDatum;
@@ -503,6 +503,9 @@ pub fn BeginCopyFrom<'mcx>(
     is_program: bool,
     data_source_cb: Option<CopyDataSourceCb>,
     where_clause: mcx::PgVec<'mcx, types_nodes::primnodes::Expr>,
+    force_notnull_flags: mcx::PgVec<'mcx, bool>,
+    force_null_flags: mcx::PgVec<'mcx, bool>,
+    convert_select_flags: Option<mcx::PgVec<'mcx, bool>>,
 ) -> PgResult<CopyFromStateData<'mcx>> {
     let binary = opts.binary;
 
@@ -649,9 +652,9 @@ pub fn BeginCopyFrom<'mcx>(
         in_functions,
         typioparams,
         defexprs,
-        convert_select_flags: None,
-        force_notnull_flags: vec![false; num_phys_attrs],
-        force_null_flags: vec![false; num_phys_attrs],
+        convert_select_flags: convert_select_flags.map(|v| v.into_iter().collect()),
+        force_notnull_flags: force_notnull_flags.into_iter().collect(),
+        force_null_flags: force_null_flags.into_iter().collect(),
         defaults: vec![false; num_phys_attrs],
         num_defaults: 0,
         defmap: Vec::new(),
@@ -667,6 +670,18 @@ pub fn BeginCopyFrom<'mcx>(
     cstate.raw_buf.clear();
     cstate.raw_buf.resize((RAW_BUF_SIZE + 1) as usize, 0);
     cstate.raw_buf_len = 0;
+
+    // Set up soft error handler for ON_ERROR (copyfrom.c:1617-1632). When
+    // `on_error != STOP`, install an ErrorSaveContext so `InputFunctionCallSafe`
+    // routes recoverable input-function errors into the sink (returning false /
+    // None) instead of raising a hard ERROR. IGNORE wants no DETAIL.
+    if cstate.opts.on_error != CopyOnErrorChoice::COPY_ON_ERROR_STOP {
+        let details_wanted =
+            cstate.opts.on_error != CopyOnErrorChoice::COPY_ON_ERROR_IGNORE;
+        cstate.escontext = Some(types_error::SoftErrorContext::new(details_wanted));
+    } else {
+        cstate.escontext = None;
+    }
 
     // C (copyfrom.c BeginCopyFrom): `input_buf` is a distinct INPUT_BUF_SIZE+1
     // buffer only when transcoding; otherwise it aliases `raw_buf`
@@ -837,11 +852,21 @@ pub fn EndCopyFrom(state: CopyFromStateData<'_>) -> PgResult<()> {
 pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> PgResult<u64> {
     let relkind = state.cstate.rel.rd_rel.relkind;
 
-    // The target must be a plain, foreign, or partitioned relation, or an
-    // INSTEAD OF INSERT view. We support plain tables; the rest is gated.
+    // The target must be a plain, foreign, or partitioned relation, or have an
+    // INSTEAD OF INSERT row trigger (currently only allowed on views), in which
+    // case the per-row loop routes the tuple through ExecIRInsertTriggers
+    // (copyfrom.c:809-840).
+    let has_instead_insert_row = state
+        .cstate
+        .rel
+        .rd_trigdesc
+        .as_ref()
+        .map(|td| td.trig_insert_instead_row)
+        .unwrap_or(false);
     if relkind != RELKIND_RELATION
         && relkind != RELKIND_FOREIGN_TABLE
         && relkind != RELKIND_PARTITIONED_TABLE
+        && !has_instead_insert_row
     {
         let name = state.cstate.rel.rd_rel.relname.as_str();
         if relkind == RELKIND_VIEW {
@@ -1122,6 +1147,36 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 None => break,
             };
 
+            // if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE &&
+            //     cstate->escontext->error_occurred) { ...skip... } (copyfrom.c:1152)
+            // A soft error occurred while parsing this row: NextCopyFrom already
+            // counted it (cstate.num_errors) and emitted any VERBOSE notice, so
+            // just reset the sink and skip the tuple, honoring REJECT_LIMIT.
+            if state.cstate.opts.on_error == CopyOnErrorChoice::COPY_ON_ERROR_IGNORE
+                && state
+                    .cstate
+                    .escontext
+                    .as_ref()
+                    .is_some_and(|c| c.error_occurred())
+            {
+                if let Some(c) = state.cstate.escontext.as_mut() {
+                    c.reset_error_occurred();
+                }
+
+                if state.cstate.opts.reject_limit > 0
+                    && state.cstate.num_errors > state.cstate.opts.reject_limit
+                {
+                    return Err(PgError::error(format!(
+                        "skipped more than REJECT_LIMIT ({}) rows due to data type incompatibility",
+                        state.cstate.opts.reject_limit
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION)
+                    .add_context(copy_from_error_context(&state.cstate)));
+                }
+
+                continue;
+            }
+
             // `myslot` is the slot the per-row body operates on. On the
             // single-insert path it is `singleslot`; with `proute` and a
             // root→child conversion map it is reassigned to the partition's
@@ -1387,6 +1442,23 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
 
         processed
     };
+
+    // copyfrom.c:1470-1477: report the count of rows skipped under ON_ERROR when
+    // any soft errors occurred and the verbosity is at least DEFAULT (not SILENT).
+    if state.cstate.opts.on_error != CopyOnErrorChoice::COPY_ON_ERROR_STOP
+        && state.cstate.num_errors > 0
+        && state.cstate.opts.log_verbosity != CopyLogVerbosityChoice::COPY_LOG_VERBOSITY_SILENT
+    {
+        let n = state.cstate.num_errors;
+        let msg = if n == 1 {
+            format!("{n} row was skipped due to data type incompatibility")
+        } else {
+            format!("{n} rows were skipped due to data type incompatibility")
+        };
+        ereport(types_error::NOTICE)
+            .errmsg(msg)
+            .finish(here("CopyFrom"))?;
+    }
 
     // FreeExecutorState(estate);
     backend_executor_execUtils::free_executor_state_in(estate_owned)?;

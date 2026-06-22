@@ -48,7 +48,6 @@ backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # Outward seams (would cycle as direct deps).
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
-backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 backend-parser-parse-expr-seams = { path = "../backend-parser-parse-expr-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }

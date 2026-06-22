@@ -6657,7 +6657,6 @@ version = "0.0.0"
 dependencies = [
  "backend-access-table-table",
  "backend-access-transam-xact-seams",
- "backend-catalog-aclchk-seams",
  "backend-commands-copy-seams",
  "backend-commands-copyfrom",
  "backend-commands-copyto",

@@ -48,7 +48,6 @@ use types_tuple::access::RELPERSISTENCE_TEMP;
 use types_tuple::heaptuple::{TupleDesc, FirstLowInvalidHeapAttributeNumber};
 
 // Seam aliases.
-use backend_catalog_aclchk_seams as aclchk_s;
 use backend_commands_define_seams as define_s;
 use backend_commands_define_seams::DefElemArg;
 use backend_parser_small1_seams as small1_s;
@@ -161,15 +160,15 @@ fn def_get_boolean(defel: &DefElem) -> PgResult<bool> {
     )
 }
 
-/// `errorConflictingDefElem(defel, pstate)` (aclchk.c) — always raises.
-fn error_conflicting_def_elem(defel: &DefElem) -> PgError {
-    match aclchk_s::error_conflicting_def_elem::call(def_name(defel).to_string()) {
-        Err(e) => e,
-        // The seam always returns Err; synthesise the message if it somehow
-        // does not (keeps the C "always raises" contract).
-        Ok(()) => PgError::error(format!("conflicting or redundant options"))
-            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
-    }
+/// `errorConflictingDefElem(defel, pstate)` (define.c:371) — always raises.
+///
+/// In PG18.3 this emits only the "conflicting or redundant options" message
+/// plus `parser_errposition(pstate, defel->location)`; it does NOT attach a
+/// DETAIL line.
+fn error_conflicting_def_elem(pstate: Option<&ParseState<'_>>, defel: &DefElem) -> PgError {
+    PgError::error("conflicting or redundant options".to_string())
+        .with_sqlstate(ERRCODE_SYNTAX_ERROR)
+        .with_cursor_position(errpos(pstate, defel.location))
 }
 
 /// `parser_errposition(pstate, location)` — 0 when `pstate` is `None`.
@@ -440,7 +439,7 @@ pub fn ProcessCopyOptions<'mcx>(
         if dn == "format" {
             let fmt = def_get_string(mcx, defel)?;
             if format_specified {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             format_specified = true;
             if fmt == "text" {
@@ -456,44 +455,44 @@ pub fn ProcessCopyOptions<'mcx>(
             }
         } else if dn == "freeze" {
             if freeze_specified {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             freeze_specified = true;
             opts.freeze = def_get_boolean(defel)?;
         } else if dn == "delimiter" {
             if s.delim.is_some() {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             s.delim = Some(def_get_string(mcx, defel)?);
         } else if dn == "null" {
             if s.null_print.is_some() {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             s.null_print = Some(def_get_string(mcx, defel)?);
         } else if dn == "default" {
             if s.default_print.is_some() {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             s.default_print = Some(def_get_string(mcx, defel)?);
         } else if dn == "header" {
             if header_specified {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             header_specified = true;
             opts.header_line = defGetCopyHeaderChoice(mcx, defel, is_from)?;
         } else if dn == "quote" {
             if s.quote.is_some() {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             s.quote = Some(def_get_string(mcx, defel)?);
         } else if dn == "escape" {
             if s.escape.is_some() {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             s.escape = Some(def_get_string(mcx, defel)?);
         } else if dn == "force_quote" {
             if opts.force_quote.is_some() || opts.force_quote_all {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             if defel_arg_is_a_star(defel) {
                 opts.force_quote_all = true;
@@ -504,7 +503,7 @@ pub fn ProcessCopyOptions<'mcx>(
             }
         } else if dn == "force_not_null" {
             if opts.force_notnull.is_some() || opts.force_notnull_all {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             if defel_arg_is_a_star(defel) {
                 opts.force_notnull_all = true;
@@ -515,7 +514,7 @@ pub fn ProcessCopyOptions<'mcx>(
             }
         } else if dn == "force_null" {
             if opts.force_null.is_some() || opts.force_null_all {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             if defel_arg_is_a_star(defel) {
                 opts.force_null_all = true;
@@ -527,7 +526,7 @@ pub fn ProcessCopyOptions<'mcx>(
         } else if dn == "convert_selectively" {
             // Undocumented, not-accessible-from-SQL option.
             if opts.convert_selectively {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             opts.convert_selectively = true;
             if defel.arg.is_none() {
@@ -539,7 +538,7 @@ pub fn ProcessCopyOptions<'mcx>(
             }
         } else if dn == "encoding" {
             if opts.file_encoding >= 0 {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             let name = def_get_string(mcx, defel)?;
             opts.file_encoding = common_extra_encnames::pg_char_to_encoding(&name) as i32;
@@ -552,19 +551,19 @@ pub fn ProcessCopyOptions<'mcx>(
             }
         } else if dn == "on_error" {
             if on_error_specified {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             on_error_specified = true;
             opts.on_error = defGetCopyOnErrorChoice(mcx, defel, pstate, is_from)?;
         } else if dn == "log_verbosity" {
             if log_verbosity_specified {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             log_verbosity_specified = true;
             opts.log_verbosity = defGetCopyLogVerbosityChoice(mcx, defel, pstate)?;
         } else if dn == "reject_limit" {
             if reject_limit_specified {
-                return Err(error_conflicting_def_elem(defel));
+                return Err(error_conflicting_def_elem(pstate, defel));
             }
             reject_limit_specified = true;
             opts.reject_limit = defGetCopyRejectLimitOption(defel)?;
@@ -858,6 +857,51 @@ pub fn CopyGetAttnums<'mcx>(
     }
 
     Ok(attnums)
+}
+
+/// Convert a FORCE_* / convert_select column-name list to per-physical-column
+/// flags, validating that every named column is referenced by COPY
+/// (copyfrom.c:1590-1683). `optname` names the COPY option for the error
+/// message (e.g. `"FORCE_NOT_NULL"`); when `None` the "selected column ..."
+/// internal message is used (convert_selectively).
+fn force_flags_from_namelist<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup_desc: &TupleDesc<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    attnumlist: &[AttrNumber],
+    all: bool,
+    namelist: Option<&[NodePtr<'mcx>]>,
+    optname: Option<&str>,
+) -> PgResult<PgVec<'mcx, bool>> {
+    let num_phys_attrs = rel.rd_att.natts as usize;
+    let mut flags: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+    for _ in 0..num_phys_attrs {
+        flags.push(all);
+    }
+    if all {
+        return Ok(flags);
+    }
+    if let Some(names) = namelist {
+        let attnums = CopyGetAttnums(mcx, tup_desc, Some(rel), Some(names))?;
+        for &attnum in attnums.iter() {
+            if !attnumlist.iter().any(|&a| a == attnum) {
+                let td = tup_desc.as_ref().expect("tupdesc");
+                let attname_bytes = td.attrs[(attnum - 1) as usize].attname.name_str();
+                let attname = core::str::from_utf8(attname_bytes).unwrap_or("");
+                return Err(match optname {
+                    Some(opt) => PgError::error(format!(
+                        "{opt} column \"{attname}\" not referenced by COPY"
+                    )),
+                    None => PgError::error(format!(
+                        "selected column \"{attname}\" not referenced by COPY"
+                    )),
+                }
+                .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE));
+            }
+            flags[(attnum - 1) as usize] = true;
+        }
+    }
+    Ok(flags)
 }
 
 // ===========================================================================
@@ -1220,6 +1264,7 @@ fn copy_from_driver<'mcx>(
         quote: fmt.quote,
         escape: fmt.escape,
         on_error: fmt.on_error,
+        reject_limit: fmt.reject_limit,
         log_verbosity: fmt.log_verbosity,
     };
 
@@ -1228,6 +1273,43 @@ fn copy_from_driver<'mcx>(
     let attlist: Option<&[NodePtr<'mcx>]> =
         if stmt.attlist.is_empty() { None } else { Some(&stmt.attlist[..]) };
     let attnumlist = CopyGetAttnums(mcx, &tup_desc, Some(rel), attlist)?;
+
+    // Convert FORCE_NOT_NULL / FORCE_NULL / convert_select name lists to
+    // per-column flags, validating that each named column is referenced by COPY
+    // (copyfrom.c:1590-1683). C does this inside BeginCopyFrom against the live
+    // tupDesc; the owned port computes them here where the full
+    // `CopyFormatOptions` name lists are still available.
+    let force_notnull_flags = force_flags_from_namelist(
+        mcx,
+        &tup_desc,
+        rel,
+        &attnumlist,
+        fmt.force_notnull_all,
+        fmt.force_notnull.as_deref(),
+        Some("FORCE_NOT_NULL"),
+    )?;
+    let force_null_flags = force_flags_from_namelist(
+        mcx,
+        &tup_desc,
+        rel,
+        &attnumlist,
+        fmt.force_null_all,
+        fmt.force_null.as_deref(),
+        Some("FORCE_NULL"),
+    )?;
+    let convert_select_flags = if fmt.convert_selectively {
+        Some(force_flags_from_namelist(
+            mcx,
+            &tup_desc,
+            rel,
+            &attnumlist,
+            false,
+            fmt.convert_select.as_deref(),
+            None,
+        )?)
+    } else {
+        None
+    };
 
     // range_table / rteperminfos: a fresh owned copy of pstate's (the driver's
     // EState takes ownership via ExecInitRangeTable).
@@ -1258,6 +1340,9 @@ fn copy_from_driver<'mcx>(
         // data source — that is the SPI/extension `BeginCopyFrom` entry only.
         None,
         where_clause,
+        force_notnull_flags,
+        force_null_flags,
+        convert_select_flags,
     )?;
     let processed = backend_commands_copyfrom::CopyFrom(mcx, &mut state)?;
     backend_commands_copyfrom::EndCopyFrom(state)?;
