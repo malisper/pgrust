@@ -2263,7 +2263,7 @@ fn init_plan_rowmarks<'mcx>(estate: &mut types_nodes::EStateData<'mcx>) -> PgRes
         let relation: Option<types_rel::Relation<'mcx>> = match rc.markType {
             ROW_MARK_EXCLUSIVE | ROW_MARK_NOKEYEXCLUSIVE | ROW_MARK_SHARE | ROW_MARK_KEYSHARE
             | ROW_MARK_REFERENCE => {
-                let rel = execUtils::ExecGetRangeTableRelation(estate, rc.rti, false, false)?;
+                let rel = execUtils::ExecGetRangeTableRelation(estate, rc.rti, false)?;
                 CheckValidRowMarkRel(&rel, rc.markType)?;
                 Some(rel)
             }

@@ -1049,8 +1049,11 @@ pub fn ExecOpenScanRelation<'mcx>(
     eflags: i32,
     is_parallel_worker: bool,
 ) -> PgResult<Relation<'mcx>> {
-    // Open the relation.
-    let rel = ExecGetRangeTableRelation(estate, scanrelid, false, is_parallel_worker)?;
+    // Open the relation. (The parallel-worker branch is resolved inside
+    // ExecGetRangeTableRelation via IsParallelWorker(); the passed-in flag is
+    // retained on the wrapper signature only for call-site compatibility.)
+    let _ = is_parallel_worker;
+    let rel = ExecGetRangeTableRelation(estate, scanrelid, false)?;
 
     // Complain if we're attempting a scan of an unscannable relation, except
     // when the query won't actually be run. This is a slightly klugy place
@@ -1127,16 +1130,25 @@ pub fn exec_rt_fetch<'a, 'mcx>(
 /// calling this function — attempting to open a pruned relation for scanning
 /// results in an error.
 ///
-/// `is_parallel_worker` is the C `IsParallelWorker()` global (parallel.c) —
-/// an explicit parameter; the caller reads it off its own facet/state when
-/// the parallel owner lands.
+/// The parallel-worker branch (take our own lock vs. assert the leader already
+/// holds one) is decided internally by the C `IsParallelWorker()` global
+/// (parallel.c), resolved through the `is_parallel_worker` seam — NOT a
+/// caller-supplied flag. C has no such parameter; threading it as one invited
+/// callers (e.g. `CreatePartitionPruneState` / row-mark setup) to hardcode
+/// `false`, which crashed parallel workers running run-time partition pruning:
+/// they reached `relation_open` with `NoLock` while holding no `AccessShareLock`
+/// (the leader's locks aren't imported on this path), tripping the
+/// caller-must-hold-a-lock assertion.
 pub fn ExecGetRangeTableRelation<'mcx>(
     estate: &mut EStateData<'mcx>,
     rti: Index,
     is_result_rel: bool,
-    is_parallel_worker: bool,
 ) -> PgResult<Relation<'mcx>> {
     debug_assert!(rti > 0 && rti as usize <= estate.es_range_table_size);
+
+    // C: `if (!IsParallelWorker()) { ... } else { ... }` — resolve the global
+    // directly here rather than trusting a caller-passed flag.
+    let is_parallel_worker = backend_executor_execUtils_seams::is_parallel_worker::call();
 
     if !is_result_rel
         && !bms_seams::bms_is_member::call(rti as i32, estate.es_unpruned_relids.as_deref())
@@ -1200,7 +1212,11 @@ pub fn ExecInitResultRelation(
     rti: Index,
     is_parallel_worker: bool,
 ) -> PgResult<()> {
-    let result_relation_desc = ExecGetRangeTableRelation(estate, rti, true, is_parallel_worker)?;
+    // The parallel-worker branch is resolved inside ExecGetRangeTableRelation
+    // via IsParallelWorker(); the passed-in flag is retained on the wrapper
+    // signature only for call-site compatibility.
+    let _ = is_parallel_worker;
+    let result_relation_desc = ExecGetRangeTableRelation(estate, rti, true)?;
 
     // InitResultRelInfo(resultRelInfo, resultRelationDesc, rti, NULL,
     //                   estate->es_instrument);

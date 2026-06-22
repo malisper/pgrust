@@ -302,7 +302,7 @@ pub(crate) fn CreatePartitionPruneState<'mcx>(
             let rtindex = pruneinfo_ref(&estate.es_part_prune_infos[pruneinfo_index]).prune_infos
                 [i][j]
                 .rtindex;
-            let partrel = ExecGetRangeTableRelation(estate, rtindex, false, false)?;
+            let partrel = ExecGetRangeTableRelation(estate, rtindex, false)?;
 
             // partkey = RelationGetPartitionKey(partrel);
             let partkey = partcache_seams::relation_get_partition_key::call(mcx, partrel.alias())?;
