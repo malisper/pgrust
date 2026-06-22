@@ -2410,7 +2410,7 @@ fn get_tablesample_def<'mcx>(
 /// unchanged with no output; actual FieldStore / assignment SubsRef reach
 /// `get_typ_typrelid` / `get_attname` / `printSubscripts` (the F1 assignment
 /// path), which are a later family, so they panic precisely.
-fn process_indirection<'mcx>(
+pub(crate) fn process_indirection<'mcx>(
     mcx: Mcx<'mcx>,
     node: &Node<'mcx>,
     context: &mut DeparseContext<'mcx>,

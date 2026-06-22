@@ -1507,7 +1507,7 @@ fn get_rule_expr_e(
         }
 
         Expr::SubscriptingRef(s) => {
-            get_subscripting_ref(s, context, showimplicit)?;
+            get_subscripting_ref(s, expr, context, showimplicit)?;
         }
 
         Expr::FieldStore(f) => {
@@ -2000,10 +2000,13 @@ fn get_scalararrayop_expr(
  * SubscriptingRef arm — C 9307-9371 / printSubscripts — C 12998-13020.
  * -------------------------------------------------------------------------- */
 
-/// The `T_SubscriptingRef` arm of `get_rule_expr` (C 9307-9371).
-fn get_subscripting_ref(
-    sbsref: &SubscriptingRef,
-    context: &mut DeparseContext<'_>,
+/// The `T_SubscriptingRef` arm of `get_rule_expr` (C 9307-9371). `expr` is the
+/// enclosing `Expr::SubscriptingRef(sbsref)` (carried so the assignment path can
+/// re-materialize the node for `processIndirection`).
+fn get_subscripting_ref<'mcx>(
+    sbsref: &SubscriptingRef<'_>,
+    expr: &Expr<'_>,
+    context: &mut DeparseContext<'mcx>,
     showimplicit: bool,
 ) -> PgResult<()> {
     let refexpr = sbsref.refexpr.as_deref().ok_or_else(|| missing_field("SubscriptingRef.refexpr"))?;
@@ -2033,12 +2036,16 @@ fn get_subscripting_ref(
     }
 
     if sbsref.refassgnexpr.is_some() {
-        // "container[subscripts] := refassgnexpr" — not legal SQL; produced only
-        // by EXPLAIN over an INSERT/UPDATE plan via processIndirection, which
-        // needs catalog lookups (get_typ_typrelid / get_attname).
-        return Err(deferred(
-            "SubscriptingRef assignment (processIndirection; catalog get_typ_typrelid/get_attname)",
-        ));
+        // "container[subscripts] := refassgnexpr" — not legal SQL, produced only
+        // when EXPLAIN prints the targetlist of a plan from an INSERT/UPDATE.
+        //   refassgnexpr = processIndirection(node, context);
+        //   appendStringInfoString(buf, " := ");
+        //   get_rule_expr(refassgnexpr, context, showimplicit);
+        let mcx = context.buf.allocator();
+        let node = Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
+        let refassgnexpr = crate::query_deparse::process_indirection(mcx, &node, context)?;
+        str_(context, " := ")?;
+        get_rule_expr(&refassgnexpr, context, showimplicit)?;
     } else {
         // Just an ordinary container fetch, so print subscripts.
         print_subscripts(sbsref, context)?;
