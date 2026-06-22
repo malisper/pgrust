@@ -2031,6 +2031,30 @@ pub fn init_seams() {
     sx::exec_index_eval_runtime_keys_bis::set(seam_eval_runtime_keys_bis);
     sx::exec_index_eval_array_keys_bis::set(seam_eval_array_keys_bis);
     sx::exec_index_advance_array_keys_bis::set(seam_advance_array_keys_bis);
+
+    // `ParallelContext`/`shm_toc` accessor seams the parallel index-scan and
+    // index-only-scan `Exec*Estimate` hooks reach across the `shm_toc-seams`
+    // crate. The real bodies live on the DSM-owned live `ParallelContext` in
+    // `backend-access-transam-parallel` (this crate already deps it directly);
+    // the seam indirection just needs wiring to those bodies, mirroring how
+    // `backend-executor-execParallel-support` installs `pcxt_nworkers` etc.
+    //
+    // `pcxt->nworkers` (access/parallel.h): the requested worker count.
+    shm_toc::pcxt_nworkers::set(parallel::pcxt_nworkers);
+
+    // `shm_toc_estimate_chunk(&pcxt->estimator, size)` +
+    // `shm_toc_estimate_keys(&pcxt->estimator, 1)` (shm_toc.h): reserve DSM
+    // space for one chunk of `size` bytes (the parallel index-scan descriptor)
+    // and one TOC key. Both run against the context's backend-local estimator.
+    // `add_size`/`mul_size` `ereport(ERROR)` on overflow in C — an estimation
+    // overflow is effectively fatal there, so we mirror it as a panic rather
+    // than swallow it (the seam is infallible by contract).
+    shm_toc::estimate_chunk_and_key::set(|pcxt, size| {
+        parallel::pcxt_estimate_chunk(pcxt, size)
+            .expect("shm_toc_estimate_chunk: DSM size overflow");
+        parallel::pcxt_estimate_keys(pcxt, 1)
+            .expect("shm_toc_estimate_keys: DSM key-count overflow");
+    });
 }
 
 // --- shared scan-key seam adapters (IndexOnlyScanState) --------------------
