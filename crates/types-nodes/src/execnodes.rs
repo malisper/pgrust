@@ -672,6 +672,14 @@ pub struct PlanStateData<'mcx> {
     pub ExecProcNodeReal: ExecProcNodeMtd<'mcx>,
     /// `Instrumentation *instrument` — optional runtime stats for this node.
     pub instrument: Option<PgBox<'mcx, Instrumentation>>,
+    /// `struct WorkerInstrumentation *worker_instrument` — per-worker
+    /// instrumentation, when parallel. C carries a `WorkerInstrumentation`
+    /// (a `num_workers` count plus a flexible `Instrumentation[]`); the owned
+    /// model carries the `num_workers`-long array directly (its length is the
+    /// worker count). `None` ↔ C's `NULL` (non-parallel, or before
+    /// `ExecParallelRetrieveInstrumentation` fills it). Read by `EXPLAIN
+    /// ANALYZE` to print each `Worker N: actual rows=...` line.
+    pub worker_instrument: Option<alloc::vec::Vec<Instrumentation>>,
     /// `bool async_capable` — true if node is async-capable. Set by the planner
     /// / async-aware parent (`ExecInitAppend`); the default `false` is the C
     /// zero-initialized value for nodes that are not async-capable.

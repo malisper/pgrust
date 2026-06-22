@@ -736,6 +736,24 @@ pub fn set_sei_plan_node_id(sei: InstrumentationHandle, index: i32, value: i32) 
     unsafe { p.add(index as usize).write_unaligned(value) };
 }
 
+/// Find the slot index `i` such that `sei->plan_node_id[i] == plan_node_id`,
+/// scanning the flexible `plan_node_id` array (C: the linear search in both
+/// `ExecParallelReportInstrumentation` and `ExecParallelRetrieveInstrumentation`).
+/// Returns the index and the header (so callers reuse `num_workers` /
+/// `instrument_offset`). `None` ↔ C's `elog(ERROR, "plan node %d not found")`.
+fn sei_find_plan_node_slot(
+    sei: InstrumentationHandle,
+    plan_node_id: i32,
+) -> Option<(i32, SharedExecutorInstrumentation)> {
+    let header = read_sei_header(sei);
+    for i in 0..header.num_plan_nodes {
+        if sei_plan_node_id(sei, i) == plan_node_id {
+            return Some((i, header));
+        }
+    }
+    None
+}
+
 /// `jit_instrumentation = shm_toc_allocate(...);
 /// jit_instrumentation->num_workers = num_workers; memset(jit_instr, 0, ...)`.
 /// The `SharedJitInstrumentation` header is a single leading `int num_workers`,
@@ -2506,6 +2524,41 @@ fn install_execparallel_support_pcxt_seams() {
         unsafe {
             backend_executor_instrument::instr_init_slot_at(array_base, i, instrument_options)
         }
+    });
+
+    // `ExecParallelReportInstrumentation` per-node DSM write (worker side): find
+    // the plan-node slot, then `InstrAggNode(&array[i * num_workers + worker],
+    // &add)`. C `elog(ERROR, "plan node %d not found")` on miss.
+    sup::report_instr_to_dsm::set(|sei, plan_node_id, worker, add| {
+        let (i, header) = sei_find_plan_node_slot(sei, plan_node_id)
+            .ok_or_else(|| types_error::PgError::error(std::format!("plan node {plan_node_id} not found")))?;
+        let array_base = sei.0 + header.instrument_offset as usize;
+        let slot = i * header.num_workers + worker;
+        // SAFETY: the leader sized the chunk for `num_workers * num_plan_nodes`
+        // `Instrumentation` slots at `instrument_offset`; `slot` is in range
+        // (`i < num_plan_nodes`, `worker < num_workers`).
+        unsafe {
+            backend_executor_instrument::instr_agg_node_to_slot_at(array_base, slot, &add);
+        }
+        Ok(())
+    });
+
+    // `ExecParallelRetrieveInstrumentation` per-node DSM read (leader side): find
+    // the plan-node slot, then return the `num_workers` `Instrumentation` objects
+    // `array[i * num_workers ..][.. num_workers]`.
+    sup::retrieve_instr_from_dsm::set(|sei, plan_node_id| {
+        let (i, header) = sei_find_plan_node_slot(sei, plan_node_id)
+            .ok_or_else(|| types_error::PgError::error(std::format!("plan node {plan_node_id} not found")))?;
+        let array_base = sei.0 + header.instrument_offset as usize;
+        let base_slot = i * header.num_workers;
+        let mut out = std::vec::Vec::with_capacity(header.num_workers as usize);
+        for n in 0..header.num_workers {
+            // SAFETY: as `report_instr_to_dsm`; `base_slot + n` is in range.
+            let instr =
+                unsafe { backend_executor_instrument::instr_read_slot_at(array_base, base_slot + n) };
+            out.push(instr);
+        }
+        Ok(out)
     });
 }
 

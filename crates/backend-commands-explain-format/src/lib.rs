@@ -514,6 +514,146 @@ pub fn ExplainRestoreGroup(
     Ok(())
 }
 
+/// `ExplainCreateWorkersState(num_workers)` — allocate the per-worker output
+/// redirection state for an ANALYZE'd parallel plan node.
+pub fn ExplainCreateWorkersState<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    num_workers: i32,
+) -> PgResult<types_explain::ExplainWorkersState<'mcx>> {
+    let n = num_workers.max(0) as usize;
+    let mut worker_inited: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+    let mut worker_str: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+    let mut worker_state_save: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+    worker_inited.try_reserve(n).map_err(|_| mcx.oom(n))?;
+    worker_str.try_reserve(n).map_err(|_| mcx.oom(n))?;
+    worker_state_save.try_reserve(n).map_err(|_| mcx.oom(n))?;
+    for _ in 0..n {
+        worker_inited.push(false);
+        // palloc0'd StringInfoData: an empty (uninitialized) buffer; the real
+        // `initStringInfo` happens lazily in ExplainOpenWorker on first use.
+        worker_str.push(PgString::new_in(mcx));
+        worker_state_save.push(0);
+    }
+    Ok(types_explain::ExplainWorkersState {
+        num_workers,
+        worker_inited,
+        worker_str,
+        worker_state_save,
+        prev_str: None,
+    })
+}
+
+/// `ExplainOpenWorker(n, es)` — begin or resume output into the set-aside group
+/// for worker `n`. Swaps `es.str` with the per-worker buffer (the owned-model
+/// form of C's `es->str = &wstate->worker_str[n]` pointer swing), saving the
+/// prior buffer in `prev_str`.
+pub fn ExplainOpenWorker(n: i32, es: &mut ExplainState<'_>) -> PgResult<()> {
+    let wstate = es
+        .workers_state
+        .as_ref()
+        .expect("ExplainOpenWorker: workers_state present");
+    debug_assert!(n >= 0 && n < wstate.num_workers);
+    let n = n as usize;
+    let inited = wstate.worker_inited[n];
+
+    // Save prior output buffer (C: wstate->prev_str = es->str). In the owned
+    // model `es.str` is the buffer itself, so swap it out into the worker slot
+    // and stash what was there in `prev_str`.
+    let mut taken = core::mem::replace(
+        &mut es.workers_state.as_mut().unwrap().worker_str[n],
+        PgString::new_in(es.str.allocator()),
+    );
+    core::mem::swap(&mut es.str, &mut taken);
+    es.workers_state.as_mut().unwrap().prev_str = Some(taken);
+
+    if !inited {
+        // First time through: the buffer (now `es.str`) is already fresh
+        // (`initStringInfo`).
+        ExplainOpenSetAsideGroup("Worker", None, true, 2, es)?;
+
+        if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT {
+            ExplainPropertyInteger("Worker Number", None, n as i64, es)?;
+        }
+        es.workers_state.as_mut().unwrap().worker_inited[n] = true;
+    } else {
+        // Restore formatting state saved by the last ExplainCloseWorker().
+        let saved = es.workers_state.as_ref().unwrap().worker_state_save[n];
+        ExplainRestoreGroup(es, 2, saved)?;
+    }
+
+    if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        if es.str.len() == 0 {
+            ExplainIndentText(es)?;
+            es.str.try_push_str(&std::format!("Worker {n}:  "))?;
+        }
+        es.indent += 1;
+    }
+
+    Ok(())
+}
+
+/// `ExplainCloseWorker(n, es)` — end output for worker `n`; must pair with a
+/// previous [`ExplainOpenWorker`] call. Swings `es.str` back to the prior buffer.
+pub fn ExplainCloseWorker(n: i32, es: &mut ExplainState<'_>) -> PgResult<()> {
+    debug_assert!(es.workers_state.is_some());
+    let n = n as usize;
+
+    // Save formatting state, then pop the formatting stack.
+    let saved = ExplainSaveGroup(es, 2);
+    es.workers_state.as_mut().unwrap().worker_state_save[n] = saved;
+
+    if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        // If we produced no actual output line(s), truncate off the partial
+        // "Worker N:" line emitted by ExplainOpenWorker.
+        while es.str.len() > 0 && es.str.as_bytes().last().copied() != Some(b'\n') {
+            let new_len = es.str.len() - 1;
+            es.str.truncate(new_len);
+        }
+        es.indent -= 1;
+    }
+
+    // Restore prior output buffer (C: es->str = wstate->prev_str). Swing the
+    // worker buffer back into its slot and move the saved buffer back into
+    // `es.str`.
+    let mut prev = es
+        .workers_state
+        .as_mut()
+        .unwrap()
+        .prev_str
+        .take()
+        .expect("ExplainCloseWorker: prev_str saved by ExplainOpenWorker");
+    core::mem::swap(&mut es.str, &mut prev);
+    es.workers_state.as_mut().unwrap().worker_str[n] = prev;
+
+    Ok(())
+}
+
+/// `ExplainFlushWorkersState(es)` — print per-worker info for the current node,
+/// then drop the [`types_explain::ExplainWorkersState`].
+pub fn ExplainFlushWorkersState(es: &mut ExplainState<'_>) -> PgResult<()> {
+    // Take the workers_state out so we can read its buffers while appending to
+    // `es.str` (the C reads `wstate->worker_str[i]` while writing `es->str`).
+    let wstate = es
+        .workers_state
+        .take()
+        .expect("ExplainFlushWorkersState: workers_state present");
+
+    ExplainOpenGroup("Workers", Some("Workers"), false, es)?;
+    for i in 0..wstate.num_workers as usize {
+        if wstate.worker_inited[i] {
+            // This must match the previous ExplainOpenSetAsideGroup call.
+            ExplainOpenGroup("Worker", None, true, es)?;
+            es.str.try_push_str(wstate.worker_str[i].as_str())?;
+            ExplainCloseGroup("Worker", None, true, es)?;
+        }
+    }
+    ExplainCloseGroup("Workers", Some("Workers"), false, es)?;
+
+    // C `pfree`s the worker buffers + the wstate; here `wstate` is dropped.
+    drop(wstate);
+    Ok(())
+}
+
 /// `ExplainDummyGroup(objtype, labelname, es)` — emit a "dummy" group that never
 /// has any members.
 pub fn ExplainDummyGroup(

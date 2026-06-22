@@ -16,6 +16,7 @@ extern crate alloc;
 use alloc::format;
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use types_core::instrument::Instrumentation;
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
@@ -396,12 +397,25 @@ pub fn ExplainNode<'es, 'p>(
     let plan: &Plan<'p> = plan_node.plan_head();
 
     let save_indent = es.indent;
+    // save_workers_state = es->workers_state — saved for restore after the
+    // per-node detail / flush (the field is reused for each node).
+    let save_workers_state = es.workers_state.take();
 
-    // Per-worker output buffers (ANALYZE parallel): only when
-    // planstate->worker_instrument && es->analyze && !es->hide_workers. The
-    // trimmed PlanState carries no worker_instrument, so this is always the
-    // else-branch (workers_state = NULL).
-    es.workers_state = None;
+    // Prepare per-worker output buffers, if needed: only when
+    // planstate->worker_instrument && es->analyze && !es->hide_workers.
+    let num_workers = planstate
+        .ps_head()
+        .worker_instrument
+        .as_ref()
+        .map(|w| w.len() as i32);
+    es.workers_state = if num_workers.is_some() && es.analyze && !es.hide_workers {
+        Some(mcx::alloc_in(
+            mcx,
+            fmt::ExplainCreateWorkersState(mcx, num_workers.unwrap())?,
+        )?)
+    } else {
+        None
+    };
 
     // Identify plan node type, and print generic details.
     let pname: alloc::string::String;
@@ -790,18 +804,6 @@ pub fn ExplainNode<'es, 'p>(
         }
     }
 
-    // Per-worker general execution details:
-    //   if (es->workers_state && es->verbose) { ... worker_instrument ... }
-    // The trimmed PlanState carries no `worker_instrument`, and `workers_state`
-    // is forced to None above, so this leg is never entered on the modelled path;
-    // it is a genuinely-trimmed sub-leg. Guard loudly if it is ever reached.
-    if es.workers_state.is_some() && es.verbose {
-        panic!(
-            "ExplainNode: per-worker actual-rows detail needs PlanState.worker_instrument \
-             (trimmed from PlanState) — single-loop EXPLAIN ANALYZE only"
-        );
-    }
-
     // In text format, the first line ends here (explain.c:1877) — BEFORE the
     // Disabled property, so the property lands on its own indented line.
     if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
@@ -817,6 +819,51 @@ pub fn ExplainNode<'es, 'p>(
     let isdisabled = plan_is_disabled(plan_node);
     if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT || isdisabled {
         fmt::ExplainPropertyBool("Disabled", isdisabled, es)?;
+    }
+
+    // Per-worker general execution details (explain.c:1885-1929): for each worker
+    // with nloops > 0, print "actual [time=..] rows=.. loops=.." into the
+    // per-worker set-aside buffer.
+    if es.workers_state.is_some() && es.verbose {
+        // Snapshot the per-worker Instrumentation (owned read off the planstate)
+        // so the borrow of `planstate` does not overlap the `&mut es` calls.
+        let workers: alloc::vec::Vec<Instrumentation> = planstate
+            .ps_head()
+            .worker_instrument
+            .as_ref()
+            .map(|w| w.iter().copied().collect())
+            .unwrap_or_default();
+        for (n, instrument) in workers.iter().enumerate() {
+            let nloops = instrument.nloops;
+            if nloops <= 0.0 {
+                continue;
+            }
+            let startup_ms = 1000.0 * instrument.startup / nloops;
+            let total_ms = 1000.0 * instrument.total / nloops;
+            let rows = instrument.ntuples / nloops;
+
+            fmt::ExplainOpenWorker(n as i32, es)?;
+
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                fmt::ExplainIndentText(es)?;
+                es.str.try_push_str("actual ")?;
+                if es.timing {
+                    es.str
+                        .try_push_str(&std::format!("time={startup_ms:.3}..{total_ms:.3} "))?;
+                }
+                es.str
+                    .try_push_str(&std::format!("rows={rows:.2} loops={nloops:.0}\n"))?;
+            } else {
+                if es.timing {
+                    fmt::ExplainPropertyFloat("Actual Startup Time", Some("ms"), startup_ms, 3, es)?;
+                    fmt::ExplainPropertyFloat("Actual Total Time", Some("ms"), total_ms, 3, es)?;
+                }
+                fmt::ExplainPropertyFloat("Actual Rows", None, rows, 2, es)?;
+                fmt::ExplainPropertyFloat("Actual Loops", None, nloops, 0, es)?;
+            }
+
+            fmt::ExplainCloseWorker(n as i32, es)?;
+        }
     }
 
     // target list (explain.c:1932): `if (es->verbose) show_plan_tlist(...)`.
@@ -1312,6 +1359,36 @@ pub fn ExplainNode<'es, 'p>(
             crate::details::show_wal_usage(es, &instr.walusage)?;
         }
     }
+
+    // Prepare per-worker buffer/WAL usage (explain.c:2291-2310).
+    if es.workers_state.is_some() && (es.buffers || es.wal) && es.verbose {
+        let workers: alloc::vec::Vec<Instrumentation> = planstate
+            .ps_head()
+            .worker_instrument
+            .as_ref()
+            .map(|w| w.iter().copied().collect())
+            .unwrap_or_default();
+        for (n, instrument) in workers.iter().enumerate() {
+            if instrument.nloops <= 0.0 {
+                continue;
+            }
+            fmt::ExplainOpenWorker(n as i32, es)?;
+            if es.buffers {
+                crate::show_buffer_usage(es, &instrument.bufusage)?;
+            }
+            if es.wal {
+                crate::details::show_wal_usage(es, &instrument.walusage)?;
+            }
+            fmt::ExplainCloseWorker(n as i32, es)?;
+        }
+    }
+
+    // Show per-worker details for this plan node, then pop that stack
+    // (explain.c:2312-2315).
+    if es.workers_state.is_some() {
+        fmt::ExplainFlushWorkersState(es)?;
+    }
+    es.workers_state = save_workers_state;
 
     // If partition pruning was done during executor initialization, the number
     // of child plans we'll display below will be less than the number of

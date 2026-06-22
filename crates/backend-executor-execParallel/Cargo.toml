@@ -24,6 +24,7 @@ backend-access-transam-parallel = { path = "../backend-access-transam-parallel" 
 backend-storage-ipc-shm-mq-seams = { path = "../backend-storage-ipc-shm-mq-seams" }
 backend-utils-mmgr-dsa-seams = { path = "../backend-utils-mmgr-dsa-seams" }
 backend-executor-tqueue-seams = { path = "../backend-executor-tqueue-seams" }
+backend-executor-instrument-seams = { path = "../backend-executor-instrument-seams" }
 
 # Executor driver + recursive-teardown/tuple-bound (called directly — owned).
 backend-executor-execMain = { path = "../backend-executor-execMain" }

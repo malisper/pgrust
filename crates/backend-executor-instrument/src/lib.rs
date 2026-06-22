@@ -357,6 +357,36 @@ pub unsafe fn instr_init_slot_at(array_base: usize, i: i32, instrument_options: 
     InstrInit(&mut *slot, instrument_options as InstrumentOption);
 }
 
+/// `InstrAggNode(&GetInstrumentationArray(sei)[slot], add)` — fold the worker's
+/// `Instrumentation` `add` into the `slot`th DSM `Instrumentation` object in the
+/// leader's `SharedExecutorInstrumentation` array. `array_base` is the address
+/// of `GetInstrumentationArray(sei)`; the slots are plain
+/// `sizeof(Instrumentation)`-strided POD. This is the worker-side
+/// `ExecParallelReportInstrumentation` per-node write.
+///
+/// SAFETY: `array_base` addresses an `Instrumentation` array in the mapped DSM
+/// segment with at least `slot + 1` elements.
+pub unsafe fn instr_agg_node_to_slot_at(array_base: usize, slot: i32, add: &Instrumentation) {
+    let p = (array_base as *mut Instrumentation).add(slot as usize);
+    // The DSM slot is an unaligned in-place struct; read it out, fold, write
+    // back. (`read_unaligned`/`write_unaligned` matches the rest of the DSM
+    // header access in the parallel crate.)
+    let mut dst = core::ptr::read_unaligned(p);
+    InstrAggNode(&mut dst, add);
+    core::ptr::write_unaligned(p, dst);
+}
+
+/// `GetInstrumentationArray(sei)[slot]` — read the `slot`th DSM
+/// `Instrumentation` object out of the leader's `SharedExecutorInstrumentation`
+/// array. This is the leader-side `ExecParallelRetrieveInstrumentation`
+/// per-worker read.
+///
+/// SAFETY: as `instr_agg_node_to_slot_at`.
+pub unsafe fn instr_read_slot_at(array_base: usize, slot: i32) -> Instrumentation {
+    let p = (array_base as *const Instrumentation).add(slot as usize);
+    core::ptr::read_unaligned(p)
+}
+
 /// `dst += add` (`static BufferUsageAdd`).
 fn BufferUsageAdd(dst: &mut BufferUsage, add: &BufferUsage) {
     dst.shared_blks_hit += add.shared_blks_hit;
@@ -430,6 +460,7 @@ pub fn init_seams() {
     backend_executor_instrument_seams::instr_stop_node::set(InstrStopNode);
     backend_executor_instrument_seams::instr_end_loop::set(InstrEndLoop);
     backend_executor_instrument_seams::instr_update_tuple_count::set(InstrUpdateTupleCount);
+    backend_executor_instrument_seams::instr_agg_node::set(|dst, add| InstrAggNode(dst, &add));
 
     // --- lazy-vacuum driver's pgBufferUsage / pgWalUsage snapshot reads
     //     (vacuumlazy.c BufferUsageAccumDiff / WalUsageAccumDiff logging). These

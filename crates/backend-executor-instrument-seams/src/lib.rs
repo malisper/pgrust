@@ -60,3 +60,14 @@ seam_core::seam!(
         n_tuples: f64,
     )
 );
+
+seam_core::seam!(
+    /// `InstrAggNode(dst, add)` (instrument.c): fold the per-node statistics in
+    /// `add` into `dst` (the parallel-executor leader-side accumulation of each
+    /// worker's `Instrumentation` into the leader's). `add` is passed by value
+    /// (the C struct is trivially copyable). Infallible.
+    pub fn instr_agg_node(
+        dst: &mut types_nodes::Instrumentation,
+        add: types_nodes::Instrumentation,
+    )
+);

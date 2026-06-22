@@ -156,6 +156,30 @@ seam_core::seam!(pub fn instr_accum_parallel_query(
     worker: i32,
 ));
 
+/// `ExecParallelReportInstrumentation` per-node DSM write: find the slot index
+/// `i` in `sei` whose `plan_node_id[i] == plan_node_id`, then
+/// `InstrAggNode(&GetInstrumentationArray(sei)[i * num_workers + worker], &add)`.
+/// Owned by the parallel crate (which owns the DSM header layout); the worker
+/// has already `InstrEndLoop`'d its own `Instrumentation`. Errors if the plan
+/// node id is not present in the DSM header (C `elog(ERROR, "plan node %d not
+/// found")`).
+seam_core::seam!(pub fn report_instr_to_dsm(
+    sei: InstrumentationHandle,
+    plan_node_id: i32,
+    worker: i32,
+    add: types_core::instrument::Instrumentation,
+) -> PgResult<()>);
+
+/// `ExecParallelRetrieveInstrumentation` per-node DSM read: find the slot index
+/// `i` in `sei` whose `plan_node_id[i] == plan_node_id`, then return the
+/// `num_workers` `Instrumentation` objects `GetInstrumentationArray(sei)[i *
+/// num_workers ..][.. num_workers]`. Owned by the parallel crate. Errors if the
+/// plan node id is not present (C `elog(ERROR, "plan node %d not found")`).
+seam_core::seam!(pub fn retrieve_instr_from_dsm(
+    sei: InstrumentationHandle,
+    plan_node_id: i32,
+) -> PgResult<std::vec::Vec<types_core::instrument::Instrumentation>>);
+
 // ===========================================================================
 // Bitmapset membership (bitmapset.c).
 // ===========================================================================

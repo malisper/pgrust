@@ -56,6 +56,7 @@ use types_nodes::instrument::Instrumentation;
 use backend_access_transam_parallel as parallel;
 use backend_executor_execParallel_support_seams as sup;
 use backend_executor_tqueue_seams as tqueue;
+use backend_executor_instrument_seams as instr;
 use backend_storage_ipc_shm_mq_seams as shmmq;
 use backend_utils_mmgr_dsa_seams as dsa;
 
@@ -931,6 +932,80 @@ fn ExecParallelReInitializeDSM<'mcx>(
 //   panic until that carrier lands.
 // ===========================================================================
 
+/// `ExecParallelRetrieveInstrumentation` (execParallel.c:1034-1110) — copy
+/// instrumentation about this node and its descendants from dynamic shared
+/// memory into the leader's owned `PlanState` tree.
+///
+/// For each node: find its DSM slot by `plan_node_id`, accumulate every worker's
+/// per-node `Instrumentation` into the leader's `planstate->instrument`
+/// (`InstrAggNode`), and stash the per-worker array on the node's
+/// `worker_instrument` carrier so `EXPLAIN ANALYZE` can print each
+/// `Worker N: actual rows=...` line. (The per-node-type `Exec*Retrieve` hooks —
+/// IndexScan/Sort/Hash/Agg/Memoize/BitmapHeap shared-state pull — are not
+/// reached by the `count(*)`/SeqScan path and land with those nodes.)
+fn ExecParallelRetrieveInstrumentation<'mcx>(
+    planstate: &mut PlanStateNode<'mcx>,
+    sei: types_execparallel::InstrumentationHandle,
+) -> PgResult<()> {
+    let plan_node_id = planstate.plan_node_id();
+
+    // Accumulate the statistics from all workers, and keep the per-worker detail.
+    let per_worker = sup::retrieve_instr_from_dsm::call(sei, plan_node_id)?;
+    let head = planstate.ps_head_mut();
+    if let Some(dst) = head.instrument.as_deref_mut() {
+        for w in &per_worker {
+            instr_agg_node_local(dst, w);
+        }
+    }
+    // Store the per-worker detail (C: palloc the WorkerInstrumentation in the
+    // per-query context, memcpy the worker array in). The owned carrier holds
+    // the same `num_workers`-long array directly.
+    head.worker_instrument = if per_worker.is_empty() {
+        None
+    } else {
+        Some(per_worker)
+    };
+
+    for child in planstate.planstate_tree_walker_children_mut() {
+        ExecParallelRetrieveInstrumentation(child, sei)?;
+    }
+    Ok(())
+}
+
+/// `InstrAggNode(dst, add)` — the leader-side fold of one worker's per-node
+/// `Instrumentation` into the leader's. The body lives in
+/// `backend-executor-instrument`; reached here through the `instr_agg_node`
+/// seam to avoid an execParallel→instrument crate dependency cycle.
+fn instr_agg_node_local(dst: &mut Instrumentation, add: &Instrumentation) {
+    instr::instr_agg_node::call(dst, *add);
+}
+
+/// `ExecParallelReportInstrumentation` (execParallel.c:1287-1325) — write the
+/// worker's per-node `Instrumentation` into the DSM
+/// `SharedExecutorInstrumentation`, so the leader can retrieve it.
+///
+/// For each node: `InstrEndLoop(planstate->instrument)`, then find the DSM slot
+/// by `plan_node_id` and `InstrAggNode(&instrument[ParallelWorkerNumber],
+/// planstate->instrument)` (done DSM-side by the `report_instr_to_dsm` seam).
+fn ExecParallelReportInstrumentation<'mcx>(
+    planstate: &mut PlanStateNode<'mcx>,
+    sei: types_execparallel::InstrumentationHandle,
+    worker: i32,
+) -> PgResult<()> {
+    let plan_node_id = planstate.plan_node_id();
+    let head = planstate.ps_head_mut();
+    if let Some(this_instr) = head.instrument.as_deref_mut() {
+        instr::instr_end_loop::call(this_instr)?;
+        // Add our statistics to the per-node, per-worker totals (DSM-side).
+        sup::report_instr_to_dsm::call(sei, plan_node_id, worker, *this_instr)?;
+    }
+
+    for child in planstate.planstate_tree_walker_children_mut() {
+        ExecParallelReportInstrumentation(child, sei, worker)?;
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // 14. ExecParallelFinish (execParallel.c:1155-1200)
 // ===========================================================================
@@ -994,19 +1069,13 @@ pub fn ExecParallelCleanup<'mcx>(
     pei: &mut ParallelExecutorInfo<'mcx>,
     planstate: &mut PlanStateNode<'mcx>,
 ) -> PgResult<()> {
-    // Accumulate instrumentation, if any. (Parallel-DSM-carrier residual: the
-    // leader's per-PlanState `worker_instrument`/`worker_jit_instrument` arrays
-    // are not yet modeled on the owned PlanState head, and the per-node slot
-    // accumulation reads the DSM-resident SharedExecutorInstrumentation; honest
-    // panic until that carrier lands.)
-    if pei.instrumentation.is_some() {
-        let _ = &planstate;
-        panic!(
-            "ExecParallelRetrieveInstrumentation: the leader-side per-PlanState \
-             worker_instrument accumulation from the DSM SharedExecutorInstrumentation \
-             is not yet modeled (owned PlanState head carries no worker_instrument array; \
-             parallel-DSM-carrier keystone pending)"
-        );
+    // Accumulate instrumentation, if any: walk the leader's owned PlanState tree
+    // pulling each node's per-worker `Instrumentation` out of the DSM
+    // `SharedExecutorInstrumentation`, folding it into the leader's
+    // `planstate->instrument` and stashing the per-worker detail on the node's
+    // `worker_instrument` carrier (for EXPLAIN ANALYZE per-worker lines).
+    if let Some(sei) = pei.instrumentation {
+        ExecParallelRetrieveInstrumentation(planstate, sei)?;
     }
     if pei.jit_instrumentation.is_some() {
         panic!(
@@ -1275,16 +1344,17 @@ pub fn ParallelQueryMain<'mcx>(
     let parallel_worker_number = parallel::parallel_worker_number();
     sup::instr_end_parallel_query::call(buffer_usage, wal_usage, parallel_worker_number);
 
-    // Report instrumentation data if any instrumentation options are set.
-    // (Parallel-DSM-carrier residual — the worker-side per-PlanState slot
-    // accumulation into the DSM SharedExecutorInstrumentation is not yet
-    // modeled; honest panic when instrumentation is present.)
-    if instrumentation.is_some() {
-        panic!(
-            "ExecParallelReportInstrumentation: the worker-side per-PlanState slot \
-             accumulation into the DSM SharedExecutorInstrumentation is not yet modeled \
-             (parallel-DSM-carrier keystone pending)"
-        );
+    // Report instrumentation data if any instrumentation options are set: walk
+    // the worker's owned PlanState tree, `InstrEndLoop` each node, and aggregate
+    // its `Instrumentation` into this worker's per-node DSM slot so the leader
+    // can retrieve it in ExecParallelCleanup.
+    if let Some(sei) = instrumentation {
+        query_desc.with_plan_and_estate_mut(|_plan, _pstmt, _estate, planstate_slot| -> PgResult<()> {
+            let planstate = planstate_slot.as_deref_mut().ok_or_else(|| {
+                PgError::error("ParallelQueryMain: queryDesc->planstate is NULL at report")
+            })?;
+            ExecParallelReportInstrumentation(planstate, sei, parallel_worker_number)
+        })?;
     }
 
     // Report JIT instrumentation data if any.

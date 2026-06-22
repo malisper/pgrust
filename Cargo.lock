@@ -9641,6 +9641,7 @@ dependencies = [
  "backend-executor-execParallel-seams",
  "backend-executor-execParallel-support-seams",
  "backend-executor-execProcnode",
+ "backend-executor-instrument-seams",
  "backend-executor-nodeAppend",
  "backend-executor-nodeBitmapHeapscan",
  "backend-executor-nodeBitmapIndexscan",
