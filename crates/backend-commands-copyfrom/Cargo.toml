@@ -63,6 +63,7 @@ backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 common-encnames-seams = { path = "../common-encnames-seams" }
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
 backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
+backend-optimizer-plan-planner-pc-seams = { path = "../backend-optimizer-plan-planner-pc-seams" }
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }

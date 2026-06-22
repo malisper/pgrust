@@ -460,6 +460,10 @@ pub struct CopyFromStateData<'mcx> {
     pub rteperminfos: mcx::PgVec<'mcx, types_nodes::RTEPermissionInfo<'mcx>>,
     /// `bool volatile_defexprs`.
     pub volatile_defexprs: bool,
+    /// `cstate->opts.freeze` (CopyFormatOptions). Carried so `CopyFrom` can fire
+    /// the COPY FREEZE relkind checks (copyfrom.c:864-906). Not part of the
+    /// parse-state options subset (`CopyParseOptions`), so it rides here.
+    pub freeze: bool,
     /// `bool is_program`.
     pub is_program: bool,
     /// `char *filename` (== `cstate->filename`): for COPY FROM PROGRAM this is
@@ -499,6 +503,7 @@ pub fn BeginCopyFrom<'mcx>(
     attnumlist: mcx::PgVec<'mcx, AttrNumber>,
     range_table: mcx::PgVec<'mcx, types_nodes::RangeTblEntry<'mcx>>,
     rteperminfos: mcx::PgVec<'mcx, types_nodes::RTEPermissionInfo<'mcx>>,
+    freeze: bool,
     filename: Option<&str>,
     is_program: bool,
     data_source_cb: Option<CopyDataSourceCb>,
@@ -567,14 +572,31 @@ pub fn BeginCopyFrom<'mcx>(
             // (e.g. `operand_f8` in the numeric `width_bucket_test` COPY): the
             // column is then simply left NULL on input. A non-NULL result is a
             // real default to compile and (if not copied from input) record in
-            // defmap. The expression_planner + ExecInitExpr compile is deferred
-            // to CopyFrom (where the EState's per-query context exists); see the
-            // `raw_defexprs` field comment.
-            raw = backend_rewrite_rewritehandler_seams::build_column_default::call(
+            // defmap. The `ExecInitExpr` half is deferred to CopyFrom (where the
+            // EState's per-query context exists; see the `raw_defexprs` field
+            // comment) — but `expression_planner` MUST run here, at BeginCopyFrom
+            // time (copyfrom.c:1788), before `ReceiveCopyBegin` sends the
+            // CopyInResponse. A default such as `'..'::varchar(5)` const-folds to
+            // its length-coerced value during planning and can raise
+            // `value too long`; firing it here (rather than later in CopyFrom)
+            // means the client receives an ErrorResponse instead of a
+            // CopyInResponse, so a following stray `\.` is treated by psql as an
+            // ordinary command — matching reference psql output exactly.
+            let built = backend_rewrite_rewritehandler_seams::build_column_default::call(
                 mcx,
                 rel.alias(),
                 attnum as i32,
             )?;
+            if let Some(defexpr) = built {
+                // defexpr = expression_planner(defexpr);
+                let owned = defexpr.clone_in(mcx)?.erase_lifetime();
+                let planned =
+                    backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(
+                        mcx, owned,
+                    )?
+                    .clone_in(mcx)?;
+                raw = Some(mcx::alloc_in(mcx, planned)?);
+            }
         }
         raw_defexprs.push(raw);
     }
@@ -756,6 +778,7 @@ pub fn BeginCopyFrom<'mcx>(
         range_table,
         rteperminfos,
         volatile_defexprs: false,
+        freeze,
         is_program,
         filename: if is_program {
             filename.map(|s| s.to_string())
@@ -892,6 +915,31 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             return ereport(ERROR)
                 .errcode(ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!("cannot copy to non-table relation \"{name}\""))
+                .finish(here("CopyFrom"))
+                .map(|()| 0u64);
+        }
+    }
+
+    // COPY FREEZE pre-checks (copyfrom.c:864-906). The snapshot/subxact
+    // registration checks are omitted (the relcache subid fields are not carried
+    // and TABLE_INSERT_FROZEN is gated downstream), but the two relkind-based
+    // ERRORs must fire here — and the foreign-table FREEZE check must precede the
+    // FDW-not-wired gate below to match C ordering.
+    if state.freeze {
+        // We currently disallow COPY FREEZE on partitioned tables.
+        if relkind == RELKIND_PARTITIONED_TABLE {
+            return ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("cannot perform COPY FREEZE on a partitioned table")
+                .finish(here("CopyFrom"))
+                .map(|()| 0u64);
+        }
+
+        // There's currently no support for COPY FREEZE on foreign tables.
+        if relkind == RELKIND_FOREIGN_TABLE {
+            return ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("cannot perform COPY FREEZE on a foreign table")
                 .finish(here("CopyFrom"))
                 .map(|()| 0u64);
         }

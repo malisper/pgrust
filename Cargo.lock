@@ -6741,6 +6741,7 @@ dependencies = [
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-nodes-core",
+ "backend-optimizer-plan-planner-pc-seams",
  "backend-optimizer-plan-planner-seams",
  "backend-optimizer-util-clauses-seams",
  "backend-rewrite-rewritehandler-seams",
