@@ -130,8 +130,33 @@ pub fn ExplainPrintPlan<'es, 'p>(
     // dummy Result's targetlist still gets its relation prefix
     // (`f1.id`, `ss.unnest`). Preserve it by passing `None` (not an empty
     // bitmapset, which would suppress all prefixes).
-    let rels_used = explain_pre_scan_node(mcx, planstate, None)?;
-    let rels_used = rels_used.map(PgBox::into_inner);
+    let mut rels_used_acc = explain_pre_scan_node(es, mcx, planstate, None)?;
+    // planstate_tree_walker (nodeFuncs.c) also walks every node's initPlan /
+    // subPlan SubPlanState subtrees (planstate_walk_subplans). The owned model
+    // single-owns each subplan's PlanState in `EState.es_subplanstates` rather
+    // than aliasing it on `SubPlanState.planstate`, so sweep the whole table
+    // here: it is exactly the union of all initPlan/subPlan child trees. Without
+    // this, scan rels reached only through a correlated SubPlan (e.g. an EXISTS
+    // sublink's join) never get added to rels_used, so their RTEs get no display
+    // name and a Var resolving to one loses its alias prefix (memoize.sql's
+    // `t2.hundred` deparsed as bare `hundred`).
+    if !es.es_subplanstates_ptr.is_null() {
+        // SAFETY: identical aliasing contract as `resolve_subplan_planstate` —
+        // the pointer aliases the live `EState.es_subplanstates` slice for the
+        // duration of this synchronous walk.
+        let subplanstates = unsafe {
+            core::slice::from_raw_parts(
+                es.es_subplanstates_ptr as *const Option<PgBox<'p, PlanStateNode<'p>>>,
+                es.es_subplanstates_len,
+            )
+        };
+        for sub in subplanstates.iter() {
+            if let Some(ps) = sub.as_deref() {
+                rels_used_acc = explain_pre_scan_node(es, mcx, ps, rels_used_acc)?;
+            }
+        }
+    }
+    let rels_used = rels_used_acc.map(PgBox::into_inner);
     if let Some(rtable) = es.rtable.as_ref() {
         let names = ruleutils_s::select_rtable_names_for_explain::call(
             mcx,
@@ -188,6 +213,7 @@ pub fn ExplainPrintPlan<'es, 'p>(
 /// `*rels_used`), threaded by value (`acc`) down the recursion as the C `**`
 /// out-parameter would be mutated.
 fn explain_pre_scan_node<'es, 'p>(
+    es: &ExplainState<'es>,
     mcx: Mcx<'es>,
     planstate: &PlanStateNode<'p>,
     acc: Option<PgBox<'es, types_nodes::bitmapset::Bitmapset<'es>>>,
@@ -317,14 +343,14 @@ fn explain_pre_scan_node<'es, 'p>(
     // `member_input_states()` — so partition Seq Scans under an Append
     // contribute their scanrelids (and thus get display names).
     if let Some(outer) = planstate.outer_plan_state() {
-        acc = explain_pre_scan_node(mcx, outer, acc)?;
+        acc = explain_pre_scan_node(es, mcx, outer, acc)?;
     }
     if let Some(inner) = planstate.ps_head().righttree.as_deref() {
-        acc = explain_pre_scan_node(mcx, inner, acc)?;
+        acc = explain_pre_scan_node(es, mcx, inner, acc)?;
     }
     if let Some(members) = planstate.member_input_states() {
         for child in members {
-            acc = explain_pre_scan_node(mcx, child, acc)?;
+            acc = explain_pre_scan_node(es, mcx, child, acc)?;
         }
     }
     // planstate_tree_walker (nodeFuncs.c:4777) walks a SubqueryScan's sub-plan
@@ -334,7 +360,7 @@ fn explain_pre_scan_node<'es, 'p>(
     // (e.g. window.sql's WindowAgg-under-SubqueryScan EXPLAINs dropped
     // `empsalary.` on Window:/Sort Key: lines).
     if let Some(subplan) = planstate.subquery_subplan_state() {
-        acc = explain_pre_scan_node(mcx, subplan, acc)?;
+        acc = explain_pre_scan_node(es, mcx, subplan, acc)?;
     }
 
     Ok(acc)
