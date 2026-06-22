@@ -1239,6 +1239,7 @@ fn unify_hypothetical_args<'mcx>(
     actual_arg_types: &mut [Oid],
     declared_arg_types: &[Oid],
 ) -> PgResult<()> {
+    let mcx = pstate_mcx(pstate);
     let num_direct_args = fargs.len() as i32 - num_aggregated_args;
     let num_non_hypothetical_args = num_direct_args - num_aggregated_args;
     // safety check (should only trigger with a misdeclared agg).
@@ -1268,7 +1269,13 @@ fn unify_hypothetical_args<'mcx>(
         }
 
         // Select common type, preferring the aggregated argument's type.
-        let pair = vec![fargs[ap].clone(), fargs[hp].clone()];
+        // Deep-copy via `clone_in`, not a shallow `.clone()`: the aggregated
+        // arg may be an `Aggref`/`SubLink` whose context-allocated TargetEntry
+        // children panic a derived `.clone()` (e.g. `rank(sum(x)) WITHIN GROUP`).
+        let pair = vec![
+            fargs[ap].clone_in(mcx)?.erase_lifetime(),
+            fargs[hp].clone_in(mcx)?.erase_lifetime(),
+        ];
         let commontype = select_common_type::call(pstate, &pair, Some("WITHIN GROUP"))?;
         let commontypmod =
             backend_parser_coerce_seams::select_common_typmod::call(&pair, commontype)?;
@@ -1276,7 +1283,7 @@ fn unify_hypothetical_args<'mcx>(
         // Perform the coercions.
         let coerced_h = coerce_type::call(
             Some(pstate),
-            fargs[hp].clone(),
+            fargs[hp].clone_in(mcx)?.erase_lifetime(),
             actual_arg_types[hp],
             commontype,
             commontypmod,
@@ -1289,7 +1296,7 @@ fn unify_hypothetical_args<'mcx>(
 
         let coerced_a = coerce_type::call(
             Some(pstate),
-            fargs[ap].clone(),
+            fargs[ap].clone_in(mcx)?.erase_lifetime(),
             actual_arg_types[ap],
             commontype,
             commontypmod,
