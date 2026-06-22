@@ -42,13 +42,20 @@ use types_nodes::copy_query::Query;
 use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::RTEKind;
 use types_nodes::primnodes::{CoercionForm, Expr, ExprRelids, RowExpr, Var};
+use types_pathnodes::PlannerInfo;
 
 const INVALID_ATTR_NUMBER: i16 = 0;
 
-/// `flatten_join_alias_vars_context` (var.c:64-71), minus the always-NULL
-/// `PlannerInfo *root`. The `query` is the outer `Query` whose range table
-/// defines the joins; `'mcx` is its arena lifetime.
+/// `flatten_join_alias_vars_context` (var.c:64-71). The `root` is NULL for the
+/// parse_agg.c call sites but live for planner.c / prepjointree.c; it is read
+/// only by `add_nullingrels_if_needed`'s PlaceHolderVar fallback. The `query`
+/// is the outer `Query` whose range table defines the joins; `'mcx` is its
+/// arena lifetime.
 struct FlattenCtx<'a, 'mcx> {
+    /// `PlannerInfo *root` — NULL (`None`) for the parser call sites; live for
+    /// the planner / `pull_up_simple_subquery` sites (needed to build the PHV
+    /// wrapper for a non-standard nullingrel-carrying join-alias expression).
+    root: Option<&'a mut PlannerInfo>,
     query: &'a Query<'mcx>,
     sublevels_up: i32,
     /// could aliases include a SubLink?
@@ -57,13 +64,14 @@ struct FlattenCtx<'a, 'mcx> {
     inserted_sublink: bool,
 }
 
-/// `flatten_join_alias_vars(NULL, query, node)` (var.c:789).
+/// `flatten_join_alias_vars(root, query, node)` (var.c:789).
 ///
 /// We do not expect this to be applied to the whole `Query`, only to expressions
 /// or LATERAL subqueries; hence if the top node is a `Query`, it's okay to
 /// immediately increment `sublevels_up` (the mutator does so).
 pub fn flatten_join_alias_vars<'mcx>(
     mcx: Mcx<'mcx>,
+    root: Option<&mut PlannerInfo>,
     query: &Node<'mcx>,
     mut node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
@@ -76,6 +84,7 @@ pub fn flatten_join_alias_vars<'mcx>(
         }
     };
     let mut context = FlattenCtx {
+        root,
         query,
         sublevels_up: 0,
         // flag whether join aliases could possibly contain SubLinks
@@ -354,15 +363,17 @@ fn rt_fetch<'a, 'mcx>(
         .ok_or_else(|| PgError::error("flatten_join_alias_vars: rangetable index out of range"))
 }
 
-/// `add_nullingrels_if_needed(root, newnode, oldvar)` (var.c:1176), specialized
-/// for the always-NULL `root` at this seam's call site. With `root == NULL`: if
-/// `oldvar` carries no nullingrels, do nothing; else if the expansion is a
-/// "standard" join alias expression, push the nullingrels into it in place;
-/// otherwise raise `elog(ERROR, "unsupported join alias expression")` (the C
-/// final `else` arm — the PlaceHolderVar fallback requires a non-NULL `root`).
+/// `add_nullingrels_if_needed(root, newnode, oldvar)` (var.c:1176). If `oldvar`
+/// carries no nullingrels, do nothing; else if the expansion is a "standard"
+/// join alias expression, push the nullingrels into it in place; else if `root`
+/// is live, insert a PlaceHolderVar to carry the nullingrels (the C non-NULL
+/// `else if (root)` arm — evaluate the PHV at the natural semantic level of the
+/// new expression, falling back to the join's relids when the expression is
+/// variable-free); else (NULL `root`, parser call sites) raise the C final
+/// `else` arm `elog(ERROR, "unsupported join alias expression")`.
 fn add_nullingrels_if_needed<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _context: &mut FlattenCtx<'_, 'mcx>,
+    mcx: Mcx<'mcx>,
+    context: &mut FlattenCtx<'_, 'mcx>,
     mut newnode: Node<'mcx>,
     oldvar: &Var,
 ) -> PgResult<Node<'mcx>> {
@@ -372,9 +383,62 @@ fn add_nullingrels_if_needed<'mcx>(
     // If possible, do it by adding to existing nullingrel fields.
     if is_standard_join_alias_expression(&newnode, oldvar) {
         adjust_standard_join_alias_expression(&mut newnode, oldvar);
+    } else if context.root.is_some() {
+        // We can insert a PlaceHolderVar to carry the nullingrels. Deciding
+        // where to evaluate the PHV is slightly tricky: first try the natural
+        // semantic level of the new expression, but if that expression is
+        // variable-free fall back to the join that oldvar is an alias Var for.
+        let levelsup = oldvar.varlevelsup;
+        let mut phrels = {
+            let root_ref = context.root.as_deref().unwrap();
+            let relids_bms =
+                crate::var::pull_varnos_of_level(Some(root_ref), &newnode, levelsup as i32);
+            bms_to_expr_relids(relids_bms.as_deref())
+        };
+
+        if expr_relids::is_empty(&phrels) {
+            // variable-free?
+            if levelsup != 0 {
+                // this won't work otherwise
+                return Err(PgError::error("unsupported join alias expression"));
+            }
+            // phrels = get_relids_for_join(root->parse, oldvar->varno);
+            let join_relids =
+                backend_optimizer_prep_prepjointree_seams::get_relids_for_join::call(
+                    mcx,
+                    context.query,
+                    oldvar.varno,
+                )?;
+            // If it's an outer join, eval below not above the join.
+            phrels = expr_relids::del_member(join_relids, oldvar.varno);
+            debug_assert!(!expr_relids::is_empty(&phrels));
+        }
+
+        let expr_val = match newnode.into_expr() {
+            Some(e) => e,
+            None => {
+                return Err(PgError::error(
+                    "add_nullingrels_if_needed: replacement is not an expression",
+                ))
+            }
+        };
+        // make_placeholder_expr builds over the planner arena's notional
+        // `'static`; feed it the erased arena-interned expr and re-localize the
+        // resulting PlaceHolderVar into the local `mcx` via `clone_in`.
+        let root_mut = context.root.as_deref_mut().unwrap();
+        let mut newphv = backend_optimizer_util_placeholder_seams::make_placeholder_expr::call(
+            root_mut,
+            expr_val.erase_lifetime(),
+            expr_relids_to_relids(&phrels),
+        )
+        .clone_in(mcx)?;
+        // newphv has zero phlevelsup and NULL phnullingrels; fix it.
+        newphv.phlevelsup = levelsup;
+        newphv.phnullingrels = expr_relids::copy(&oldvar.varnullingrels);
+        newnode = Node::mk_expr(mcx, Expr::PlaceHolderVar(newphv))?;
     } else {
-        // root is always NULL at this call site: "ooops, we're missing support
-        // for something the parser can make".
+        // root is NULL (parser call sites): "ooops, we're missing support for
+        // something the parser can make".
         return Err(PgError::error("unsupported join alias expression"));
     }
     Ok(newnode)
@@ -505,8 +569,6 @@ fn alias_relid_set<'mcx>(
 // the underlying grouping expressions. Unlike flatten_join_alias_vars this
 // always runs with a real `root` (needed to preserve varnullingrels).
 // ===========================================================================
-
-use types_pathnodes::PlannerInfo;
 
 /// `flatten_group_exprs_mutator` context (var.c:64-71). Carries the real `root`
 /// (for `mark_nullable_by_grouping`) plus the `query` whose range table holds

@@ -1487,6 +1487,7 @@ pub fn parseCheckAggregates<'mcx>(
         if has_join_rtes {
             clause = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
                 mcx,
+                None, // C parse_agg.c passes NULL root
                 &qry_snapshot,
                 clause,
             )?;
@@ -1545,6 +1546,7 @@ fn flatten_group_clauses<'mcx>(
     for tle in group_clauses {
         let flat = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
             mcx,
+            None, // C parse_agg.c passes NULL root
             qry_node,
             Node::mk_target_entry(mcx, tle)?,
         )?;
@@ -1570,7 +1572,7 @@ fn flatten_node_list<'mcx>(
     out.reserve(list.len());
     for n in list {
         out.push(backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
-            mcx, qry_node, n,
+            mcx, None, qry_node, n,
         )?);
     }
     Ok(out)
@@ -2176,6 +2178,7 @@ fn compute_grouping_refs(
         let expr_node: Node = if context.has_join_rtes {
             flat_node = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
                 context.mcx,
+                None, // C parse_agg.c passes NULL root
                 context.qry,
                 Node::mk_expr(context.mcx, expr.clone_in(context.mcx)?)?,
             )?;

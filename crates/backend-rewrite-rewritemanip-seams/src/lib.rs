@@ -39,13 +39,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `flatten_join_alias_vars(NULL, query, node)` (rewriteManip.c) — replace
+    /// `flatten_join_alias_vars(root, query, node)` (rewriteManip.c) — replace
     /// any join-alias Vars in `node` with the underlying base-relation Vars,
-    /// using `query`'s range table for the join definitions. The PlannerInfo*
-    /// first argument is always NULL at this call site, so it is omitted. The
+    /// using `query`'s range table for the join definitions. The `PlannerInfo*`
+    /// first argument is NULL for the parse_agg.c call sites (pass `None`) but a
+    /// live `root` for planner.c / prepjointree.c (`pull_up_simple_subquery`);
+    /// `root` is what lets `add_nullingrels_if_needed` fall back to wrapping a
+    /// non-"standard" join-alias expression carrying nullingrels in a
+    /// PlaceHolderVar (via `make_placeholder_expr`) instead of erroring. The
     /// result is freshly allocated in `mcx`.
     pub fn flatten_join_alias_vars<'mcx>(
         mcx: Mcx<'mcx>,
+        root: Option<&mut types_pathnodes::PlannerInfo>,
         query: &Node<'mcx>,
         node: Node<'mcx>,
     ) -> PgResult<Node<'mcx>>

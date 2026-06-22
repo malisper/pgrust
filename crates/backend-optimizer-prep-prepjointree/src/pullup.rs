@@ -821,7 +821,17 @@ fn pull_up_simple_subquery<'mcx>(
         for i in 0..n {
             if let Some(expr) = subquery.targetList[i].expr.take() {
                 let node = Node::mk_expr(mcx, PgBox::into_inner(expr))?;
-                let flat = rewritemanip::flatten_join_alias_vars::call(mcx, &query_node, node)?;
+                // C: `flatten_join_alias_vars(subroot, subroot->parse, ...)` —
+                // the live subroot is required so add_nullingrels_if_needed can
+                // wrap a non-standard nullingrel-carrying alias expansion in a
+                // PlaceHolderVar (make_placeholder_expr bumps subroot.glob, which
+                // is still the shared glob here, before it is moved back to root).
+                let flat = rewritemanip::flatten_join_alias_vars::call(
+                    mcx,
+                    Some(&mut subroot),
+                    &query_node,
+                    node,
+                )?;
                 if let Some(e) = flat.into_expr() {
                     subquery.targetList[i].expr = Some(alloc_in(mcx, e)?);
                 } else {

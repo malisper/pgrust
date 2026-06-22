@@ -1412,7 +1412,10 @@ fn pqe_per_rte<'mcx>(
                         let sub_node = Node::mk_query(mcx, q)?;
                         let flat =
                             backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
-                                mcx, query_node, sub_node,
+                                mcx,
+                                Some(&mut *root), // C planner.c passes live root
+                                query_node,
+                                sub_node,
                             )?;
                         let flat_q = flat.into_query().ok_or_else(|| {
                             types_error::PgError::error(
@@ -2699,6 +2702,7 @@ pub fn preprocess_expression<'mcx>(
         })?;
         let flat = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
             mcx,
+            Some(&mut *root), // C planner.c passes live root
             query_node,
             Node::mk_expr(mcx, expr)?,
         )?;
