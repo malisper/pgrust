@@ -1171,6 +1171,9 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::pg_attribute_attoptions::set(
         projections::pg_attribute_attoptions,
     );
+    backend_utils_cache_syscache_seams::pg_attribute_attstattarget::set(
+        projections::pg_attribute_attstattarget,
+    );
     backend_utils_cache_syscache_seams::pg_namespace_owner_acl::set(
         projections::pg_namespace_owner_acl,
     );

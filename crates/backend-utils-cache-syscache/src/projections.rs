@@ -1365,6 +1365,7 @@ const Anum_pg_attribute_attislocal: i32 = 18;
 const Anum_pg_attribute_attinhcount: i32 = 19;
 const Anum_pg_attribute_attcollation: i32 = 20;
 const Anum_pg_attribute_attoptions: i32 = 23;
+const Anum_pg_attribute_attstattarget: i32 = 21;
 
 /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
 /// + `GETSTRUCT(Form_pg_attribute)` projected to the fixed-width
@@ -1442,6 +1443,36 @@ pub(crate) fn pg_attribute_attoptions<'mcx>(
         getattr_option_bytes(mcx, ATTNUM, &tup, Anum_pg_attribute_attoptions)?.map(Datum::ByRef);
     ReleaseSysCache(tup);
     Ok(Some(attopts))
+}
+
+/// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+/// + `SysCacheGetAttr(ATTNUM, tuple, Anum_pg_attribute_attstattarget, &isnull)`:
+/// the attribute's nullable `attstattarget` `int2`. The outer `Ok(None)` is the
+/// cache miss; the inner `None` is SQL null (catalog-default statistics target),
+/// `Some(n)` an explicit `SET STATISTICS n`. Used by `index_concurrently_create_-
+/// copy` to carry per-column stat targets to the rebuilt index.
+pub(crate) fn pg_attribute_attstattarget(
+    mcx: Mcx<'_>,
+    relid: Oid,
+    attnum: i16,
+) -> PgResult<Option<Option<i16>>> {
+    let tuple = SearchSysCache2(
+        mcx,
+        ATTNUM,
+        SysCacheKey::Value(KeyDatum::from_oid(relid)),
+        SysCacheKey::Value(KeyDatum::from_i16(attnum)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let (value, is_null) = SysCacheGetAttr(mcx, ATTNUM, &tup, Anum_pg_attribute_attstattarget)?;
+    let stattarget = if is_null {
+        None
+    } else {
+        Some(byval(value)?.as_i16())
+    };
+    ReleaseSysCache(tup);
+    Ok(Some(stattarget))
 }
 
 /// `SearchSysCache1(AGGFNOID, ObjectIdGetDatum(funcid))` projected to the

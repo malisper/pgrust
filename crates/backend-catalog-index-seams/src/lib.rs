@@ -47,6 +47,11 @@ pub struct IndexCreateArgs<'mcx> {
     /// options). `None` ⇒ the C NULL `opclassOptions` (no per-column opclass
     /// options at all).
     pub opclass_options: std::option::Option<std::vec::Vec<types_tuple::Datum<'mcx>>>,
+    /// `const NullableDatum *stattargets` — per-column `attstattarget`
+    /// (one entry per index attribute; `None` for the catalog-default NULL,
+    /// `Some(n)` for an explicit `SET STATISTICS n`). `None` for the whole array
+    /// ⇒ the C NULL `stattargets` (every column gets the default).
+    pub stattargets: std::option::Option<std::vec::Vec<std::option::Option<i16>>>,
     /// `bits16 flags`.
     pub flags: u16,
     /// `bits16 constr_flags`.

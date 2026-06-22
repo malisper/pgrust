@@ -742,6 +742,7 @@ pub fn DefineIndex<'mcx>(
         coloptions: coloptions_v,
         reloptions,
         opclass_options: Some(opclass_options),
+        stattargets: None, // C: stattargets == NULL
         flags,
         constr_flags,
         allow_system_table_mods: allow_system_table_mods(),

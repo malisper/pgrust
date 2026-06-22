@@ -1025,6 +1025,7 @@ pub fn index_create<'mcx>(
     let coloptions = args.coloptions;
     let reloptions = args.reloptions;
     let opclass_options = args.opclass_options;
+    let stattargets = args.stattargets;
     let flags = args.flags;
     let constr_flags = args.constr_flags;
     let allow_system_table_mods = args.allow_system_table_mods;
@@ -1293,7 +1294,12 @@ pub fn index_create<'mcx>(
      * (InitializeAttributeOids runs inside AppendAttributeTuples' seam in the
      * owned model — see AppendAttributeTuples.)
      */
-    AppendAttributeTuples(mcx, &index_relation, opclass_options.as_deref())?;
+    AppendAttributeTuples(
+        mcx,
+        &index_relation,
+        opclass_options.as_deref(),
+        stattargets.as_deref(),
+    )?;
 
     /*
      * update pg_index (append INDEX tuple). Stows away "predicate".
@@ -2384,6 +2390,20 @@ pub fn index_concurrently_create_copy<'mcx>(
         opclass_options.push(opt.unwrap_or_else(types_tuple::Datum::null));
     }
 
+    /* Extract statistic targets for each attribute (SearchSysCache2(ATTNUM, ...)
+     * + SysCacheGetAttr(Anum_pg_attribute_attstattarget)). */
+    let mut stattargets: Vec<Option<i16>> = Vec::with_capacity(new_info.ii_NumIndexAttrs as usize);
+    for i in 0..new_info.ii_NumIndexAttrs as usize {
+        let st = syscache::pg_attribute_attstattarget::call(mcx, old_index_id, (i + 1) as i16)?
+            .ok_or_else(|| {
+                PgError::error(alloc::format!(
+                    "cache lookup failed for attribute {} of relation {old_index_id}",
+                    i + 1
+                ))
+            })?;
+        stattargets.push(st);
+    }
+
     let access_method_id = relcache::rd_rel_relam::call(&index_relation)?;
     let new_index_name = new_name.to_string();
 
@@ -2406,6 +2426,7 @@ pub fn index_concurrently_create_copy<'mcx>(
         coloptions: indcoloptions,
         reloptions,
         opclass_options: Some(opclass_options),
+        stattargets: Some(stattargets),
         flags: INDEX_CREATE_SKIP_BUILD | INDEX_CREATE_CONCURRENT,
         constr_flags: 0,
         allow_system_table_mods: true, /* allow table to be a system catalog */
@@ -3304,6 +3325,7 @@ fn AppendAttributeTuples<'mcx>(
     mcx: Mcx<'mcx>,
     index_relation: &Relation<'mcx>,
     opclass_options: Option<&[types_tuple::Datum<'mcx>]>,
+    stattargets: Option<&[Option<i16>]>,
 ) -> PgResult<()> {
     use types_tuple::Datum;
     // C: InsertPgAttributeTuples is given attopts == opclassOptions verbatim.
@@ -3331,7 +3353,7 @@ fn AppendAttributeTuples<'mcx>(
         mcx,
         index_relation,
         attopts.as_deref(),
-        None,
+        stattargets,
     )
 }
 

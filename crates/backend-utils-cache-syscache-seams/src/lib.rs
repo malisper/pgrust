@@ -1640,6 +1640,21 @@ seam_core::seam!(
     ) -> PgResult<Option<Option<types_tuple::Datum<'mcx>>>>
 );
 
+seam_core::seam!(
+    /// `SearchSysCache2(ATTNUM, relid, attnum)` + `SysCacheGetAttr(ATTNUM, tuple,
+    /// Anum_pg_attribute_attstattarget, &isnull)`: the attribute's nullable
+    /// `attstattarget` `int2`. Outer `Ok(None)` is the cache miss (the caller
+    /// raises its own `cache lookup failed for attribute` error); inner `None` is
+    /// SQL null (catalog-default), `Some(n)` an explicit `SET STATISTICS n`.
+    /// Reached by `index_concurrently_create_copy` to forward per-column stat
+    /// targets to the rebuilt index.
+    pub fn pg_attribute_attstattarget<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: i16,
+    ) -> PgResult<Option<Option<i16>>>
+);
+
 /// The fixed-width `Form_pg_class` columns lsyscache.c reads off
 /// `SearchSysCache1(RELOID, ...)` not already covered by the single-field
 /// relation seams.
