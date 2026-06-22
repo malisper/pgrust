@@ -567,14 +567,28 @@ fn examine_cte_subroot<'mcx, 'run, 'a>(
     //
     // levelsup = rte->ctelevelsup; cteroot = root;
     // while (levelsup-- > 0) { cteroot = cteroot->parent_root; ... }
+    //
+    // C's `cteroot->parent_root` is a back-pointer that lives for the whole
+    // planning run, so this walk always completes. In this owned PlannerInfo
+    // model the subroot does NOT retain its `parent_root` after the CTE's own
+    // create_plan finished (it was moved back to restore the parent — see
+    // plan_sublink_subquery; PlannerInfo is not `Clone`). So when selectivity
+    // for a side-reference to a sibling CTE is re-estimated from inside the
+    // referencing CTE's subroot at a *later* point (e.g. top-level join cost
+    // estimation reaching down through subroot->parse), the parent_root chain
+    // is severed and we cannot reach the level that owns the CTE's plan_id.
+    // This is a stats-only path: C itself punts with empty vardata when the
+    // subroot isn't available yet (`if (subroot == NULL) return;`). Treat a
+    // severed parent_root chain the same way — punt (no stats refinement),
+    // which yields the correct plan, never a spurious "bad levelsup" error.
     let mut cteroot: &PlannerInfo = root;
     let mut levelsup = rte.ctelevelsup;
     while levelsup > 0 {
         levelsup -= 1;
-        cteroot = cteroot.parent_root.as_deref().ok_or_else(|| {
-            // shouldn't happen
-            PgError::error(alloc::format!("bad levelsup for CTE \"{ctename}\""))
-        })?;
+        cteroot = match cteroot.parent_root.as_deref() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
     }
 
     // ndx = index of the matching CTE in cteroot->parse->cteList.
