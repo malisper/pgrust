@@ -41,7 +41,7 @@ use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenTyp
 use types_jsonb::backend_utils_adt_jsonb_util::{JsonbValue, JsonbValueData};
 use types_jsonb::jsonb::{
     jbvType, json_container_is_array, json_container_is_object, json_container_is_scalar,
-    JsonbIteratorToken, VARHDRSZ,
+    JsonbIteratorToken,
 };
 use types_jsonfuncs::{
     ColumnIOUnion, JsonHashEntry, TypeCat, NAMEDATALEN,
@@ -322,7 +322,7 @@ fn populate_recordset_worker<'mcx>(
         // is its VARDATA (skip the 4-byte length word), as C reads via
         // VARDATA_ANY.
         let json_image = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo_ref, json_arg_num)?;
-        let json = &json_image[VARHDRSZ..];
+        let json = crate::common::vardata_any(&json_image);
 
         let state = Rc::new(RefCell::new(PopulateRecordsetState {
             function_name: funcname,
@@ -431,7 +431,7 @@ fn populate_recordset_worker<'mcx>(
     } else {
         // Jsonb *jb = PG_GETARG_JSONB_P(json_arg_num);
         let jb = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo_ref, json_arg_num)?;
-        let root = &jb[VARHDRSZ..];
+        let root = crate::common::vardata_any(&jb);
         let header = u32::from_ne_bytes([root[0], root[1], root[2], root[3]]);
 
         // if (JB_ROOT_IS_SCALAR(jb) || !JB_ROOT_IS_ARRAY(jb)) ereport("cannot call %s on a non-array")

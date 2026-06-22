@@ -38,7 +38,7 @@ use types_jsonb::backend_utils_adt_jsonb_util::{
 };
 use types_jsonb::jsonb::{
     jbvType, json_container_is_object, json_container_is_scalar, json_container_size,
-    JsonbIteratorToken, VARHDRSZ,
+    JsonbIteratorToken,
 };
 
 use backend_utils_adt_jsonb::JsonbToCStringIndent;
@@ -84,11 +84,13 @@ pub const jtiAll: u32 = 0x0F;
 // Small helpers tying the repo's owned model to the C idioms.
 // ===========================================================================
 
-/// Read the root container header word from the full varlena (`&jb[VARHDRSZ..]`
+use crate::common::vardata_any;
+
+/// Read the root container header word from the full varlena (`VARDATA_ANY(jb)`
 /// first word). Mirrors `backend-utils-adt-jsonb::container_header`.
 #[inline]
 fn root_header(jb: &[u8]) -> u32 {
-    let c = &jb[VARHDRSZ..];
+    let c = vardata_any(jb);
     u32::from_ne_bytes([c[0], c[1], c[2], c[3]])
 }
 
@@ -274,7 +276,7 @@ fn token_as_int(r: JsonbIteratorToken) -> i32 {
 /// payload; the varlena wrapping is the fmgr boundary).
 pub fn jsonb_pretty<'mcx>(mcx: Mcx<'mcx>, jb: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     // JsonbToCStringIndent(str, &jb->root, VARSIZE(jb));
-    JsonbToCStringIndent(mcx, &jb[VARHDRSZ..], jb.len() as i32)
+    JsonbToCStringIndent(mcx, vardata_any(jb), jb.len() as i32)
 }
 
 /// `jsonb_concat` (jsonfuncs.c:4623): the `||` operator.
@@ -290,8 +292,8 @@ pub fn jsonb_concat<'mcx>(mcx: Mcx<'mcx>, jb1: &[u8], jb2: &[u8]) -> PgResult<Pg
         }
     }
 
-    let mut it1 = JsonbIteratorInit(&jb1[VARHDRSZ..]);
-    let mut it2 = JsonbIteratorInit(&jb2[VARHDRSZ..]);
+    let mut it1 = JsonbIteratorInit(vardata_any(jb1));
+    let mut it2 = JsonbIteratorInit(vardata_any(jb2));
     let mut state: Option<Box<JsonbParseState>> = None;
 
     let res = iterator_concat(&mut it1, &mut it2, &mut state)?;
@@ -314,7 +316,7 @@ pub fn jsonb_delete<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], key: &[u8]) -> PgResult<PgV
         return return_jsonb(mcx, jb);
     }
 
-    let mut it = JsonbIteratorInit(&jb[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(vardata_any(jb));
     let mut state: Option<Box<JsonbParseState>> = None;
     let mut res: Option<JsonbValue> = None;
     let mut skip_nested = false;
@@ -376,7 +378,7 @@ pub fn jsonb_delete_array<'mcx>(
         return return_jsonb(mcx, jb);
     }
 
-    let mut it = JsonbIteratorInit(&jb[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(vardata_any(jb));
     let mut state: Option<Box<JsonbParseState>> = None;
     let mut res: Option<JsonbValue> = None;
     let mut skip_nested = false;
@@ -444,7 +446,7 @@ pub fn jsonb_delete_idx<'mcx>(mcx: Mcx<'mcx>, jb: &[u8], idx: i32) -> PgResult<P
         return return_jsonb(mcx, jb);
     }
 
-    let mut it = JsonbIteratorInit(&jb[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(vardata_any(jb));
     let mut state: Option<Box<JsonbParseState>> = None;
 
     let (r, v) = iter_next(&mut it, false)?;
@@ -533,7 +535,7 @@ pub fn jsonb_set_element<'mcx>(
         }
     }
 
-    let mut it = JsonbIteratorInit(&jb[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(vardata_any(jb));
     let mut state: Option<Box<JsonbParseState>> = None;
 
     let res = set_path(
@@ -599,7 +601,7 @@ fn jsonb_set_with_value<'mcx>(
 
     let path_elems = path_elems_of(path);
     let path_nulls = path_nulls_of(path);
-    let mut it = JsonbIteratorInit(&jb[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(vardata_any(jb));
     let mut st: Option<Box<JsonbParseState>> = None;
 
     let res = set_path(
@@ -711,7 +713,7 @@ pub fn jsonb_delete_path<'mcx>(
 
     let path_elems = path_elems_of(path);
     let path_nulls = path_nulls_of(path);
-    let mut it = JsonbIteratorInit(&jb[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(vardata_any(jb));
     let mut st: Option<Box<JsonbParseState>> = None;
 
     // setPath with newval == NULL: JB_PATH_DELETE never dereferences newval, so a
@@ -758,7 +760,7 @@ pub fn jsonb_insert<'mcx>(
 
     let path_elems = path_elems_of(path);
     let path_nulls = path_nulls_of(path);
-    let mut it = JsonbIteratorInit(&jb[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(vardata_any(jb));
     let mut st: Option<Box<JsonbParseState>> = None;
 
     let res = set_path(
@@ -1392,7 +1394,7 @@ fn set_path_array(
 /// describes which jsonb value kinds to iterate in `iterate_json(b)_values`,
 /// into the `jti*` bitmask. The information is presented in jsonb format.
 pub fn parse_jsonb_index_flags(jb: &[u8]) -> PgResult<u32> {
-    let mut it = JsonbIteratorInit(&jb[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(vardata_any(jb));
     let mut flags: u32 = 0;
 
     let (mut typ, _v) = iter_next(&mut it, false)?;

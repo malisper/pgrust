@@ -34,7 +34,7 @@ use types_error::PgResult;
 
 use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::backend_utils_adt_jsonb_util::{JsonbValue, JsonbValueData};
-use types_jsonb::jsonb::{jbvType, JsonbIteratorToken, VARHDRSZ};
+use types_jsonb::jsonb::{jbvType, JsonbIteratorToken};
 
 use backend_utils_adt_json::{escape_json, escape_json_with_len};
 use backend_utils_adt_jsonb_util::{
@@ -61,7 +61,7 @@ pub fn iterate_jsonb_values<'mcx>(
     action: &mut dyn FnMut(&[u8]) -> PgResult<()>,
 ) -> PgResult<()> {
     // it = JsonbIteratorInit(&jb->root);
-    let mut it = JsonbIteratorInit(&jb[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(crate::common::vardata_any(jb));
 
     // Just recursively iterating over jsonb and call callback on all
     // corresponding elements.
@@ -291,7 +291,7 @@ pub fn transform_jsonb_string_values<'mcx>(
     let mut st = None;
 
     // it = JsonbIteratorInit(&jsonb->root);
-    let mut it = JsonbIteratorInit(&jsonb[VARHDRSZ..]);
+    let mut it = JsonbIteratorInit(crate::common::vardata_any(jsonb));
     // is_scalar = it->isScalar;
     let is_scalar = it.as_ref().map(|i| i.is_scalar).unwrap_or(false);
 

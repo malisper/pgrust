@@ -1830,7 +1830,7 @@ fn populate_record_worker<'mcx>(
         // is its VARDATA (skip the 4-byte length word), as C reads via
         // VARDATA_ANY.
         let json_image = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo_ref, json_arg_num)?;
-        let json = &json_image[VARHDRSZ..];
+        let json = crate::common::vardata_any(&json_image);
         JsValue::Json {
             str: Some(json.to_vec()),
             // type not used in populate_composite()
@@ -1841,11 +1841,11 @@ fn populate_record_worker<'mcx>(
         // jbv.type = jbvBinary; jbv.val.binary.data = &jb->root;
         // jbv.val.binary.len = VARSIZE(jb) - VARHDRSZ;
         let jb = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo_ref, json_arg_num)?;
-        let root = &jb[VARHDRSZ..];
+        let root = crate::common::vardata_any(&jb);
         let jbv = JsonbValue {
             typ: jbvType::jbvBinary,
             val: JsonbValueData::Binary {
-                len: (jb.len() - VARHDRSZ) as i32,
+                len: root.len() as i32,
                 data: root.to_vec(),
                 offset: 0,
             },
@@ -2003,11 +2003,11 @@ pub fn json_populate_type<'mcx>(
             })))
         } else {
             // jbv.type = jbvBinary; data = &jsonb->root; len = VARSIZE - VARHDRSZ;
-            let root = &json_val[VARHDRSZ..];
+            let root = crate::common::vardata_any(json_val);
             JsValue::Jsonb(Some(Box::new(JsonbValue {
                 typ: jbvType::jbvBinary,
                 val: JsonbValueData::Binary {
-                    len: (json_val.len() - VARHDRSZ) as i32,
+                    len: root.len() as i32,
                     data: root.to_vec(),
                     offset: 0,
                 },

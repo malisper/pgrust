@@ -27,7 +27,6 @@ use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenTyp
 use types_jsonb::backend_utils_adt_jsonb_util::{JsonbValue, JsonbValueData};
 use types_jsonb::jsonb::{
     json_container_is_array, json_container_is_scalar, json_container_size, JsonbIteratorToken,
-    VARHDRSZ,
 };
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::Datum;
@@ -65,7 +64,7 @@ fn container_header(root: &[u8]) -> u32 {
 /// starts after the varlena header (`&jb[VARHDRSZ..]`). Raises
 /// `ERRCODE_INVALID_PARAMETER_VALUE` on a scalar or array root.
 fn jsonb_object_keys_worker(jb: &[u8]) -> PgResult<Vec<Vec<u8>>> {
-    let root = &jb[VARHDRSZ..];
+    let root = crate::common::vardata_any(jb);
     let header = container_header(root);
 
     // if (JB_ROOT_IS_SCALAR(jb)) ereport(... "cannot call %s on a scalar" ...)
@@ -261,7 +260,7 @@ pub fn json_object_keys<'mcx>(
     // The seam yields the header-ful varlena image; the json (text) document is
     // its VARDATA (skip the 4-byte length word), as C reads via VARDATA_ANY.
     let json_image = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo, 0)?;
-    let json = &json_image[VARHDRSZ..];
+    let json = crate::common::vardata_any(&json_image);
 
     let keys = json_object_keys_worker(json)?;
 

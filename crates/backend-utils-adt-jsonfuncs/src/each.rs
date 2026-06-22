@@ -28,7 +28,7 @@ use types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use types_error::PgResult;
 use types_json::{JsonLexContext, JsonParseErrorType, JsonTokenType};
 use types_jsonb::backend_utils_adt_jsonb_util::{JsonbValue, JsonbValueData};
-use types_jsonb::jsonb::{jbvType, json_container_is_object, JsonbIteratorToken, VARHDRSZ};
+use types_jsonb::jsonb::{jbvType, json_container_is_object, JsonbIteratorToken};
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::MAT_SRF_BLESS;
 use types_tuple::Datum;
@@ -157,7 +157,7 @@ fn each_worker_jsonb<'mcx>(
 ) -> PgResult<Datum<'mcx>> {
     // Jsonb *jb = PG_GETARG_JSONB_P(0);
     let jb = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo, 0)?;
-    let root = &jb[VARHDRSZ..];
+    let root = crate::common::vardata_any(&jb);
     let header = u32::from_ne_bytes([root[0], root[1], root[2], root[3]]);
 
     // if (!JB_ROOT_IS_OBJECT(jb)) ereport(... "cannot call %s on a non-object" ...)
@@ -353,7 +353,7 @@ fn each_worker<'mcx>(
     // The seam yields the header-ful varlena image; the json (text) document is
     // its VARDATA (skip the 4-byte length word), as C reads via VARDATA_ANY.
     let json_image = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo, 0)?;
-    let json = &json_image[VARHDRSZ..];
+    let json = crate::common::vardata_any(&json_image);
 
     // state = palloc0(sizeof(EachState)); sem = palloc0(sizeof(JsonSemAction));
     let state = Rc::new(RefCell::new(EachState::default()));

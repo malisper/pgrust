@@ -14,6 +14,23 @@ use types_jsonb::jsonb::jbvType;
 /// buffers, matching the C source unit name.
 pub const MCTX_NAME: &str = "backend-utils-adt-jsonfuncs";
 
+/// `VARDATA_ANY(ptr)` — the payload (`JsonbContainer` root / `json` text body)
+/// after the varlena header of an arg-sourced `jsonb`/`json` image: skip ONE
+/// header byte for a short (1-byte, low-bit-set) header, else `VARHDRSZ` (4).
+/// A small stored value reaches an fmgr arg verbatim (the EEOP_FUNCEXPR boundary
+/// does not detoast/unpack), so once `SHORT_VARLENA_PACKING` is on a fixed 4-byte
+/// strip would land three bytes into the payload (corrupt container / json body).
+/// Behavior-preserving while the flag is off (every stored value is 4-byte).
+#[inline]
+pub fn vardata_any(image: &[u8]) -> &[u8] {
+    const VARHDRSZ: usize = 4;
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
+    }
+}
+
 // `enum` (jsonfuncs.h:25) — the GIN/iterate value-kind selector flags shared by
 // `parse_jsonb_index_flags` (setops) and `iterate_*`/`transform_*` (iterate).
 /// `jtiKey = 0x01`.

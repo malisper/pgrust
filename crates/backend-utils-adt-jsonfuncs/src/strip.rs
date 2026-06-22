@@ -15,7 +15,7 @@ use mcx::{Mcx, PgVec};
 use types_error::PgResult;
 use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::backend_utils_adt_jsonb_util::JsonbValue;
-use types_jsonb::jsonb::{jbvType, json_container_is_scalar, JsonbIteratorToken, VARHDRSZ};
+use types_jsonb::jsonb::{jbvType, json_container_is_scalar, JsonbIteratorToken};
 
 use backend_utils_adt_json::escape_json;
 use backend_utils_adt_jsonb_util::{
@@ -257,7 +257,7 @@ pub fn jsonb_strip_nulls<'mcx>(
     jb: &[u8],
     strip_in_arrays: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    let root = &jb[VARHDRSZ..];
+    let root = crate::common::vardata_any(jb);
     let header = u32::from_ne_bytes([root[0], root[1], root[2], root[3]]);
 
     // if (JB_ROOT_IS_SCALAR(jb)) PG_RETURN_POINTER(jb);

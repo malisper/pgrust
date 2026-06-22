@@ -33,7 +33,7 @@ use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenTyp
 use types_jsonb::backend_utils_adt_jsonb_util::{JsonbValue, JsonbValueData};
 use types_jsonb::jsonb::{
     is_a_jsonb_scalar, jbvType, json_container_is_array, json_container_is_object,
-    json_container_is_scalar, json_container_size, VARHDRSZ,
+    json_container_is_scalar, json_container_size,
 };
 
 use backend_utils_adt_jsonb::JsonbToCString;
@@ -53,28 +53,30 @@ fn container_header(root: &[u8]) -> u32 {
     u32::from_ne_bytes([root[0], root[1], root[2], root[3]])
 }
 
+use crate::common::vardata_any;
+
 /// `JB_ROOT_COUNT(jb)` (jsonb.h:219) — over the full varlena.
 #[inline]
 fn jb_root_count(jb: &[u8]) -> u32 {
-    json_container_size(container_header(&jb[VARHDRSZ..]))
+    json_container_size(container_header(vardata_any(jb)))
 }
 
 /// `JB_ROOT_IS_OBJECT(jb)` (jsonb.h:221).
 #[inline]
 fn jb_root_is_object(jb: &[u8]) -> bool {
-    json_container_is_object(container_header(&jb[VARHDRSZ..]))
+    json_container_is_object(container_header(vardata_any(jb)))
 }
 
 /// `JB_ROOT_IS_ARRAY(jb)` (jsonb.h:222).
 #[inline]
 fn jb_root_is_array(jb: &[u8]) -> bool {
-    json_container_is_array(container_header(&jb[VARHDRSZ..]))
+    json_container_is_array(container_header(vardata_any(jb)))
 }
 
 /// `JB_ROOT_IS_SCALAR(jb)` (jsonb.h:220).
 #[inline]
 fn jb_root_is_scalar(jb: &[u8]) -> bool {
-    json_container_is_scalar(container_header(&jb[VARHDRSZ..]))
+    json_container_is_scalar(container_header(vardata_any(jb)))
 }
 
 /// `pg_abs_s32(a)` (common/int.h): `|a|` as a `uint32`, widening through `int64`
@@ -108,7 +110,7 @@ pub fn jsonb_object_field<'mcx>(
 
     // v = getKeyJsonValueFromContainer(&jb->root, VARDATA_ANY(key),
     //                                  VARSIZE_ANY_EXHDR(key), &vbuf);
-    let v = getKeyJsonValueFromContainer(&jb[VARHDRSZ..], key)?;
+    let v = getKeyJsonValueFromContainer(vardata_any(jb), key)?;
 
     // if (v != NULL) PG_RETURN_JSONB_P(JsonbValueToJsonb(v));
     match v {
@@ -128,7 +130,7 @@ pub fn jsonb_object_field_text<'mcx>(
         return Ok(None);
     }
 
-    let v = getKeyJsonValueFromContainer(&jb[VARHDRSZ..], key)?;
+    let v = getKeyJsonValueFromContainer(vardata_any(jb), key)?;
 
     // if (v != NULL && v->type != jbvNull) PG_RETURN_TEXT_P(JsonbValueAsText(v));
     match v {
@@ -162,7 +164,7 @@ pub fn jsonb_array_element<'mcx>(
     }
 
     // v = getIthJsonbValueFromContainer(&jb->root, element);
-    let v = getIthJsonbValueFromContainer(&jb[VARHDRSZ..], element as u32)?;
+    let v = getIthJsonbValueFromContainer(vardata_any(jb), element as u32)?;
     match v {
         Some(v) => Ok(Some(JsonbValueToJsonb(mcx, &v)?)),
         None => Ok(None),
@@ -190,7 +192,7 @@ pub fn jsonb_array_element_text<'mcx>(
         }
     }
 
-    let v = getIthJsonbValueFromContainer(&jb[VARHDRSZ..], element as u32)?;
+    let v = getIthJsonbValueFromContainer(vardata_any(jb), element as u32)?;
 
     // if (v != NULL && v->type != jbvNull) PG_RETURN_TEXT_P(JsonbValueAsText(v));
     match v {
@@ -876,7 +878,7 @@ pub fn jsonb_get_element<'mcx>(
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     let npath = path.len() as i32;
     // JsonbContainer *container = &jb->root;
-    let mut container: Vec<u8> = jb[VARHDRSZ..].to_vec();
+    let mut container: Vec<u8> = vardata_any(jb).to_vec();
     let mut jbvp: Option<JsonbValue> = None;
     let mut have_object = false;
     let mut have_array = false;

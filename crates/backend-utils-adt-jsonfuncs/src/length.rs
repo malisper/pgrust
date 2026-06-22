@@ -54,7 +54,7 @@ fn container_header(root: &[u8]) -> u32 {
 /// `jsonb` varlena; the root container starts after the varlena header (the
 /// `&jsonb[VARHDRSZ..]` convention the other jsonb entry points use).
 pub fn jsonb_array_length(jb: &[u8]) -> PgResult<i32> {
-    let header = container_header(&jb[types_jsonb::jsonb::VARHDRSZ..]);
+    let header = container_header(crate::common::vardata_any(jb));
 
     // JB_ROOT_IS_SCALAR(jb)
     if json_container_is_scalar(header) {

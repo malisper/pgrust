@@ -69,7 +69,16 @@ fn arg_jsonb_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u
 /// `VARHDRSZ` header to recover the payload the cores consume.
 #[inline]
 fn arg_text_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    &arg_varlena_image(fcinfo, i)[VARHDRSZ..]
+    let image = arg_varlena_image(fcinfo, i);
+    // `VARDATA_ANY`: skip ONE header byte for a short (1-byte, low-bit-set) header,
+    // else `VARHDRSZ`. A small stored value arrives short-headed once
+    // `SHORT_VARLENA_PACKING` is on; a fixed 4-byte strip would drop three payload
+    // bytes. No-op while the flag is off (every stored value is 4-byte).
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
+    }
 }
 
 /// `PG_GETARG_INT32(i)`.

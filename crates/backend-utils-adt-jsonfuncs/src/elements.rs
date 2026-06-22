@@ -24,7 +24,7 @@ use types_error::PgResult;
 use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::backend_utils_adt_jsonb_util::JsonbValue;
 use types_jsonb::jsonb::{
-    jbvType, json_container_is_array, json_container_is_scalar, JsonbIteratorToken, VARHDRSZ,
+    jbvType, json_container_is_array, json_container_is_scalar, JsonbIteratorToken,
 };
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::Datum;
@@ -57,7 +57,7 @@ fn elements_worker_jsonb(
     as_text: bool,
 ) -> PgResult<Vec<ElementRow>> {
     let _ = funcname;
-    let root = &jb[VARHDRSZ..];
+    let root = crate::common::vardata_any(jb);
     let header = container_header(root);
 
     // if (JB_ROOT_IS_SCALAR(jb)) ... "cannot extract elements from a scalar"
@@ -350,7 +350,7 @@ fn json_array_elements_impl<'mcx>(
     // The seam yields the header-ful varlena image; the json (text) document is
     // its VARDATA (skip the 4-byte length word), as C reads via VARDATA_ANY.
     let json_image = funcapi::srf_arg_varlena_bytes::call(mcx, fcinfo, 0)?;
-    let json = &json_image[VARHDRSZ..];
+    let json = crate::common::vardata_any(&json_image);
 
     // InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC | MAT_SRF_BLESS);
     // Single-column SRF: bless the executor-supplied 1-column `expectedDesc`
