@@ -733,6 +733,7 @@ fn transform_trigger_transitions<'mcx>(
         // below. If we later allow naming OLD/NEW row variables, adjust this.
 
         // if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+        //   ereport: "%s" is a foreign table / Triggers on foreign tables ...
         if relkind == RELKIND_FOREIGN_TABLE {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_WRONG_OBJECT_TYPE)
@@ -742,6 +743,7 @@ fn transform_trigger_transitions<'mcx>(
         }
 
         // if (rel->rd_rel->relkind == RELKIND_VIEW)
+        //   ereport: "%s" is a view / Triggers on views cannot have transition tables.
         if relkind == RELKIND_VIEW {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_WRONG_OBJECT_TYPE)
@@ -752,8 +754,13 @@ fn transform_trigger_transitions<'mcx>(
 
         // We currently don't allow row-level triggers with transition tables on
         // partition or inheritance children.
-        // if (TRIGGER_FOR_ROW(tgtype) && has_superclass(rel->rd_id))
-        if (tgtype & pt::TRIGGER_TYPE_ROW) != 0
+        //   if (TRIGGER_FOR_ROW(tgtype) && has_superclass(rel->rd_id)) {
+        //       if (rel->rd_rel->relispartition)
+        //           ereport: ROW triggers ... not supported on partitions
+        //       else
+        //           ereport: ROW triggers ... not supported on inheritance children
+        //   }
+        if pt::TRIGGER_FOR_ROW(tgtype)
             && backend_catalog_pg_inherits::has_superclass(rel.rd_id)?
         {
             if rel.rd_rel.relispartition {
@@ -788,13 +795,14 @@ fn transform_trigger_transitions<'mcx>(
         }
 
         // We currently don't allow multi-event triggers ("INSERT OR UPDATE")
-        // with transition tables, because it's not clear how to handle the
-        // distinct event types' transition tables.
-        // C: exactly one of INSERT/UPDATE/DELETE must be set in tgtype.
-        let multi_count = (if (tgtype & pt::TRIGGER_TYPE_INSERT) != 0 { 1 } else { 0 })
-            + (if (tgtype & pt::TRIGGER_TYPE_UPDATE) != 0 { 1 } else { 0 })
-            + (if (tgtype & pt::TRIGGER_TYPE_DELETE) != 0 { 1 } else { 0 });
-        if multi_count != 1 {
+        // with transition tables.
+        //   if (((TRIGGER_FOR_INSERT(tgtype) ? 1 : 0) +
+        //        (TRIGGER_FOR_UPDATE(tgtype) ? 1 : 0) +
+        //        (TRIGGER_FOR_DELETE(tgtype) ? 1 : 0)) != 1)
+        let nevents = ((tgtype & pt::TRIGGER_TYPE_INSERT != 0) as i32)
+            + ((tgtype & pt::TRIGGER_TYPE_UPDATE != 0) as i32)
+            + ((tgtype & pt::TRIGGER_TYPE_DELETE != 0) as i32);
+        if nevents != 1 {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("transition tables cannot be specified for triggers with more than one event")

@@ -1344,6 +1344,16 @@ fn exec_before_statement_triggers(
     // LocTriggerData.tg_event = TRIGGER_EVENT_<OP> | TRIGGER_EVENT_BEFORE;
     let tg_event = tg_event_bit | TRIGGER_EVENT_BEFORE;
 
+    // ExecBSUpdateTriggers: updatedCols = ExecGetAllUpdatedCols(relinfo, estate);
+    // LocTriggerData.tg_updatedcols = updatedCols.  The INSERT/DELETE statement
+    // paths pass NULL (no column-specific filtering applies).
+    let updated_cols = if tg_event_bit == TRIGGER_EVENT_UPDATE {
+        let mcx = estate.es_query_cxt;
+        backend_executor_execUtils_seams::exec_get_all_updated_cols::call(mcx, estate, relinfo)?
+    } else {
+        None
+    };
+
     let numtriggers = match estate.result_rel(relinfo).ri_TrigDesc.as_ref() {
         Some(td) => td.triggers.len(),
         None => return Ok(()),
@@ -1358,10 +1368,11 @@ fn exec_before_statement_triggers(
         if !TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_BEFORE, tg_event_op) {
             continue;
         }
-        // if (!TriggerEnabled(estate, relinfo, trigger, tg_event, NULL, NULL, NULL))
-        //   continue;   (no slots for a statement trigger.)
+        // if (!TriggerEnabled(estate, relinfo, trigger, tg_event, updatedCols,
+        //   NULL, NULL)) continue;   (no slots for a statement trigger.)
         if !trigger_enabled(
             estate, relinfo, i, tgenabled, tgnattr, has_qual, tg_event,
+            updated_cols.as_deref(),
             /* oldslot */ None, /* newslot */ None,
         )? {
             continue;
@@ -1472,6 +1483,7 @@ fn exec_as_insert_triggers_impl(
         relinfo,
         TRIGGER_EVENT_INSERT,
         crate::queue::CmdType::Insert,
+        /* modified_cols */ None,
         tc.as_deref(),
     )
 }
@@ -1483,11 +1495,17 @@ fn exec_as_update_triggers_impl(
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_update_after_statement) {
         return Ok(());
     }
+    // ExecASUpdateTriggers passes ExecGetAllUpdatedCols(relinfo, estate).
+    let updated_cols = {
+        let mcx = estate.es_query_cxt;
+        backend_executor_execUtils_seams::exec_get_all_updated_cols::call(mcx, estate, relinfo)?
+    };
     after_trigger_save_event_stmt(
         estate,
         relinfo,
         TRIGGER_EVENT_UPDATE,
         crate::queue::CmdType::Update,
+        updated_cols.as_deref(),
         tc.as_deref(),
     )
 }
@@ -1504,6 +1522,7 @@ fn exec_as_delete_triggers_impl(
         relinfo,
         TRIGGER_EVENT_DELETE,
         crate::queue::CmdType::Delete,
+        /* modified_cols */ None,
         tc.as_deref(),
     )
 }
@@ -1698,6 +1717,7 @@ fn exec_bs_truncate_triggers(
         // if (!TriggerEnabled(estate, relinfo, trigger, tg_event, NULL, NULL, NULL)) continue;
         if !trigger_enabled(
             estate, relinfo, i, tgenabled, tgnattr, has_qual, tg_event,
+            /* modified_cols */ None,
             /* oldslot */ None, /* newslot */ None,
         )? {
             continue;
@@ -1743,6 +1763,7 @@ fn exec_as_truncate_triggers(
         relinfo,
         TRIGGER_EVENT_TRUNCATE,
         crate::queue::CmdType::Insert,
+        /* modified_cols */ None,
         None,
     )
 }
@@ -1838,6 +1859,7 @@ fn exec_br_ir_insert_triggers<'mcx>(
             tgnattr,
             has_qual,
             tg_event,
+            /* modified_cols */ None,
             /* oldslot */ None,
             /* newslot */ Some(slot),
         )? {
@@ -2346,6 +2368,34 @@ fn before_trigger_return_unported() -> PgError {
 /// the OLD/NEW rows the WHEN clause references as `OLD`/`NEW` (mapped to
 /// `INNER_VAR`/`OUTER_VAR`).  The column-specific (`tgnattr`) check only applies
 /// to UPDATE; on INSERT/DELETE `modified_cols` is `None` and the arm is skipped.
+/// `TRIGGER_FIRED_BY_UPDATE(event)` (commands/trigger.h): whether the event's
+/// opcode bits select UPDATE.
+fn trigger_fired_by_update(event: u32) -> bool {
+    (event & TRIGGER_EVENT_OPMASK) == TRIGGER_EVENT_UPDATE
+}
+
+/// Materialize the `Bitmapset` `modifiedCols` set as the sorted member `Vec<i32>`
+/// the queue's `SharedRecord.ats_modifiedcols` holds (C copies the bitmapset into
+/// the after-trigger context as `new_shared.ats_modifiedcols = modifiedCols`).
+/// `None` (the C NULL set) maps to `None`.
+fn bms_to_sorted_vec(modified_cols: Option<&types_nodes::Bitmapset<'_>>) -> Option<Vec<i32>> {
+    modified_cols?;
+    let mut out = Vec::new();
+    let mut x = -1;
+    loop {
+        x = backend_nodes_core::bitmapset::bms_next_member(modified_cols, x);
+        if x < 0 {
+            break;
+        }
+        out.push(x);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn trigger_enabled<'mcx>(
     estate: &mut EStateData<'mcx>,
@@ -2355,6 +2405,7 @@ fn trigger_enabled<'mcx>(
     tgnattr: i16,
     has_qual: bool,
     event: u32,
+    modified_cols: Option<&types_nodes::Bitmapset<'_>>,
     oldslot: Option<types_nodes::SlotId>,
     newslot: Option<types_nodes::SlotId>,
 ) -> PgResult<bool> {
@@ -2363,12 +2414,35 @@ fn trigger_enabled<'mcx>(
         return Ok(false);
     }
 
-    // Column-specific trigger (only possible for UPDATE; tgattr ignored
-    // otherwise).  modifiedCols is not threaded on the INSERT/DELETE paths
-    // (None), so the column check is a no-op there.  When an UPDATE path threads
-    // a modified-columns set, the per-column tgattr check belongs here; on
-    // INSERT (this caller) tgnattr-gated columns never restrict firing.
-    let _ = tgnattr;
+    // Check for column-specific trigger (only possible for UPDATE, and in fact
+    // we *must* ignore tgattr for other event types) — trigger.c:3499.
+    //
+    //   if (trigger->tgnattr > 0 && TRIGGER_FIRED_BY_UPDATE(event)) {
+    //       modified = false;
+    //       for (i = 0; i < trigger->tgnattr; i++)
+    //           if (bms_is_member(trigger->tgattr[i] -
+    //                             FirstLowInvalidHeapAttributeNumber, modifiedCols))
+    //           { modified = true; break; }
+    //       if (!modified) return false;
+    //   }
+    if tgnattr > 0 && trigger_fired_by_update(event) {
+        let mut modified = false;
+        for k in 0..tgnattr as usize {
+            let attr = estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[tgindx]
+                .tgattr[k];
+            if backend_nodes_core::bitmapset::bms_is_member(
+                attr as i32
+                    - types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber as i32,
+                modified_cols,
+            ) {
+                modified = true;
+                break;
+            }
+        }
+        if !modified {
+            return Ok(false);
+        }
+    }
 
     // WHEN clause (tgqual).
     if has_qual {
@@ -2578,6 +2652,7 @@ fn exec_ar_insert_triggers_impl<'mcx>(
         /* oldslot */ None,
         /* newslot */ Some(slot),
         recheck_indexes,
+        /* modified_cols */ None,
         tc.as_deref(),
     )
 }
@@ -3092,6 +3167,7 @@ fn after_trigger_save_event<'mcx>(
     oldslot: Option<types_nodes::SlotId>,
     newslot: Option<types_nodes::SlotId>,
     recheck_indexes: &[Oid],
+    modified_cols: Option<&types_nodes::Bitmapset<'_>>,
     tc: Option<&types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     use types_catalog::pg_trigger::{
@@ -3236,7 +3312,7 @@ fn after_trigger_save_event<'mcx>(
     // their index so the WHEN-clause (tgqual) leg of TriggerEnabled can key
     // ri_TrigWhenExprs[i]. The replication-role / WHEN-qual check runs in the
     // second pass, which needs &mut estate (predicate compile + ExecQual).
-    let candidates: Vec<(usize, i8, bool, Oid, bool, bool, Oid, Oid, bool)> = {
+    let candidates: Vec<(usize, i8, i16, bool, Oid, bool, bool, Oid, Oid, bool)> = {
         let rri = estate.result_rel(relinfo);
         let trigdesc = rri
             .ri_TrigDesc
@@ -3250,6 +3326,7 @@ fn after_trigger_save_event<'mcx>(
             out.push((
                 i,
                 trig.tgenabled,
+                trig.tgnattr,
                 trig.tgqual.is_some(),
                 trig.tgoid,
                 trig.tgdeferrable,
@@ -3266,23 +3343,24 @@ fn after_trigger_save_event<'mcx>(
     // tgqual ExprState eval against oldslot/newslot) for each candidate, then the
     // FK-enforcement / unique-recheck skips, and collect the survivors to queue.
     let mut trigs: Vec<(Oid, bool, bool, Oid, Oid, bool)> = Vec::new();
-    for (i, tgenabled, has_qual, tgoid, tgdeferrable, tginitdeferred, tgconstrindid, tgfoid, uses_transition) in
+    for (i, tgenabled, tgnattr, has_qual, tgoid, tgdeferrable, tginitdeferred, tgconstrindid, tgfoid, uses_transition) in
         candidates
     {
         {
             // TriggerEnabled(estate, relinfo, trigger, event, modifiedCols,
             // oldslot, newslot). A statement event (row_trigger == false) has no
             // WHEN clause and no slots, reducing to the no-qual check; a row event
-            // evaluates the WHEN qual against the OLD/NEW slots. tgnattr (the
-            // column-specific UPDATE check) is ignored here as on the BR/AR paths.
+            // evaluates the WHEN qual against the OLD/NEW slots. The
+            // column-specific (tgnattr) UPDATE check uses `modified_cols`.
             let enabled = trigger_enabled(
                 estate,
                 relinfo,
                 i,
                 tgenabled,
-                /* tgnattr */ 0,
+                tgnattr,
                 has_qual,
                 event,
+                modified_cols,
                 oldslot,
                 newslot,
             )?;
@@ -3351,7 +3429,7 @@ fn after_trigger_save_event<'mcx>(
             ats_relid: rel_oid,
             ats_rolid: user_id,
             ats_firing_id: 0,
-            ats_modifiedcols: None,
+            ats_modifiedcols: bms_to_sorted_vec(modified_cols),
             ats_table,
         };
         with_after_triggers(|at| {
@@ -3396,6 +3474,7 @@ fn after_trigger_save_event_stmt(
     relinfo: types_nodes::RriId,
     event: u32,
     cmd_type: crate::queue::CmdType,
+    modified_cols: Option<&types_nodes::Bitmapset<'_>>,
     tc: Option<&types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     use types_catalog::pg_trigger::{
@@ -3469,9 +3548,26 @@ fn after_trigger_save_event_stmt(
                 continue;
             }
             // A statement trigger has no WHEN clause; TriggerEnabled reduces to the
-            // replication-role / tgenabled check.
+            // replication-role / tgenabled check plus the column-specific (tgattr)
+            // UPDATE check (trigger.c:3499) against the updated-columns set.
             if !trigger_enabled_no_qual(trig.tgenabled) {
                 continue;
+            }
+            if trig.tgnattr > 0 && trigger_fired_by_update(event) {
+                let mut modified = false;
+                for k in 0..trig.tgnattr as usize {
+                    if backend_nodes_core::bitmapset::bms_is_member(
+                        trig.tgattr[k] as i32
+                            - types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber as i32,
+                        modified_cols,
+                    ) {
+                        modified = true;
+                        break;
+                    }
+                }
+                if !modified {
+                    continue;
+                }
             }
             let uses_transition = trig.tgoldtable.is_some() || trig.tgnewtable.is_some();
             out.push((trig.tgoid, trig.tgdeferrable, trig.tginitdeferred, uses_transition));
@@ -3498,7 +3594,7 @@ fn after_trigger_save_event_stmt(
             ats_relid: rel_oid,
             ats_rolid: user_id,
             ats_firing_id: 0,
-            ats_modifiedcols: None,
+            ats_modifiedcols: bms_to_sorted_vec(modified_cols),
             ats_table,
         };
         with_after_triggers(|at| {
@@ -3520,13 +3616,26 @@ fn trigger_enabled_no_qual(tgenabled: i8) -> bool {
     use types_catalog::pg_trigger::{
         TRIGGER_DISABLED, TRIGGER_FIRES_ON_ORIGIN, TRIGGER_FIRES_ON_REPLICA,
     };
-    // SessionReplicationRole: this port runs in the ORIGIN/LOCAL role (replica
-    // apply is a separate path), so a TRIGGER_FIRES_ON_REPLICA / TRIGGER_DISABLED
-    // trigger is skipped; ORIGIN/ALWAYS fires.
-    if tgenabled == TRIGGER_FIRES_ON_REPLICA || tgenabled == TRIGGER_DISABLED {
+    // `SESSION_REPLICATION_ROLE_REPLICA` (utils/guc.h).
+    const SESSION_REPLICATION_ROLE_REPLICA: i32 = 1;
+
+    // Check replication-role-dependent enable state (trigger.c:3488).
+    //   if (SessionReplicationRole == SESSION_REPLICATION_ROLE_REPLICA) {
+    //       if (tgenabled == TRIGGER_FIRES_ON_ORIGIN ||
+    //           tgenabled == TRIGGER_DISABLED) return false;
+    //   } else { /* ORIGIN or LOCAL role */
+    //       if (tgenabled == TRIGGER_FIRES_ON_REPLICA ||
+    //           tgenabled == TRIGGER_DISABLED) return false;
+    //   }
+    let session_replica = backend_utils_misc_guc_tables::vars::SessionReplicationRole.read()
+        == SESSION_REPLICATION_ROLE_REPLICA;
+    if session_replica {
+        if tgenabled == TRIGGER_FIRES_ON_ORIGIN || tgenabled == TRIGGER_DISABLED {
+            return false;
+        }
+    } else if tgenabled == TRIGGER_FIRES_ON_REPLICA || tgenabled == TRIGGER_DISABLED {
         return false;
     }
-    let _ = TRIGGER_FIRES_ON_ORIGIN;
     true
 }
 
@@ -3632,6 +3741,7 @@ fn exec_br_delete_triggers_impl<'mcx>(
             tgnattr,
             has_qual,
             tg_event,
+            /* modified_cols */ None,
             /* oldslot */ Some(slot),
             /* newslot */ None,
         )? {
@@ -3755,6 +3865,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
         /* oldslot */ Some(oldslot),
         /* newslot */ None,
         &[],
+        /* modified_cols */ None,
         tc,
     )
 }
@@ -3823,6 +3934,7 @@ fn exec_ir_delete_triggers_impl<'mcx>(
             tgnattr,
             has_qual,
             tg_event,
+            /* modified_cols */ None,
             /* oldslot */ Some(oldslot),
             /* newslot */ None,
         )? {
@@ -3931,8 +4043,10 @@ fn exec_br_update_triggers_impl<'mcx>(
     // LocTriggerData.tg_event = TRIGGER_EVENT_UPDATE | ROW | BEFORE;
     let tg_event = TRIGGER_EVENT_UPDATE | TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE;
     // updatedCols = ExecGetAllUpdatedCols(relinfo, estate); LocTriggerData.tg_updatedcols
-    // — only consulted by a column-specific (tgattr) trigger and the WHEN qual's
-    // tg_updatedcols accessor, which the common (no-tgattr) path does not exercise.
+    // — consulted by a column-specific (tgattr) trigger and the WHEN qual's
+    // tg_updatedcols accessor.
+    let updated_cols =
+        backend_executor_execUtils_seams::exec_get_all_updated_cols::call(mcx, estate, relinfo)?;
 
     let numtriggers = {
         let rri = estate.result_rel(relinfo);
@@ -3965,6 +4079,7 @@ fn exec_br_update_triggers_impl<'mcx>(
             tgnattr,
             has_qual,
             tg_event,
+            updated_cols.as_deref(),
             /* oldslot */ Some(oldslot),
             /* newslot */ Some(newslot),
         )? {
@@ -4251,6 +4366,7 @@ fn exec_ir_update_triggers_impl<'mcx>(
             tgnattr,
             has_qual,
             tg_event,
+            /* modified_cols */ None,
             /* oldslot */ Some(oldslot),
             /* newslot */ Some(newslot),
         )? {
@@ -4406,6 +4522,10 @@ fn exec_ar_update_triggers_impl<'mcx>(
     //                       TRIGGER_EVENT_UPDATE, true, oldslot, newslot,
     //                       recheckIndexes, ExecGetAllUpdatedCols(...),
     //                       transition_capture, is_crosspart_update);
+    let updated_cols = {
+        let mcx = estate.es_query_cxt;
+        backend_executor_execUtils_seams::exec_get_all_updated_cols::call(mcx, estate, relinfo)?
+    };
     after_trigger_save_event(
         estate,
         relinfo,
@@ -4415,6 +4535,7 @@ fn exec_ar_update_triggers_impl<'mcx>(
         /* oldslot */ Some(oldslot),
         /* newslot */ Some(ns),
         recheck_indexes,
+        updated_cols.as_deref(),
         tc.as_deref(),
     )
 }
