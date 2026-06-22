@@ -211,11 +211,27 @@ pub fn standard_ExecutorStart(query_desc: &mut QueryDesc, mut eflags: i32) -> Pg
 
     // estate->es_snapshot = RegisterSnapshot(queryDesc->snapshot);
     // estate->es_crosscheck_snapshot = RegisterSnapshot(queryDesc->crosscheck_snapshot);
-    // (execMain.c standard_ExecutorStart.) The Rc clone is the refcount-bearing
-    // registration; the QueryDesc keeps the originals alive for the query's
-    // lifetime. Cloned out before borrowing the work bundle.
-    let es_snapshot = query_desc.snapshot.clone();
-    let es_crosscheck_snapshot = query_desc.crosscheck_snapshot.clone();
+    // (execMain.c standard_ExecutorStart.) This is a true snapmgr registration,
+    // not just a refcount-bearing `Rc` clone: it adds the snapshot to the
+    // RegisteredSnapshots set so `HaveRegisteredOrActiveSnapshot()` counts it for
+    // the query's lifetime. That keeps detoasting valid when this query's results
+    // are replayed later without an active snapshot (e.g. a held/portal-store
+    // cursor whose FETCH output is detoasted after PopActiveSnapshot). The
+    // registered (possibly copied) handle is stored on the EState and is dropped
+    // by the matching `UnregisterSnapshot` in `standard_ExecutorEnd`.
+    // `RegisterSnapshot(NULL)` is a no-op returning NULL, so `None` stays `None`.
+    let es_snapshot = match query_desc.snapshot.clone() {
+        Some(snap) => Some(alloc::rc::Rc::new(
+            backend_utils_time_snapmgr_seams::register_snapshot::call((*snap).clone())?,
+        )),
+        None => None,
+    };
+    let es_crosscheck_snapshot = match query_desc.crosscheck_snapshot.clone() {
+        Some(snap) => Some(alloc::rc::Rc::new(
+            backend_utils_time_snapmgr_seams::register_snapshot::call((*snap).clone())?,
+        )),
+        None => None,
+    };
 
     query_desc.work.with_mut(|w| {
         if let Some(cid) = es_output_cid {
@@ -698,6 +714,30 @@ pub fn ExecutorRewind(query_desc: &mut QueryDesc) -> PgResult<()> {
 pub fn standard_ExecutorEnd(query_desc: &mut QueryDesc) -> PgResult<()> {
     // Assert(estate); Assert(es_finished || EXPLAIN_ONLY). ExecEndPlan(planstate, estate).
     ExecEndPlan(query_desc)?;
+
+    // do away with our snapshots:
+    //   UnregisterSnapshot(estate->es_snapshot);
+    //   UnregisterSnapshot(estate->es_crosscheck_snapshot);
+    // (execMain.c, immediately after ExecEndPlan.) Drops the registrations taken
+    // in `standard_ExecutorStart`, removing them from RegisteredSnapshots when the
+    // last registration goes away. The seam consumes the `SnapshotData` value, so
+    // move the registered handle off the EState (leaving `None`) and pass the
+    // inner value back. `Rc::try_unwrap` recovers the value without a clone in the
+    // common case (the EState holds the only strong ref); on the rare shared path
+    // we clone — the registration identity travels in `reg_id`, not pointer
+    // identity, so unregister still matches.
+    let (es_snapshot, es_crosscheck) = query_desc.with_estate_mut(|estate| {
+        (estate.es_snapshot.take(), estate.es_crosscheck_snapshot.take())
+    });
+    if let Some(snap) = es_snapshot {
+        let value = alloc::rc::Rc::try_unwrap(snap).unwrap_or_else(|rc| (*rc).clone());
+        backend_utils_time_snapmgr_seams::unregister_snapshot::call(value);
+    }
+    if let Some(snap) = es_crosscheck {
+        let value = alloc::rc::Rc::try_unwrap(snap).unwrap_or_else(|rc| (*rc).clone());
+        backend_utils_time_snapmgr_seams::unregister_snapshot::call(value);
+    }
+
     // estate->es_finished = true; (informational on the owned bundle.)
     query_desc.with_estate_mut(|estate| {
         estate.es_finished = true;
