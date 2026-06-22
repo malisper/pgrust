@@ -440,12 +440,19 @@ pub fn ATExecSetNotNull<'mcx>(
     )?;
 
     // ccon = linitial(cooked); ObjectAddressSet(address, ConstraintRelationId, ccon->conoid);
-    // The cooked-constraint carrier does not carry conoid (event-trigger surface
-    // only); leave objectId Invalid, as the rest of this crate's NOT NULL path.
+    // The cooked-constraint carrier stashes the freshly-created constraint OID in
+    // its `old_pktable_oid` slot (AddRelationNewConstraints / make_cooked_node).
+    // A valid objectId is load-bearing: callers (e.g.
+    // ATExecAlterConstrInheritability) gate a CommandCounterIncrement on
+    // OidIsValid(addr.objectId), and the C code always returns a valid OID from
+    // this path. Returning Invalid here suppressed that CCI and caused "tuple
+    // already updated by self" when a child was reached twice through diamond
+    // inheritance.
     debug_assert!(!cooked.is_empty());
+    let ccon_oid = cooked[0].expect_constraint().old_pktable_oid;
     let address = ObjectAddress {
         classId: ConstraintRelationId,
-        objectId: InvalidOid,
+        objectId: ccon_oid,
         objectSubId: 0,
     };
 

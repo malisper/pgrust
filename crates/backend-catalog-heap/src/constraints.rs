@@ -746,6 +746,7 @@ fn MergeWithExistingConstraint<'mcx>(
 /// Build a `Node::Constraint` carrying the cooked result (the C
 /// `CookedConstraint`). The seam consumer reads only `conname` (and `contype`),
 /// so the remaining fields are the empty / default image.
+#[allow(clippy::too_many_arguments)]
 fn make_cooked_node<'mcx>(
     mcx: Mcx<'mcx>,
     contype: ConstrType,
@@ -761,6 +762,10 @@ fn make_cooked_node<'mcx>(
     // fields we likewise do not re-store.
     _inhcount: i16,
     is_no_inherit: bool,
+    // C: cooked->conoid = constrOid. Stashed in the carrier's spare
+    // `old_pktable_oid` slot so the just-created constraint's OID can be read
+    // back without a syscache lookup (the row is not yet CCI-visible).
+    conoid: Oid,
 ) -> PgResult<NodePtr<'mcx>> {
     let conname = match conname {
         Some(s) => Some(PgString::from_str_in(s, mcx)?),
@@ -805,7 +810,7 @@ fn make_cooked_node<'mcx>(
         fk_del_action: 0,
         fk_del_set_cols: PgVec::new_in(mcx),
         old_conpfeqop: PgVec::new_in(mcx),
-        old_pktable_oid: InvalidOid,
+        old_pktable_oid: conoid,
         location: attnum as i32,
     };
     alloc_in(mcx, Node::mk_constraint(mcx, c)?)
@@ -904,6 +909,7 @@ pub fn AddRelationNewConstraints<'mcx>(
             is_local,
             if is_local { 0 } else { 1 },
             false,
+            InvalidOid, // C: cooked->conoid = InvalidOid for defaults
         )?;
         let _ = def_oid;
         cooked_constraints.push(cooked);
@@ -1025,7 +1031,7 @@ pub fn AddRelationNewConstraints<'mcx>(
             /*
              * OK, store it.
              */
-            let _constr_oid = StoreRelCheck(
+            let constr_oid = StoreRelCheck(
                 mcx,
                 rel,
                 &ccname,
@@ -1051,6 +1057,7 @@ pub fn AddRelationNewConstraints<'mcx>(
                 is_local,
                 if is_local { 0 } else { 1 },
                 cdef.is_no_inherit,
+                constr_oid, // C: cooked->conoid = constrOid
             )?;
             cooked_constraints.push(cooked);
         } else if cdef.contype == ConstrType::CONSTR_NOTNULL {
@@ -1128,7 +1135,7 @@ pub fn AddRelationNewConstraints<'mcx>(
             }
             nnnames.push(nnname.clone());
 
-            let _constr_oid = StoreRelNotNull(
+            let constr_oid = StoreRelNotNull(
                 mcx,
                 rel,
                 &nnname,
@@ -1150,6 +1157,7 @@ pub fn AddRelationNewConstraints<'mcx>(
                 is_local,
                 inhcount,
                 cdef.is_no_inherit,
+                constr_oid, // C: cooked->conoid = constrOid
             )?;
             cooked_constraints.push(nncooked);
         }
