@@ -120,6 +120,7 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     rel: &Relation<'mcx>,
     cmd: &PartitionCmd<'mcx>,
+    query_string: Option<&str>,
 ) -> PgResult<ObjectAddress> {
     // We must lock the default partition if one exists, because attaching a new
     // partition will change its partition constraint.
@@ -316,15 +317,21 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     let key = backend_utils_cache_partcache_seams::relation_get_partition_key::call(mcx, rel.alias())?
         .ok_or_else(|| elog("ATTACH PARTITION: parent has no partition key"))?;
     let attachrel_name = attachrel.name().to_string();
-    // C passes the real ParseState only on the DefineRelation path; ATTACH
-    // PARTITION calls check_new_partition_bound with pstate = NULL.
+    // C: pstate = make_parsestate(NULL); pstate->p_sourcetext = context->queryString;
+    // and passes that pstate to check_new_partition_bound so the "overlap"/
+    // "conflicts with default" errors carry the FOR VALUES cursor position
+    // (tablecmds.c:20266 / 20444).
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+    if let Some(qs) = query_string {
+        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(qs, mcx)?);
+    }
     backend_partitioning_partbounds_seams::check_new_partition_bound::call(
         mcx,
         &attachrel_name,
         &key,
         &parent_partdesc,
         bound,
-        None,
+        Some(&pstate),
     )?;
 
     // OK to create inheritance. Rest of the checks performed there.

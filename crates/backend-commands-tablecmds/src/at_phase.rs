@@ -2164,7 +2164,13 @@ fn ATExecCmd<'mcx>(
                 // C: rd_rel->relkind == RELKIND_PARTITIONED_TABLE ⇒ ATExecAttachPartition;
                 // RELKIND_PARTITIONED_INDEX ⇒ ATExecAttachPartitionIdx (unported).
                 if owned_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
-                    crate::at_attach::ATExecAttachPartition(mcx, wqueue, &owned_rel, pc)
+                    crate::at_attach::ATExecAttachPartition(
+                        mcx,
+                        wqueue,
+                        &owned_rel,
+                        pc,
+                        context.query_string,
+                    )
                 } else {
                     crate::at_attach_idx::ATExecAttachPartitionIdx(mcx, &owned_rel, pc)
                 }
