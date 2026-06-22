@@ -682,35 +682,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// The per-partition MERGE action map-and-build of `ExecInitPartitionInfo`
-    /// (execPartition.c L933-981): mirrors the ExecInitMerge per-action build but
-    /// for a leaf partition rel reached by tuple routing. Build
-    /// `build_attrmap_by_name(partrel, firstResultRel)`, map the join condition
-    /// `map_variable_attnos(ref_join_condition, firstVarno, attmap)` and
-    /// `ExecInitQual` it into `ri_MergeJoinCondition`, then for each
-    /// `MergeAction` in `ref_merge_action_list`: copy it, build the
-    /// `MergeActionState` (CMD_INSERT `ExecBuildProjectionInfo` over the
-    /// partition's `ri_newTupleSlot`; CMD_UPDATE
-    /// `adjust_partition_colnos_using_map(action->updateColnos, attmap)` +
-    /// `ExecBuildUpdateProjection`), map+`ExecInitQual` the action's `qual` into
-    /// `mas_whenqual`, and append into `ri_MergeActions[matchKind]`. The
-    /// `ExecInitMergeTupleSlots` gate (`!ri_projectNewInfoValid`) is the caller's;
-    /// the attmap/rewrite/projection/qual machinery is execExpr/rewrite-owned.
-    /// Allocated in the per-query context; fallible on OOM / `ereport(ERROR)`.
-    pub fn partition_init_merge_actions<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
-        estate: &mut types_nodes::EStateData<'mcx>,
-        leaf_part_rri: types_nodes::RriId,
-        first_result_rel: types_nodes::RriId,
-        first_varno: types_core::primitive::Index,
-        econtext: types_nodes::EcxtId,
-        ref_join_condition: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
-        ref_merge_action_list: &[types_nodes::modifytable::MergeAction<'mcx>],
-    ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
     /// `ExecProject(node->js.ps.ps_ProjInfo)` (executor.h): form the projection
     /// into the node's result slot, returning its slot id. Can `ereport(ERROR)`.
     pub fn exec_hashjoin_project<'mcx>(

@@ -49,7 +49,6 @@ use mcx::{Mcx, PgBox};
 use types_core::primitive::Index;
 use types_error::PgResult;
 use types_nodes::execexpr::{ExprState, ProjectionInfo};
-use types_nodes::modifytable::MergeAction;
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::{Expr, TargetEntry};
 use types_nodes::{EStateData, EcxtId, ModifyTableState, RriId, SlotId};
@@ -308,40 +307,6 @@ pub fn partition_init_on_conflict_update<'mcx>(
          (map_variable_attnos), tableam.c (table_slot_create) — no reachable owner seam — which \
          must remap/create the projection inputs before the (landed) execExpr_core \
          ExecBuildUpdateProjection/ExecInitQual can run"
-    )
-}
-
-/// The per-partition MERGE action map-and-build of `ExecInitPartitionInfo`
-/// (execPartition.c L886-981).
-///
-/// `build_attrmap_by_name`, map the join condition via `map_variable_attnos` +
-/// `ExecInitQual` into `ri_MergeJoinCondition`, then for each `MergeAction`:
-/// build the `MergeActionState` (CMD_INSERT `ExecBuildProjectionInfo` over the
-/// partition's `ri_newTupleSlot`; CMD_UPDATE
-/// `adjust_partition_colnos_using_map` + `ExecBuildUpdateProjection`),
-/// map + `ExecInitQual` the action's `qual` into `mas_whenqual`, and append into
-/// `ri_MergeActions[matchKind]`. The execExpr_core
-/// ExecBuildProjectionInfo/ExecBuildUpdateProjection/ExecInitQual it would call
-/// are landed; the attmap.c / rewriteManip.c / execPartition.c remap that must
-/// run first has no reachable owner seam, so this is blocked on those owners.
-#[allow(clippy::too_many_arguments)]
-pub fn partition_init_merge_actions<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _mtstate: &mut ModifyTableState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _leaf_part_rri: RriId,
-    _first_result_rel: RriId,
-    _first_varno: Index,
-    _econtext: EcxtId,
-    _ref_join_condition: Option<&[Expr<'mcx>]>,
-    _ref_merge_action_list: &[MergeAction<'mcx>],
-) -> PgResult<()> {
-    panic!(
-        "execExpr-modify::partition_init_merge_actions: per-partition MERGE action build routes \
-         to attmap.c (build_attrmap_by_name), rewriteManip.c (map_variable_attnos), \
-         execPartition.c (adjust_partition_colnos_using_map) — no reachable owner seam — which \
-         must remap the per-action inputs before the (landed) execExpr_core \
-         ExecBuildProjectionInfo/ExecBuildUpdateProjection/ExecInitQual can run"
     )
 }
 

@@ -39,7 +39,18 @@ pub(crate) fn adjust_partition_colnos_using_map<'mcx>(
 ) -> PgResult<PgVec<'mcx, i32>> {
     // Assert(attrMap != NULL); — the parameter is a reference, so non-NULL by
     // construction.
-    let attnums: &[AttrNumber] = &attr_map.attnums;
+    adjust_partition_colnos_using_attnums(mcx, colnos, &attr_map.attnums)
+}
+
+/// Seam-shaped variant of [`adjust_partition_colnos_using_map`] that takes the
+/// raw `attrMap->attnums` slice (so callers across the seam boundary need not
+/// hold an `AttrMap`). `ExecInitPartitionInfo`'s MERGE leg uses this with the
+/// freshly-built `build_attrmap_by_name(partrel, firstResultRel)` map.
+pub fn adjust_partition_colnos_using_attnums<'mcx>(
+    mcx: Mcx<'mcx>,
+    colnos: &[i32],
+    attnums: &[AttrNumber],
+) -> PgResult<PgVec<'mcx, i32>> {
     let maplen = attnums.len() as i32;
 
     // List *new_colnos = NIL; built up one entry per input colno (lappend_int).

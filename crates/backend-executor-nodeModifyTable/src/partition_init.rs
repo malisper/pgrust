@@ -657,7 +657,6 @@ pub fn ExecInitPartitionMerge<'mcx>(
     first_varno: Index,
     first_result_rel: RriId,
 ) -> PgResult<()> {
-    let _ = first_result_rel;
     // if (node && node->operation == CMD_MERGE) { ... }
     let node = match mtstate.plan_node {
         Some(n) => n,
@@ -680,13 +679,35 @@ pub fn ExecInitPartitionMerge<'mcx>(
         .ps_ExprContext
         .expect("ExecInitPartitionInfo: MERGE node has an expression context");
 
-    // joinCondition = linitial(node->mergeJoinConditions);
-    let ref_join_condition: Option<&'mcx [types_nodes::primnodes::Expr]> = node
-        .mergeJoinConditions
+    // part_attmap =
+    //     build_attrmap_by_name(RelationGetDescr(partrel),
+    //                           RelationGetDescr(firstResultRel), false);
+    let part_desc = estate
+        .result_rel(leaf_part_rri)
+        .ri_RelationDesc
         .as_ref()
-        .and_then(|jc| jc.first())
-        .and_then(|c| c.as_ref())
-        .map(|v| v.as_slice());
+        .expect("ExecInitPartitionMerge: leaf partition ResultRelInfo has no open relation")
+        .rd_att_clone_in(mcx)?;
+    let part_reltype = estate
+        .result_rel(leaf_part_rri)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecInitPartitionMerge: leaf partition ResultRelInfo has no open relation")
+        .rd_rel
+        .reltype;
+    let first_desc = estate
+        .result_rel(first_result_rel)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecInitPartitionMerge: first result ResultRelInfo has no open relation")
+        .rd_att_clone_in(mcx)?;
+    let part_attmap = backend_access_common_next_seams::build_attrmap_by_name::call(
+        mcx,
+        &part_desc,
+        &first_desc,
+        false,
+    )?;
+    let part_attnums: alloc::vec::Vec<i16> = part_attmap.attnums.iter().copied().collect();
 
     // if (unlikely(!leaf_part_rri->ri_projectNewInfoValid))
     //     ExecInitMergeTupleSlots(mtstate, leaf_part_rri);
@@ -694,19 +715,222 @@ pub fn ExecInitPartitionMerge<'mcx>(
         crate::merge::ExecInitMergeTupleSlots(mcx, mtstate, estate, leaf_part_rri)?;
     }
 
-    // Build the join-condition qual (ri_MergeJoinCondition) and each action's
-    // MergeActionState (map_variable_attnos / adjust_partition_colnos_using_map,
-    // ExecBuildProjectionInfo / ExecBuildUpdateProjection, ExecInitQual) into
-    // ri_MergeActions[matchKind] — all execExpr/rewrite-owned.
-    backend_executor_execExpr_seams::partition_init_merge_actions::call(
-        mcx,
+    // Initialize state for join condition checking.
+    //   joinCondition =
+    //       map_variable_attnos(linitial(node->mergeJoinConditions),
+    //                           firstVarno, 0, part_attmap,
+    //                           RelationGetForm(partrel)->reltype,
+    //                           &found_whole_row);
+    //   leaf_part_rri->ri_MergeJoinCondition =
+    //       ExecInitQual((List *) joinCondition, &mtstate->ps);
+    let mapped_join_condition: Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>> = {
+        let ref_join_condition: Option<&'mcx [types_nodes::primnodes::Expr]> = node
+            .mergeJoinConditions
+            .as_ref()
+            .and_then(|jc| jc.first())
+            .and_then(|c| c.as_ref())
+            .map(|v| v.as_slice());
+        match ref_join_condition {
+            None => None,
+            Some(jc) => {
+                let mut cloned: mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>> =
+                    mcx::vec_with_capacity_in(mcx, jc.len())?;
+                for e in jc {
+                    cloned.push(e.clone_in(mcx)?);
+                }
+                let (mapped, _fwr) =
+                    backend_rewrite_rewritemanip_seams::map_variable_attnos_expr_list_varno::call(
+                        mcx,
+                        cloned,
+                        first_varno as i32,
+                        &part_attnums,
+                        part_reltype,
+                    )?;
+                Some(mapped)
+            }
+        }
+    };
+    backend_executor_execExpr_seams::exec_init_merge_join_condition::call(
         mtstate,
         estate,
         leaf_part_rri,
-        first_result_rel,
-        first_varno,
-        econtext,
-        ref_join_condition,
-        ref_merge_action_list.as_slice(),
-    )
+        mapped_join_condition.as_ref().map(|v| v.as_slice()),
+    )?;
+
+    // foreach(lc, firstMergeActionList) — build each action's MergeActionState
+    // for this leaf partition. This mirrors merge.rs::ExecInitMerge, but each
+    // action's targetList / updateColnos / qual is first remapped to this
+    // partition's attribute numbers (map_variable_attnos /
+    // adjust_partition_colnos_using_map), since the reference action came from
+    // the first result relation. Note the per-leaf re-init does NOT touch
+    // mtstate->mt_merge_subcommands (that was accumulated by ExecInitMerge over
+    // the first result rel).
+    for action in ref_merge_action_list.iter() {
+        // MergeAction *action = copyObject(lfirst(lc));
+        let match_kind = action.matchKind;
+        let command_type = action.commandType;
+
+        // INSERT/UPDATE: clone + remap the action's targetList; UPDATE also
+        // remaps updateColnos via the part_attmap.
+        let target_list: mcx::PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> = {
+            let mut tl: mcx::PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+                mcx::vec_with_capacity_in(
+                    mcx,
+                    action.targetList.as_ref().map(|t| t.len()).unwrap_or(0),
+                )?;
+            if let Some(src) = action.targetList.as_ref() {
+                for tle in src.iter() {
+                    tl.push(tle.clone_in(mcx)?);
+                }
+            }
+            tl
+        };
+
+        let mas_proj: Option<mcx::PgBox<'mcx, types_nodes::execexpr::ProjectionInfo<'mcx>>>;
+
+        match command_type {
+            CmdType::CMD_INSERT => {
+                // ExecCheckPlanOutput() already done on the targetlist when the
+                // "first" result relation was initialized (it is the same for
+                // all result relations), so it is not repeated here.
+                //
+                // action_state->mas_proj =
+                //     ExecBuildProjectionInfo(action->targetList, econtext,
+                //                             leaf_part_rri->ri_newTupleSlot,
+                //                             &mtstate->ps,
+                //                             RelationGetDescr(partrel));
+                let tgt_slot = estate
+                    .result_rel(leaf_part_rri)
+                    .ri_newTupleSlot
+                    .expect("ExecInitPartitionMerge: leaf partition has a new tuple slot");
+                mas_proj = Some(
+                    backend_executor_execExpr_seams::exec_build_merge_insert_projection::call(
+                        mtstate,
+                        estate,
+                        target_list.as_slice(),
+                        econtext,
+                        tgt_slot,
+                        leaf_part_rri,
+                    )?,
+                );
+            }
+            CmdType::CMD_UPDATE => {
+                // if (part_attmap)
+                //     action->updateColnos =
+                //         adjust_partition_colnos_using_map(action->updateColnos,
+                //                                           part_attmap);
+                let mapped_colnos = match action.updateColnos.as_ref() {
+                    Some(cols) if !cols.is_empty() => {
+                        backend_executor_execPartition_seams::adjust_partition_colnos_using_map::call(
+                            mcx,
+                            cols.as_slice(),
+                            &part_attnums,
+                        )?
+                    }
+                    _ => mcx::PgVec::new_in(mcx),
+                };
+                // action_state->mas_proj =
+                //     ExecBuildUpdateProjection(action->targetList, true,
+                //         action->updateColnos,
+                //         RelationGetDescr(leaf_part_rri->ri_RelationDesc),
+                //         econtext, leaf_part_rri->ri_newTupleSlot, NULL);
+                mas_proj = Some(
+                    backend_executor_execExpr_seams::exec_build_merge_update_projection::call(
+                        mtstate,
+                        estate,
+                        leaf_part_rri,
+                        target_list.as_slice(),
+                        mapped_colnos.as_slice(),
+                        econtext,
+                    )?,
+                );
+            }
+            CmdType::CMD_DELETE | CmdType::CMD_NOTHING => {
+                // Nothing to do.
+                mas_proj = None;
+            }
+            _ => {
+                // default: elog(ERROR, "unknown action in MERGE WHEN clause");
+                return Err(types_error::PgError::error(
+                    "unknown action in MERGE WHEN clause",
+                ));
+            }
+        }
+
+        // found_whole_row intentionally ignored.
+        //   action->qual =
+        //       map_variable_attnos(action->qual, firstVarno, 0, part_attmap,
+        //                           RelationGetForm(partrel)->reltype,
+        //                           &found_whole_row);
+        //   action_state->mas_whenqual =
+        //       ExecInitQual((List *) action->qual, &mtstate->ps);
+        let mapped_qual: Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>> =
+            match action.qual.as_ref() {
+                None => None,
+                Some(q) => {
+                    let mut cloned: mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>> =
+                        mcx::vec_with_capacity_in(mcx, q.len())?;
+                    for e in q.iter() {
+                        cloned.push(e.clone_in(mcx)?);
+                    }
+                    let (mapped, _fwr) =
+                        backend_rewrite_rewritemanip_seams::map_variable_attnos_expr_list_varno::call(
+                            mcx,
+                            cloned,
+                            first_varno as i32,
+                            &part_attnums,
+                            part_reltype,
+                        )?;
+                    Some(mapped)
+                }
+            };
+        let mas_whenqual = backend_executor_execExpr_seams::exec_init_merge_when_qual::call(
+            mtstate,
+            estate,
+            mapped_qual.as_ref().map(|v| v.as_slice()),
+        )?;
+
+        // action_state = makeNode(MergeActionState);
+        // action_state->mas_action = action;
+        //
+        // The owned-by-value tree cannot share the `&'mcx` plan borrow into the
+        // pooled state, so `mas_action` carries the command/match-kind/overriding
+        // fields the executor reads (ExecMergeMatched reads only commandType /
+        // matchKind), matching merge.rs::ExecInitMerge.
+        let mas_action = mcx::alloc_in(
+            mcx,
+            types_nodes::modifytable::MergeAction {
+                matchKind: match_kind,
+                commandType: command_type,
+                overriding: action.overriding,
+                qual: None,
+                targetList: None,
+                updateColnos: None,
+            },
+        )?;
+        let action_state = mcx::alloc_in(
+            mcx,
+            types_nodes::modifytable::MergeActionState {
+                type_: types_nodes::nodes::T_MergeActionState,
+                mas_action: Some(mas_action),
+                mas_proj,
+                mas_whenqual,
+            },
+        )?;
+
+        // leaf_part_rri->ri_MergeActions[action->matchKind] =
+        //     lappend(leaf_part_rri->ri_MergeActions[action->matchKind],
+        //             action_state);
+        let slot = &mut estate.result_rel_mut(leaf_part_rri).ri_MergeActions[match_kind as usize];
+        match slot {
+            Some(list) => list.push(action_state),
+            None => {
+                let mut v = mcx::PgVec::new_in(mcx);
+                v.push(action_state);
+                *slot = Some(v);
+            }
+        }
+    }
+
+    Ok(())
 }

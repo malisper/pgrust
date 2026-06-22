@@ -68,6 +68,9 @@ pub fn init_seams() {
     backend_executor_execPartition_seams::adjust_partition_colnos::set(
         colnos::adjust_partition_colnos,
     );
+    backend_executor_execPartition_seams::adjust_partition_colnos_using_map::set(
+        colnos::adjust_partition_colnos_using_attnums,
+    );
 }
 
 /// Seam adapter for `exec_setup_partition_tuple_routing`: the owner returns the

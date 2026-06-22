@@ -103,6 +103,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `adjust_partition_colnos_using_map(colnos, attrMap)` (execPartition.c):
+    /// like [`adjust_partition_colnos`], but with a caller-supplied attribute
+    /// map (the `attmap->attnums` slice) instead of the leaf's child→root map.
+    /// `ExecInitPartitionInfo`'s MERGE leg calls it on each UPDATE action's
+    /// `updateColnos` using the freshly-built `build_attrmap_by_name(partrel,
+    /// firstResultRel)` map. Must not be called when no adjustment is required
+    /// (the C `Assert(attrMap != NULL)`). Returns the freshly-mapped colno list
+    /// allocated in `mcx`. Fallible (`elog(ERROR)` on an unexpected attno, OOM).
+    pub fn adjust_partition_colnos_using_map<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        colnos: &[i32],
+        attnums: &[i16],
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, i32>>
+);
+
+seam_core::seam!(
     /// `ExecDoInitialPruning(estate)` (execPartition.c): perform run-time
     /// "initial" (executor-startup) partition pruning for every
     /// `PartitionPruneInfo` in `estate->es_part_prune_infos`, building each

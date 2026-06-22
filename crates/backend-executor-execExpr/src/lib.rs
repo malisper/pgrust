@@ -144,7 +144,6 @@ pub fn init_seams() {
     seams::partition_init_on_conflict_update::set(
         execExpr_modify::partition_init_on_conflict_update,
     );
-    seams::partition_init_merge_actions::set(execExpr_modify::partition_init_merge_actions);
     seams::exec_project_new_tuple::set(execExpr_modify::exec_project_new_tuple);
     seams::exec_init_with_check_options::set(execExpr_modify::exec_init_with_check_options);
     seams::exec_build_returning_projection::set(execExpr_modify::exec_build_returning_projection);
