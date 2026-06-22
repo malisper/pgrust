@@ -834,17 +834,31 @@ fn make_string_node<'mcx>(
 // ===========================================================================
 
 /// `FindTriggerIncompatibleWithInheritance(trigdesc)` (tablecmds.c) — a ROW
-/// trigger with a transition table prevents a table from becoming a partition.
-/// The trimmed relcache does not carry the in-memory `TriggerDesc`; a relation
-/// with no triggers (`relhastriggers == false`) trivially has none, so we return
-/// `None`. A relation WITH triggers needs the per-trigger transition-table flag,
-/// which the trigger-clone path (also unported) would require — surface that as
-/// a precise error from `CloneRowTriggersToPartition` instead (it fires first).
+/// trigger with a transition table prevents a table from becoming a partition
+/// or inheritance child. Returns the name of the first such incompatible
+/// trigger, or `None`.
+///
+/// The C reads the in-memory `TriggerDesc`; the owned model materializes the
+/// same information by scanning `pg_trigger` by `tgrelid` (the genam-owned
+/// by-tgrelid scan, identical to `CloneRowTriggersToPartition`'s). A relation
+/// with no triggers (`relhastriggers == false`) trivially has none.
 fn FindTriggerIncompatibleWithInheritance<'mcx>(
     attachrel: &Relation<'mcx>,
 ) -> PgResult<Option<String>> {
-    // relhastriggers == false ⇒ no triggers ⇒ none incompatible.
-    let _ = attachrel;
+    use types_catalog::pg_trigger as pt;
+
+    // A relation with no triggers yields an empty scan ⇒ none incompatible.
+    let trigs =
+        backend_access_index_genam_seams::relcache_scan_pg_trigger::call(attachrel.rd_id)?;
+    for trig in &trigs {
+        if !pt::TRIGGER_FOR_ROW(trig.tgtype) {
+            continue;
+        }
+        if trig.tgoldtable.is_some() || trig.tgnewtable.is_some() {
+            return Ok(Some(trig.tgname.clone()));
+        }
+    }
+
     Ok(None)
 }
 

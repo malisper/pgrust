@@ -556,26 +556,107 @@ fn DetachPartitionFinalize<'mcx>(
 // ===========================================================================
 
 /// `DropClonedTriggersFromPartition(partitionId)` (tablecmds.c:21506) — remove
-/// triggers cloned onto the partition at creation/attach. Unported; a precise
-/// error if the partition carries any triggers (so the cloned-trigger scan would
-/// have work), a genuine no-op when it has none.
+/// triggers that were cloned onto the partition when it was created-as-partition
+/// or attached (undoes `CloneRowTriggersToPartition`). Scans `pg_trigger` by
+/// `tgrelid`, skips non-cloned triggers (`tgparentid` unset) and FK
+/// implementation triggers (`tgconstrrelid` set — those detach with their
+/// foreign keys), removes the partition dependency markings, and deletes the
+/// rest in one `performMultipleDeletions`.
 fn DropClonedTriggersFromPartition<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     partition_id: Oid,
 ) -> PgResult<()> {
-    let has_triggers =
-        backend_utils_cache_syscache_seams::rel_relhastriggers::call(partition_id)?
-            .unwrap_or(false);
-    if has_triggers {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(
-                "DETACH PARTITION of a partition with triggers is not yet supported \
-                 (DropClonedTriggersFromPartition unported)"
-                    .to_string(),
-            )
-            .into_error());
+    use types_catalog::catalog_dependency::{
+        DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
+    };
+    use types_catalog::pg_trigger as pt;
+
+    let mut objects = backend_catalog_dependency_seams::new_object_addresses::call()?;
+
+    // Scan pg_trigger to search for all triggers on this rel.
+    let tgrel = backend_access_table_table_seams::table_open::call(
+        mcx,
+        pt::TriggerRelationId,
+        RowExclusiveLock,
+    )?;
+
+    let mut skey = types_scan::scankey::ScanKeyData::empty();
+    backend_access_common_scankey::ScanKeyInit(
+        &mut skey,
+        pt::Anum_pg_trigger_tgrelid,
+        types_scan::scankey::BTEqualStrategyNumber,
+        types_core::fmgr::F_OIDEQ,
+        types_tuple::backend_access_common_heaptuple::Datum::from_oid(partition_id),
+    )?;
+    let keys = [skey];
+
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &tgrel,
+        pt::TriggerRelidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+
+    let mut trig_oids: Vec<Oid> = Vec::new();
+    while let Some(trigtup) =
+        backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+    {
+        let cols = backend_access_common_heaptuple::heap_deform_tuple(
+            mcx,
+            &trigtup.tuple,
+            &tgrel.rd_att,
+            &trigtup.data,
+        )?;
+        let col = |attno: i16| cols[attno as usize - 1].0.clone();
+        let tgparentid = col(pt::Anum_pg_trigger_tgparentid).as_oid();
+        let tgconstrrelid = col(pt::Anum_pg_trigger_tgconstrrelid).as_oid();
+        let tgoid = col(pt::Anum_pg_trigger_oid).as_oid();
+
+        // Ignore triggers that weren't cloned.
+        if !OidIsValid(tgparentid) {
+            continue;
+        }
+        // Ignore internal triggers that are implementation objects of foreign
+        // keys, because these will be detached when the foreign keys themselves
+        // are.
+        if OidIsValid(tgconstrrelid) {
+            continue;
+        }
+        trig_oids.push(tgoid);
     }
+    drop(scan);
+
+    // Remove the partition dependency markings so the triggers can be removed,
+    // then collect their addresses for deletion.
+    for tgoid in trig_oids {
+        backend_catalog_dependency_seams::delete_dependency_records_for_class::call(
+            pt::TriggerRelationId,
+            tgoid,
+            pt::TriggerRelationId,
+            DEPENDENCY_PARTITION_PRI,
+        )?;
+        backend_catalog_dependency_seams::delete_dependency_records_for_class::call(
+            pt::TriggerRelationId,
+            tgoid,
+            RelationRelationId,
+            DEPENDENCY_PARTITION_SEC,
+        )?;
+        let trig = object_address_set(pt::TriggerRelationId, tgoid);
+        backend_catalog_dependency_seams::add_exact_object_address::call(trig, &mut objects)?;
+    }
+
+    // Make the dependency removal visible to the deletion below.
+    backend_access_transam_xact::CommandCounterIncrement()?;
+    backend_catalog_dependency_seams::perform_multiple_deletions::call(
+        &objects.refs,
+        types_nodes::parsenodes::DROP_RESTRICT,
+        backend_catalog_dependency_seams::PERFORM_DELETION_INTERNAL,
+    )?;
+
+    backend_catalog_dependency_seams::free_object_addresses::call(objects)?;
+    tgrel.close(RowExclusiveLock)?;
+
     Ok(())
 }
 
