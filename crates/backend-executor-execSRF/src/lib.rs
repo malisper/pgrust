@@ -104,6 +104,7 @@ mod shmem_numa_srf;
 mod pg_get_shmem_allocations_srf;
 mod pg_get_aios;
 mod pg_get_backend_memory_contexts;
+mod show_all_settings;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
 pub use json_record::{invoke_scalar_record_function, is_scalar_record_function};
@@ -316,6 +317,9 @@ pub fn init_seams() {
     pg_get_aios::register_pg_get_aios();
     // pg_get_backend_memory_contexts(): walk the live MemoryContext tree.
     pg_get_backend_memory_contexts::register_pg_get_backend_memory_contexts();
+    // show_all_settings() (OID 2084): the pg_settings view / `\dconfig` SRF over
+    // the live GUC registry (GetConfigOptionValues row projection).
+    show_all_settings::register_show_all_settings();
 }
 
 // ===========================================================================

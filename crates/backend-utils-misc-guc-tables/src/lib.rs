@@ -173,7 +173,46 @@ pub fn init_seams() {
     backend_utils_misc_guc_file_seams::log_xact_sample_rate::set(
         log_xact_sample_rate_impl,
     );
+
+    // Enum option tables whose C owners (xlogdesc.c `wal_level_options[]`,
+    // xlogrecovery.c `recovery_target_action_options[]`) do not yet depend on
+    // the guc-tables type layer in the owned model. They are pure-data constant
+    // arrays the `wal_level` / `recovery_target_action` enum GUCs reference via
+    // `GucEnumOptions::External`; SHOW ALL / pg_settings reads them through
+    // config_enum_get_options / config_enum_lookup_by_value. Install them here,
+    // the table owner, so the slots are never read before installed. (The
+    // archive_mode / wal_sync_method option sets are installed by their genuine
+    // C owner, `backend-access-transam-xlog`.)
+    option_sets::wal_level_options.install(WAL_LEVEL_OPTIONS);
+    option_sets::recovery_target_action_options.install(RECOVERY_TARGET_ACTION_OPTIONS);
 }
+
+/// `const struct config_enum_entry wal_level_options[]` (xlogdesc.c). Vals
+/// minimal=0, replica=1, logical=2; `archive`/`hot_standby` are hidden
+/// deprecated aliases of `replica`.
+const WAL_LEVEL_OPTIONS: &[types_guc::config_enum_entry] = &[
+    types_guc::config_enum_entry { name: "minimal", val: 0, hidden: false },
+    types_guc::config_enum_entry { name: "replica", val: consts::WAL_LEVEL_REPLICA, hidden: false },
+    types_guc::config_enum_entry { name: "archive", val: consts::WAL_LEVEL_REPLICA, hidden: true },
+    types_guc::config_enum_entry {
+        name: "hot_standby",
+        val: consts::WAL_LEVEL_REPLICA,
+        hidden: true,
+    },
+    types_guc::config_enum_entry { name: "logical", val: 2, hidden: false },
+];
+
+/// `const struct config_enum_entry recovery_target_action_options[]`
+/// (xlogrecovery.c). Vals pause=0, promote=1, shutdown=2.
+const RECOVERY_TARGET_ACTION_OPTIONS: &[types_guc::config_enum_entry] = &[
+    types_guc::config_enum_entry {
+        name: "pause",
+        val: consts::RECOVERY_TARGET_ACTION_PAUSE,
+        hidden: false,
+    },
+    types_guc::config_enum_entry { name: "promote", val: 1, hidden: false },
+    types_guc::config_enum_entry { name: "shutdown", val: 2, hidden: false },
+];
 
 fn log_xact_sample_rate_impl() -> f64 {
     if vars::log_xact_sample_rate.installed() {

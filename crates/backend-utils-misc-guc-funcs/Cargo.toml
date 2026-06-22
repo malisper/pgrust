@@ -23,6 +23,7 @@ types-nodes = { path = "../types-nodes" }
 types-parsenodes = { path = "../types-parsenodes" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-seams" }

@@ -21,7 +21,8 @@ extern crate std;
 
 use core::cell::Cell;
 
-use backend_utils_misc_guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
+use backend_utils_misc_guc_tables::{hooks, option_sets, vars, GucHookExtra, GucVarAccessors};
+use types_guc::config_enum_entry;
 use types_error::PgResult;
 use types_guc::GucSource;
 use types_wal::rmgr::RM_N_IDS;
@@ -352,6 +353,63 @@ pub fn install() {
 
     // --- show hook for `in_hot_standby` (xlog.c:4884) ----------------------
     hooks::show_in_hot_standby.install(show_in_hot_standby);
+
+    // --- show hook for `archive_command` (xlog.c:4872) ---------------------
+    hooks::show_archive_command.install(show_archive_command);
+
+    // --- enum option tables owned by xlog.c --------------------------------
+    // `archive_mode_options[]` / `wal_sync_method_options[]` (xlog.c) — the
+    // option sets the `archive_mode` / `wal_sync_method` enum GUCs reference via
+    // `GucEnumOptions::External`. SHOW ALL / pg_settings reads them through
+    // config_enum_get_options / config_enum_lookup_by_value, so the owner must
+    // install them.
+    option_sets::archive_mode_options.install(ARCHIVE_MODE_OPTIONS);
+    option_sets::wal_sync_method_options.install(WAL_SYNC_METHOD_OPTIONS);
+}
+
+/// `const struct config_enum_entry archive_mode_options[]` (xlog.c). The
+/// canonical names (`always`/`on`/`off`) plus the hidden bool/yes/no/1/0
+/// aliases C accepts on input but hides from `enumvals`.
+const ARCHIVE_MODE_OPTIONS: &[config_enum_entry] = &[
+    config_enum_entry { name: "always", val: 2, hidden: false },
+    config_enum_entry { name: "on", val: 1, hidden: false },
+    config_enum_entry { name: "off", val: 0, hidden: false },
+    config_enum_entry { name: "true", val: 1, hidden: true },
+    config_enum_entry { name: "false", val: 0, hidden: true },
+    config_enum_entry { name: "yes", val: 1, hidden: true },
+    config_enum_entry { name: "no", val: 0, hidden: true },
+    config_enum_entry { name: "1", val: 1, hidden: true },
+    config_enum_entry { name: "0", val: 0, hidden: true },
+];
+
+/// `const struct config_enum_entry wal_sync_method_options[]` (xlog.c), in the
+/// `#ifdef` set this platform compiles (Darwin: HAVE_FSYNC_WRITETHROUGH + O_SYNC
+/// + O_DSYNC). The `enum WalSyncMethod` (xlog.h) values are FSYNC=0,
+/// FDATASYNC=1, OPEN=2 (`open_sync`, for O_SYNC), FSYNC_WRITETHROUGH=3,
+/// OPEN_DSYNC=4 (`open_datasync`, for O_DSYNC); the array order is C's (which is
+/// the `enumvals` display order).
+const WAL_SYNC_METHOD_OPTIONS: &[config_enum_entry] = &[
+    config_enum_entry { name: "fsync", val: 0, hidden: false },
+    config_enum_entry { name: "fsync_writethrough", val: 3, hidden: false },
+    config_enum_entry { name: "fdatasync", val: 1, hidden: false },
+    config_enum_entry { name: "open_sync", val: 2, hidden: false },
+    config_enum_entry { name: "open_datasync", val: 4, hidden: false },
+];
+
+/// `show_archive_command(void)` (xlog.c:4872) — GUC show_hook for
+/// `archive_command`. `XLogArchivingActive() ? XLogArchiveCommand :
+/// "(disabled)"`. Reads the GUC's backing store directly (the same
+/// `XLOG_ARCHIVE_MODE` / `XLOG_ARCHIVE_COMMAND` cells the accessors install over;
+/// `XLogArchivingActive()` is `XLogArchiveMode > ARCHIVE_MODE_OFF == 0`).
+fn show_archive_command() -> std::string::String {
+    let archiving_active = XLOG_ARCHIVE_MODE.with(Cell::get) > 0;
+    if archiving_active {
+        XLOG_ARCHIVE_COMMAND
+            .with(|c| c.borrow().clone())
+            .unwrap_or_default()
+    } else {
+        "(disabled)".into()
+    }
 }
 
 /// `show_in_hot_standby(void)` (xlog.c:4884) — GUC show_hook for

@@ -46,11 +46,16 @@
 //!
 //! The `PG_FUNCTION_ARGS` / `Datum` SQL-callable functions
 //! (`set_config_by_name`, `pg_settings_get_flags`, `show_config_by_name`,
-//! `show_config_by_name_missing_ok`, `show_all_settings`,
-//! `show_all_file_settings`) and the `GetConfigOptionValues` helper feeding
-//! `show_all_settings` belong to the project-wide fmgr/Datum-layer deferral.
-//! They live behind a loud-panic module ([`fmgr_deferred`]) — never a pretend
-//! success (and never a placeholder/unported stub).
+//! `show_config_by_name_missing_ok`, `show_all_file_settings`) belong to the
+//! project-wide fmgr/Datum-layer deferral. They live behind a loud-panic module
+//! ([`fmgr_deferred`]) — never a pretend success (and never a
+//! placeholder/unported stub).
+//!
+//! `show_all_settings` (OID 2084, the `pg_settings` view) IS ported: its row
+//! projection ([`GetConfigOptionValues`](get_config_option_values) /
+//! [`pg_settings_rows`]) lives here, and the executor-frame SRF adapter that runs
+//! `InitMaterializedSRF` and emits the 17-column rows lives in
+//! `backend-executor-execSRF`.
 
 extern crate alloc;
 
@@ -693,6 +698,190 @@ pub const NUM_PG_FILE_SETTINGS_ATTS: usize = 7;
 /// `MAX_GUC_FLAGS` (guc_funcs.c:544).
 pub const MAX_GUC_FLAGS: usize = 6;
 
+// ===========================================================================
+// GetConfigOptionValues / show_all_settings row builder (guc_funcs.c:593/848).
+// ===========================================================================
+
+/// One `pg_settings` row (`GetConfigOptionValues` output, guc_funcs.c:593).
+///
+/// The 17 columns of `pg_settings`. Every text column is an `Option<String>`
+/// (`NULL` is `None`, matching C's `values[i] = NULL`); `enumvals` is the set of
+/// enum option strings (`text[]`, `None` for non-enum variables); `sourceline`
+/// is an `int4` (only set for `PGC_S_FILE` sources visible to the caller);
+/// `pending_restart` is the bool drawn from `conf->status & GUC_PENDING_RESTART`.
+#[derive(Debug, Clone)]
+pub struct PgSettingsRow {
+    /// `[0]` name — text.
+    pub name: String,
+    /// `[1]` setting — text (`ShowGUCOption(conf, false)`).
+    pub setting: String,
+    /// `[2]` unit — text / NULL.
+    pub unit: Option<String>,
+    /// `[3]` category — text (`config_group_names[conf->group]`).
+    pub category: String,
+    /// `[4]` short_desc — text / NULL.
+    pub short_desc: Option<String>,
+    /// `[5]` extra_desc — text / NULL (`conf->long_desc`).
+    pub extra_desc: Option<String>,
+    /// `[6]` context — text (`GucContext_Names[conf->context]`).
+    pub context: String,
+    /// `[7]` vartype — text (`config_type_names[conf->vartype]`).
+    pub vartype: String,
+    /// `[8]` source — text (`GucSource_Names[conf->source]`).
+    pub source: String,
+    /// `[9]` min_val — text / NULL.
+    pub min_val: Option<String>,
+    /// `[10]` max_val — text / NULL.
+    pub max_val: Option<String>,
+    /// `[11]` enumvals — text[] / NULL (the enum option names, `None` for
+    /// non-enum variables).
+    pub enumvals: Option<Vec<String>>,
+    /// `[12]` boot_val — text / NULL.
+    pub boot_val: Option<String>,
+    /// `[13]` reset_val — text / NULL.
+    pub reset_val: Option<String>,
+    /// `[14]` sourcefile — text / NULL.
+    pub sourcefile: Option<String>,
+    /// `[15]` sourceline — int4 / NULL.
+    pub sourceline: Option<i32>,
+    /// `[16]` pending_restart — bool.
+    pub pending_restart: bool,
+}
+
+/// `GetConfigOptionValues(conf, values)` (guc_funcs.c:593): extract the 17
+/// `pg_settings` fields for one GUC variable. The generic attributes come from
+/// `config_generic`; the typed `min/max/enumvals/boot/reset` attributes are read
+/// off the `config_*` record per `conf->vartype` (the C downcast switch). The
+/// source-file/line fields are only filled for `PGC_S_FILE` sources visible to a
+/// `pg_read_all_settings` caller.
+fn get_config_option_values(var: &GucVariable) -> PgSettingsRow {
+    use backend_utils_misc_guc::enum_lookup::{
+        config_enum_get_options, config_enum_lookup_by_value,
+    };
+    use backend_utils_misc_guc::model::GUC_PENDING_RESTART;
+    use backend_utils_misc_guc::units::{fmt_g, get_config_unit_name};
+    use backend_utils_misc_guc_tables::{
+        config_group_names, config_type_names, GucContext_Names, GucSource_Names,
+    };
+    use types_guc::PGC_S_FILE;
+
+    let conf = var.gen();
+
+    // Generic attributes.
+    let name = conf.name.to_string();
+    // C: ShowGUCOption(conf, false) — no unit conversion for pg_settings.
+    let setting = show_guc_option(var, false);
+    let unit = get_config_unit_name(conf.flags).map(|s| s.to_string());
+    let category = config_group_names[conf.group as i32 as usize].to_string();
+    let short_desc = conf.short_desc.map(|s| s.to_string());
+    let extra_desc = conf.long_desc.map(|s| s.to_string());
+    let context = GucContext_Names[conf.context as i32 as usize].to_string();
+    let vartype = config_type_names[conf.vartype as i32 as usize].to_string();
+    let source = GucSource_Names[conf.source as i32 as usize].to_string();
+
+    // Type-specific attributes (the C downcast switch on conf->vartype).
+    let (min_val, max_val, enumvals, boot_val, reset_val) = match var {
+        GucVariable::Bool(lconf) => (
+            None,
+            None,
+            None,
+            Some(if lconf.boot_val { "on" } else { "off" }.to_string()),
+            Some(if lconf.reset_val { "on" } else { "off" }.to_string()),
+        ),
+        GucVariable::Int(lconf) => (
+            Some(format!("{}", lconf.min)),
+            Some(format!("{}", lconf.max)),
+            None,
+            Some(format!("{}", lconf.boot_val)),
+            Some(format!("{}", lconf.reset_val)),
+        ),
+        GucVariable::Real(lconf) => (
+            Some(fmt_g(lconf.min)),
+            Some(fmt_g(lconf.max)),
+            None,
+            Some(fmt_g(lconf.boot_val)),
+            Some(fmt_g(lconf.reset_val)),
+        ),
+        GucVariable::String(lconf) => (
+            None,
+            None,
+            None,
+            lconf.boot_val.clone(),
+            lconf.reset_val.clone(),
+        ),
+        GucVariable::Enum(lconf) => {
+            // C builds the text[] literal via config_enum_get_options(conf,
+            // "{\"", "\"}", "\",\"") then array_in parses it. The owned model
+            // carries the option names directly and lets the executor frame
+            // build the text[] Datum (construct_text_array). Use a NUL separator
+            // (no enum option name contains NUL) so the split is exact.
+            let opts_csv = config_enum_get_options(lconf, "", "", "\u{0}");
+            let enumvals: Vec<String> = if opts_csv.is_empty() {
+                Vec::new()
+            } else {
+                opts_csv.split('\u{0}').map(|s| s.to_string()).collect()
+            };
+            let boot = config_enum_lookup_by_value(lconf, lconf.boot_val)
+                .map(|s| s.to_string());
+            let reset = config_enum_lookup_by_value(lconf, lconf.reset_val)
+                .map(|s| s.to_string());
+            (None, None, Some(enumvals), boot, reset)
+        }
+    };
+
+    // Source file/line: only for PGC_S_FILE sources visible to a
+    // pg_read_all_settings caller (C's security gate).
+    let (sourcefile, sourceline) = if conf.source == PGC_S_FILE
+        && seam::has_privs_of_role::call(seam::get_user_id::call(), ROLE_PG_READ_ALL_SETTINGS)
+    {
+        (conf.sourcefile.clone(), Some(conf.sourceline))
+    } else {
+        (None, None)
+    };
+
+    // pending_restart: conf->status & GUC_PENDING_RESTART.
+    let pending_restart = (conf.status & GUC_PENDING_RESTART) != 0;
+
+    PgSettingsRow {
+        name,
+        setting,
+        unit,
+        category,
+        short_desc,
+        extra_desc,
+        context,
+        vartype,
+        source,
+        min_val,
+        max_val,
+        enumvals,
+        boot_val,
+        reset_val,
+        sourcefile,
+        sourceline,
+        pending_restart,
+    }
+}
+
+/// `show_all_settings()` row source (guc_funcs.c:848): the `pg_settings` rows in
+/// sorted-name order, filtered to the visible / non-`NO_SHOW_ALL` variables (the
+/// per-call skip the C SRF applies inside its loop). Each row is the
+/// `GetConfigOptionValues` projection of one GUC variable.
+pub fn pg_settings_rows() -> Vec<PgSettingsRow> {
+    with_registry(|reg| {
+        let mut rows: Vec<PgSettingsRow> = Vec::new();
+        for var in sorted_variables(reg) {
+            let conf = var.gen();
+            // skip if marked NO_SHOW_ALL or not visible to the current user.
+            if (conf.flags & GUC_NO_SHOW_ALL) != 0 || !ConfigOptionIsVisible(conf) {
+                continue;
+            }
+            rows.push(get_config_option_values(var));
+        }
+        rows
+    })
+}
+
 /// The `PG_FUNCTION_ARGS` / `Datum` SQL-callable functions of guc_funcs.c, and
 /// the `GetConfigOptionValues` helper that feeds `show_all_settings`.
 ///
@@ -729,16 +918,10 @@ pub mod fmgr_deferred {
         panic!("fmgr/Datum-layer deferral: show_config_by_name_missing_ok (guc_funcs.c)")
     }
 
-    /// `GetConfigOptionValues(conf, values)` (guc_funcs.c:593): the
-    /// `pg_settings` row builder feeding `show_all_settings`.
-    pub fn GetConfigOptionValues() -> ! {
-        panic!("fmgr/Datum-layer deferral: GetConfigOptionValues (guc_funcs.c)")
-    }
-
-    /// `show_all_settings() -> setof record` (guc_funcs.c:848).
-    pub fn show_all_settings() -> ! {
-        panic!("fmgr/Datum-layer deferral: show_all_settings (guc_funcs.c)")
-    }
+    // `GetConfigOptionValues` (guc_funcs.c:593) and `show_all_settings`
+    // (guc_funcs.c:848) are now ported: see `get_config_option_values` /
+    // `pg_settings_rows` above (the executor-frame SRF adapter for OID 2084 lives
+    // in `backend-executor-execSRF`).
 
     /// `show_all_file_settings() -> setof record` (guc_funcs.c:983).
     pub fn show_all_file_settings() -> ! {
