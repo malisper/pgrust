@@ -551,13 +551,22 @@ pub fn exec_set_tuple_bound<'mcx>(
                 exec_set_tuple_bound(tuples_needed, child, estate)?;
             }
         }
-        // The remaining C `IsA` arms — IncrementalSortState, the projecting
-        // ResultState (descend through outerPlanState), SubqueryScanState with a
-        // NULL qual (descend through ss.subplan), GatherState and
-        // GatherMergeState (record tuples_needed + descend through
-        // outerPlanState) — operate on node-state variants not yet present in
-        // the `#[non_exhaustive]` `PlanStateNode` enum, so their tags cannot
-        // occur. Each adds its arm here as its executor unit lands.
+        // else if (IsA(child_node, SubqueryScanState))
+        // We can also descend through SubqueryScan, but only if it has no qual
+        // (otherwise it might discard rows).
+        PlanStateNode::SubqueryScan(subquery_state) => {
+            if subquery_state.ss.ps.qual.is_none() {
+                if let Some(subplan) = subquery_state.subplan.as_mut() {
+                    exec_set_tuple_bound(tuples_needed, subplan, estate)?;
+                }
+            }
+        }
+        // The remaining C `IsA` arms — the projecting ResultState (descend
+        // through outerPlanState), GatherState and GatherMergeState (record
+        // tuples_needed + descend through outerPlanState) — operate on
+        // node-state variants not yet present in the `#[non_exhaustive]`
+        // `PlanStateNode` enum, so their tags cannot occur. Each adds its arm
+        // here as its executor unit lands.
         //
         // Otherwise, on seeing a node that can discard or combine input rows we
         // can't propagate the bound any further; do nothing (the C
