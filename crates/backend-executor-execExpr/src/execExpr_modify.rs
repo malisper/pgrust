@@ -84,7 +84,7 @@ pub fn exec_init_merge_when_qual<'mcx>(
 /// the build needs only the target list, the econtext id, and the target tuple
 /// descriptor (`tgt_desc_rel`'s relation `rd_att`).
 pub fn exec_build_merge_insert_projection<'mcx>(
-    _mtstate: &mut ModifyTableState<'mcx>,
+    mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     target_list: &[TargetEntry<'mcx>],
     econtext: EcxtId,
@@ -101,13 +101,21 @@ pub fn exec_build_merge_insert_projection<'mcx>(
         .as_ref()
         .expect("ExecBuildMergeInsertProjection: ri_RelationDesc is NULL")
         .rd_att_clone_in(mcx)?;
-    execExpr_core::exec_build_projection_info_impl(
+    let mut proj = execExpr_core::exec_build_projection_info_impl(
         estate,
         target_list,
         econtext,
         Some(tgt_slot),
         Some(&tgt_desc),
-    )
+    )?;
+    // C `ExecBuildProjectionInfo(action->targetList, ..., &mtstate->ps, ...)`
+    // passes the ModifyTable PlanState as parent, so a SubPlan compiled in this
+    // INSERT action's target list (e.g. `INSERT VALUES ((SELECT ...)))`) is
+    // appended to `mtstate->ps.subPlan` via `state->parent->subPlan = lappend(...)`.
+    // The owned spine defers this to a drain here (read by EXPLAIN to print the
+    // SubPlan under the Merge node).
+    execExpr_core::drain_found_subplan_ids(mcx, &mut mtstate.ps, &mut proj.pi_state)?;
+    Ok(proj)
 }
 
 /// `ExecBuildUpdateProjection(...)` for a MERGE UPDATE action.
@@ -123,7 +131,7 @@ pub fn exec_build_merge_insert_projection<'mcx>(
 /// `result_rel_info`'s `rd_att`, and the result slot only matters at
 /// `ExecProject` time (not during compilation).
 pub fn exec_build_merge_update_projection<'mcx>(
-    _mtstate: &mut ModifyTableState<'mcx>,
+    mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     target_list: &[TargetEntry<'mcx>],
@@ -140,7 +148,7 @@ pub fn exec_build_merge_update_projection<'mcx>(
     // result slot = resultRelInfo->ri_newTupleSlot (the MERGE UPDATE "new tuple"
     // slot).
     let slot = estate.result_rel(result_rel_info).ri_newTupleSlot;
-    execExpr_core::exec_build_update_projection_impl(
+    let mut proj = execExpr_core::exec_build_update_projection_impl(
         estate,
         target_list,
         true,
@@ -148,7 +156,15 @@ pub fn exec_build_merge_update_projection<'mcx>(
         &rel_desc,
         econtext,
         slot,
-    )
+    )?;
+    // C `ExecBuildUpdateProjection(action->targetList, true, ..., &mtstate->ps)`
+    // passes the ModifyTable PlanState as parent. With `evalTargetList = true`
+    // the action target list is evaluated here, so a SubPlan in it (e.g.
+    // `UPDATE SET (b,c) = (SELECT ...)`) is appended to `mtstate->ps.subPlan`
+    // via `state->parent->subPlan = lappend(...)`. The owned spine defers this
+    // to a drain here (read by EXPLAIN to print the SubPlan under the Merge node).
+    execExpr_core::drain_found_subplan_ids(mcx, &mut mtstate.ps, &mut proj.pi_state)?;
+    Ok(proj)
 }
 
 /// `ri_MergeJoinCondition = ExecInitQual((List *) joinCondition, &mtstate->ps)`.
