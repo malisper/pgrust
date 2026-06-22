@@ -46,7 +46,8 @@ use types_catalog::catalog_dependency::ObjectAddress;
 use types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber};
 use types_error::{
-    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE,
+    PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INVALID_COLUMN_REFERENCE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TABLE_DEFINITION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
@@ -847,6 +848,195 @@ pub fn ATExecDropOf<'mcx>(
     objaccess_seam::invoke_object_post_alter_hook::call(RelationRelationId, relid, 0)?;
 
     Ok(())
+}
+
+/// `ATExecAddOf(rel, ofTypename, lockmode)` (tablecmds.c:18216) — ALTER TABLE
+/// ... OF type. Validate the target composite type, require the table's column
+/// layout to match the type's rowtype (name + type + typmod + collation, order
+/// included; only attnotnull may differ), record a NORMAL dependency on the
+/// type, and set `pg_class.reloftype`.
+pub fn ATExecAddOf<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    of_typename: &types_nodes::rawnodes::TypeName<'mcx>,
+    _lockmode: LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    use types_catalog::catalog_dependency::DEPENDENCY_NORMAL;
+    use types_catalog::pg_type::{TypeRelationId, TYPTYPE_COMPOSITE};
+    use types_storage::lock::AccessShareLock;
+
+    let relid = rel.rd_id;
+
+    // typetuple = typenameType(NULL, ofTypename, NULL); typeid = GETSTRUCT->oid.
+    let parse_type_name = backend_parser_parse_type::raw_typename_to_parse(of_typename)?;
+    let (typeform, _typmod) =
+        backend_parser_parse_type::typenameType(mcx, None, &parse_type_name)?;
+    let typeid = typeform.oid;
+
+    // check_of_type(typetuple): the target must be a stand-alone composite type
+    // (typtype == 'c' and its typrelid relkind == 'c'). (tablecmds.c check_of_type)
+    if typeform.typtype == TYPTYPE_COMPOSITE {
+        debug_assert!(types_core::primitive::OidIsValid(typeform.typrelid));
+        let type_relation = relation_open(mcx, typeform.typrelid, AccessShareLock)?;
+        let type_ok = type_relation.rd_rel.relkind == b'c';
+        // Close the parent rel, but keep the AccessShareLock until xact commit.
+        backend_access_table_table::table_close(type_relation, NoLock)?;
+        if !type_ok {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(format!(
+                    "type {} is the row type of another table",
+                    backend_utils_adt_format_type_seams::format_type_be::call(mcx, typeid)?
+                        .as_str()
+                ))
+                .errdetail(
+                    "A typed table must use a stand-alone composite type created with CREATE TYPE.",
+                )
+                .finish(here("ATExecAddOf"))
+                .map(|_| unreachable!());
+        }
+    } else {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!(
+                "type {} is not a composite type",
+                backend_utils_adt_format_type_seams::format_type_be::call(mcx, typeid)?.as_str()
+            ))
+            .finish(here("ATExecAddOf"))
+            .map(|_| unreachable!());
+    }
+
+    // Fail if the table has any inheritance parents.
+    if backend_catalog_pg_inherits_seams::has_superclass::call(relid)? {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg("typed tables cannot inherit")
+            .finish(here("ATExecAddOf"))
+            .map(|_| unreachable!());
+    }
+
+    // Check the tuple descriptors for compatibility. Unlike inheritance, we
+    // require that the order also match. However, attnotnull need not match.
+    let type_tupdesc =
+        backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(mcx, typeid, -1)?;
+    let table_tupdesc = &rel.rd_att;
+    let table_natts = table_tupdesc.natts as usize;
+    let type_natts = type_tupdesc.natts as usize;
+
+    // table_attno is a 0-based cursor into the table descriptor.
+    let mut table_attno: usize = 0;
+    for type_attno in 0..type_natts {
+        let type_attr = type_tupdesc.attr(type_attno);
+        // Get the next non-dropped type attribute.
+        if type_attr.attisdropped {
+            continue;
+        }
+        let type_attname = core::str::from_utf8(type_attr.attname.name_str()).unwrap_or("");
+
+        // Get the next non-dropped table attribute.
+        let table_attr = loop {
+            if table_attno >= table_natts {
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg(format!("table is missing column \"{type_attname}\""))
+                    .finish(here("ATExecAddOf"))
+                    .map(|_| unreachable!());
+            }
+            let attr = table_tupdesc.attr(table_attno);
+            table_attno += 1;
+            if !attr.attisdropped {
+                break attr;
+            }
+        };
+        let table_attname = core::str::from_utf8(table_attr.attname.name_str()).unwrap_or("");
+
+        // Compare name.
+        if table_attname != type_attname {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg(format!(
+                    "table has column \"{table_attname}\" where type requires \"{type_attname}\""
+                ))
+                .finish(here("ATExecAddOf"))
+                .map(|_| unreachable!());
+        }
+
+        // Compare type.
+        if table_attr.atttypid != type_attr.atttypid
+            || table_attr.atttypmod != type_attr.atttypmod
+            || table_attr.attcollation != type_attr.attcollation
+        {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg(format!(
+                    "table \"{}\" has different type for column \"{type_attname}\"",
+                    rel.name()
+                ))
+                .finish(here("ATExecAddOf"))
+                .map(|_| unreachable!());
+        }
+    }
+
+    // Any remaining columns at the end of the table had better be dropped.
+    while table_attno < table_natts {
+        let table_attr = table_tupdesc.attr(table_attno);
+        table_attno += 1;
+        if !table_attr.attisdropped {
+            let attname = core::str::from_utf8(table_attr.attname.name_str()).unwrap_or("");
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg(format!("table has extra column \"{attname}\""))
+                .finish(here("ATExecAddOf"))
+                .map(|_| unreachable!());
+        }
+    }
+    // ReleaseTupleDesc(typeTupleDesc) — the owned copy drops here.
+    drop(type_tupdesc);
+
+    // If the table was already typed, drop the existing dependency.
+    let cur_reloftype =
+        backend_utils_cache_syscache_seams::search_relation_reloftype::call(relid)?
+            .unwrap_or(types_core::InvalidOid);
+    if types_core::primitive::OidIsValid(cur_reloftype) {
+        // drop_parent_dependency(relid, TypeRelationId, reloftype, DEPENDENCY_NORMAL):
+        // remove the relation's NORMAL dependency on its previous OF-type.
+        backend_catalog_pg_depend_seams::deleteDependencyRecordsForSpecific::call(
+            RelationRelationId,
+            relid,
+            DEPENDENCY_NORMAL.as_char(),
+            TypeRelationId,
+            cur_reloftype,
+        )?;
+    }
+
+    // Record a dependency on the new type.
+    let tableobj = ObjectAddress {
+        classId: RelationRelationId,
+        objectId: relid,
+        objectSubId: 0,
+    };
+    let typeobj = ObjectAddress {
+        classId: TypeRelationId,
+        objectId: typeid,
+        objectSubId: 0,
+    };
+    backend_catalog_pg_depend_seams::recordDependencyOn::call(
+        mcx, &tableobj, &typeobj, DEPENDENCY_NORMAL,
+    )?;
+
+    // Update pg_class.reloftype.
+    let valid = indexing_seam::set_pg_class_reloftype::call(relid, typeid)?;
+    if !valid {
+        return backend_utils_error::ereport(ERROR)
+            .errmsg(format!("cache lookup failed for relation {relid}"))
+            .finish(here("ATExecAddOf"))
+            .map(|_| unreachable!());
+    }
+
+    // InvokeObjectPostAlterHook(RelationRelationId, relid, 0);
+    objaccess_seam::invoke_object_post_alter_hook::call(RelationRelationId, relid, 0)?;
+
+    Ok(typeobj)
 }
 
 // ---------------------------------------------------------------------------

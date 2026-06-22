@@ -2028,7 +2028,14 @@ fn ATExecCmd<'mcx>(
                 .expect("AT_DropInherit: cmd.def is not a RangeVar");
             _address = crate::at_detach::ATExecDropInherit(mcx, rel, parent, lockmode)?;
         }
-        AT_AddOf => unported("OF (ATExecAddOf)"),
+        AT_AddOf => {
+            // ATExecAddOf(rel, (TypeName *) cmd->def, lockmode).
+            let def = cmd.def.as_deref().expect("AT_AddOf: cmd.def is NULL");
+            let typename = def
+                .as_typename()
+                .expect("AT_AddOf: cmd.def is not a TypeName");
+            _address = crate::at_column::ATExecAddOf(mcx, rel, typename, lockmode)?;
+        }
         AT_DropOf => {
             // ATExecDropOf(rel, lockmode).
             crate::at_column::ATExecDropOf(mcx, rel, lockmode)?;
