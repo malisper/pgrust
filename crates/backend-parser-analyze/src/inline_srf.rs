@@ -301,6 +301,32 @@ fn query_clone_from_node<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Query
 /// entire tuple result of its final statement, `false` if just the first column.
 /// May modify the final Query (in `query_list[0]`) by inserting a projection
 /// level. Raises an error if the final statement can't return the right type.
+/// Public entry point onto `check_sql_fn_retval` for the SQL-function call
+/// handler (`backend-executor-functions`'s `fmgr_sql` / `init_sql_fcache`).
+///
+/// `init_sql_fcache` (functions.c:973-978) runs `check_sql_stmt_retval` over the
+/// last analyzed body query with the call-time-resolved `rettype`/`rettupdesc`
+/// (from `get_call_result_type`), so the body's final targetlist is coerced to
+/// the *resolved* polymorphic result types and `returnsTuple` is computed. This
+/// re-exports the same machinery the SRF inliner uses, for the call-time path.
+pub fn check_sql_fn_retval_public<'mcx>(
+    mcx: Mcx<'mcx>,
+    query_list: &mut [Query<'mcx>],
+    rettype: Oid,
+    rettupdesc: Option<&types_tuple::heaptuple::TupleDescData<'mcx>>,
+    prokind: u8,
+    insert_dropped_cols: bool,
+) -> PgResult<bool> {
+    check_sql_fn_retval(
+        mcx,
+        query_list,
+        rettype,
+        rettupdesc,
+        prokind,
+        insert_dropped_cols,
+    )
+}
+
 fn check_sql_fn_retval<'mcx>(
     mcx: Mcx<'mcx>,
     query_list: &mut [Query<'mcx>],

@@ -400,7 +400,29 @@ fn fmgr_sql<'mcx>(
         proargtypes,
         collation,
     );
-    let querytrees = parse_body_queries(mcx, prosrc.as_str(), prosqlbody.as_deref(), &pinfo)?;
+    let mut querytrees = parse_body_queries(mcx, prosrc.as_str(), prosqlbody.as_deref(), &pinfo)?;
+
+    // ---- check_sql_stmt_retval (functions.c:973-978) ----------------------
+    // init_sql_fcache resolves any polymorphism via get_call_result_type, then
+    // runs check_sql_stmt_retval over the last analyzed body query with the
+    // call-time-resolved rettype/rettupdesc/prokind so the body's final
+    // targetlist is coerced to the *resolved* result types. Without this a
+    // polymorphic procedure CALL whose body's last column is a different
+    // concrete type than the resolved INOUT/OUT parameter (e.g.
+    //   CREATE PROCEDURE p(inout a anyelement, inout b anyelement) ...
+    //     AS $$ SELECT $1, 1 $$;  CALL p(1.1, null);   -- resolves to numeric)
+    // returns the un-coerced int4 where numeric is expected → wrong-type Datum.
+    // (Only the last canSetTag query is coerced; check_sql_fn_retval finds it.)
+    let (call_rettype, call_rettupdesc) =
+        resolve_call_result_type(mcx, fcinfo, rettype)?;
+    backend_parser_analyze::check_sql_fn_retval(
+        mcx,
+        &mut querytrees[..],
+        call_rettype,
+        call_rettupdesc.as_deref(),
+        form.prokind,
+        false,
+    )?;
 
     // ---- Snapshot management (functions.c:1655) ---------------------------
     // The caller (a containing query) already has an active snapshot. A
@@ -511,6 +533,63 @@ fn fmgr_sql<'mcx>(
 /// stamped and return the declared type of argument `argnum` (the
 /// `get_call_expr_argtype` `IsA` dispatch, owned by the nodeFuncs seam), or
 /// `InvalidOid` when no field-bearing call node is carried.
+/// `get_call_result_type(fcinfo, &rettype, &rettupdesc)` (funcapi.c:276) for the
+/// SQL-function call frame — resolve the actual (post-polymorphism) result type
+/// and, when it's a rowtype/procedure-OUT-params descriptor, the result tupdesc.
+///
+/// C reads `fcinfo->flinfo->fn_expr` and routes through `internal_get_result_type`
+/// (which resolves polymorphic OUT/INOUT params against the call args). Here we
+/// recover the field-bearing call `Expr` off the frame's stamped `fn_expr`, wrap
+/// it in a `Node`, and run the `get_expr_result_type` funcapi seam (which routes
+/// a `FuncExpr` straight into `internal_get_result_type`). With no call node on
+/// the frame we fall back to the declared `rettype` and no descriptor — exactly
+/// what `get_func_result_type(funcid)` would yield (the validator path), which
+/// still coerces a non-polymorphic scalar result.
+fn resolve_call_result_type<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    rettype: Oid,
+) -> PgResult<(Oid, Option<mcx::PgBox<'mcx, TupleDescData<'mcx>>>)> {
+    let fn_expr_node = fn_expr_call_node(mcx, fcinfo)?;
+    let Some(node) = fn_expr_node else {
+        return Ok((rettype, None));
+    };
+    let resolved =
+        backend_utils_fmgr_funcapi_seams::get_expr_result_type::call(mcx, Some(&node))?;
+    let rt = resolved.result_type_id.unwrap_or(rettype);
+    Ok((rt, resolved.result_tuple_desc))
+}
+
+/// Recover the call's field-bearing `Expr` (the `FuncExpr` the CALL/SELECT
+/// stamped into `flinfo->fn_expr` via `fmgr_info_set_expr`) and wrap it in a
+/// `Node` so the funcapi `get_expr_result_type` seam can read its result type.
+/// `None` when the frame carries no field-bearing call node (legacy tag-only
+/// carrier or the opclass-options `Const`).
+fn fn_expr_call_node<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+) -> PgResult<Option<Node<'mcx>>> {
+    let Some(flinfo) = fcinfo.flinfo.as_ref() else {
+        return Ok(None);
+    };
+    let Some(fn_expr) = flinfo.fn_expr.as_ref() else {
+        return Ok(None);
+    };
+    match fn_expr.as_ref() {
+        types_fmgr::FnExpr::ByteaConst(_) => Ok(None),
+        types_fmgr::FnExpr::External(ext) => {
+            match ext
+                .node
+                .as_ref()
+                .and_then(|n| n.downcast_ref::<types_nodes::primnodes::Expr>())
+            {
+                Some(e) => Ok(Some(Node::mk_expr(mcx, e.clone_in(mcx)?)?)),
+                None => Ok(None),
+            }
+        }
+    }
+}
+
 fn fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData, argnum: i32) -> PgResult<Oid> {
     let Some(flinfo) = fcinfo.flinfo.as_ref() else {
         return Ok(InvalidOid);

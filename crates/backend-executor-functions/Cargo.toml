@@ -51,3 +51,5 @@ types-portal = { path = "../types-portal" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 # format_type_be for the "could not determine actual type" diagnostic
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+# get_expr_result_type: resolve the call-time (polymorphic) result tupdesc for check_sql_fn_retval
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }

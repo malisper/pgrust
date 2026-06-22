@@ -29,6 +29,7 @@ use types_nodes::rawnodes::SelectStmt;
 
 mod inline_sql;
 mod inline_srf;
+pub use inline_srf::check_sql_fn_retval_public as check_sql_fn_retval;
 mod insert;
 pub use insert::build_on_conflict_excluded_targetlist as BuildOnConflictExcludedTargetlist;
 mod locking;
