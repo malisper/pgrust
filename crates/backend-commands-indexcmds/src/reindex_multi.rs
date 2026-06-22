@@ -107,9 +107,11 @@ pub(crate) fn ReindexPartitions<'mcx>(
 
     debug_assert!(relkind_has_partitions(relkind));
 
-    // The error-context callback (reindex_error_callback) that C pushes around
-    // PreventInTransactionBlock has no counterpart in this repo's RAII error
-    // model; the PreventInTransactionBlock error is raised verbatim.
+    // Check if this runs in a transaction block, with an error callback
+    // (reindex_error_callback) to provide more context under which a problem
+    // happens. The RAII error model has no error_context_stack; instead we
+    // decorate the caught PreventInTransactionBlock error with the same
+    // errcontext() line the callback would have emitted.
     xact_seam::prevent_in_transaction_block::call(
         is_top_level,
         if relkind == RELKIND_PARTITIONED_TABLE {
@@ -117,7 +119,31 @@ pub(crate) fn ReindexPartitions<'mcx>(
         } else {
             "REINDEX INDEX"
         },
-    )?;
+    )
+    .map_err(|mut err| {
+        let relname = lsyscache::get_rel_name::call(mcx, relid)
+            .ok()
+            .flatten()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let relnamespace = lsyscache::get_rel_namespace::call(relid)
+            .ok()
+            .and_then(|nsp| {
+                lsyscache::get_namespace_name::call(mcx, nsp).ok().flatten()
+            })
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if relkind == RELKIND_PARTITIONED_TABLE {
+            err.add_context_line(alloc::format!(
+                "while reindexing partitioned table \"{relnamespace}.{relname}\""
+            ));
+        } else if relkind == RELKIND_PARTITIONED_INDEX {
+            err.add_context_line(alloc::format!(
+                "while reindexing partitioned index \"{relnamespace}.{relname}\""
+            ));
+        }
+        err
+    })?;
 
     // Create special memory context for cross-transaction storage. Since it is
     // a child of PortalContext, it will go away eventually even if we suffer an
