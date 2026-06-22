@@ -381,6 +381,14 @@ thread_local! {
     /// Byte location of the token most recently handed to the grammar (the C
     /// `*yyllocp` that `scanner_yyerror` reads for "at or near").
     static LAST_TOK_LOC: RefCell<c_int> = const { RefCell::new(0) };
+    /// Byte offset of the END of the token most recently handed to the grammar
+    /// (the scanner's read position immediately after lexing it, before any
+    /// grammar lookahead advances the scanner further). C's flex holds a NUL at
+    /// the end of `yytext` for exactly this token, so `scanner_yyerror`'s "at or
+    /// near" snippet spans `[yylloc .. this end]`, NOT up to the live scan pos
+    /// (which may already be past a lookahead token). Without this a body like
+    /// `not even SQL` reports `"not even"` instead of just `"not"`.
+    static LAST_TOK_END: RefCell<c_int> = const { RefCell::new(0) };
     /// `errhint()` text of the in-flight `ereport` (empty = none). The grammar's
     /// Unicode-escape errors carry hints (`gram.y` `errhint("Unicode escapes
     /// must be \\XXXX or \\+XXXXXX.")`); these must reach the client.
@@ -424,6 +432,7 @@ fn clear_last_error() {
     CUR_ERRSTATE.with(|s| *s.borrow_mut() = *b"XX000");
     CUR_ERRPOS.with(|p| *p.borrow_mut() = 0);
     LAST_TOK_LOC.with(|l| *l.borrow_mut() = 0);
+    LAST_TOK_END.with(|l| *l.borrow_mut() = 0);
     CUR_ERRHINT.with(|h| h.borrow_mut().clear());
     CUR_ERRDETAIL.with(|d| d.borrow_mut().clear());
 }
@@ -534,7 +543,20 @@ unsafe fn record_yyerror(message: &str, lloc: c_int, yyscanner: gram::core_yysca
     let scanner = (*(*shim).lexer).scanner();
     let buf = scanner.scanbuf();
     let lloc = lloc.max(0) as usize;
-    let end = scanner.pos().max(lloc).min(buf.len());
+    // The "at or near" snippet spans the offending token only. When the error is
+    // on the token the grammar last received (the common base_yyerror path), use
+    // that token's recorded match end (C's flex-held NUL after yytext) rather
+    // than the live scanner position, which may already be past a lookahead
+    // token. Falls back to the live pos for lexer-error paths whose lloc points
+    // at a token the grammar never received.
+    let last_tok_loc = LAST_TOK_LOC.with(|l| *l.borrow()).max(0) as usize;
+    let last_tok_end = LAST_TOK_END.with(|l| *l.borrow()).max(0) as usize;
+    let raw_end = if lloc == last_tok_loc && last_tok_end > lloc {
+        last_tok_end
+    } else {
+        scanner.pos()
+    };
+    let end = raw_end.max(lloc).min(buf.len());
     let full = if lloc >= buf.len() {
         format!("{message} at end of input")
     } else {
@@ -596,6 +618,14 @@ pub unsafe fn base_yylex(
     // Record the token's start byte for scanner_yyerror's "at or near" (the C
     // *yyllocp the grammar hands back on a syntax error).
     LAST_TOK_LOC.with(|l| *l.borrow_mut() = tok.location);
+    // Record the END of `tok`'s match (the lexer's recorded match end, NOT the
+    // live scanner pos which may already be past a merge-lookahead token like
+    // the `even` peeked after `not`). scanner_yyerror spans [yylloc .. this end]
+    // so a syntax error at `tok` names only `tok`.
+    {
+        let end = (*(*shim).lexer).cur_tok_end();
+        LAST_TOK_END.with(|l| *l.borrow_mut() = end as c_int);
+    }
 
     *llocp = tok.location;
     write_yystype(lvalp, &tok.value);

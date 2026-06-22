@@ -165,6 +165,18 @@ pub struct BaseLexer<'a> {
     lookahead: Option<Token>,
     /// Unicode-to-server seam used by `str_udeescape`.
     unicode_seam: &'a dyn UnicodeToServerSeam,
+    /// Scanner read position immediately after `core_yylex` produced the most
+    /// recent raw token (its match end, before any merge-lookahead advances the
+    /// scanner further). C's flex holds a NUL here for `yytext`. Read by
+    /// [`Self::cur_tok_end`] so `scanner_yyerror`'s "at or near" snippet spans
+    /// only the offending token, not a peeked-ahead lookahead token (e.g.
+    /// `not even SQL` must report `"not"`, not `"not even"`).
+    last_core_end: usize,
+    /// Match end of the buffered lookahead token, if any (paired with
+    /// `lookahead`).
+    lookahead_end: usize,
+    /// Match end of the token most recently RETURNED by [`Self::base_yylex`].
+    returned_tok_end: usize,
 }
 
 impl<'a> BaseLexer<'a> {
@@ -179,7 +191,18 @@ impl<'a> BaseLexer<'a> {
             scanner,
             lookahead: seed,
             unicode_seam,
+            last_core_end: 0,
+            lookahead_end: 0,
+            returned_tok_end: 0,
         }
+    }
+
+    /// Match end (byte offset) of the token most recently returned by
+    /// [`Self::base_yylex`]. The scanner's live `pos()` may already be past a
+    /// merge-lookahead token; this is the end of `yytext` for the returned
+    /// token. Used to bound `scanner_yyerror`'s "at or near" snippet.
+    pub fn cur_tok_end(&self) -> usize {
+        self.returned_tok_end
     }
 
     /// Convert a byte `location` (as produced by the scanner) into the 1-based
@@ -212,6 +235,9 @@ impl<'a> BaseLexer<'a> {
                 if self.scanner.notices.len() > noticed {
                     self.emit_scanner_notices(noticed);
                 }
+                // Record this raw token's match end (scanner read position
+                // before any merge-lookahead). C's flex-held NUL after yytext.
+                self.last_core_end = self.scanner.pos();
                 Ok(tok)
             }
             Err(e) => {
@@ -287,9 +313,16 @@ impl<'a> BaseLexer<'a> {
     pub fn base_yylex(&mut self) -> Result<Token, ParseError> {
         // Get next token --- we might already have it (lookahead/mode seed).
         let mut cur = match self.lookahead.take() {
-            Some(tok) => tok,
+            Some(tok) => {
+                // `cur`'s match end was captured when it was lexed into the
+                // lookahead slot.
+                self.last_core_end = self.lookahead_end;
+                tok
+            }
             None => self.core_yylex()?,
         };
+        // The end of `cur`'s match (before we peek any merge-lookahead).
+        let cur_end = self.last_core_end;
 
         // If this token doesn't require lookahead, just return it.
         let needs_lookahead = matches!(
@@ -303,12 +336,14 @@ impl<'a> BaseLexer<'a> {
                 || t == tokens::USCONST
         );
         if !needs_lookahead {
+            self.returned_tok_end = cur_end;
             return Ok(cur);
         }
 
         // Get next token, saving it as the lookahead.
         let next = self.core_yylex()?;
         let next_token = next.token;
+        self.lookahead_end = self.last_core_end;
         self.lookahead = Some(next.clone());
 
         // Replace cur_token if needed, based on lookahead.
@@ -344,11 +379,19 @@ impl<'a> BaseLexer<'a> {
                 }
             }
             t if t == tokens::UIDENT || t == tokens::USCONST => {
-                return self.finish_uident_usconst(cur);
+                // The returned token's text is the UIDENT/USCONST (and any
+                // UESCAPE clause); its end is the scanner position once
+                // finish_uident_usconst consumes the optional UESCAPE.
+                let tok = self.finish_uident_usconst(cur)?;
+                self.returned_tok_end = self.last_core_end;
+                return Ok(tok);
             }
             _ => {}
         }
 
+        // The merged token (NOT_LA/WITH_LA/...) or the bare cur token: its text
+        // ends at cur_end (the lookahead we peeked is a separate token).
+        self.returned_tok_end = cur_end;
         Ok(cur)
     }
 

@@ -54,6 +54,7 @@ use types_fmgr::FunctionCallInfoBaseData;
 use types_nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use types_nodes::nodes::{CmdType, Node, NodePtr};
 use types_nodes::nodeindexscan::PlannedStmt;
+use types_nodes::parsestmt::RawStmt;
 use types_nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
 use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
 use types_tuple::heaptuple::TupleDescData;
@@ -79,6 +80,48 @@ const PROVOLATILE_VOLATILE: u8 = b'v';
 const TYPTYPE_PSEUDO: u8 = b'p';
 /// `CMD_UTILITY` discriminant (`nodes.h`).
 const CMD_UTILITY: types_nodes::nodes::CmdType = types_nodes::nodes::CmdType::CMD_UTILITY;
+
+/// The body of a SQL function, in the form the execution loop consumes it.
+///
+/// C `sql_compile_callback` raw-parses a text body (`raw_source = true`) up
+/// front but defers `pg_analyze_and_rewrite_withcb` to `prepare_next_query`,
+/// which the postquel loop calls lazily — one statement at a time, AFTER the
+/// prior statement's `CommandCounterIncrement` has made its catalog changes
+/// visible. That lazy analysis is what lets `CREATE TABLE t; INSERT INTO t ...`
+/// work inside one SQL function: the INSERT is parse-analyzed only after the
+/// CREATE has run, so `t` is found. A `prosqlbody` (BEGIN ATOMIC) body is stored
+/// already-analyzed, so it needs no per-statement analysis.
+enum BodyQueries<'mcx> {
+    /// `prosqlbody`: the queries are already parse-analyzed.
+    Analyzed(mcx::PgVec<'mcx, Query<'mcx>>),
+    /// Text `prosrc`: raw parse trees to be analyzed lazily, one before each
+    /// runs, with `sql_fn_parser_setup`/`pinfo` installed.
+    Raw {
+        stmts: mcx::PgVec<'mcx, RawStmt<'mcx>>,
+        prosrc_mcx: &'mcx str,
+        pinfo: types_nodes::parsestmt::SqlFnParseInfo,
+    },
+}
+
+impl<'mcx> BodyQueries<'mcx> {
+    /// Number of body statements (`func->num_queries`).
+    fn num_queries(&self) -> usize {
+        match self {
+            BodyQueries::Analyzed(q) => q.len(),
+            BodyQueries::Raw { stmts, .. } => stmts.len(),
+        }
+    }
+}
+
+/// The resolved result-type facts `check_sql_stmt_retval` validates the body's
+/// final statement against (functions.c `func->rettype` / `rettupdesc` /
+/// `prokind`). Resolved once per call (after polymorphism resolution) and
+/// applied lazily to the final body query when it's analyzed.
+struct RetvalCheck<'mcx> {
+    rettype: Oid,
+    rettupdesc: Option<mcx::PgBox<'mcx, TupleDescData<'mcx>>>,
+    prokind: u8,
+}
 
 // Polymorphic pseudo-type OIDs (pg_type.dat) for `IsPolymorphicType`.
 const ANYELEMENTOID: Oid = 2283;
@@ -400,7 +443,8 @@ fn fmgr_sql<'mcx>(
         proargtypes,
         collation,
     );
-    let mut querytrees = parse_body_queries(mcx, prosrc.as_str(), prosqlbody.as_deref(), &pinfo)?;
+    let body = build_body_queries(mcx, prosrc.as_str(), prosqlbody.as_deref(), &pinfo)
+        .map_err(|e| e.add_context(sql_startup_context(&form.proname)))?;
 
     // ---- check_sql_stmt_retval (functions.c:973-978) ----------------------
     // init_sql_fcache resolves any polymorphism via get_call_result_type, then
@@ -413,16 +457,43 @@ fn fmgr_sql<'mcx>(
     //     AS $$ SELECT $1, 1 $$;  CALL p(1.1, null);   -- resolves to numeric)
     // returns the un-coerced int4 where numeric is expected → wrong-type Datum.
     // (Only the last canSetTag query is coerced; check_sql_fn_retval finds it.)
+    //
+    // C runs this in prepare_next_query when the LAST statement is prepared,
+    // which (for a raw text body) is lazily — after earlier DDL has run. We
+    // therefore resolve the result type here but defer the actual retval check
+    // to the runner, which applies it to the final body query once analyzed.
     let (call_rettype, call_rettupdesc) =
         resolve_call_result_type(mcx, fcinfo, rettype)?;
-    backend_parser_analyze::check_sql_fn_retval(
-        mcx,
-        &mut querytrees[..],
-        call_rettype,
-        call_rettupdesc.as_deref(),
-        form.prokind,
-        false,
-    )?;
+    let retval_check = RetvalCheck {
+        rettype: call_rettype,
+        rettupdesc: call_rettupdesc,
+        prokind: form.prokind,
+    };
+
+    // Edge case (functions.c:1182): an empty body is OK only if the function
+    // returns VOID. Normally check_sql_fn_retval validates the final statement,
+    // but with no statements it is never reached. (This is the `SELECT test1(0)`
+    // empty-body case created with check_function_bodies=off.)
+    if body.num_queries() == 0 && rettype != VOIDOID {
+        // An empty query list makes check_sql_fn_retval take its "final
+        // statement must be SELECT or ... RETURNING" error arm — the same
+        // ERRCODE/message/detail C raises for an empty non-VOID body.
+        let mut empty: [Query<'mcx>; 0] = [];
+        return Err(backend_parser_analyze::check_sql_fn_retval(
+            mcx,
+            &mut empty,
+            retval_check.rettype,
+            retval_check.rettupdesc.as_deref(),
+            retval_check.prokind,
+            false,
+        )
+        .err()
+        .unwrap_or_else(|| {
+            PgError::error("return type mismatch in function")
+                .with_sqlstate(types_error::ERRCODE_INVALID_FUNCTION_DEFINITION)
+        })
+        .add_context(sql_startup_context(&form.proname)));
+    }
 
     // ---- Snapshot management (functions.c:1655) ---------------------------
     // The caller (a containing query) already has an active snapshot. A
@@ -444,8 +515,21 @@ fn fmgr_sql<'mcx>(
     // same postquel loop with an ACCUMULATING receiver that appends each row's
     // column(s) into the active materialize sink, then signals materialize mode.
     if set_returning {
-        let run_result =
-            run_body_setof(mcx, &querytrees, prosrc.as_str(), params, &form.proname);
+        // C functions.c:879: when the function returns VOID no junkfilter is
+        // made, so the result query's setsResult is never set and its output is
+        // thrown away. SETOF VOID therefore yields zero rows regardless of how
+        // many the body's final SELECT produces (e.g. voidtest5's
+        // generate_series). Signal the SETOF runner to discard the result rows.
+        let returns_void = rettype == VOIDOID;
+        let run_result = run_body_setof(
+            mcx,
+            &body,
+            &retval_check,
+            prosrc.as_str(),
+            params,
+            &form.proname,
+            returns_void,
+        );
         if pushed_snapshot {
             let _ = snapmgr::pop_active_snapshot::call();
         }
@@ -467,7 +551,8 @@ fn fmgr_sql<'mcx>(
     let return_rowtype = if returns_tuple { Some(rettype) } else { None };
     let run_result = run_body(
         mcx,
-        &querytrees,
+        &body,
+        &retval_check,
         prosrc.as_str(),
         params,
         &form.proname,
@@ -771,6 +856,42 @@ fn parse_body_queries<'mcx>(
     Ok(out)
 }
 
+/// Build the executable body representation (`sql_compile_callback`'s
+/// `source_list`). For a `prosqlbody` (BEGIN ATOMIC) function the stored trees
+/// are already parse-analyzed (`Analyzed`). For a text body the statements are
+/// raw-parsed up front (`pg_parse_query`) but NOT analyzed — analysis is
+/// deferred per-statement to the execution loop (`prepare_next_query`), so a
+/// later statement sees DDL made visible by an earlier one.
+fn build_body_queries<'mcx>(
+    mcx: Mcx<'mcx>,
+    prosrc: &str,
+    prosqlbody: Option<&str>,
+    pinfo: &types_nodes::parsestmt::SqlFnParseInfo,
+) -> PgResult<BodyQueries<'mcx>> {
+    if let Some(body) = prosqlbody {
+        let n = backend_nodes_core::read::string_to_node(mcx, body)?;
+        let mut out: mcx::PgVec<'mcx, Query<'mcx>> = mcx::PgVec::new_in(mcx);
+        collect_body_queries(mcx, &n, &mut out)?;
+        Ok(BodyQueries::Analyzed(out))
+    } else {
+        // raw_parser borrows its source for 'mcx; re-home prosrc into the arena.
+        let prosrc_mcx: &'mcx str = {
+            let boxed = mcx::alloc_in(mcx, mcx::PgString::from_str_in(prosrc, mcx)?)?;
+            mcx::leak_in(boxed).as_str()
+        };
+        let stmts = backend_parser_driver::raw_parser(
+            mcx,
+            prosrc_mcx,
+            types_parsenodes::RawParseMode::RAW_PARSE_DEFAULT,
+        )?;
+        Ok(BodyQueries::Raw {
+            stmts,
+            prosrc_mcx,
+            pinfo: pinfo.clone(),
+        })
+    }
+}
+
 /// `prepare_sql_fn_parse_info` (functions.c:251) — assemble the SQL-function-body
 /// parse info from the function's `pg_proc` facts and input collation. The
 /// polymorphic-argument resolution C does here against `call_expr` is already
@@ -988,94 +1109,150 @@ fn check_sql_fn_statements(querytrees: &[Query<'_>]) -> PgResult<()> {
 /// completion for a non-set function).
 fn run_body<'mcx>(
     mcx: Mcx<'mcx>,
-    querytrees: &mcx::PgVec<'mcx, Query<'mcx>>,
+    body: &BodyQueries<'mcx>,
+    retval_check: &RetvalCheck<'mcx>,
     source_text: &str,
     params: ParamListInfo,
     fname: &str,
     return_rowtype: Option<Oid>,
     readonly: bool,
 ) -> PgResult<Option<CaptureSlot>> {
-    // Rewrite each query up front (this only takes relation locks, it does not
-    // run the statements), and find the index of the last canSetTag query: that
-    // one delivers the function result. Planning is deferred to the execution
-    // loop below so that DDL earlier in the body (made visible by the per-
-    // statement CommandCounterIncrement) is seen by the planner of a later
-    // statement — e.g. `CREATE TABLE t; INSERT INTO t ...` in one SQL function.
-    // (C functions.c plans each query lazily in the postquel loop for the same
-    // reason; planning all queries up front would make the INSERT's planner fail
-    // to find the not-yet-committed table.)
-    let mut rewritten_queries: alloc::vec::Vec<Query<'mcx>> = alloc::vec::Vec::new();
-    let mut last_setstag: Option<usize> = None;
-
-    for (qi, query) in querytrees.iter().enumerate() {
-        // C functions.c:931 (prepare_next_query, pre-analyzed prosqlbody branch):
-        // AcquireRewriteLocks(parsetree, true, false) before pg_rewrite_query.
-        // A prosqlbody (BEGIN ATOMIC) function stores pre-analyzed Query trees that
-        // never passed through parse analysis, so no relation locks were taken;
-        // without this the executor's ExecOpenScanRelation re-opens each scanned
-        // relation with NoLock and the lock-held-by-me assertion fires. (Re-locking
-        // an already-held AccessShareLock on the prosrc path is a no-op.)
-        //
-        // The rewriter is where an RLS-affected query raises "query would be
-        // affected by row-level security policy" (and similar revalidation
-        // errors). C keeps sql_exec_error_callback on the error_context_stack
-        // for the whole postquel run including this rewrite step, so the body
-        // statement's `SQL function "<fname>" statement <N>` context line must
-        // be attached to errors from rewrite as well, not just execution.
-        let locked = rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)
-            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
-        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)
-            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
-        for rq in rewritten.iter() {
-            if rq.canSetTag {
-                last_setstag = Some(rewritten_queries.len());
-            }
-            rewritten_queries.push(rq.clone_in(mcx)?);
-        }
-    }
-
+    // Faithful to the C postquel loop (functions.c:655): each body statement is
+    // prepared (analyzed for a raw text body, rewritten, retval-checked if it's
+    // the last) lazily — right before it runs, AFTER the prior statement's
+    // CommandCounterIncrement. This is what lets DDL earlier in the body be
+    // seen by a later statement (`CREATE TABLE t; INSERT INTO t ...`): the
+    // INSERT is parse-analyzed only once `t` exists.
+    let num = body.num_queries();
     let mut captured: Option<CaptureSlot> = None;
 
-    for (i, rq) in rewritten_queries.iter().enumerate() {
+    for qi in 0..num {
+        let is_last = qi + 1 == num;
+
         // For a non-read-only (VOLATILE) function, advance the command counter
-        // before each statement so that work done by earlier statements in the
-        // body — including DDL such as CREATE/ALTER TABLE — is visible to this
-        // statement's planning and execution (functions.c:1684). The active
-        // snapshot's command id was already advanced by the caller's snapshot
-        // push; CommandCounterIncrement makes the catalog changes visible.
+        // before preparing/running each statement so that work done by earlier
+        // statements — including DDL such as CREATE/ALTER TABLE — is visible to
+        // this statement's parse analysis, planning and execution
+        // (functions.c:1684). The caller's snapshot push already advanced the
+        // command id; CommandCounterIncrement makes the catalog changes visible.
         if !readonly {
             xact_seams::command_counter_increment::call()?;
         }
 
-        // Utility statements require no planning; C wraps them in a trivial
-        // CMD_UTILITY PlannedStmt (copying canSetTag/utilityStmt/etc.) and
-        // executes them via ProcessUtility on the postquel path
-        // (pg_plan_queries / functions.c postquel_getnext). See run_one_query.
-        // Plan each query here (lazily) rather than up front, so a later
-        // statement sees DDL committed by an earlier one (see comment above).
-        let plan = if rq.commandType == CmdType::CMD_UTILITY {
-            PlannedStmt::for_utility(mcx, rq)?
-        } else {
-            planner_seams::pg_plan_query::call(
-                mcx,
-                rq,
-                source_text,
-                CURSOR_OPT_PARALLEL_OK,
-            )?
-        };
+        // prepare_next_query: analyze (raw body only) + check_sql_fn_statement +
+        // (last only) check_sql_stmt_retval + AcquireRewriteLocks + rewrite.
+        let rewritten =
+            prepare_body_statement(mcx, body, retval_check, qi, is_last, fname)?;
 
-        let is_result = Some(i) == last_setstag;
-        // sql_exec_error_callback (functions.c:1929): any error raised while
-        // executing an identifiable body statement gets the call-stack context
-        // line `SQL function "<fname>" statement <N>` (N = 1-based error_query_index).
-        let cap = run_one_query(mcx, &plan, source_text, params.clone(), is_result, return_rowtype)
-            .map_err(|e| e.add_context(sql_exec_context(fname, i + 1)))?;
-        if is_result {
-            captured = cap;
+        // The rewrite of one body statement may yield several queries (rules);
+        // the last canSetTag one delivers the result when this is the last body
+        // statement.
+        let last_setstag = rewritten
+            .iter()
+            .rposition(|rq| rq.canSetTag);
+
+        for (ri, rq) in rewritten.iter().enumerate() {
+            // Utility statements require no planning; C wraps them in a trivial
+            // CMD_UTILITY PlannedStmt and executes them via ProcessUtility on
+            // the postquel path. See run_one_query.
+            let plan = if rq.commandType == CmdType::CMD_UTILITY {
+                PlannedStmt::for_utility(mcx, rq)?
+            } else {
+                planner_seams::pg_plan_query::call(
+                    mcx,
+                    rq,
+                    source_text,
+                    CURSOR_OPT_PARALLEL_OK,
+                )?
+            };
+
+            let is_result = is_last && Some(ri) == last_setstag;
+            // sql_exec_error_callback (functions.c:1929): any error raised while
+            // executing an identifiable body statement gets the call-stack
+            // context line `SQL function "<fname>" statement <N>` (1-based).
+            let cap = run_one_query(
+                mcx,
+                &plan,
+                source_text,
+                params.clone(),
+                is_result,
+                return_rowtype,
+            )
+            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
+            if is_result {
+                captured = cap;
+            }
         }
     }
 
     Ok(captured)
+}
+
+/// `prepare_next_query` (functions.c:899) for one body statement: analyze a raw
+/// text body statement (with `sql_fn_parser_setup`/`pinfo`), or take the already
+/// parse-analyzed `prosqlbody` query; run `check_sql_fn_statement`; if it's the
+/// last statement run `check_sql_stmt_retval` (coercing the final tlist to the
+/// resolved result type); then `AcquireRewriteLocks` + rewrite. Returns the
+/// rewritten query list for this body statement. All errors are blamed on the
+/// 1-based body statement number (`sql_exec_error_callback`).
+fn prepare_body_statement<'mcx>(
+    mcx: Mcx<'mcx>,
+    body: &BodyQueries<'mcx>,
+    retval_check: &RetvalCheck<'mcx>,
+    qi: usize,
+    is_last: bool,
+    fname: &str,
+) -> PgResult<mcx::PgVec<'mcx, Query<'mcx>>> {
+    // Obtain the analyzed Query for body statement `qi`.
+    let mut analyzed: Query<'mcx> = match body {
+        BodyQueries::Analyzed(queries) => queries[qi].clone_in(mcx)?,
+        BodyQueries::Raw {
+            stmts,
+            prosrc_mcx,
+            pinfo,
+        } => backend_parser_analyze::parse_analyze_sql_function(
+            mcx,
+            &stmts[qi],
+            prosrc_mcx,
+            pinfo.clone(),
+        )
+        .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?,
+    };
+
+    // check_sql_fn_statement (functions.c:2051): disallow CALL of a procedure
+    // with output arguments inside a SQL function.
+    check_sql_fn_statements(core::slice::from_ref(&analyzed))
+        .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
+
+    // check_sql_stmt_retval on the last statement only: validate/coerce the
+    // body's final targetlist against the resolved result type. C runs this in
+    // prepare_next_query(islast); deferring it here (rather than up front) means
+    // a body whose final statement depends on earlier DDL is validated against
+    // the schema that exists once those statements have run.
+    if is_last {
+        let mut one = [analyzed];
+        backend_parser_analyze::check_sql_fn_retval(
+            mcx,
+            &mut one[..],
+            retval_check.rettype,
+            retval_check.rettupdesc.as_deref(),
+            retval_check.prokind,
+            false,
+        )
+        .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
+        let [coerced] = one;
+        analyzed = coerced;
+    }
+
+    // AcquireRewriteLocks (functions.c:931) before rewriting: a prosqlbody tree
+    // never passed parse analysis so holds no relation locks; re-locking an
+    // already-held AccessShareLock on the analyzed path is a no-op. The rewriter
+    // is also where RLS revalidation errors surface, hence the same context line.
+    let locked =
+        rewrite_seams::acquire_rewrite_locks::call(mcx, analyzed, true, false)
+            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
+    rewrite_seams::query_rewrite_canonical::call(mcx, locked)
+        .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))
 }
 
 /// Format the `sql_exec_error_callback` context line (functions.c:1949): the
@@ -1084,6 +1261,16 @@ fn run_body<'mcx>(
 /// failures, which surface on the parse/plan path, not the execution loop).
 fn sql_exec_context(fname: &str, query_index: usize) -> String {
     format!("SQL function \"{}\" statement {}", fname, query_index)
+}
+
+/// `sql_exec_error_callback` context line for the compile/startup phase
+/// (functions.c:1943: `es->status != F_EXEC_RUN` → `SQL function "%s" during
+/// startup`). Emitted when a body parse/analyze/retval-check error surfaces
+/// before the execution loop begins — e.g. an empty-body function created with
+/// check_function_bodies=off whose return-type mismatch is only caught at first
+/// call (the `SELECT test1(0)` case).
+fn sql_startup_context(fname: &str) -> String {
+    format!("SQL function \"{}\" during startup", fname)
 }
 
 /// Run one planned query (`postquel_start` + `postquel_getnext` +
@@ -1227,35 +1414,29 @@ fn accum_receive<'mcx>(mcx: Mcx<'mcx>, _state: u64, slot: &mut SlotData<'mcx>) -
 /// row to `rsinfo->setResult`.
 fn run_body_setof<'mcx>(
     mcx: Mcx<'mcx>,
-    querytrees: &mcx::PgVec<'mcx, Query<'mcx>>,
+    body: &BodyQueries<'mcx>,
+    retval_check: &RetvalCheck<'mcx>,
     source_text: &str,
     params: ParamListInfo,
     fname: &str,
+    returns_void: bool,
 ) -> PgResult<()> {
-    let mut plans: alloc::vec::Vec<PlannedStmt<'mcx>> = alloc::vec::Vec::new();
-    let mut last_setstag: Option<usize> = None;
+    // Like run_body: prepare (analyze/check/retval/rewrite) and run each body
+    // statement lazily so a later statement sees DDL from an earlier one.
+    let num = body.num_queries();
 
-    for (qi, query) in querytrees.iter().enumerate() {
-        // C functions.c:931 (prepare_next_query, pre-analyzed prosqlbody branch):
-        // AcquireRewriteLocks(parsetree, true, false) before pg_rewrite_query.
-        // A prosqlbody (BEGIN ATOMIC) function stores pre-analyzed Query trees that
-        // never passed through parse analysis, so no relation locks were taken;
-        // without this the executor's ExecOpenScanRelation re-opens each scanned
-        // relation with NoLock and the lock-held-by-me assertion fires. (Re-locking
-        // an already-held AccessShareLock on the prosrc path is a no-op.)
-        //
-        // RLS revalidation errors raised by the rewriter need the body
-        // statement's `SQL function "<fname>" statement <N>` context line too
-        // (C keeps sql_exec_error_callback installed across the rewrite step).
-        let locked = rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)
-            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
-        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)
-            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
-        for rq in rewritten.iter() {
+    for qi in 0..num {
+        let is_last = qi + 1 == num;
+
+        // prepare_next_query for this body statement (see run_body).
+        let rewritten =
+            prepare_body_statement(mcx, body, retval_check, qi, is_last, fname)?;
+
+        let last_setstag = rewritten.iter().rposition(|rq| rq.canSetTag);
+
+        for (ri, rq) in rewritten.iter().enumerate() {
             // Utility statements require no planning; C wraps them in a trivial
-            // CMD_UTILITY PlannedStmt (copying canSetTag/utilityStmt/etc.) and
-            // executes them via ProcessUtility on the postquel path
-            // (pg_plan_queries / functions.c postquel_getnext). See run_one_query.
+            // CMD_UTILITY PlannedStmt and executes via ProcessUtility.
             let plan = if rq.commandType == CmdType::CMD_UTILITY {
                 PlannedStmt::for_utility(mcx, rq)?
             } else {
@@ -1266,19 +1447,16 @@ fn run_body_setof<'mcx>(
                     CURSOR_OPT_PARALLEL_OK,
                 )?
             };
-            if plan.canSetTag {
-                last_setstag = Some(plans.len());
-            }
-            plans.push(plan);
-        }
-    }
 
-    for (i, plan) in plans.iter().enumerate() {
-        let is_result = Some(i) == last_setstag;
-        // sql_exec_error_callback (functions.c:1929): attach the running
-        // statement's call-stack context line on any execution error.
-        run_one_query_setof(mcx, plan, source_text, params.clone(), is_result)
-            .map_err(|e| e.add_context(sql_exec_context(fname, i + 1)))?;
+            // A VOID-returning function makes no junkfilter, so even the last
+            // canSetTag query never sets setsResult — its rows are discarded
+            // (functions.c:879). Force the result query onto the discarding path.
+            let is_result = is_last && Some(ri) == last_setstag && !returns_void;
+            // sql_exec_error_callback (functions.c:1929): attach the running
+            // statement's call-stack context line on any execution error.
+            run_one_query_setof(mcx, &plan, source_text, params.clone(), is_result)
+                .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
+        }
     }
 
     Ok(())
