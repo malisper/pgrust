@@ -23898,6 +23898,7 @@ dependencies = [
  "backend-utils-resowner-pc-seams",
  "backend-utils-resowner-resowner-seams",
  "backend-utils-resowner-seams",
+ "backend-utils-time-snapmgr-seams",
  "common-hashfn",
  "seam-core",
  "types-core",

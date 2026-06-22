@@ -315,3 +315,66 @@ seam_core::seam!(
     /// `StartupXLOG`'s crash-recovery (`if (InRecovery)`) block.
     pub fn delete_all_exported_snapshot_files() -> PgResult<()>
 );
+
+// ===========================================================================
+// Resource-owner integration for registered snapshots.
+//
+// C's `RegisterSnapshotOnOwner` (snapmgr.c:834) does
+// `ResourceOwnerRememberSnapshot(owner, snap)` after adding the snapshot to the
+// RegisteredSnapshots set, and `UnregisterSnapshotNoOwner` (snapmgr.c:886) does
+// `ResourceOwnerForgetSnapshot(owner, snapshot)` when the registration drops.
+// The `snapshot_resowner_desc.ReleaseResource = ResOwnerReleaseSnapshot`
+// callback (snapmgr.c:1969) runs `UnregisterSnapshotNoOwner` for any snapshot
+// still registered when the resource owner is released — i.e. a snapshot whose
+// registering executor errored out between `ExecutorStart` and `ExecutorEnd`
+// (e.g. an inner SPI query caught by plpgsql `EXCEPTION WHEN OTHERS`). Without
+// this release path that leaked registration survives to `AtEOXact_Snapshot`,
+// which (on commit) emits `WARNING: registered snapshots seem to remain after
+// cleanup`.
+//
+// The snapmgr owns the canonical `SnapHandle` for each registered snapshot,
+// keyed by its stable `reg_id`; the resowner remembers only that `reg_id`
+// (the value-seam analog of C's `Snapshot` pointer). These seams are installed
+// by the resowner crate, except `release_leaked_snapshot` which the snapmgr
+// owns (the release callback delegates back into it).
+// ===========================================================================
+
+seam_core::seam!(
+    /// `ResourceOwnerEnlarge(owner)` (snapmgr.c, before the snapshot remember).
+    /// Ensures the owner's array has room so the subsequent
+    /// `resource_owner_remember_snapshot` cannot fail. `on_top` selects the
+    /// TopTransactionResourceOwner (large-object registrations) over the
+    /// CurrentResourceOwner. No-op when the chosen owner does not exist
+    /// (bootstrap / no transaction).
+    pub fn resource_owner_enlarge_for_snapshot(on_top: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerRememberSnapshot(owner, snap)` (snapmgr.c). Remember the
+    /// registered snapshot (by its `reg_id`) against the resource owner so a
+    /// (sub)transaction abort releases a leaked registration. `on_top` selects
+    /// the TopTransactionResourceOwner (the snapshot lives for the whole
+    /// transaction) over the CurrentResourceOwner. No-op when the chosen owner
+    /// does not exist. The owner actually used is recorded so the matching
+    /// `resource_owner_forget_snapshot` targets it regardless of later
+    /// `CurrentResourceOwner` drift.
+    pub fn resource_owner_remember_snapshot(reg_id: u64, on_top: bool)
+);
+
+seam_core::seam!(
+    /// `ResourceOwnerForgetSnapshot(CurrentResourceOwner, snapshot)` (snapmgr.c).
+    /// Forget the registration remembered by [`resource_owner_remember_snapshot`]
+    /// when the snapshot's last registration drops. No-op when there is no
+    /// current resource owner.
+    pub fn resource_owner_forget_snapshot(reg_id: u64)
+);
+
+seam_core::seam!(
+    /// `ResOwnerReleaseSnapshot(Datum res)` (snapmgr.c:1969) — the
+    /// `snapshot_resowner_desc` `ReleaseResource` callback. Release a snapshot
+    /// registration that was still held when the resource owner was released
+    /// (a leak on abort). Runs the `UnregisterSnapshotNoOwner` core against the
+    /// snapmgr's canonical `SnapHandle` for `reg_id`, WITHOUT re-forgetting it
+    /// from the (currently-releasing) owner. Owned by the snapmgr crate.
+    pub fn release_leaked_snapshot(reg_id: u64) -> PgResult<()>
+);

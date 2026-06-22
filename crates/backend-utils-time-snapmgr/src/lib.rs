@@ -729,8 +729,28 @@ pub fn RegisterSnapshot(snapshot: Option<&SnapHandle>) -> Option<SnapHandle> {
     Some(RegisterSnapshotOnOwner(snapshot))
 }
 
-/// `RegisterSnapshotOnOwner` (snapmgr.c:834).
+/// `RegisterSnapshotOnOwner` (snapmgr.c:834). Registers against the current
+/// resource owner.
 pub fn RegisterSnapshotOnOwner(snapshot: &SnapHandle) -> SnapHandle {
+    register_snapshot_on(snapshot, false)
+}
+
+/// `RegisterSnapshotOnOwner(snapshot, TopTransactionResourceOwner)` (snapmgr.c)
+/// — registers against the TOP transaction resource owner so the snapshot lives
+/// for the whole transaction (large objects, which keep an MVCC snapshot pinned
+/// across statements). Differs from [`RegisterSnapshotOnOwner`] only in the
+/// resowner-remember target.
+pub fn RegisterSnapshotOnTopOwner(snapshot: &SnapHandle) -> SnapHandle {
+    register_snapshot_on(snapshot, true)
+}
+
+/// Shared body of `RegisterSnapshotOnOwner`; `on_top` selects the
+/// TopTransactionResourceOwner (vs CurrentResourceOwner) as the remember target.
+fn register_snapshot_on(snapshot: &SnapHandle, on_top: bool) -> SnapHandle {
+    // C does `ResourceOwnerEnlarge(owner)` first so the later remember can't OOM
+    // mid-operation. The seam is a no-op when there is no current resource owner.
+    let _ = backend_utils_time_snapmgr_seams::resource_owner_enlarge_for_snapshot::call(on_top);
+
     // Static snapshot? Create a persistent copy.
     let snap_ = if snapshot.borrow().copied {
         snapshot.clone()
@@ -741,7 +761,30 @@ pub fn RegisterSnapshotOnOwner(snapshot: &SnapHandle) -> SnapHandle {
     snap_.borrow_mut().regd_count += 1;
 
     if snap_.borrow().regd_count == 1 {
+        // `pairingheap_add(&RegisteredSnapshots, ...)`. This also stamps the
+        // stable `reg_id` (the value-seam analog of the snapshot's heap-node
+        // pointer identity) that the resowner remembers below.
         with_state(|s| registered_add(s, snap_.clone()));
+
+        // `ResourceOwnerRememberSnapshot(owner, snap)`: remember this snapshot
+        // against the current resource owner so a (sub)transaction abort
+        // releases it if the registering caller errors before unregistering
+        // (e.g. an inner SPI query whose error is caught by plpgsql `EXCEPTION
+        // WHEN OTHERS` — its executor registered es_snapshot but never reaches
+        // ExecutorEnd). The resowner array key is the snapshot's just-stamped
+        // `reg_id`. No-op when there is no current owner.
+        //
+        // C remembers on every RegisterSnapshot call (the owner array carries
+        // one entry per `regd_count`, each a distinct heap-node pointer). Across
+        // the value seam a re-registration of an already-registered snapshot
+        // (`copied` snapshots: the catalog snapshot, the transaction snapshot)
+        // shares one `reg_id`, so tracking only the set-membership transition
+        // (regd_count 0->1 / 1->0) keeps the resowner remember/forget balanced
+        // against the same key while still releasing the leaked executor
+        // registration this fixes. The set-membership entry is the one
+        // `AtEOXact_Snapshot` warns about, so this covers exactly the leak.
+        let reg_id = snap_.borrow().reg_id;
+        backend_utils_time_snapmgr_seams::resource_owner_remember_snapshot::call(reg_id, on_top);
     }
 
     snap_
@@ -755,14 +798,29 @@ pub fn UnregisterSnapshot(snapshot: Option<&SnapHandle>) -> PgResult<()> {
     UnregisterSnapshotFromOwner(snapshot)
 }
 
-/// `UnregisterSnapshotFromOwner` (snapmgr.c:876). The resowner `Forget` is the
-/// caller's responsibility (RAII lifecycle); this is the `NoOwner` core.
+/// `UnregisterSnapshotFromOwner` (snapmgr.c:876). C does
+/// `ResourceOwnerForgetSnapshot(owner, snapshot)` then `UnregisterSnapshotNoOwner`.
+/// The forget here pairs the remember taken at the set-membership transition in
+/// `RegisterSnapshotOnOwner` (see that function): it fires only on the call that
+/// drops `regd_count` to 0 (the same call that removes the snapshot from the
+/// registered set), keeping remember/forget balanced against the shared `reg_id`
+/// for `copied` snapshots that are re-registered across the value seam.
 pub fn UnregisterSnapshotFromOwner(snapshot: &SnapHandle) -> PgResult<()> {
+    // `ResourceOwnerForgetSnapshot(owner, snapshot)`. No-op when there is no
+    // current resource owner. Only the last registration was remembered (the
+    // set-membership entry), so only the last unregister forgets.
+    if snapshot.borrow().regd_count == 1 {
+        let reg_id = snapshot.borrow().reg_id;
+        backend_utils_time_snapmgr_seams::resource_owner_forget_snapshot::call(reg_id);
+    }
     UnregisterSnapshotNoOwner(snapshot)
 }
 
 /// `UnregisterSnapshotNoOwner` (snapmgr.c:886) — also the
-/// `ResOwnerReleaseSnapshot` resource-owner callback target.
+/// `ResOwnerReleaseSnapshot` resource-owner callback target (which is exactly
+/// why this must NOT touch the resource owner: the owner is mid-release and
+/// forbids Forget once release has started; the leaked entry is removed from the
+/// releasing owner's array by `ResourceOwnerReleaseAll` itself).
 pub fn UnregisterSnapshotNoOwner(snapshot: &SnapHandle) -> PgResult<()> {
     debug_assert!(snapshot.borrow().regd_count > 0);
     debug_assert!(with_state(|s| !registered_is_empty(s)));
@@ -780,6 +838,28 @@ pub fn UnregisterSnapshotNoOwner(snapshot: &SnapHandle) -> PgResult<()> {
         // FreeSnapshot: dropping the manager's last tracked reference reclaims
         // it (the caller's handle drops at its own scope end).
         SnapshotResetXmin()?;
+    }
+    Ok(())
+}
+
+/// `ResOwnerReleaseSnapshot(Datum res)` (snapmgr.c:1969) — the
+/// `snapshot_resowner_desc` `ReleaseResource` callback. Releases a registration
+/// that was still held when its resource owner was released — i.e. a snapshot
+/// whose registering executor (or other RegisterSnapshot caller) errored out
+/// before reaching `UnregisterSnapshot` (e.g. an inner SPI query caught by a
+/// plpgsql `EXCEPTION WHEN OTHERS`). Recovers the snapmgr's canonical
+/// `SnapHandle` by `reg_id` and runs the `NoOwner` core (no Forget: the owner is
+/// mid-release). A `reg_id` no longer present in the set means the registration
+/// was already dropped through the normal path, so this is a no-op.
+pub fn ResOwnerReleaseSnapshot(reg_id: u64) -> PgResult<()> {
+    let handle = with_state(|s| {
+        s.registered
+            .iter()
+            .find(|h| h.borrow().reg_id == reg_id)
+            .cloned()
+    });
+    if let Some(handle) = handle {
+        UnregisterSnapshotNoOwner(&handle)?;
     }
     Ok(())
 }
@@ -1602,6 +1682,7 @@ pub fn init_seams() {
     seams::with_transaction_snapshot::set(with_transaction_snapshot);
     seams::snapshot_set_command_id::set(SnapshotSetCommandId);
     seams::at_eoxact_snapshot::set(AtEOXact_Snapshot);
+    seams::release_leaked_snapshot::set(ResOwnerReleaseSnapshot);
     seams::at_subcommit_snapshot::set(AtSubCommit_Snapshot);
     seams::at_subabort_snapshot::set(AtSubAbort_Snapshot);
     seams::xact_has_exported_snapshots::set(XactHasExportedSnapshots);
@@ -1675,12 +1756,15 @@ pub fn init_seams() {
         UpdateActiveSnapshotCommandId()
     });
     seams::register_snapshot_on_top_owner::set(|snapshot| {
-        let regd = RegisterSnapshotOnOwner(&new_handle((*snapshot).clone()));
+        // C registers a large object's snapshot on the TopTransactionResourceOwner
+        // so it lives for the whole transaction (across statements/portals).
+        let regd = RegisterSnapshotOnTopOwner(&new_handle((*snapshot).clone()));
         let snap = regd.borrow().clone();
         Ok(std::rc::Rc::new(snap))
     });
     seams::unregister_snapshot_from_top_owner::set(|snapshot| {
-        // `NoOwner` core; the resowner `Forget` is the caller's RAII business.
+        // Forgets against the owner recorded at registration (the top-transaction
+        // owner), looked up by reg_id, so it balances the top-owner remember.
         UnregisterSnapshotFromOwner(&new_handle((*snapshot).clone()))
     });
 

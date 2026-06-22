@@ -40,6 +40,9 @@ mod ac {
 mod rcr {
     pub use backend_utils_cache_relcache_seams::*;
 }
+mod sm {
+    pub use backend_utils_time_snapmgr_seams::*;
+}
 
 /// `Option<ResourceOwner>` → the seam carrier (`ResourceOwner::NULL` for None).
 fn flat(o: Option<ResourceOwner>) -> ResourceOwner {
@@ -126,6 +129,65 @@ static RELCACHE_DESC: types_resowner::ResourceOwnerDesc = types_resowner::Resour
     ReleaseResource: Some(release_relation_ref),
     DebugPrint: Some(print_relation_ref),
 };
+
+// ===========================================================================
+// Registered-snapshot ResourceOwnerDesc (`snapshot_resowner_desc`, defined in
+// snapmgr.c). The release callback delegates to the snapmgr crate through the
+// `release_leaked_snapshot` seam (which runs `ResOwnerReleaseSnapshot` /
+// `UnregisterSnapshotNoOwner`). The remembered `Datum` is the snapshot's stable
+// `reg_id` (the value-seam analog of the C `Snapshot` pointer). Release runs in
+// the AFTER_LOCKS phase, matching C's `snapshot_resowner_desc.release_phase`.
+// ===========================================================================
+
+// The resource owner a snapshot's set-membership registration was remembered
+// against, keyed by `reg_id`. C reaches the owner through the snapshot's
+// pointer identity at unregister time (`UnregisterSnapshotFromOwner` is called
+// with the same owner that registered it); across the value seam the snapmgr
+// only round-trips `reg_id`, and `CurrentResourceOwner` may differ between the
+// register and the matching unregister (e.g. a snapshot held across a
+// CREATE INDEX, which switches the active resource owner). Remembering the
+// owner here lets the forget target the SAME owner that holds the entry,
+// keeping the resowner array balanced regardless of `CurrentResourceOwner`
+// drift.
+thread_local! {
+    static SNAPSHOT_OWNERS: std::cell::RefCell<std::collections::HashMap<u64, ResourceOwner>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn release_leaked_snapshot(res: Datum) {
+    let reg_id = res.as_u64();
+    // The owner is mid-release and is removing this entry itself, so just drop
+    // our owner-tracking record before delegating the unregister to the snapmgr.
+    SNAPSHOT_OWNERS.with(|m| m.borrow_mut().remove(&reg_id));
+    sm::release_leaked_snapshot::call(reg_id)
+        .expect("ResOwnerReleaseSnapshot: leaked snapshot registration release failed");
+}
+
+fn print_snapshot_ref(res: Datum) -> Option<String> {
+    // C prints `snapshot %p`; the address is meaningless across the value seam,
+    // so identify the leak by its registration id instead.
+    Some(format!("snapshot with reg_id {}", res.as_u64()))
+}
+
+static SNAPSHOT_DESC: types_resowner::ResourceOwnerDesc = types_resowner::ResourceOwnerDesc {
+    name: None, // "snapshot reference" — rendered via DebugPrint below
+    release_phase: RESOURCE_RELEASE_AFTER_LOCKS,
+    release_priority: types_resowner::RELEASE_PRIO_SNAPSHOT_REFS,
+    ReleaseResource: Some(release_leaked_snapshot),
+    DebugPrint: Some(print_snapshot_ref),
+};
+
+/// The resource owner a snapshot registration targets: the
+/// TopTransactionResourceOwner for `RegisterSnapshotOnTopOwner` (large objects,
+/// whose snapshot must outlive individual statements) or the CurrentResourceOwner
+/// otherwise. `None` when the chosen owner does not exist.
+fn snapshot_target_owner(on_top: bool) -> Option<ResourceOwner> {
+    if on_top {
+        TopTransactionResourceOwner()
+    } else {
+        CurrentResourceOwner()
+    }
+}
 
 /// Get the current resource owner, erroring if there is none (the bufmgr
 /// remember/forget seams require `CurrentResourceOwner != NULL`).
@@ -416,6 +478,42 @@ pub fn install() {
             &RELCACHE_DESC,
         )
         .expect("ResourceOwnerForgetRelationRef");
+    });
+
+    // --- snapmgr-seams (registered-snapshot resowner bookkeeping) ----------
+    // `ResourceOwnerEnlarge(owner)` / `ResourceOwnerRememberSnapshot(owner, snap)`
+    // / `ResourceOwnerForgetSnapshot(owner, snapshot)` (snapmgr.c). The
+    // remembered Datum is the snapshot's stable `reg_id`. Unlike the relcache
+    // pins, RegisterSnapshot can run with no current resource owner (e.g. the
+    // catalog snapshot during early startup / bootstrap), so a NULL owner is a
+    // tolerated no-op rather than an error — the snapshot then has no abort-time
+    // release path, which matches C (`RegisterSnapshotOnOwner(snap, NULL)`).
+    sm::resource_owner_enlarge_for_snapshot::set(|on_top| {
+        match snapshot_target_owner(on_top) {
+            Some(owner) => ResourceOwnerEnlarge(owner),
+            None => Ok(()),
+        }
+    });
+
+    sm::resource_owner_remember_snapshot::set(|reg_id, on_top| {
+        if let Some(owner) = snapshot_target_owner(on_top) {
+            ResourceOwnerRemember(owner, Datum::from_u64(reg_id), &SNAPSHOT_DESC)
+                .expect("ResourceOwnerRememberSnapshot");
+            SNAPSHOT_OWNERS.with(|m| m.borrow_mut().insert(reg_id, owner));
+        }
+    });
+
+    sm::resource_owner_forget_snapshot::set(|reg_id| {
+        // Forget against the owner that actually holds this registration (the
+        // one captured at remember time), not `CurrentResourceOwner`, which may
+        // have changed since (e.g. a snapshot held across a CREATE INDEX). If
+        // the registration was taken with no owner (None at remember time, so
+        // nothing recorded), there is nothing to forget.
+        let owner = SNAPSHOT_OWNERS.with(|m| m.borrow_mut().remove(&reg_id));
+        if let Some(owner) = owner {
+            ResourceOwnerForget(owner, Datum::from_u64(reg_id), &SNAPSHOT_DESC)
+                .expect("ResourceOwnerForgetSnapshot");
+        }
     });
 
     // --- aio-completion-seams: AIO-handle resowner registry ----------------
