@@ -10,3 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+types-error = { path = "../types-error" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

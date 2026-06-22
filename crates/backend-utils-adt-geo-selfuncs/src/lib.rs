@@ -20,11 +20,78 @@
 #![allow(clippy::unreadable_literal)]
 
 use types_core::primitive::Selectivity;
+use types_datum::Datum;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-/// This crate owns no inward seams (its entry points are reached through the
-/// selfuncs fmgr dispatch by `pg_proc` OID), so there is nothing to install.
-/// Mirrors `backend-utils-adt-array-selfuncs::init_seams`.
-pub fn init_seams() {}
+/// Install this crate's contributions. The selectivity estimators are reached
+/// through the selfuncs fmgr dispatch by `pg_proc` OID (so there is no seam to
+/// install), but they MUST also live in the fmgr builtin REGISTRY so that
+/// `fmgr_internal_function(prosrc)` resolves their names — `CREATE OPERATOR`
+/// (and `CREATE FUNCTION ... LANGUAGE internal`) validates an operator's
+/// `RESTRICT`/`JOIN` (and an internal function's `prosrc`) against that registry
+/// via `fmgr_internal_validator`. Without these rows, `CREATE OPERATOR (...,
+/// RESTRICT = contsel, JOIN = contjoinsel)` fails with "there is no built-in
+/// function named". Register them here (the crate's natural installer).
+pub fn init_seams() {
+    register_geo_selfuncs_builtins();
+}
+
+/// Register the geometric selectivity estimators (C: their `fmgr_builtins[]`
+/// rows) into the fmgr-core builtin table. OIDs / nargs / strict / retset are
+/// transcribed from `pg_proc.dat` (all `proisstrict => 't'`, none retset). These
+/// are dispatched by the planner by OID, but the fmgr-callable native bodies are
+/// also wired (they ignore every argument and return the constant, exactly as
+/// the C entry points do) so a direct `OidFunctionCall*` resolves identically.
+fn register_geo_selfuncs_builtins() {
+    fn entry(
+        foid: u32,
+        name: &str,
+        nargs: i16,
+        native: PgFnNative,
+    ) -> (BuiltinFunction, PgFnNative) {
+        (
+            BuiltinFunction {
+                foid,
+                name: name.to_string(),
+                nargs,
+                strict: true,
+                retset: false,
+                func: None,
+            },
+            native,
+        )
+    }
+    backend_utils_fmgr_core::register_builtins_native([
+        entry(139, "areasel", 4, fc_areasel),
+        entry(140, "areajoinsel", 5, fc_areajoinsel),
+        entry(1300, "positionsel", 4, fc_positionsel),
+        entry(1301, "positionjoinsel", 5, fc_positionjoinsel),
+        entry(1302, "contsel", 4, fc_contsel),
+        entry(1303, "contjoinsel", 5, fc_contjoinsel),
+    ]);
+}
+
+/// `PG_RETURN_FLOAT8(constant)` — the fmgr-1 native body shape for each bogus
+/// constant estimator (ignores `fcinfo`, returns the constant as a `float8`
+/// Datum).
+fn fc_areasel(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(Datum::from_f64(areasel()))
+}
+fn fc_areajoinsel(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(Datum::from_f64(areajoinsel()))
+}
+fn fc_positionsel(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(Datum::from_f64(positionsel()))
+}
+fn fc_positionjoinsel(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(Datum::from_f64(positionjoinsel()))
+}
+fn fc_contsel(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(Datum::from_f64(contsel()))
+}
+fn fc_contjoinsel(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(Datum::from_f64(contjoinsel()))
+}
 
 /*
  *	Selectivity functions for geometric operators.  These are bogus -- unless

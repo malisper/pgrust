@@ -20232,7 +20232,11 @@ dependencies = [
 name = "backend-utils-adt-geo-selfuncs"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
 ]
 
 [[package]]
