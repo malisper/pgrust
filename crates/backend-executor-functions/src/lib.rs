@@ -291,6 +291,83 @@ fn composite_receive<'mcx>(
         .tts_tupleDescriptor
         .as_ref()
         .ok_or_else(|| PgError::error("fmgr_sql: composite result slot has no descriptor"))?;
+
+    // Named composite whose declared rowtype has DROPPED columns: the body's
+    // `SELECT *` slot carries only the LIVE columns, but the declared rowtype's
+    // physical descriptor still has the dropped-attribute slots. Forming the
+    // composite against the live-only descriptor and merely stamping the declared
+    // OID leaves the columns AFTER the dropped slot misaligned (they shift up by
+    // one, and the last live column falls off). C's junkfilter maps the body
+    // tlist onto the full rettupdesc, inserting a NULL for each dropped slot.
+    // Reproduce that: deform the live row and re-form it against the declared
+    // rowtype descriptor, NULL-filling dropped attribute positions.
+    if rettype != RECORDOID {
+        let declared = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+            mcx, rettype, -1,
+        )?;
+        let phys_natts = declared.natts.max(0) as usize;
+        let has_dropped = declared.attrs.iter().any(|a| a.attisdropped);
+        if has_dropped {
+            let live_natts = slot_desc.natts.max(0);
+            let mut src: alloc::vec::Vec<(CanonDatum<'mcx>, bool)> =
+                alloc::vec::Vec::with_capacity(live_natts as usize);
+            for attnum in 1..=live_natts {
+                let (value, isnull) = backend_executor_execTuples::slot_deform::slot_getattr(
+                    mcx, slot, attnum as i16,
+                )?;
+                src.push((value, isnull));
+            }
+            let mut values: alloc::vec::Vec<CanonDatum<'mcx>> =
+                alloc::vec::Vec::with_capacity(phys_natts);
+            let mut nulls: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(phys_natts);
+            let mut srci = src.into_iter();
+            for i in 0..phys_natts {
+                if declared.attrs[i].attisdropped {
+                    values.push(CanonDatum::default());
+                    nulls.push(true);
+                    continue;
+                }
+                match srci.next() {
+                    Some((v, n)) => {
+                        values.push(v);
+                        nulls.push(n);
+                    }
+                    None => {
+                        values.push(CanonDatum::default());
+                        nulls.push(true);
+                    }
+                }
+            }
+            let mut desc: TupleDescData<'mcx> = declared.clone_in(mcx)?;
+            desc.tdtypeid = rettype;
+            desc.tdtypmod = -1;
+            let formed = backend_access_common_heaptuple::heap_form_tuple(
+                mcx, &desc, &values, &nulls,
+            )
+            .map_err(|e| PgError::error(format!("fmgr_sql: heap_form_tuple (dropped cols): {e:?}")))?;
+            let datum = backend_access_common_heaptuple::HeapTupleGetDatum(mcx, &formed, &desc)?;
+            let image = match datum {
+                CanonDatum::ByRef(b) => b.as_slice().to_vec(),
+                CanonDatum::Composite(t) => t.to_datum_image(),
+                other => {
+                    return Err(PgError::error(format!(
+                        "fmgr_sql: composite result Datum is not a by-reference image: {other:?}"
+                    )))
+                }
+            };
+            CAPTURES.with(|c| {
+                let mut map = c.borrow_mut();
+                if let Some(slot_state) = map.get_mut(&state) {
+                    slot_state.got_row = true;
+                    slot_state.value = 0;
+                    slot_state.ref_payload = Some(RefPayload::Composite(image));
+                    slot_state.isnull = false;
+                }
+            });
+            return Ok(true);
+        }
+    }
+
     let mut desc: TupleDescData<'mcx> = slot_desc.clone_in(mcx)?;
     if rettype != RECORDOID {
         // Named composite: stamp the declared rowtype identity.
