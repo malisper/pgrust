@@ -128,8 +128,8 @@ seam_core::seam!(
         depender: ObjectAddress,
         expr: &types_nodes::nodes::Node<'mcx>,
         rel_id: Oid,
+        behavior: types_catalog::catalog_dependency::DependencyType,
         self_behavior: types_catalog::catalog_dependency::DependencyType,
-        other_behavior: types_catalog::catalog_dependency::DependencyType,
         reverse_self: bool,
     ) -> PgResult<()>
 );

@@ -97,15 +97,15 @@ fn seam_record_dependency_on_single_rel_expr(
     depender: ObjectAddress,
     expr: &Node<'_>,
     rel_id: types_core::primitive::Oid,
+    behavior: DependencyType,
     self_behavior: DependencyType,
-    other_behavior: DependencyType,
     reverse_self: bool,
 ) -> PgResult<()> {
     crate::recordDependencyOnSingleRelExpr(
         &depender,
         expr,
         rel_id,
-        other_behavior,
+        behavior,
         self_behavior,
         reverse_self,
     )
