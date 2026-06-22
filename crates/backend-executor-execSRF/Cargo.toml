@@ -244,5 +244,6 @@ types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
 [dev-dependencies]

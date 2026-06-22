@@ -197,7 +197,20 @@ pub fn fmgr_lookup_by_name(name: &str) -> Option<BuiltinFunction> {
 pub fn fmgr_internal_function(proname: &str) -> Oid {
     match fmgr_lookup_by_name(proname) {
         Some(fbp) => fbp.foid,
-        None => InvalidOid,
+        // Set-returning built-ins do NOT live in the scalar by-name fmgr
+        // registry (`fmgr_builtins[]` here) — they live in the executor-frame
+        // SRF table (`backend-executor-execSRF`'s by-OID registry), the WONTFIX
+        // dual-home split. C's `fmgr_builtins[]` is the SINGLE home for both, so
+        // `fmgr_lookupByName` finds an SRF there; here we must additionally
+        // consult the canonical `(oid, name, …, retset)` table — the runtime
+        // counterpart of `Gen_fmgrtab.pl` — for a set-returning name. This makes
+        // `CREATE FUNCTION ... LANGUAGE internal AS $$generate_series_int4$$`
+        // validate, matching C's `OidIsValid(fmgr_internal_function(prosrc))`.
+        None => builtin_canonical::CANONICAL
+            .iter()
+            .find(|&&(_oid, name, _nargs, _strict, retset)| retset && name == proname)
+            .map(|&(oid, ..)| oid)
+            .unwrap_or(InvalidOid),
     }
 }
 

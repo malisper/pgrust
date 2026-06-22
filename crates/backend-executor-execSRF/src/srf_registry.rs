@@ -53,6 +53,46 @@ pub fn srf_is_registered(foid: Oid) -> bool {
     table().lock().expect("SRF table lock").contains_key(&foid)
 }
 
+/// Resolve a built-in SRF's `prosrc` name (e.g. `"generate_series_int4"`) to its
+/// executor-frame `PGFunction` core, mirroring C's `fmgr_lookupByName` over the
+/// `fmgr_builtins[]` table — except that in C the SAME `PGFunction` serves both
+/// scalar and set-returning calls, while here the executor-frame SRF core lives
+/// in this OID-keyed table, NOT in the scalar `fmgr-core` by-name registry.
+///
+/// The bridge is the canonical `(oid, name, …, retset)` table (the runtime
+/// counterpart of `Gen_fmgrtab.pl`'s `fmgr_builtins[]`): we map the `prosrc`
+/// name to its canonical OID and then look that OID up in this registry. A name
+/// that is not a registered executor-frame SRF returns `None` (the caller raises
+/// C's `there is no built-in function named "%s"`).
+///
+/// This is the by-NAME half of the dual-home bridge: it lets `CREATE FUNCTION
+/// ... LANGUAGE internal AS $$generate_series_int4$$` validate (the prosrc names
+/// a real built-in SRF) and lets a call through a USER pg_proc OID re-dispatch
+/// to the underlying built-in SRF core (see [`srf_resolve_by_oid_or_name`]).
+pub fn srf_lookup_by_name(proname: &str) -> Option<SrfFunction> {
+    let foid = srf_oid_for_name(proname)?;
+    table().lock().expect("SRF table lock").get(&foid).copied()
+}
+
+/// The canonical OID a built-in SRF `prosrc` name maps to, iff that name is a
+/// set-returning built-in (`retset == true`) in the canonical `fmgr_builtins[]`
+/// counterpart. `None` for a non-set built-in name or an unknown name.
+fn srf_oid_for_name(proname: &str) -> Option<Oid> {
+    backend_utils_fmgr_core::builtin_canonical::CANONICAL
+        .iter()
+        .find(|&&(_oid, name, _nargs, _strict, retset)| retset && name == proname)
+        .map(|&(oid, ..)| oid)
+}
+
+/// Whether `proname` names a registered built-in set-returning function — the
+/// executor-frame counterpart of `OidIsValid(fmgr_internal_function(prosrc))`
+/// for the SRF case. The CREATE FUNCTION `LANGUAGE internal` validator
+/// (`fmgr_internal_validator`) consults this so an SRF prosrc passes the
+/// `there is no built-in function named "%s"` gate.
+pub fn srf_name_is_builtin(proname: &str) -> bool {
+    srf_lookup_by_name(proname).is_some()
+}
+
 /// The outcome of dispatching one SRF call frame: either a builtin
 /// executor-frame `PGFunction` produced a per-call (or in-frame materialize)
 /// `Datum` result, or a USER (plpgsql/SQL) function ran the SFRM_Materialize
@@ -86,8 +126,41 @@ pub fn srf_invoke_by_oid<'mcx>(
     let func = table().lock().expect("SRF table lock").get(&foid).copied();
     match func {
         Some(f) => Ok(SrfDispatch::Builtin(f(fcinfo)?)),
-        None => dispatch_user_setof(foid, fcinfo),
+        // An OID with no executor-frame SRF registered is one of:
+        //   (a) a USER `LANGUAGE internal` function whose `prosrc` names a
+        //       built-in SRF (e.g. `CREATE FUNCTION my_gen_series(...) ...
+        //       AS $$generate_series_int4$$`). C's `fmgr_info` resolves the
+        //       prosrc to the built-in's address; here we re-dispatch through
+        //       the by-NAME bridge to the underlying built-in SRF core, running
+        //       it over the SAME live frame (its `resultinfo` carries the
+        //       `ReturnSetInfo`).
+        //   (b) a USER plpgsql/SQL SETOF function (the C `fmgr_isbuiltin` miss),
+        //       which materializes through the fmgr path.
+        None => match resolve_internal_srf_core(foid) {
+            Some(f) => Ok(SrfDispatch::Builtin(f(fcinfo)?)),
+            None => dispatch_user_setof(foid, fcinfo),
+        },
     }
+}
+
+/// For an OID absent from the executor-frame SRF table, read its `pg_proc`
+/// language + `prosrc`; if it is a `LANGUAGE internal` function whose `prosrc`
+/// names a registered built-in SRF, return that built-in's executor-frame core.
+/// `None` for any other case (plpgsql/SQL/C function, or a prosrc that is not a
+/// known built-in SRF). This is the call-time counterpart of C's `fmgr_info`
+/// setting `finfo->fn_addr` to the built-in's address for a `LANGUAGE internal`
+/// pg_proc row — the dual-home bridge resolving the USER OID to the shared core.
+fn resolve_internal_srf_core(foid: Oid) -> Option<SrfFunction> {
+    use types_fmgr::resolution::ProcLanguage;
+
+    let scratch = mcx::MemoryContext::new("resolve_internal_srf_core");
+    let proc =
+        backend_utils_cache_syscache_seams::lookup_proc::call(scratch.mcx(), foid).ok()??;
+    if !matches!(proc.language, ProcLanguage::Internal) {
+        return None;
+    }
+    let prosrc = proc.prosrc.as_ref().map(|s| s.as_str())?;
+    srf_lookup_by_name(prosrc)
 }
 
 /// Dispatch a USER (plpgsql / SQL-language) SETOF function through the fmgr
