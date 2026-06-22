@@ -575,8 +575,14 @@ fn unit_and_space(flags: i32) -> (&'static str, &'static str) {
 // ---------------------------------------------------------------------------
 
 fn check_hook_error(name: &str, fallback: String) -> PgError {
+    let _ = name;
+    // When the hook supplied no message and left the default errcode,
+    // `guc_check_error_to_pg_error_or` returns None; C then falls back to the
+    // value-specific `invalid value for parameter "name": "value"` message,
+    // which the caller already built into `fallback`.
+    let fallback2 = fallback.clone();
     crate::guc_check_error_to_pg_error_or(fallback)
-        .unwrap_or_else(|| err(ERRCODE_INVALID_PARAMETER_VALUE, format!("invalid value for parameter \"{name}\"")))
+        .unwrap_or_else(|| err(ERRCODE_INVALID_PARAMETER_VALUE, fallback2))
 }
 
 fn call_bool_check_hook(
@@ -1945,51 +1951,71 @@ pub fn reset_all_options(reg: &mut GucRegistry) {
 }
 
 fn reset_one(var: &mut GucVariable) {
+    // C's `ResetAllOptions` re-applies the variable's `reset_val` *with* its
+    // saved `reset_extra` (the boot/reset-time check-hook payload), and copies
+    // `reset_extra` back into `gen.extra` (set_extra_field). Passing `None` for
+    // the extra here panics any assign hook that downcasts a required payload
+    // (e.g. client_encoding, datestyle, timezone, session_authorization).
     match var {
         GucVariable::Bool(c) => {
             c.value = Some(c.reset_val);
             if let Some(slot) = c.assign_hook {
-                (slot.get())(c.reset_val, None);
+                if slot.installed() {
+                    (slot.get())(c.reset_val, c.reset_extra.as_deref());
+                }
             }
             if c.variable.installed() {
                 c.variable.write(c.reset_val);
             }
+            c.gen.extra = c.reset_extra.clone();
         }
         GucVariable::Int(c) => {
             c.value = Some(c.reset_val);
             if let Some(slot) = c.assign_hook {
-                (slot.get())(c.reset_val, None);
+                if slot.installed() {
+                    (slot.get())(c.reset_val, c.reset_extra.as_deref());
+                }
             }
             if c.variable.installed() {
                 c.variable.write(c.reset_val);
             }
+            c.gen.extra = c.reset_extra.clone();
         }
         GucVariable::Real(c) => {
             c.value = Some(c.reset_val);
             if let Some(slot) = c.assign_hook {
-                (slot.get())(c.reset_val, None);
+                if slot.installed() {
+                    (slot.get())(c.reset_val, c.reset_extra.as_deref());
+                }
             }
             if c.variable.installed() {
                 c.variable.write(c.reset_val);
             }
+            c.gen.extra = c.reset_extra.clone();
         }
         GucVariable::String(c) => {
             if let Some(slot) = c.assign_hook {
-                (slot.get())(c.reset_val.as_deref(), None);
+                if slot.installed() {
+                    (slot.get())(c.reset_val.as_deref(), c.reset_extra.as_deref());
+                }
             }
             if c.variable.installed() {
                 c.variable.write(c.reset_val.clone());
             }
             c.value = Some(c.reset_val.clone());
+            c.gen.extra = c.reset_extra.clone();
         }
         GucVariable::Enum(c) => {
             c.value = Some(c.reset_val);
             if let Some(slot) = c.assign_hook {
-                (slot.get())(c.reset_val, None);
+                if slot.installed() {
+                    (slot.get())(c.reset_val, c.reset_extra.as_deref());
+                }
             }
             if c.variable.installed() {
                 c.variable.write(c.reset_val);
             }
+            c.gen.extra = c.reset_extra.clone();
         }
     }
     let reset_source = var.gen().reset_source;
