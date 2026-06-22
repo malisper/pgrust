@@ -209,17 +209,6 @@ fn populate_recordset_worker<'mcx>(
 ) -> PgResult<Datum<'mcx>> {
     let json_arg_num = if have_record_arg { 1 } else { 0 };
 
-    // rsi = (ReturnSetInfo *) fcinfo->resultinfo;
-    // if (!rsi || !IsA(rsi, ReturnSetInfo)) ereport("set-valued function ...")
-    // if (!(rsi->allowedModes & SFRM_Materialize)) ereport("materialize mode ...")
-    // rsi->returnMode = SFRM_Materialize;
-    //
-    // The repo `InitMaterializedSRF` seam performs exactly these rsinfo checks
-    // (set-valued-context / SFRM_Materialize / returnMode) plus the
-    // tuplestore + setDesc setup that C does manually further down (4127-4132,
-    // 4208-4209). We use it for the equivalent observable effect.
-    funcapi::InitMaterializedSRF::call(fcinfo, types_nodes::funcapi::MAT_SRF_BLESS)?;
-
     // First time through (no fn_extra cache in the trimmed frame): identify the
     // input/result record type. (See PopulateRecordCacheLocal.)
     let mut cache = PopulateRecordCacheLocal {
@@ -275,13 +264,11 @@ fn populate_recordset_worker<'mcx>(
         }
     }
 
-    // if the json is null send back an empty set
-    if backend_utils_fmgr_fmgr_seams::pg_argisnull::call(fcinfo_ref, json_arg_num) {
-        return Ok(Datum::null());
-    }
-
     // Forcibly update the cached tupdesc, to ensure we have the right tupdesc to
-    // return even if the JSON contains no rows.
+    // return even if the JSON contains no rows. (C jsonfuncs.c:4117 — done
+    // before the tuplestore is created, after the null-json short-circuit; we
+    // hoist it ahead of the null check so the materialize-mode `ReturnSetInfo`
+    // can be set up with the resolved descriptor in all cases — see below.)
     {
         let io = match &mut cache.c.io {
             ColumnIOUnion::Composite(c) => c,
@@ -292,6 +279,36 @@ fn populate_recordset_worker<'mcx>(
             }
         };
         update_cached_tupdesc(mcx, io)?;
+    }
+
+    // The result row type is the INPUT-RECORD's cached composite tupdesc (C
+    // jsonfuncs.c:4204-4205: `rsi->setDesc = CreateTupleDescCopy(
+    // cache->c.io.composite.tupdesc)`), NOT the query's column-def-list. Set up
+    // the materialize-mode `ReturnSetInfo` here — the rsinfo validity /
+    // SFRM_Materialize checks, the `tuplestore_begin_heap`, `returnMode`, and
+    // `setResult`/`setDesc` block C runs by hand (4051-4066, 4127-4132,
+    // 4204-4205). Crucially this does NOT route through
+    // `InitMaterializedSRF`/`get_call_result_type`, which would reject the
+    // RECORD result type ("return type must be a row type") that
+    // `json_populate_recordset(row(...), ...)` and the column-definition-list
+    // forms legitimately use — the row type comes from the resolved cache, not
+    // from the call result type.
+    let setdesc_box = {
+        let io = match &cache.c.io {
+            ColumnIOUnion::Composite(c) => c,
+            _ => unreachable!("cache.c is composite"),
+        };
+        io.tupdesc.as_ref().expect("tupdesc cached").clone_in(mcx)?
+    };
+    funcapi::init_materialized_srf_with_desc::call(
+        fcinfo,
+        Some(mcx::alloc_in(mcx, setdesc_box)?),
+    )?;
+
+    // if the json is null send back an empty set (the materialize-mode store is
+    // already initialized above, so this yields a valid empty result).
+    if backend_utils_fmgr_fmgr_seams::pg_argisnull::call(fcinfo_ref, json_arg_num) {
+        return Ok(Datum::null());
     }
 
     // The formed tuples produced by each level-1 object / array element. (C
@@ -467,20 +484,16 @@ fn populate_recordset_worker<'mcx>(
         }
     }
 
-    // C jsonfuncs.c:4204-4205:
-    //   rsi->setResult = state.tuple_store;
-    //   rsi->setDesc = CreateTupleDescCopy(cache->c.io.composite.tupdesc);
-    // The result row type is the INPUT-RECORD's cached composite tupdesc, NOT
-    // the query's column-def-list (`expectedDesc`). InitMaterializedSRF set
-    // setDesc from the result-type resolution (expectedDesc) above; overwrite it
-    // here with the cached composite tupdesc so the rows are materialized against
-    // the type they were actually formed with. When the supplied record's type
+    // C jsonfuncs.c:4204-4205 (`rsi->setResult`/`rsi->setDesc`) is already done:
+    // the materialize-mode store and `setDesc` (the INPUT-RECORD's cached
+    // composite tupdesc) were set up by `init_materialized_srf_with_desc` above.
+    // We still need a local copy of that descriptor to deform the formed tuples
+    // against the type they were built with (no value crosses a
+    // by-value/by-reference boundary). When the supplied record's type
     // disagrees with the query's column definitions, the executor's
     // `tupledesc_match(expectedDesc, setDesc)` (execSRF) raises
-    // "function return row and query-specified return row do not match" — which
-    // is exactly the user-facing error for the wrong-record-type negative cases.
-    // Forming the rows against this same descriptor also means no value ever
-    // crosses a by-value/by-reference type boundary.
+    // "function return row and query-specified return row do not match" — the
+    // user-facing error for the wrong-record-type negative cases.
     let tupdesc_box = {
         let io = match &cache.c.io {
             ColumnIOUnion::Composite(c) => c,
@@ -488,14 +501,6 @@ fn populate_recordset_worker<'mcx>(
         };
         io.tupdesc.as_ref().expect("tupdesc cached").clone_in(mcx)?
     };
-
-    {
-        let rsi = fcinfo
-            .resultinfo
-            .as_mut()
-            .expect("InitMaterializedSRF set fcinfo->resultinfo");
-        rsi.setDesc = Some(mcx::alloc_in(mcx, tupdesc_box.clone_in(mcx)?)?);
-    }
 
     for tuple in &result {
         put_recordset_tuple(mcx, fcinfo, &tupdesc_box, tuple)?;

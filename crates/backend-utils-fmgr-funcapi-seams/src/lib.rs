@@ -30,6 +30,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The materialize-mode `ReturnSetInfo` setup that `populate_recordset_worker`
+    /// (jsonfuncs.c) performs by hand — the same rsinfo checks and
+    /// `tuplestore_begin_heap` / `returnMode = SFRM_Materialize` /
+    /// `setResult` / `setDesc` block as `InitMaterializedSRF`, but with the
+    /// result descriptor supplied by the caller instead of being resolved via
+    /// `get_call_result_type`. jsonfuncs needs this because it determines the
+    /// result row type from the input record / column-definition list
+    /// (`get_record_type_from_argument` / `get_record_type_from_query`), for
+    /// which `get_call_result_type` would (correctly, in C) bail out with
+    /// "return type must be a row type". Can `ereport(ERROR)` (rsinfo context,
+    /// tuplestore allocation), carried on `Err`.
+    pub fn init_materialized_srf_with_desc<'mcx>(
+        fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+        setdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// The C call `tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
     /// values, nulls)` against an `InitMaterializedSRF`-prepared
     /// `ReturnSetInfo`: resolving `setResult`/`setDesc` is funcapi-owned; the

@@ -211,6 +211,68 @@ pub fn InitMaterializedSRF<'mcx>(
     Ok(())
 }
 
+/// The materialize-mode `ReturnSetInfo` setup `populate_recordset_worker`
+/// (jsonfuncs.c) does by hand: the same rsinfo validity / `SFRM_Materialize`
+/// checks and `tuplestore_begin_heap` / `returnMode` / `setResult` / `setDesc`
+/// block as [`InitMaterializedSRF`], but with the result descriptor supplied by
+/// the caller (it determined the row type from the input record / column
+/// definition list) rather than resolved through `get_call_result_type` — which
+/// would bail with "return type must be a row type" for a RECORD result.
+///
+/// Mirrors jsonfuncs.c:4108-4133: the `rsi`/`allowedModes`/`returnMode` stanza
+/// plus `tuplestore_begin_heap(... SFRM_Materialize_Random ...)` and the
+/// `setResult`/`setDesc` assignment.
+pub fn init_materialized_srf_with_desc<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+    setdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+) -> PgResult<()> {
+    // rsi = (ReturnSetInfo *) fcinfo->resultinfo;
+    // if (!rsi || !IsA(rsi, ReturnSetInfo)) ereport("set-valued function ...")
+    let rsinfo = match fcinfo.resultinfo.as_ref() {
+        Some(r) => r,
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("set-valued function called in context that cannot accept a set")
+                .into_error());
+        }
+    };
+
+    // if (!(rsi->allowedModes & SFRM_Materialize)) ereport("materialize mode ...")
+    if (rsinfo.allowedModes & SFRM_Materialize) == 0 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("materialize mode required, but it is not allowed in this context")
+            .into_error());
+    }
+
+    // random_access = (rsi->allowedModes & SFRM_Materialize_Random) != 0;
+    let random_access = (rsinfo.allowedModes & SFRM_Materialize_Random) != 0;
+
+    let mcx: Mcx<'mcx> = backend_utils_fmgr_fmgr_seams::pg_call_mcx::call(fcinfo);
+
+    // tupstore = tuplestore_begin_heap(random_access, false, work_mem);
+    let tupstore = backend_utils_sort_storage_seams::tuplestore_begin_heap::call(
+        mcx,
+        random_access,
+        false,
+        backend_utils_init_small_seams::work_mem::call(),
+    )?;
+
+    // rsi->returnMode = SFRM_Materialize;
+    // rsi->setResult = tupstore;
+    // rsi->setDesc = setdesc;
+    let rsinfo = fcinfo
+        .resultinfo
+        .as_mut()
+        .expect("init_materialized_srf_with_desc: resultinfo present (checked at entry)");
+    rsinfo.returnMode = SetFunctionReturnMode::Materialize;
+    rsinfo.setResult = allocator_api2::boxed::Box::into_inner(tupstore);
+    rsinfo.setDesc = setdesc;
+
+    Ok(())
+}
+
 /// The `tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls)`
 /// append against an `InitMaterializedSRF`-prepared `ReturnSetInfo`. funcapi
 /// resolves `setResult`/`setDesc`; the append delegates to the tuplestore unit.

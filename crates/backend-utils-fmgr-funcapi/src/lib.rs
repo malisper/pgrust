@@ -63,6 +63,9 @@ pub mod tupledesc;
 /// Invoked once at backend startup from `seams-init::init_all()`.
 pub fn init_seams() {
     backend_utils_fmgr_funcapi_seams::InitMaterializedSRF::set(srf_support::InitMaterializedSRF);
+    backend_utils_fmgr_funcapi_seams::init_materialized_srf_with_desc::set(
+        srf_support::init_materialized_srf_with_desc,
+    );
     backend_utils_fmgr_funcapi_seams::materialized_srf_putvalues::set(
         srf_support::materialized_srf_putvalues,
     );
