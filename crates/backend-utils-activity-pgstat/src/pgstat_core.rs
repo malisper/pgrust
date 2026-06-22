@@ -570,6 +570,12 @@ fn pgstat_build_snapshot() -> PgResult<()> {
 
     pgstat_prep_snapshot();
 
+    // pgStatLocal.snapshot.snapshot_timestamp = GetCurrentTimestamp();
+    let now = timestamp::get_current_timestamp::call();
+    local::with_local(|l| {
+        l.snapshot.snapshot_timestamp = now;
+    });
+
     let (area, dsh) = local::with_local(|l| (l.dsa, l.shared_hash));
 
     // dshash_seq_init(&hstat, pgStatLocal.shared_hash, false): walk all entries.
