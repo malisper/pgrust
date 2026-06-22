@@ -2792,9 +2792,11 @@ pub fn addRangeTableEntryForGroup<'mcx>(
         eref.colnames.push(make_string_node(mcx, colname)?);
 
         // groupexprs = lappend(groupexprs, copyObject(te->expr))
+        // Deep-copy via clone_in (copyObject shape), never the panicking derived
+        // `.clone()`: a group expr can embed a SubLink with an owned subselect.
         let expr = te.expr.as_deref();
         let expr_node = match expr {
-            Some(e) => Node::mk_expr(mcx, e.clone())?,
+            Some(e) => Node::mk_expr(mcx, e.clone_in(mcx)?)?,
             None => panic!("addRangeTableEntryForGroup: group clause has no expr"),
         };
         groupexprs.push(mcx::alloc_in(mcx, expr_node)?);

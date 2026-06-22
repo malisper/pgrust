@@ -151,11 +151,14 @@ fn with_errposition_callback<T>(
 /// owned [`Expr`] wrapped as [`Node::Expr`]. An absent expr is an internal error
 /// (the C code always has a non-NULL `tle->expr` at these call sites).
 fn tle_expr_node<'mcx>(mcx: mcx::Mcx<'mcx>, tle: &TargetEntry<'mcx>) -> PgResult<Node<'mcx>> {
+    // Deep-copy via `clone_in` (C copyObject shape), never the panicking derived
+    // `.clone()`: the expr can embed a SubLink whose owned subselect `Query` must
+    // go through the analyzed-tree clone path.
     let expr = tle
         .expr
         .as_deref()
-        .cloned()
-        .expect("TargetEntry.expr must be present");
+        .expect("TargetEntry.expr must be present")
+        .clone_in(mcx)?;
     Ok(Node::mk_expr(mcx, expr)?)
 }
 
