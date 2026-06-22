@@ -525,12 +525,13 @@ fn compute_common_attribute(
     is_procedure: bool,
     defel: &DefElem,
     attrs: &mut CommonAttributes,
+    query_string: Option<&str>,
 ) -> PgResult<bool> {
     let defname = def_name(defel);
 
     if defname == "volatility" {
         if is_procedure {
-            return Err(procedure_error(defel));
+            return Err(procedure_error(defel, query_string));
         }
         if attrs.volatility_item.is_some() {
             return Err(error_conflicting_def_elem(defel));
@@ -538,7 +539,7 @@ fn compute_common_attribute(
         attrs.volatility_item = Some(defel.clone());
     } else if defname == "strict" {
         if is_procedure {
-            return Err(procedure_error(defel));
+            return Err(procedure_error(defel, query_string));
         }
         if attrs.strict_item.is_some() {
             return Err(error_conflicting_def_elem(defel));
@@ -551,7 +552,7 @@ fn compute_common_attribute(
         attrs.security_item = Some(defel.clone());
     } else if defname == "leakproof" {
         if is_procedure {
-            return Err(procedure_error(defel));
+            return Err(procedure_error(defel, query_string));
         }
         if attrs.leakproof_item.is_some() {
             return Err(error_conflicting_def_elem(defel));
@@ -563,7 +564,7 @@ fn compute_common_attribute(
         }
     } else if defname == "cost" {
         if is_procedure {
-            return Err(procedure_error(defel));
+            return Err(procedure_error(defel, query_string));
         }
         if attrs.cost_item.is_some() {
             return Err(error_conflicting_def_elem(defel));
@@ -571,7 +572,7 @@ fn compute_common_attribute(
         attrs.cost_item = Some(defel.clone());
     } else if defname == "rows" {
         if is_procedure {
-            return Err(procedure_error(defel));
+            return Err(procedure_error(defel, query_string));
         }
         if attrs.rows_item.is_some() {
             return Err(error_conflicting_def_elem(defel));
@@ -579,7 +580,7 @@ fn compute_common_attribute(
         attrs.rows_item = Some(defel.clone());
     } else if defname == "support" {
         if is_procedure {
-            return Err(procedure_error(defel));
+            return Err(procedure_error(defel, query_string));
         }
         if attrs.support_item.is_some() {
             return Err(error_conflicting_def_elem(defel));
@@ -587,7 +588,7 @@ fn compute_common_attribute(
         attrs.support_item = Some(defel.clone());
     } else if defname == "parallel" {
         if is_procedure {
-            return Err(procedure_error(defel));
+            return Err(procedure_error(defel, query_string));
         }
         if attrs.parallel_item.is_some() {
             return Err(error_conflicting_def_elem(defel));
@@ -745,6 +746,7 @@ fn compute_function_attributes(
     is_procedure: bool,
     options: &[Node],
     attrs: &mut FunctionAttributes,
+    query_string: Option<&str>,
 ) -> PgResult<()> {
     let mut as_item: Option<DefElem> = None;
     let mut language_item: Option<DefElem> = None;
@@ -786,11 +788,14 @@ fn compute_function_attributes(
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
                     .errmsg("invalid attribute in procedure definition")
-                    .errposition(seam::parser_errposition::call(None, defel.location))
+                    .errposition(seam::parser_errposition::call(
+                        query_string.map(|s| s.to_string()),
+                        defel.location,
+                    ))
                     .into_error());
             }
             windowfunc_item = Some(defel.clone());
-        } else if compute_common_attribute(is_procedure, defel, &mut common)? {
+        } else if compute_common_attribute(is_procedure, defel, &mut common, query_string)? {
             /* recognized common option */
             continue;
         } else {
@@ -1007,7 +1012,7 @@ pub fn CreateFunction<'mcx>(
     let is_procedure = stmt.is_procedure;
 
     /* Extract non-default attributes from stmt->options list */
-    compute_function_attributes(is_procedure, &stmt.options, &mut attrs)?;
+    compute_function_attributes(is_procedure, &stmt.options, &mut attrs, query_string.as_deref())?;
 
     let language: String = match &attrs.language {
         Some(l) => l.clone(),
@@ -1220,7 +1225,7 @@ pub fn RemoveFunctionById(func_oid: Oid) -> PgResult<()> {
 // AlterFunction (functioncmds.c:1360)
 // ===========================================================================
 
-pub fn AlterFunction(stmt: &AlterFunctionStmt) -> PgResult<ObjectAddress> {
+pub fn AlterFunction(stmt: &AlterFunctionStmt, query_string: Option<&str>) -> PgResult<ObjectAddress> {
     let func = match &stmt.func {
         Some(f) => (**f).clone(),
         None => {
@@ -1257,7 +1262,7 @@ pub fn AlterFunction(stmt: &AlterFunctionStmt) -> PgResult<ObjectAddress> {
                     .into_error());
             }
         };
-        if !compute_common_attribute(is_procedure, defel, &mut common)? {
+        if !compute_common_attribute(is_procedure, defel, &mut common, query_string)? {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_INTERNAL_ERROR)
                 .errmsg_internal(format!("option \"{}\" not recognized", def_name(defel)))

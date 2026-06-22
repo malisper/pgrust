@@ -109,12 +109,17 @@ pub(crate) fn name_list_to_string(names: &[String]) -> String {
     names.join(".")
 }
 
-/// `goto procedure_error;` target in compute_common_attribute.
-pub(crate) fn procedure_error(defel: &DefElem) -> PgError {
+/// `goto procedure_error;` target in compute_common_attribute. `query_string`
+/// is the active query source (`pstate->p_sourcetext`), forwarded to
+/// `parser_errposition` so the error carries a cursor position (`LINE 1: ...^`).
+pub(crate) fn procedure_error(defel: &DefElem, query_string: Option<&str>) -> PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
         .errmsg("invalid attribute in procedure definition")
-        .errposition(seam::parser_errposition::call(None, defel.location))
+        .errposition(seam::parser_errposition::call(
+            query_string.map(|s| s.to_string()),
+            defel.location,
+        ))
         .into_error()
 }
 

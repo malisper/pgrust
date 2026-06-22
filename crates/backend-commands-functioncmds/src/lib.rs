@@ -136,7 +136,7 @@ fn aclcheck_error_language_seam(
 /// parity; `AlterFunction` re-derives what it needs.
 fn alter_function_seam<'mcx>(
     _mcx: mcx::Mcx<'mcx>,
-    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
     stmt: &types_nodes::nodes::Node<'mcx>,
 ) -> types_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
     use backend_parser_parse_type::rich_node_to_parse;
@@ -167,7 +167,8 @@ fn alter_function_seam<'mcx>(
         actions,
     };
 
-    ddl_core::AlterFunction(&pn)
+    let query_string = pstate.p_sourcetext.as_ref().map(|s| s.as_str().to_string());
+    ddl_core::AlterFunction(&pn, query_string.as_deref())
 }
 
 /// Outward-seam adapter for `CreateTransform(stmt)` (utility.c
