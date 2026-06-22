@@ -175,6 +175,7 @@ fn alloc_empty_bucket_indices<'mcx>(
 pub fn ExecHashTableCreate<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut HashState<'mcx>,
+    estate: &types_nodes::EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, HashJoinTableData<'mcx>>> {
     // node = (Hash *) state->ps.plan;  outerNode = outerPlan(node);
     //
@@ -211,12 +212,15 @@ pub fn ExecHashTableCreate<'mcx>(
     let parallel_workers = match state.parallel_state {
         Some(dp) => {
             // area = state->ps.state->es_query_dsa
-            let area = state
-                .ps
-                .state
-                .as_ref()
-                .expect("ExecHashTableCreate: PlanState has no EState")
-                .get()
+            //
+            // C reaches the per-query DSA area through the Hash node's EState
+            // back-link (`state->ps.state`). The owned model threads the live
+            // `EState` explicitly into `ExecHashTableCreate`, so read
+            // `es_query_dsa` directly off the threaded `estate` — this is the
+            // same object the parallel-worker entry (`ParallelQueryMain`) sets
+            // `es_query_dsa` on before the executor run, avoiding any reliance
+            // on a possibly-stale captured back-pointer.
+            let area = estate
                 .es_query_dsa
                 .expect("ExecHashTableCreate: parallel hash but es_query_dsa is NULL");
             let cursor = dsa::dsa_get_address::call(area, dp);

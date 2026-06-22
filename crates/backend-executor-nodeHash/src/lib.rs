@@ -159,7 +159,7 @@ mod adapters {
         // then install it on the join node and the inner HashState.
         let table = {
             let state = inner_hash_state(node);
-            hash_table::ExecHashTableCreate(mcx, state)?
+            hash_table::ExecHashTableCreate(mcx, state, estate)?
         };
         // node->hj_HashTable = hashtable; hashNode->hashtable = hashtable;
         // (The two C pointers alias one table; the owned model installs the
