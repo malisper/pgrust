@@ -373,13 +373,23 @@ fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     //      never part of the locked state). Verified: 25+ repeated parallel
     //      `count(*)` runs past the old ~run-5 failure point with zero borrow
     //      errors.
-    //   4. NEXT wall — intermittent hang in `WaitForParallelWorkersToExit`
-    //      (`wait_for_background_worker_shutdown` → `WaitLatch`): the leader
-    //      blocks for `BGWH_STOPPED` that never arrives because a pooled
-    //      parallel worker does not genuinely `exit()` / get reaped by the
-    //      postmaster (so its bgworker slot is never cleared and the leader is
-    //      never SIGUSR1'd). statement_timeout cannot interrupt this
-    //      non-interruptible latch wait.
+    //   4. CLEARED — the intermittent hang in `WaitForParallelWorkersToExit`
+    //      (`wait_for_background_worker_shutdown` → `WaitLatch`) is fixed. The
+    //      leader blocked on `BGWH_STOPPED` for one of its two workers that never
+    //      arrived: `bgworker.c`'s `BackgroundWorkerList` was modeled as a bare
+    //      `Vec`, but C's `rw` is a STABLE pointer (stored in `PMChild.rw`, reused
+    //      by the reaper across intervening registrations). `insert(0,..)` on
+    //      registration and `Vec::remove(idx)` in `ForgetBackgroundWorker` shifted
+    //      every higher index, so after the first sibling worker exited and was
+    //      forgotten, the SECOND worker's stored `rw_index` pointed at the wrong
+    //      entry → its `ReportBackgroundWorkerExit` zeroed the wrong shmem slot,
+    //      leaving its own slot's `pid` non-zero forever → leader hangs. Fixed by
+    //      making `BackgroundWorkerList` a stable slab (`Vec<Option<…>>`):
+    //      registration fills a free cell, `Forget` nulls it in place, indices
+    //      never move (C's stable-pointer semantics). Verified: 180+ repeated
+    //      parallel `count(*)` runs, zero hangs, no stuck workers, no
+    //      `too many clients`. (Re-enable parallelism by deleting the early return
+    //      below; it is restored only while the EXPLAIN-ANALYZE residual #2 lands.)
     return Ok(DSM_HANDLE_INVALID);
 
     // If we already created a session-scope segment, return its handle.

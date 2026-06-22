@@ -110,13 +110,13 @@ fn rw_accessors_and_keep_walk() {
         w.bgw_name[..3].copy_from_slice(b"foo");
         w.bgw_restart_time = 5;
         w.bgw_notify_pid = 71;
-        list.push(RegisteredBgWorker {
+        list.push(Some(RegisteredBgWorker {
             rw_worker: w,
             rw_pid: 0,
             rw_crashed_at: 0,
             rw_shmem_slot: 0,
             rw_terminate: false,
-        });
+        }));
     });
 
     assert_eq!(background_worker_list_len(), 1);

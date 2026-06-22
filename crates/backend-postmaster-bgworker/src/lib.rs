@@ -108,11 +108,45 @@ const _: () = assert!(
 // BackgroundWorkerList — the postmaster's process-local registration list.
 // C: `dlist_head BackgroundWorkerList = DLIST_STATIC_INIT(...)`.
 // ---------------------------------------------------------------------------
+//
+// C's `BackgroundWorkerList` is a `dlist` of heap-allocated `RegisteredBgWorker`
+// nodes, and `rw` is a STABLE pointer: it is stored in the worker's `PMChild`
+// (`bp->rw`) at launch time and reused — across many intervening
+// registrations/deregistrations — by the postmaster scheduler and the SIGCHLD
+// reaper (`ReportBackgroundWorkerExit`/`rw_set_pid`/...). Removing one node
+// (`dlist_delete`) never moves another. The Rust port keys every `rw_*`
+// accessor by an INDEX into this container, so that index must be equally
+// stable. A bare `Vec` is NOT: `insert(0, ..)` on registration and
+// `remove(idx)` on `ForgetBackgroundWorker` shift every higher index, so a
+// second in-flight parallel worker's stored `rw_index` would silently point at
+// the wrong (or a removed) entry after the first sibling exited — leaving its
+// shmem slot's `pid` non-zero forever and hanging the leader in
+// `WaitForBackgroundWorkerShutdown`. We therefore use a SLAB
+// (`Vec<Option<RegisteredBgWorker>>`): registration fills a free `None` cell (or
+// appends), `ForgetBackgroundWorker` sets the cell back to `None`, and indices
+// never move — exactly C's stable-pointer semantics.
 
 thread_local! {
-    static BACKGROUND_WORKER_LIST: RefCell<Vec<RegisteredBgWorker>> = const { RefCell::new(Vec::new()) };
+    static BACKGROUND_WORKER_LIST: RefCell<Vec<Option<RegisteredBgWorker>>> = const { RefCell::new(Vec::new()) };
     /// `static int numworkers = 0;` inside `RegisterBackgroundWorker`.
     static NUMWORKERS: RefCell<i32> = const { RefCell::new(0) };
+}
+
+/// Allocate a stable slab index for a new `RegisteredBgWorker`: reuse the first
+/// free (`None`) cell, else append. The returned index never moves for the life
+/// of the entry (until `ForgetBackgroundWorker` frees it), mirroring C's stable
+/// `RegisteredBgWorker *`.
+fn bgw_list_alloc(rw: RegisteredBgWorker) -> usize {
+    BACKGROUND_WORKER_LIST.with(|l| {
+        let mut list = l.borrow_mut();
+        if let Some(idx) = list.iter().position(|e| e.is_none()) {
+            list[idx] = Some(rw);
+            idx
+        } else {
+            list.push(Some(rw));
+            list.len() - 1
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -309,9 +343,12 @@ pub fn BackgroundWorkerShmemInit() -> PgResult<()> {
         BACKGROUND_WORKER_LIST.with(|list| {
             let mut list = list.borrow_mut();
             // Copy contents of worker list into shared memory, recording the
-            // shared slot assigned to each worker (1-to-1 correspondence).
+            // shared slot assigned to each worker (1-to-1 correspondence). At
+            // shmem-init time the slab is dense (only static workers, no holes),
+            // so `enumerate()` yields the C dlist-iteration slot assignment.
             for (slotno, rw) in list.iter_mut().enumerate() {
                 debug_assert!((slotno as i32) < max_worker_processes);
+                let rw = rw.as_mut().expect("BackgroundWorkerList has no holes at shmem init");
                 let rw_worker = rw.rw_worker;
                 let slot = bwa.slot_mut(slotno);
                 slot.in_use = true;
@@ -347,8 +384,9 @@ fn bgworker_data_is_initialized() -> bool {
 /// `FindRegisteredWorkerBySlotNumber(int slotno)` — return the list index of
 /// the worker occupying shared slot `slotno`, the idiomatic stand-in for the C
 /// `RegisteredBgWorker *`.
-fn FindRegisteredWorkerBySlotNumber(list: &[RegisteredBgWorker], slotno: i32) -> Option<usize> {
-    list.iter().position(|rw| rw.rw_shmem_slot == slotno)
+fn FindRegisteredWorkerBySlotNumber(list: &[Option<RegisteredBgWorker>], slotno: i32) -> Option<usize> {
+    list.iter()
+        .position(|rw| matches!(rw, Some(rw) if rw.rw_shmem_slot == slotno))
 }
 
 // ---------------------------------------------------------------------------
@@ -407,14 +445,15 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) -> PgResult<()> {
             let (slot_terminate, rw_terminate) = {
                 let data = BACKGROUND_WORKER_DATA.lock().unwrap();
                 let st = data.as_ref().unwrap().slot(slotno as usize).terminate;
-                let rt = BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_terminate);
+                let rt = BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].as_ref().unwrap().rw_terminate);
                 (st, rt)
             };
             if slot_terminate && !rw_terminate {
                 let rw_pid = BACKGROUND_WORKER_LIST.with(|l| {
                     let mut list = l.borrow_mut();
-                    list[rw_index].rw_terminate = true;
-                    list[rw_index].rw_pid
+                    let rw = list[rw_index].as_mut().unwrap();
+                    rw.rw_terminate = true;
+                    rw.rw_pid
                 });
                 if rw_pid != 0 {
                     backend_postmaster_postmaster_seams::signal_child_sigterm::call(rw_pid);
@@ -539,8 +578,12 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) -> PgResult<()> {
             .with_error_location(loc(435, "BackgroundWorkerStateChange")),
         )?;
 
-        // dlist_push_head: prepend to keep C's head-insertion order.
-        BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut().insert(0, rw));
+        // dlist_push_head in C; here we allocate a STABLE slab cell (reuse a
+        // free hole or append). Position/order is irrelevant for dynamic
+        // workers — every lookup is by `rw_shmem_slot` or by the stable index —
+        // and a stable index is required so a sibling's `ForgetBackgroundWorker`
+        // does not invalidate this entry's stored `rw_index`.
+        bgw_list_alloc(rw);
 
         slotno += 1;
     }
@@ -558,7 +601,7 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) -> PgResult<()> {
 pub fn ForgetBackgroundWorker(rw_index: usize) -> PgResult<()> {
     let (slotno, parallel, name) = BACKGROUND_WORKER_LIST.with(|l| {
         let list = l.borrow();
-        let rw = &list[rw_index];
+        let rw = list[rw_index].as_ref().expect("ForgetBackgroundWorker on freed slab entry");
         (
             rw.rw_shmem_slot,
             (rw.rw_worker.bgw_flags & BGWORKER_CLASS_PARALLEL) != 0,
@@ -584,9 +627,10 @@ pub fn ForgetBackgroundWorker(rw_index: usize) -> PgResult<()> {
             .with_error_location(loc(472, "ForgetBackgroundWorker")),
     )?;
 
-    // dlist_delete + pfree(rw).
+    // dlist_delete + pfree(rw): free the stable slab cell WITHOUT shifting any
+    // other index (C's dlist_delete leaves every other node's pointer valid).
     BACKGROUND_WORKER_LIST.with(|l| {
-        l.borrow_mut().remove(rw_index);
+        l.borrow_mut()[rw_index] = None;
     });
     Ok(())
 }
@@ -611,56 +655,56 @@ pub fn background_worker_list_len() -> usize {
 
 /// `rw->rw_pid` for the worker at list index `rw_index`.
 pub fn rw_pid(rw_index: usize) -> pid_t {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_pid)
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].as_ref().unwrap().rw_pid)
 }
 /// `rw->rw_pid = pid`.
 pub fn set_rw_pid(rw_index: usize, pid: pid_t) {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].rw_pid = pid);
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].as_mut().unwrap().rw_pid = pid);
 }
 /// `rw->rw_crashed_at`.
 pub fn rw_crashed_at(rw_index: usize) -> types_core::TimestampTz {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_crashed_at)
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].as_ref().unwrap().rw_crashed_at)
 }
 /// `rw->rw_crashed_at = ts`.
 pub fn set_rw_crashed_at(rw_index: usize, ts: types_core::TimestampTz) {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].rw_crashed_at = ts);
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].as_mut().unwrap().rw_crashed_at = ts);
 }
 /// `rw->rw_terminate`.
 pub fn rw_terminate(rw_index: usize) -> bool {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_terminate)
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].as_ref().unwrap().rw_terminate)
 }
 /// `rw->rw_terminate = terminate`.
 pub fn set_rw_terminate(rw_index: usize, terminate: bool) {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].rw_terminate = terminate);
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].as_mut().unwrap().rw_terminate = terminate);
 }
 /// `rw->rw_shmem_slot`.
 pub fn rw_shmem_slot(rw_index: usize) -> i32 {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_shmem_slot)
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].as_ref().unwrap().rw_shmem_slot)
 }
 /// `rw->rw_worker.bgw_restart_time`.
 pub fn rw_bgw_restart_time(rw_index: usize) -> i32 {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_worker.bgw_restart_time)
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].as_ref().unwrap().rw_worker.bgw_restart_time)
 }
 /// `rw->rw_worker.bgw_start_time`.
 pub fn rw_bgw_start_time(rw_index: usize) -> BgWorkerStartTime {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_worker.bgw_start_time)
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].as_ref().unwrap().rw_worker.bgw_start_time)
 }
 /// `rw->rw_worker.bgw_notify_pid`.
 pub fn rw_bgw_notify_pid(rw_index: usize) -> pid_t {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_worker.bgw_notify_pid)
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].as_ref().unwrap().rw_worker.bgw_notify_pid)
 }
 /// `rw->rw_worker.bgw_name` as an owned (lossy) string (for `%s` logging).
 pub fn rw_bgw_name(rw_index: usize) -> String {
-    BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[rw_index].rw_worker.bgw_name))
+    BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[rw_index].as_ref().unwrap().rw_worker.bgw_name))
 }
 /// `rw->rw_worker.bgw_type` as an owned (lossy) string (for `%s` logging).
 pub fn rw_bgw_type(rw_index: usize) -> String {
-    BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[rw_index].rw_worker.bgw_type))
+    BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[rw_index].as_ref().unwrap().rw_worker.bgw_type))
 }
 /// A `Copy` snapshot of the whole `rw->rw_worker` registration (the value
 /// `postmaster_child_launch` copies into the worker's `StartupData`).
 pub fn rw_worker(rw_index: usize) -> BackgroundWorker {
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_worker)
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].as_ref().unwrap().rw_worker)
 }
 
 /// What [`for_each_background_worker_modify`] should do with the entry after the
@@ -686,24 +730,27 @@ pub fn for_each_background_worker_modify<F: FnMut(usize) -> BgwWalk>(
     mut f: F,
 ) -> PgResult<()> {
     // dlist_foreach_modify caches the next node before running the body, so a
-    // body that removes the current node is safe. We walk by index and, on
-    // Forget, remove index i (the next entry shifts down into i), so we do not
-    // advance i in that case — equivalent to caching `next`.
+    // body that removes the current node is safe. The list is a stable slab now,
+    // so removal (`Forget`) only nulls the current cell and never moves another
+    // entry: we always advance `i`, and we skip freed (`None`) cells.
     let mut i = 0;
     loop {
-        let len = background_worker_list_len();
+        let len = BACKGROUND_WORKER_LIST.with(|l| l.borrow().len());
         if i >= len {
             break;
         }
+        let occupied = BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i].is_some());
+        if !occupied {
+            i += 1;
+            continue;
+        }
         match f(i) {
-            BgwWalk::Keep => {
-                i += 1;
-            }
+            BgwWalk::Keep => {}
             BgwWalk::Forget => {
                 ForgetBackgroundWorker(i)?;
-                // The entry was removed; the next entry now occupies index i.
             }
         }
+        i += 1;
     }
     Ok(())
 }
@@ -717,7 +764,7 @@ pub fn for_each_background_worker_modify<F: FnMut(usize) -> BgwWalk>(
 pub fn ReportBackgroundWorkerPID(rw_index: usize) {
     let (slotno, rw_pid, notify_pid) = BACKGROUND_WORKER_LIST.with(|l| {
         let list = l.borrow();
-        let rw = &list[rw_index];
+        let rw = list[rw_index].as_ref().expect("ReportBackgroundWorkerPID on freed slab entry");
         (rw.rw_shmem_slot, rw.rw_pid, rw.rw_worker.bgw_notify_pid)
     });
 
@@ -741,7 +788,7 @@ pub fn ReportBackgroundWorkerExit(rw_index: usize) -> PgResult<()> {
     let (slotno, rw_pid, rw_terminate, restart_time, notify_pid) =
         BACKGROUND_WORKER_LIST.with(|l| {
             let list = l.borrow();
-            let rw = &list[rw_index];
+            let rw = list[rw_index].as_ref().expect("ReportBackgroundWorkerExit on freed slab entry");
             (
                 rw.rw_shmem_slot,
                 rw.rw_pid,
@@ -777,7 +824,7 @@ pub fn ReportBackgroundWorkerExit(rw_index: usize) -> PgResult<()> {
 /// notifications for an exiting backend's PID. Postmaster-only.
 pub fn BackgroundWorkerStopNotifications(pid: pid_t) {
     BACKGROUND_WORKER_LIST.with(|l| {
-        for rw in l.borrow_mut().iter_mut() {
+        for rw in l.borrow_mut().iter_mut().flatten() {
             if rw.rw_worker.bgw_notify_pid == pid {
                 rw.rw_worker.bgw_notify_pid = 0;
             }
@@ -792,8 +839,9 @@ pub fn BackgroundWorkerStopNotifications(pid: pid_t) {
 /// `ForgetUnstartedBackgroundWorkers(void)` — cancel not-yet-started worker
 /// requests whose waiters need to be kicked at shutdown. Postmaster-only.
 pub fn ForgetUnstartedBackgroundWorkers() -> PgResult<()> {
-    // dlist_foreach_modify: walk by index; ForgetBackgroundWorker removes the
-    // entry, so re-examine the same index when it does.
+    // dlist_foreach_modify: walk by stable slab index, skipping freed (`None`)
+    // cells. `ForgetBackgroundWorker` nulls the cell in place (no shift), so we
+    // always advance `i`.
     let mut i = 0;
     loop {
         let len = BACKGROUND_WORKER_LIST.with(|l| l.borrow().len());
@@ -801,10 +849,15 @@ pub fn ForgetUnstartedBackgroundWorkers() -> PgResult<()> {
             break;
         }
 
-        let (slotno, notify_pid) = BACKGROUND_WORKER_LIST.with(|l| {
-            let list = l.borrow();
-            (list[i].rw_shmem_slot, list[i].rw_worker.bgw_notify_pid)
+        let entry = BACKGROUND_WORKER_LIST.with(|l| {
+            l.borrow()[i]
+                .as_ref()
+                .map(|rw| (rw.rw_shmem_slot, rw.rw_worker.bgw_notify_pid))
         });
+        let Some((slotno, notify_pid)) = entry else {
+            i += 1;
+            continue;
+        };
 
         let slot_pid = {
             let data = BACKGROUND_WORKER_DATA.lock().unwrap();
@@ -818,8 +871,6 @@ pub fn ForgetUnstartedBackgroundWorkers() -> PgResult<()> {
             if notify_pid != 0 {
                 backend_postmaster_postmaster_seams::signal_child_sigusr1::call(notify_pid);
             }
-            // The entry was removed; the next entry now occupies index i.
-            continue;
         }
 
         i += 1;
@@ -844,24 +895,28 @@ pub fn ResetBackgroundWorkerCrashTimes() -> PgResult<()> {
         }
 
         let restart_time =
-            BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i].rw_worker.bgw_restart_time);
+            BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i].as_ref().map(|rw| rw.rw_worker.bgw_restart_time));
+        let Some(restart_time) = restart_time else {
+            // Freed slab cell — skip.
+            i += 1;
+            continue;
+        };
 
         if restart_time == BGW_NEVER_RESTART {
             // Forget BGW_NEVER_RESTART workers so they aren't relaunched (and so
             // a parallel worker can't bump parallel_terminate_count after the
-            // register count was zeroed).
+            // register count was zeroed). Forget nulls the cell in place.
             ForgetBackgroundWorker(i)?;
-            // The entry was removed; the next entry now occupies index i.
-            continue;
         } else {
             BACKGROUND_WORKER_LIST.with(|l| {
                 let mut list = l.borrow_mut();
+                let rw = list[i].as_mut().unwrap();
                 // All non-never-restart survivors must be non-parallel.
-                debug_assert!((list[i].rw_worker.bgw_flags & BGWORKER_CLASS_PARALLEL) == 0);
+                debug_assert!((rw.rw_worker.bgw_flags & BGWORKER_CLASS_PARALLEL) == 0);
                 // Allow immediate restart and drop any waiter.
-                list[i].rw_crashed_at = 0;
-                list[i].rw_pid = 0;
-                list[i].rw_worker.bgw_notify_pid = 0;
+                rw.rw_crashed_at = 0;
+                rw.rw_pid = 0;
+                rw.rw_worker.bgw_notify_pid = 0;
             });
         }
 
@@ -1403,7 +1458,11 @@ pub fn RegisterBackgroundWorker(worker: &BackgroundWorker) -> PgResult<()> {
         rw_terminate: false,
     };
 
-    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut().insert(0, rw));
+    // dlist_push_head. This runs only at boot (static registration via
+    // shared_preload_libraries), before any `rw_index` has been handed out, so
+    // prepending is safe: the slab has no holes yet and `BackgroundWorkerShmemInit`
+    // assigns shmem slots in this iteration order (matching C's dlist order).
+    BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut().insert(0, Some(rw)));
     Ok(())
 }
 
@@ -1527,7 +1586,8 @@ pub fn GetBackgroundWorkerPid(handle: &BackgroundWorkerHandle) -> (BgwHandleStat
 
     let pid = {
         let data = BACKGROUND_WORKER_DATA.lock().unwrap();
-        let slot = data.as_ref().unwrap().slot(slotno as usize);
+        let arr = data.as_ref().unwrap();
+        let slot = arr.slot(slotno as usize);
         // generation can't change under the lock; pid (postmaster-updated)
         // may be stale but won't be garbage.
         if handle.generation != slot.generation || !slot.in_use {
@@ -1935,34 +1995,41 @@ pub fn init_seams() {
 fn pm_registry_init_seams() {
     use backend_postmaster_postmaster_seams as psm;
 
-    // dlist_foreach order = the Vec's index order.
+    // dlist_foreach order = the slab's index order, skipping freed (`None`)
+    // cells so the postmaster only ever drives `rw_*` accessors on live entries.
     psm::background_worker_list::set(|| {
-        BACKGROUND_WORKER_LIST.with(|l| (0..l.borrow().len() as u32).collect())
+        BACKGROUND_WORKER_LIST.with(|l| {
+            l.borrow()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| e.as_ref().map(|_| i as u32))
+                .collect()
+        })
     });
 
     // Per-entry reads (`rw->...`).
-    psm::rw_pid::set(|i| BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_pid));
-    psm::rw_crashed_at::set(|i| BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_crashed_at));
-    psm::rw_terminate::set(|i| BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_terminate));
+    psm::rw_pid::set(|i| BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].as_ref().unwrap().rw_pid));
+    psm::rw_crashed_at::set(|i| BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].as_ref().unwrap().rw_crashed_at));
+    psm::rw_terminate::set(|i| BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].as_ref().unwrap().rw_terminate));
     psm::rw_bgw_restart_time::set(|i| {
-        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_worker.bgw_restart_time)
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].as_ref().unwrap().rw_worker.bgw_restart_time)
     });
     psm::rw_bgw_start_time::set(|i| {
-        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_worker.bgw_start_time as i32)
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].as_ref().unwrap().rw_worker.bgw_start_time as i32)
     });
     psm::rw_bgw_notify_pid::set(|i| {
-        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_worker.bgw_notify_pid)
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].as_ref().unwrap().rw_worker.bgw_notify_pid)
     });
     psm::rw_bgw_name::set(|i| {
-        BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[i as usize].rw_worker.bgw_name))
+        BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[i as usize].as_ref().unwrap().rw_worker.bgw_name))
     });
     psm::rw_bgw_type::set(|i| {
-        BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[i as usize].rw_worker.bgw_type))
+        BACKGROUND_WORKER_LIST.with(|l| cstr_lossy(&l.borrow()[i as usize].as_ref().unwrap().rw_worker.bgw_type))
     });
 
     // Full `*rw->rw_worker` payload (StartBackgroundWorker -> StartupData).
     psm::rw_worker::set(|i| {
-        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].rw_worker)
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow()[i as usize].as_ref().unwrap().rw_worker)
     });
 
     // `BackgroundWorkerMain` entry-point dispatch (bgworker.c:855-869): resolve
@@ -1973,13 +2040,13 @@ fn pm_registry_init_seams() {
 
     // Per-entry writes (`rw->... = v`).
     psm::rw_set_pid::set(|i, pid| {
-        BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[i as usize].rw_pid = pid)
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[i as usize].as_mut().unwrap().rw_pid = pid)
     });
     psm::rw_set_crashed_at::set(|i, ts| {
-        BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[i as usize].rw_crashed_at = ts)
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[i as usize].as_mut().unwrap().rw_crashed_at = ts)
     });
     psm::rw_set_terminate::set(|i, v| {
-        BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[i as usize].rw_terminate = v)
+        BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[i as usize].as_mut().unwrap().rw_terminate = v)
     });
 
     // Control operations the postmaster scheduler / reaper drive.
