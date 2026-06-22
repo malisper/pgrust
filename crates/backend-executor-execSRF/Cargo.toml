@@ -144,6 +144,10 @@ types-storage = { path = "../types-storage" }
 # GUC the body reads as a global.
 backend-storage-ipc-shmem = { path = "../backend-storage-ipc-shmem" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+# pg_get_aios() (OID 6399): the lock-free per-handle render loop (pg_get_aios_core)
+# + the AioRow row-sink seam fed into the live materialized result.
+backend-storage-aio-methods = { path = "../backend-storage-aio-methods" }
+backend-storage-aio-funcs-seams = { path = "../backend-storage-aio-funcs-seams" }
 # pg_prepared_xact() (OID 1065): the locked snapshot-and-project core over the
 # live TwoPhaseState (pg_prepared_xact_rows / with_twophase_state).
 backend-access-transam-twophase = { path = "../backend-access-transam-twophase" }

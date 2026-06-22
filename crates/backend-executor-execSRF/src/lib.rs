@@ -100,6 +100,8 @@ mod pg_stat_get_backend_idset;
 mod pgstat_composite_srf;
 mod pg_mcv_list_items;
 mod shmem_numa_srf;
+mod pg_get_shmem_allocations_srf;
+mod pg_get_aios;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
 pub use json_record::{invoke_scalar_record_function, is_scalar_record_function};
@@ -297,6 +299,16 @@ pub fn init_seams() {
     // `backend-utils-misc-more` / `backend-utils-adt-misc2`).
     control_srf::register_control_srfs();
     shmem_numa_srf::register_shmem_numa_srf();
+    // `pg_get_shmem_allocations()` (OID 5052) — the materialize-mode SRF iterating
+    // the live ShmemIndex under ShmemIndexLock, emitting (name, off, size,
+    // allocated_size) per entry + the <anonymous>/free rows (core in
+    // `backend-storage-ipc-shmem::pg_get_shmem_allocations`).
+    pg_get_shmem_allocations_srf::register_pg_get_shmem_allocations();
+    // `pg_get_aios()` (OID 6399) — the materialize-mode SRF rendering every
+    // in-flight AIO handle via the lock-free copy/retry loop (core in
+    // `backend-storage-aio-methods::aio_funcs::pg_get_aios_core`); zero rows under
+    // io_method=sync (all handles idle).
+    pg_get_aios::register_pg_get_aios();
 }
 
 // ===========================================================================

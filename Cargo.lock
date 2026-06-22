@@ -9978,6 +9978,8 @@ dependencies = [
  "backend-postmaster-bgworker",
  "backend-replication-logical-launcher-seams",
  "backend-statistics-mcv",
+ "backend-storage-aio-funcs-seams",
+ "backend-storage-aio-methods",
  "backend-storage-ipc-procarray-seams",
  "backend-storage-ipc-shmem",
  "backend-storage-lmgr-proc-seams",
