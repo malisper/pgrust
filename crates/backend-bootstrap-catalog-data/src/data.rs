@@ -49,6 +49,8 @@ fn attr(
         attnotnull,
         // Nailed bootstrap catalogs have no column defaults.
         atthasdef: false,
+        // Nailed bootstrap catalogs have no fast-default missing values.
+        atthasmissing: false,
         attndims: 0,
         attidentity,
         attgenerated,

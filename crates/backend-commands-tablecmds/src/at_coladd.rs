@@ -620,23 +620,57 @@ pub fn ATExecAddColumn<'mcx>(
                 is_generated: col_def.generated != 0,
             });
 
-            // C attempts to skip a complete table rewrite by storing the DEFAULT
-            // outside the heap (a "missing value", StoreAttrMissingVal) when the
-            // relation is a plain table, the column is non-generated, the default
-            // is non-volatile, and the type has no domain constraints. That
-            // optimization rides the by-ref `Datum` missing-value carrier
-            // (`store_attr_missing_val`), which bottoms out on the writable ATTNUM
-            // syscache copy + `pg_attribute` CatalogTupleUpdate carrier (still
-            // unported — see `backend-catalog-heap-seams::store_attr_missing_val`).
-            // Until that lands we take the always-correct path: materialize the
-            // default into existing rows via the phase-3 table rewrite. (This is
-            // observably correct; it differs from upstream only in that a rewrite
-            // happens where the missing-value fast path would have avoided one,
-            // and `atthasmissing` stays false.) The volatile case (e.g.
-            // `DEFAULT random()`) takes the rewrite path in upstream too.
-            let _ = (has_domain_constraints, &planned);
-            if col_def.generated != ATTRIBUTE_GENERATED_VIRTUAL {
-                wqueue[ti].rewrite |= AT_REWRITE_DEFAULT_VAL;
+            // Attempt to skip a complete table rewrite by storing the specified
+            // DEFAULT value outside of the heap. This is only allowed for plain
+            // relations and non-generated columns, and the default expression
+            // can't be volatile (stable is OK). Note that
+            // contain_volatile_functions deems CoerceToDomain immutable, but here
+            // we consider that coercion to a domain with constraints is volatile;
+            // else it might fail even when the table is empty.
+            if relkind == RELKIND_RELATION
+                && col_def.generated == 0
+                && !has_domain_constraints
+                && !backend_optimizer_util_clauses::contain_volatile_functions(Some(&planned))?
+            {
+                // Evaluate the default expression.
+                //   estate = CreateExecutorState();
+                //   exprState = ExecPrepareExpr(defval, estate);
+                //   missingval = ExecEvalExpr(exprState,
+                //                             GetPerTupleExprContext(estate),
+                //                             &missingIsNull);
+                let mut estate =
+                    backend_executor_execExpr_seams::create_executor_state::call(mcx)?;
+                let mut expr_state =
+                    backend_executor_execExpr_seams::exec_prepare_expr::call(&planned, &mut estate)?;
+                let econtext =
+                    backend_executor_execUtils_seams::get_per_tuple_expr_context::call(
+                        &mut estate,
+                    )?;
+                let (missingval, missing_is_null) =
+                    backend_executor_execExpr_seams::exec_eval_expr_switch_context::call(
+                        &mut expr_state,
+                        econtext,
+                        &mut estate,
+                    )?;
+
+                // If it turns out NULL, nothing to do; else store it.
+                if !missing_is_null {
+                    backend_catalog_heap::StoreAttrMissingVal(
+                        mcx, rel, newattnum, missingval,
+                    )?;
+                    // Make the additional catalog change visible.
+                    backend_access_transam_xact::CommandCounterIncrement()?;
+                    has_missing = true;
+                }
+
+                drop(expr_state);
+                backend_executor_execExpr_seams::free_executor_state::call(estate)?;
+            } else {
+                // Failed to use missing mode. We have to do a table rewrite to
+                // install the value --- unless it's a virtual generated column.
+                if col_def.generated != ATTRIBUTE_GENERATED_VIRTUAL {
+                    wqueue[ti].rewrite |= AT_REWRITE_DEFAULT_VAL;
+                }
             }
         }
 

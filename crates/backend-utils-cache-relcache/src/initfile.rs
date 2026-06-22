@@ -532,6 +532,10 @@ pub fn RelationBuildLocalRelation<'mcx>(
             attcompression: satt.attcompression,
             attnotnull: satt.attnotnull,
             atthasdef: satt.atthasdef,
+            // CreateTupleDescCopy clears atthasmissing on the copy (it does not
+            // carry constraints/defaults/missing); a newly created relation has
+            // no missing values yet.
+            atthasmissing: false,
             attndims: satt.attndims,
             attidentity: satt.attidentity,
             attgenerated: satt.attgenerated,

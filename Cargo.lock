@@ -4734,11 +4734,13 @@ dependencies = [
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-predicate-seams",
  "backend-utils-activity-pgstat-seams",
+ "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit",
@@ -21837,6 +21839,8 @@ name = "backend-utils-adt-varchar"
 version = "0.0.0"
 dependencies = [
  "backend-libpq-pqformat",
+ "backend-nodes-core",
+ "backend-optimizer-util-clauses",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-pg-locale-seams",
  "backend-utils-adt-varlena",
@@ -21849,6 +21853,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-fmgr",
+ "types-nodes",
  "types-sortsupport",
  "types-stringinfo",
 ]

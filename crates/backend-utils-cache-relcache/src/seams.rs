@@ -160,6 +160,34 @@ pub fn init_seams() {
         })
     });
 
+    sx::set_relcache_attmissing::set(|relid, attnum, image| {
+        crate::core_entry_store::with_relation_mut(relid, |rd| {
+            let idx = (attnum - 1) as usize;
+            let natts = rd.rd_att.attrs.len();
+            // Full attr flag. The projected descriptor (`project_in` ->
+            // `build_form_attrs` -> `populate_compact_attribute`) derives the
+            // compact attr's `atthasmissing` from this, so the materialized-tuple
+            // deform path (`getmissingattr`) sees it too.
+            rd.rd_att.attrs[idx].atthasmissing = true;
+            // constr->missing[attnum-1] = { am_present: true, am_value: image }.
+            // Lazily allocate the relnatts-long missing array (C's
+            // MemoryContextAllocZero(relnatts * sizeof(AttrMissing))).
+            let constr = rd
+                .rd_att
+                .constr
+                .get_or_insert_with(types_relcache_entry::OwnedTupleConstr::default);
+            if constr.missing.len() < natts {
+                constr
+                    .missing
+                    .resize(natts, types_relcache_entry::OwnedAttrMissing::default());
+            }
+            constr.missing[idx] = types_relcache_entry::OwnedAttrMissing {
+                am_present: true,
+                am_value: Some(image),
+            };
+        })
+    });
+
     // --- rewriteHandler.c per-query rule reader (rd_rules re-projection) ---
     sx::relation_rules::set(relation_rules);
     sx::relation_row_security::set(relation_row_security);

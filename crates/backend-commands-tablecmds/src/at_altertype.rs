@@ -43,10 +43,11 @@ use mcx::{Mcx, PgVec};
 
 use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 use types_catalog::pg_attribute::{
-    Anum_pg_attribute_attcollation, Anum_pg_attribute_attgenerated, Anum_pg_attribute_atthasdef,
-    Anum_pg_attribute_atthasmissing, Anum_pg_attribute_attinhcount, Anum_pg_attribute_attnotnull,
-    Anum_pg_attribute_attnum, Anum_pg_attribute_atttypid, Anum_pg_attribute_atttypmod,
-    AttributeRelationId, PgAttributeUpdateRow,
+    Anum_pg_attribute_attalign, Anum_pg_attribute_attbyval, Anum_pg_attribute_attcollation,
+    Anum_pg_attribute_attgenerated, Anum_pg_attribute_atthasdef, Anum_pg_attribute_atthasmissing,
+    Anum_pg_attribute_attinhcount, Anum_pg_attribute_attlen, Anum_pg_attribute_attmissingval,
+    Anum_pg_attribute_attnotnull, Anum_pg_attribute_attnum, Anum_pg_attribute_atttypid,
+    Anum_pg_attribute_atttypmod, AttributeRelationId, PgAttributeUpdateRow,
 };
 use types_catalog::pg_attrdef::AttrDefaultRelationId;
 use types_catalog::pg_collation::CollationRelationId;
@@ -1939,9 +1940,82 @@ pub fn ATExecAlterColumnType<'mcx>(
         )?;
     }
 
-    // The attmissingval array repack (no-rewrite path) is not yet ported.
-    if atthasmissing && rewrite == 0 {
-        unported("attmissingval repack (construct_array over the new type)");
+    // First fix up the missing value, if any. If `rewrite` is set the missing
+    // value should already have been cleared, so this only fires on the
+    // no-rewrite path. We assume that since the table doesn't need rewriting,
+    // the actual Datum doesn't need to be changed, only the array metadata: get
+    // the element out of the old-type array and repack it in a new array built
+    // with the new type data (tablecmds.c:14897).
+    let mut new_missingval: Option<Option<alloc::vec::Vec<u8>>> = None;
+    if atthasmissing {
+        // Assert(tab->rewrite == 0);
+        debug_assert_eq!(rewrite, 0);
+
+        // missingval = heap_getattr(heapTup, Anum_pg_attribute_attmissingval,
+        //                           attrelation->rd_att, &missingNull);
+        let (missingval_bytes, missing_null) = backend_utils_cache_syscache::SysCacheGetAttr(
+            mcx,
+            ATTNAME,
+            &heap_tup,
+            Anum_pg_attribute_attmissingval as i32,
+        )?;
+
+        // if it's a null array there is nothing to do.
+        if !missing_null {
+            // The old type's array element metadata (still current on the
+            // pg_attribute tuple before this update): attlen/attbyval/attalign.
+            let old_attlen =
+                SysCacheGetAttrNotNull(mcx, ATTNAME, &heap_tup, Anum_pg_attribute_attlen as i32)?
+                    .as_i16();
+            let old_attbyval = SysCacheGetAttrNotNull(
+                mcx,
+                ATTNAME,
+                &heap_tup,
+                Anum_pg_attribute_attbyval as i32,
+            )?
+            .as_bool();
+            let old_attalign = SysCacheGetAttrNotNull(
+                mcx,
+                ATTNAME,
+                &heap_tup,
+                Anum_pg_attribute_attalign as i32,
+            )?
+            .as_char();
+
+            // missingval = array_get_element(missingval, 1, &one, 0, attlen,
+            //                                attbyval, attalign, &isNull);
+            // The single-element array is deconstructed; element 0 is the C
+            // "element 1".
+            let old_bytes = missingval_bytes.as_ref_bytes();
+            let elems = backend_utils_adt_arrayfuncs_seams::deconstruct_array_values_bytes::call(
+                mcx,
+                old_bytes,
+                old_atttypid,
+                old_attlen,
+                old_attbyval,
+                old_attalign as core::ffi::c_char,
+            )?;
+            let (elem_datum, _elem_isnull) = elems
+                .first()
+                .ok_or_else(|| {
+                    backend_utils_error::PgError::error(
+                        "attmissingval array has no element".to_string(),
+                    )
+                })?
+                .clone();
+
+            // missingval = PointerGetDatum(construct_array(&missingval, 1,
+            //     targettype, tform->typlen, tform->typbyval, tform->typalign));
+            let new_arr = backend_utils_adt_arrayfuncs_seams::construct_array_values_bytes::call(
+                mcx,
+                core::slice::from_ref(&elem_datum),
+                targettype,
+                tform.typlen,
+                tform.typbyval,
+                tform.typalign as core::ffi::c_char,
+            )?;
+            new_missingval = Some(Some(new_arr.as_slice().to_vec()));
+        }
     }
 
     // Here we go — change the recorded column type and collation.
@@ -1964,6 +2038,8 @@ pub fn ATExecAlterColumnType<'mcx>(
         attalign: Some(tform.typalign),
         attstorage: Some(tform.typstorage),
         attcompression: Some(InvalidCompressionMethod),
+        // Repacked missing value (no-rewrite path); `None` leaves it unchanged.
+        attmissingval: new_missingval,
         ..Default::default()
     };
     indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, &attrelation, &heap_tup, &row)?;
