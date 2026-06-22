@@ -641,6 +641,11 @@ fn tuplesort_begin_batch<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult
     // Initial size of array must be more than ALLOCSET_SEPARATE_THRESHOLD.
     state.memtupsize = INITIAL_MEMTUPSIZE;
     state.growmemtuples = true;
+    // C: state->slabAllocatorUsed = false; — a re-batched sort (tuplesort_reset,
+    // e.g. incremental sort between groups) may have set this true on a prior
+    // on-disk run. Without clearing it, a subsequent in-memory run lands in
+    // SortedInMem with slabAllocatorUsed still true and trips the gettuple assert.
+    state.slabAllocatorUsed = false;
     state.memtuples = vec_with_capacity_in(state.mcx(), state.memtupsize as usize)?;
 
     // USEMEM(state, GetMemoryChunkSpace(state->memtuples)): account for the

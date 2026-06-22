@@ -2885,9 +2885,12 @@ fn show_sort_group_keys<'es, 'p>(
             )?;
         }
 
-        // if (keyno < nPresortedKeys) resultPresorted = lappend(...).
+        // if (keyno < nPresortedKeys) resultPresorted = lappend(resultPresorted,
+        // exprstr). C pushes the BARE deparsed expr (exprstr), NOT the
+        // order-decorated sortkeybuf — the Presorted Key list never shows
+        // ASC/DESC/NULLS direction.
         if (keyno as i32) < n_presorted_keys {
-            result_presorted.push(sortkeybuf.clone());
+            result_presorted.push(alloc::string::String::from(exprstr.as_str()));
         }
         result.push(sortkeybuf);
     }
