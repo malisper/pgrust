@@ -129,6 +129,7 @@ seam_core::seam!(
     /// `adjust_appendrel_attrs_multilevel(root, (Node *) node, child_rel,
     /// top_parent)` (appendinfo.c) — multi-level Var translation.
     pub fn adjust_appendrel_attrs_multilevel<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         node: Expr<'mcx>,
         child_rel: RelId,

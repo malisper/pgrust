@@ -54,7 +54,7 @@ use types_tuple::heaptuple::{
 };
 
 use backend_nodes_core::makefuncs;
-use backend_optimizer_util_appendinfo::{adjust_appendrel_attrs, make_append_rel_info};
+use backend_optimizer_util_appendinfo::{adjust_appendrel_attrs_in, make_append_rel_info};
 use backend_optimizer_util_relnode::{build_simple_rel, expand_planner_arrays};
 use backend_optimizer_util_relnode_seams as bms;
 
@@ -1022,7 +1022,7 @@ pub fn apply_child_basequals<'mcx>(
             )
         };
 
-        let childqual = adjust_appendrel_attrs(root, clause, &appinfos)?;
+        let childqual = adjust_appendrel_attrs_in(mcx, root, clause, &appinfos)?;
         let childqual =
             backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, childqual)?;
 

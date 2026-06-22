@@ -2766,7 +2766,7 @@ fn create_samplescan_plan<'mcx>(
                     let mut e = e;
                     for &(child, top_parent) in &child_targets {
                         e = equivclass_ext::adjust_appendrel_attrs_multilevel::call(
-                            root, e, child, Some(top_parent),
+                            run, root, e, child, Some(top_parent),
                         )?;
                     }
                     new_args.push(e);
@@ -2777,7 +2777,7 @@ fn create_samplescan_plan<'mcx>(
                 let mut e = *rep;
                 for &(child, top_parent) in &child_targets {
                     e = equivclass_ext::adjust_appendrel_attrs_multilevel::call(
-                        root, e, child, Some(top_parent),
+                        run, root, e, child, Some(top_parent),
                     )?;
                 }
                 tsc.repeatable = Some(alloc::boxed::Box::new(e));
