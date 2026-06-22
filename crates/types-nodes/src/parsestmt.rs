@@ -740,6 +740,23 @@ impl<'mcx> ParseState<'mcx> {
             out.p_ctenamespace.push(cte.clone_in(mcx)?);
         }
 
+        // p_future_ctes is part of the spine an inner reference reads through
+        // `parentParseState`: a not-yet-in-scope (forward-referenced, or plain
+        // non-RECURSIVE self) CTE name reached from a sub-SELECT inside a CTE's
+        // body lands in `parserOpenTable`, which calls `isFutureCTE` — that walks
+        // up `parentParseState` looking for the name in each level's
+        // `p_future_ctes`, to upgrade the bare "relation does not exist" into the
+        // WITH-item DETAIL/HINT. Without this copy the cloned ancestor's
+        // `p_future_ctes` is empty and the hint is lost (C holds the parent by a
+        // live back-pointer). Read-only at the ancestor level, so no merge-back.
+        out.p_future_ctes = PgVec::new_in(mcx);
+        out.p_future_ctes
+            .try_reserve(self.p_future_ctes.len())
+            .map_err(|_| mcx.oom(self.p_future_ctes.len()))?;
+        for cte in self.p_future_ctes.iter() {
+            out.p_future_ctes.push(cte.clone_in(mcx)?);
+        }
+
         // The permission-info list is part of the spine an upper-level reference
         // reads/marks: a LATERAL or correlated subquery resolves an outer-query
         // Var via `parentParseState` and then marks SELECT privilege on the
