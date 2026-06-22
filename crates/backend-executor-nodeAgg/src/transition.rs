@@ -1318,7 +1318,17 @@ fn transfn_input_args<'mcx>(
     alloc::vec::Vec<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
     alloc::vec::Vec<bool>,
 ) {
-    if pertrans.num_trans_inputs > 1 {
+    // The ordered-aggregate drain dispatches on `numInputs` (the number of
+    // aggregated input columns, incl. ORDER BY keys), NOT `numTransInputs` (the
+    // number of columns actually passed to the transfn). `finalize_aggregates`
+    // calls `process_ordered_aggregate_single` iff `numInputs == 1` and
+    // `process_ordered_aggregate_multi` otherwise — e.g. `array_agg(x ORDER BY y)`
+    // has `numInputs == 2` (x + the sort key y) but `numTransInputs == 1` (only x
+    // reaches the transfn). The multi path stages every drained column on
+    // `trans_input_args`; the single path stages arg[1] on `distinct_value`.
+    // Selecting on `numTransInputs` here wrongly read the empty `distinct_value`
+    // for such an aggregate, dropping its by-reference input.
+    if pertrans.num_inputs != 1 {
         // Multi-column ordered-aggregate drain: all numTransInputs columns were
         // deformed and staged by `load_transfn_args_from_slot`.
         (
