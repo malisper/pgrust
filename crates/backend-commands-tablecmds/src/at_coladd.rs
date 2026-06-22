@@ -597,14 +597,47 @@ pub fn ATExecAddColumn<'mcx>(
             backend_utils_cache_typcache_seams::domain_has_constraints::call(attribute_typid)?;
         if defval.is_none() && has_domain_constraints {
             // Build a CoerceToDomain(NULL) so the table is rewritten and the
-            // domain constraints are checked against each existing row. The
-            // makeNullConst + coerce_to_target_type build is not yet ported.
+            // domain constraints are checked against each existing row.
+            //   baseTypeMod = attribute->atttypmod;
+            //   baseTypeId  = getBaseTypeAndTypmod(attribute->atttypid, &baseTypeMod);
+            //   baseTypeColl = get_typcollation(baseTypeId);
+            //   defval = makeNullConst(baseTypeId, baseTypeMod, baseTypeColl);
+            //   defval = coerce_to_target_type(NULL, defval, baseTypeId,
+            //              attribute->atttypid, attribute->atttypmod,
+            //              COERCION_ASSIGNMENT, COERCE_IMPLICIT_CAST, -1);
             let _ = attribute_typmod;
-            panic!(
-                "ALTER TABLE ADD COLUMN of a constrained-domain type with no default: the \
-                 CoerceToDomain(NULL) build (makeNullConst + coerce_to_target_type) is not \
-                 yet ported (faithful seam-and-panic)"
-            );
+            let (base_type_id, base_type_mod) =
+                backend_utils_cache_lsyscache_seams::get_base_type_and_typmod::call(
+                    attribute_typid,
+                )?;
+            let base_type_coll =
+                backend_utils_cache_lsyscache_seams::get_typcollation::call(base_type_id)?;
+            let null_const = backend_nodes_core::makefuncs::make_null_const(
+                mcx,
+                base_type_id,
+                base_type_mod,
+                base_type_coll,
+            )?;
+            let coerced = backend_parser_coerce::coerce_to_target_type(
+                mcx,
+                None,
+                types_nodes::primnodes::Expr::Const(null_const).erase_lifetime(),
+                base_type_id,
+                attribute_typid,
+                attribute_typmod,
+                types_nodes::ddlnodes::CoercionContext::COERCION_ASSIGNMENT,
+                types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                -1,
+            )?;
+            // if (defval == NULL) /* should not happen */
+            //     elog(ERROR, "failed to coerce base type to domain");
+            let coerced = coerced.ok_or_else(|| {
+                types_error::PgError::error("failed to coerce base type to domain")
+            })?;
+            // Bring the parser-arena `'static` coercion result into `mcx`
+            // (Expr is invariant over its lifetime).
+            let coerced: types_nodes::primnodes::Expr<'mcx> = coerced.clone_in(mcx)?;
+            defval = Some(mcx::alloc_in(mcx, coerced)?);
         }
 
         if let Some(dv) = defval.take() {
