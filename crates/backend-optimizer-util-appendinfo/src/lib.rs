@@ -366,8 +366,9 @@ fn adjust_appendrel_attrs_inner<'mcx>(
         out
     };
     // No deferred interning is produced by the expressible branches (Var/
-    // RestrictInfo/CurrentOfExpr/PlaceHolderVar translate in place over the owned
-    // value tree); `pending` stays empty.
+    // CurrentOfExpr/PlaceHolderVar translate in place over the owned value tree;
+    // embedded `RestrictInfo` arms are handled out-of-band by `adjust_restrictinfo`
+    // / `adjust_orclause_node`, not by this value mutator); `pending` stays empty.
     debug_assert!(pending.is_empty());
     Ok(result)
 }
@@ -709,9 +710,19 @@ fn adjust_restrictinfo(
     newinfo.clause = root.alloc_node(new_clause);
 
     // and the modified version, if an OR clause.
+    //
+    // The orclause is a BoolExpr whose args are themselves `RestrictInfo` arms
+    // (C `make_sub_restrictinfos`). C's `adjust_appendrel_attrs_mutator` recurses
+    // through the BoolExpr into each arm, hitting the `IsA(node, RestrictInfo)`
+    // branch and producing a freshly-translated sub-RestrictInfo. The value-tree
+    // mutator here has no RestrictInfo case (an `Expr::RestrictInfo` arm would be
+    // returned verbatim, leaving the arm's clause/relids pointing at the parent
+    // rel — which is exactly what broke parameterized bitmap-OR paths for child
+    // partitions). So translate the orclause arms explicitly, recursing into
+    // `adjust_restrictinfo` for each `RestrictInfo` arm.
     if let Some(orclause_id) = newinfo.orclause {
         let or_expr = root.node(orclause_id).clone_in(mcx)?;
-        let new_or = adjust_appendrel_attrs_in(mcx, root, or_expr, appinfos)?;
+        let new_or = adjust_orclause_node(mcx, root, or_expr, appinfos)?;
         newinfo.orclause = Some(root.alloc_node(new_or));
     }
 
@@ -735,6 +746,39 @@ fn adjust_restrictinfo(
     newinfo.right_mcvfreq = -1.0;
 
     Ok(root.alloc_rinfo(newinfo))
+}
+
+/// Translate a `RestrictInfo->orclause` node tree for `adjust_restrictinfo`.
+///
+/// The orclause mirrors the clause structure but with `make_sub_restrictinfos`
+/// wrapping: it is a BoolExpr (OR, possibly with nested AND BoolExprs) whose leaf
+/// arms are `Expr::RestrictInfo` handles. C's `adjust_appendrel_attrs_mutator`
+/// recurses through the BoolExpr and translates each arm via its
+/// `IsA(node, RestrictInfo)` branch. We replicate that here: BoolExpr nodes
+/// recurse over their args; `Expr::RestrictInfo` arms re-enter
+/// [`adjust_restrictinfo`]; any other (bare clause) node goes through the value
+/// mutator.
+fn adjust_orclause_node<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    node: Expr<'mcx>,
+    appinfos: &[AppendRelInfo],
+) -> PgResult<Expr<'mcx>> {
+    match node {
+        Expr::RestrictInfo(r) => {
+            let new_ri = adjust_restrictinfo(mcx, root, RinfoId::from(r), appinfos)?;
+            Ok(Expr::RestrictInfo(new_ri.as_expr_ref()))
+        }
+        Expr::BoolExpr(mut be) => {
+            let mut new_args = Vec::with_capacity(be.args.len());
+            for arg in be.args.drain(..) {
+                new_args.push(adjust_orclause_node(mcx, root, arg, appinfos)?);
+            }
+            be.args = new_args;
+            Ok(Expr::BoolExpr(be))
+        }
+        other => adjust_appendrel_attrs_in(mcx, root, other, appinfos),
+    }
 }
 
 /* ==========================================================================
