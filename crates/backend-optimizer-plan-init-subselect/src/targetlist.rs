@@ -59,7 +59,7 @@ pub fn build_base_rel_tlists(root: &mut PlannerInfo, run: &PlannerRun<'_>) -> Pg
 
     if !tlist_vars.is_empty() {
         let where_needed = bms::relids_make_singleton::call(0);
-        add_vars_to_targetlist(root, tlist_vars, where_needed)?;
+        add_vars_to_targetlist(run.mcx(), root, tlist_vars, where_needed)?;
     }
 
     // If there's a HAVING clause, we'll need the Vars it uses, too. Note that
@@ -76,7 +76,7 @@ pub fn build_base_rel_tlists(root: &mut PlannerInfo, run: &PlannerRun<'_>) -> Pg
     };
     if !having_vars.is_empty() {
         let where_needed = bms::relids_make_singleton::call(0);
-        add_vars_to_targetlist(root, having_vars, where_needed)?;
+        add_vars_to_targetlist(run.mcx(), root, having_vars, where_needed)?;
     }
     Ok(())
 }
@@ -89,6 +89,7 @@ pub fn build_base_rel_tlists(root: &mut PlannerInfo, run: &PlannerRun<'_>) -> Pg
 /// contain `PlaceHolderVar`s, whose `ph_needed` is updated via the placeholder
 /// owner instead.
 pub fn add_vars_to_targetlist<'mcx>(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     vars: Vec<Expr<'mcx>>,
     where_needed: Relids,
@@ -128,7 +129,7 @@ pub fn add_vars_to_targetlist<'mcx>(
                     bms::relids_add_members::call(cur, &where_needed);
             }
             Expr::PlaceHolderVar(phv) => {
-                initext::phinfo_add_needed::call(root, &phv, &where_needed)?;
+                initext::phinfo_add_needed::call(mcx, root, &phv, &where_needed)?;
             }
             other => {
                 panic!("unrecognized node type: {:?}", core::mem::discriminant(&other));
@@ -148,7 +149,7 @@ pub fn add_vars_to_targetlist<'mcx>(
 /// clause's relids (intersected with `all_baserels` for clone clauses).
 pub fn rebuild_joinclause_attr_needed(
     root: &mut PlannerInfo,
-    _run: &PlannerRun<'_>,
+    run: &PlannerRun<'_>,
 ) -> PgResult<()> {
     // seen_serials — rinfo_serials of join clauses already processed.
     let mut seen_serials: Relids = None;
@@ -198,7 +199,7 @@ pub fn rebuild_joinclause_attr_needed(
                 } else {
                     required_relids
                 };
-                add_vars_to_attr_needed(root, vars, where_needed)?;
+                add_vars_to_attr_needed(run.mcx(), root, vars, where_needed)?;
             }
         }
     }
@@ -213,6 +214,7 @@ pub fn rebuild_joinclause_attr_needed(
 /// their relations' targetlists. Used to rebuild attr_needed after removal of a
 /// useless outer join.
 pub fn add_vars_to_attr_needed<'mcx>(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     vars: Vec<Expr<'mcx>>,
     where_needed: Relids,
@@ -237,7 +239,7 @@ pub fn add_vars_to_attr_needed<'mcx>(
                     bms::relids_add_members::call(cur, &where_needed);
             }
             Expr::PlaceHolderVar(phv) => {
-                initext::phinfo_add_needed::call(root, &phv, &where_needed)?;
+                initext::phinfo_add_needed::call(mcx, root, &phv, &where_needed)?;
             }
             other => {
                 panic!("unrecognized node type: {:?}", core::mem::discriminant(&other));

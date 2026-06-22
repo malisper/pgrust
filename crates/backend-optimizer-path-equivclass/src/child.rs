@@ -280,7 +280,7 @@ pub fn add_setop_child_rel_equivalences(
  * ==================================================================== */
 
 /// `rebuild_eclass_attr_needed(root)` (equivclass.c:2574).
-pub fn rebuild_eclass_attr_needed(root: &mut PlannerInfo) -> PgResult<()> {
+pub fn rebuild_eclass_attr_needed(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo) -> PgResult<()> {
     let live = live_ec_ids(root);
     for ec in live {
         debug_assert!(root.ec(ec).ec_childmembers.is_empty());
@@ -294,7 +294,7 @@ pub fn rebuild_eclass_attr_needed(root: &mut PlannerInfo) -> PgResult<()> {
                     PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
                 );
                 let ec_relids = root.ec(ec).ec_relids.clone();
-                ec_seam::add_vars_to_attr_needed::call(root, vars, ec_relids)?;
+                ec_seam::add_vars_to_attr_needed::call(mcx, root, vars, ec_relids)?;
             }
         }
     }

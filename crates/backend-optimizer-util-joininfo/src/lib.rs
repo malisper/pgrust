@@ -207,12 +207,22 @@ pub fn init_seams() {
     // once placeholders are frozen and can OOM; neither happens on the memoize
     // cache-key path (placeholders not yet frozen there), so the wrapper
     // surfaces such an error as a panic, matching the fixed consumer signature.
-    joinpath_seam::find_placeholder_info::set(|root, node| {
-        let phv = match root.node(node) {
-            Expr::PlaceHolderVar(phv) => phv.clone(),
+    joinpath_seam::find_placeholder_info::set(|mcx, root, node| {
+        // copyObject shape: the PHV's `phexpr` may carry a SubPlan whose derived
+        // `Expr::clone` panics, so deep-copy through `clone_in` into `mcx`.
+        let phv_expr: Expr<'static> = match root.node(node) {
+            Expr::PlaceHolderVar(phv) => Expr::PlaceHolderVar(
+                phv.clone_in(mcx)
+                    .expect("find_placeholder_info: PHV clone_in failed"),
+            )
+            .erase_lifetime(),
             _ => panic!("find_placeholder_info: node is not a PlaceHolderVar"),
         };
-        find_placeholder_info(root, &phv).expect("find_placeholder_info failed")
+        let phv = match &phv_expr {
+            Expr::PlaceHolderVar(phv) => phv,
+            _ => unreachable!(),
+        };
+        find_placeholder_info(mcx, root, phv).expect("find_placeholder_info failed")
     });
 
     // placeholder.c / costsize.c — `find_placeholder_info_width` (costsize-seams,
@@ -241,7 +251,7 @@ pub fn init_seams() {
             Expr::PlaceHolderVar(phv) => phv,
             _ => unreachable!(),
         };
-        let phid = find_placeholder_info(root, phv)
+        let phid = find_placeholder_info(mcx, root, phv)
             .expect("find_placeholder_info_width: find_placeholder_info failed");
         let ph_width = root.phinfo(phid).ph_width;
         let phexpr = phv
@@ -269,8 +279,8 @@ pub fn init_seams() {
     placeholder_seam::make_placeholder_expr::set(|root, expr, phrels| {
         make_placeholder_expr(root, expr, phrels)
     });
-    placeholder_seam::find_placeholder_info::set(|root, phv| {
-        find_placeholder_info(root, phv)
+    placeholder_seam::find_placeholder_info::set(|mcx, root, phv| {
+        find_placeholder_info(mcx, root, phv)
     });
 
     // joininfo.c — geqo-all-seams (consumed by geqo + joinrels).
@@ -283,7 +293,7 @@ pub fn init_seams() {
     // Homed here because this unit ports `find_placeholder_info`; consumed by
     // `add_vars_to_targetlist` / `add_vars_to_attr_needed` in init-subselect.
     backend_optimizer_plan_init_subselect_ext_seams::phinfo_add_needed::set(
-        |root, phv, where_needed| placeholder::phinfo_add_needed(root, phv, where_needed),
+        |mcx, root, phv, where_needed| placeholder::phinfo_add_needed(mcx, root, phv, where_needed),
     );
 
     // relnode.c reaches `add_placeholders_to_joinrel` (placeholder.c, owned here)
@@ -291,8 +301,8 @@ pub fn init_seams() {
     // (restrictinfo.c, owned here) through its no-owner consumer-side ext seam
     // crate. These owners live in this unit; install them.
     use backend_optimizer_util_relnode_ext_seams as relnode_ext;
-    relnode_ext::add_placeholders_to_joinrel::set(|root, joinrel, outer_rel, inner_rel, sjinfo| {
-        placeholder::add_placeholders_to_joinrel(root, joinrel, outer_rel, inner_rel, sjinfo)
+    relnode_ext::add_placeholders_to_joinrel::set(|mcx, root, joinrel, outer_rel, inner_rel, sjinfo| {
+        placeholder::add_placeholders_to_joinrel(mcx, root, joinrel, outer_rel, inner_rel, sjinfo)
     });
     relnode_ext::join_clause_is_movable_into_relids::set(
         |root, rinfo, current_relids, join_and_required| {

@@ -89,9 +89,9 @@ seam_core::seam!(
 seam_core::seam!(
     /// `add_vars_to_targetlist(root, vars, where_needed)` (var.c). `vars` is a
     /// list of Var/PlaceHolderVar nodes; `where_needed` the relids needing them.
-    pub fn add_vars_to_targetlist(root: &mut PlannerInfo, vars: Vec<Expr<'static>>, where_needed: Relids) -> PgResult<()>
+    pub fn add_vars_to_targetlist(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo, vars: Vec<Expr<'static>>, where_needed: Relids) -> PgResult<()>
 );
 seam_core::seam!(
     /// `add_vars_to_attr_needed(root, vars, where_needed)` (var.c).
-    pub fn add_vars_to_attr_needed(root: &mut PlannerInfo, vars: Vec<Expr<'static>>, where_needed: Relids) -> PgResult<()>
+    pub fn add_vars_to_attr_needed(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo, vars: Vec<Expr<'static>>, where_needed: Relids) -> PgResult<()>
 );

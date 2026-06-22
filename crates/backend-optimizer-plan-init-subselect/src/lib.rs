@@ -234,11 +234,11 @@ pub fn init_seams() {
     });
 
     /* ---- initsplan.c-owned fns called by equivclass (equivclass-ext-seams) */
-    eqext::add_vars_to_targetlist::set(|root, vars, where_needed| {
-        targetlist::add_vars_to_targetlist(root, vars, where_needed)
+    eqext::add_vars_to_targetlist::set(|mcx, root, vars, where_needed| {
+        targetlist::add_vars_to_targetlist(mcx, root, vars, where_needed)
     });
-    eqext::add_vars_to_attr_needed::set(|root, vars, where_needed| {
-        targetlist::add_vars_to_attr_needed(root, vars, where_needed)
+    eqext::add_vars_to_attr_needed::set(|mcx, root, vars, where_needed| {
+        targetlist::add_vars_to_attr_needed(mcx, root, vars, where_needed)
     });
     eqext::distribute_restrictinfo_to_rels::set(|run, root, restrictinfo| {
         quals::distribute_restrictinfo_to_rels(run, root, restrictinfo)
@@ -259,11 +259,11 @@ pub fn init_seams() {
     );
 
     /* ---- initsplan.c-owned fns called by joininfo (joininfo-ext-seams) -- */
-    jiext::add_vars_to_targetlist::set(|root, vars, where_needed| {
-        targetlist::add_vars_to_targetlist(root, vars, where_needed)
+    jiext::add_vars_to_targetlist::set(|mcx, root, vars, where_needed| {
+        targetlist::add_vars_to_targetlist(mcx, root, vars, where_needed)
     });
-    jiext::add_vars_to_attr_needed::set(|root, vars, where_needed| {
-        targetlist::add_vars_to_attr_needed(root, vars, where_needed)
+    jiext::add_vars_to_attr_needed::set(|mcx, root, vars, where_needed| {
+        targetlist::add_vars_to_attr_needed(mcx, root, vars, where_needed)
     });
     jiext::restriction_is_always_true::set(|root, ri| {
         quals::restriction_is_always_true_for(root, ri)

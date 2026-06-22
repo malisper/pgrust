@@ -293,7 +293,7 @@ pub fn expand_inherited_rtentry<'mcx>(
         // Add the newly added Vars to the parent's reltarget.  The children's
         // reltargets are made later.
         let singleton = bms::relids_make_singleton::call(0);
-        eqext::add_vars_to_targetlist::call(root, newvars, singleton)?;
+        eqext::add_vars_to_targetlist::call(run.mcx(), root, newvars, singleton)?;
     }
 
     oldrelation.close(NO_LOCK)?;

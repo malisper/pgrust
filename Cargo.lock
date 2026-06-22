@@ -12773,6 +12773,7 @@ dependencies = [
 name = "backend-optimizer-path-equivclass-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -13680,6 +13681,7 @@ dependencies = [
 name = "backend-optimizer-util-joininfo-ext-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -13764,6 +13766,7 @@ dependencies = [
 name = "backend-optimizer-util-placeholder-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -13865,6 +13868,7 @@ dependencies = [
 name = "backend-optimizer-util-relnode-ext-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

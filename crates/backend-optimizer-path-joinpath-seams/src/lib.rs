@@ -478,7 +478,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `find_placeholder_info(root, (PlaceHolderVar *) node)` (placeholder.c) —
     /// the PlaceHolderInfo for a `PlaceHolderVar` node.
-    pub fn find_placeholder_info(root: &mut PlannerInfo, node: NodeId) -> PhInfoId
+    pub fn find_placeholder_info(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo, node: NodeId) -> PhInfoId
 );
 seam_core::seam!(
     /// `lookup_type_cache(exprType((Node*) expr), TYPECACHE_HASH_PROC |

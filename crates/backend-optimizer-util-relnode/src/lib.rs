@@ -641,7 +641,7 @@ pub fn build_join_rel<'mcx>(
         pushed_down_joins,
         sjinfo.jointype != JOIN_INNER,
     )?;
-    ext::add_placeholders_to_joinrel::call(root, joinrel, outer_rel, inner_rel, sjinfo)?;
+    ext::add_placeholders_to_joinrel::call(run.mcx(), root, joinrel, outer_rel, inner_rel, sjinfo)?;
 
     /*
      * Finish computing direct_lateral_relids now that PHVs are added.
@@ -860,7 +860,7 @@ fn build_joinrel_tlist(
 
         /* For a PlaceHolderVar, look up the PlaceHolderInfo. */
         if node.is_placeholdervar() {
-            let phinfo = joinpath::find_placeholder_info::call(root, var_id);
+            let phinfo = joinpath::find_placeholder_info::call(mcx, root, var_id);
 
             /* Is it still needed above this joinrel? */
             if bms::relids_nonempty_difference::call(&root.phinfo(phinfo).ph_needed, &relids) {

@@ -360,9 +360,9 @@ fn remove_leftjoinrel_from_query<'mcx>(
     /*
      * Repeat construction of attr_needed bits coming from all other sources.
      */
-    backend_optimizer_util_joininfo::rebuild_placeholder_attr_needed(root)?;
+    backend_optimizer_util_joininfo::rebuild_placeholder_attr_needed(run.mcx(), root)?;
     backend_optimizer_plan_small_seams::rebuild_joinclause_attr_needed::call(root, run);
-    backend_optimizer_path_equivclass::rebuild_eclass_attr_needed(root)?;
+    backend_optimizer_path_equivclass::rebuild_eclass_attr_needed(run.mcx(), root)?;
     backend_optimizer_plan_small_seams::rebuild_lateral_attr_needed::call(root, run);
     Ok(())
 }
@@ -1380,10 +1380,10 @@ fn remove_self_join_rel<'mcx>(
     root.simple_rel_array[remove_relid as usize] = None;
 
     // Rebuild attr_needed bits from all other sources.
-    backend_optimizer_util_joininfo::placeholder::rebuild_placeholder_attr_needed(root)
+    backend_optimizer_util_joininfo::placeholder::rebuild_placeholder_attr_needed(run.mcx(), root)
         .expect("rebuild_placeholder_attr_needed");
     backend_optimizer_plan_small_seams::rebuild_joinclause_attr_needed::call(root, run);
-    backend_optimizer_path_equivclass::rebuild_eclass_attr_needed(root)
+    backend_optimizer_path_equivclass::rebuild_eclass_attr_needed(run.mcx(), root)
         .expect("rebuild_eclass_attr_needed");
     backend_optimizer_plan_small_seams::rebuild_lateral_attr_needed::call(root, run);
     Ok(())

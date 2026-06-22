@@ -566,7 +566,7 @@ fn extract_lateral_vars_from_PHVs<'mcx>(
                 }
             } else if jp::node_is_placeholdervar::call(root, node) {
                 // Assert(phv->phlevelsup == 0) in C.
-                let inner_phid = jp::find_placeholder_info::call(root, node);
+                let inner_phid = jp::find_placeholder_info::call(mcx, root, node);
                 let inner_eval_at = clone_relids(&root.phinfo(inner_phid).ph_eval_at);
                 if bms::relids_is_subset::call(&inner_eval_at, &ph_lateral) {
                     charged_push(mcx, &mut ph_lateral_vars, node)?;

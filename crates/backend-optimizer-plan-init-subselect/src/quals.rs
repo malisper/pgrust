@@ -230,7 +230,7 @@ pub fn distribute_qual_to_rels<'mcx>(
         } else {
             bms::relids_copy::call(&relids)
         };
-        crate::targetlist::add_vars_to_targetlist(root, vars, where_needed)
+        crate::targetlist::add_vars_to_targetlist(run.mcx(), root, vars, where_needed)
             .expect("add_vars_to_targetlist");
     }
 
@@ -802,7 +802,7 @@ pub fn process_implied_equality<'mcx>(
     // If it's a join clause, add vars used in the clause to targetlists.
     if bms::relids_membership::call(&relids) == BMS_MULTIPLE {
         let vars = eqext::pull_var_clause::call(&clause, PVC_JOINCLAUSE_FLAGS);
-        crate::targetlist::add_vars_to_targetlist(root, vars, bms::relids_copy::call(&relids))?;
+        crate::targetlist::add_vars_to_targetlist(run.mcx(), root, vars, bms::relids_copy::call(&relids))?;
     }
 
     // Check mergejoinability (usually succeeds, since op came from an EC).

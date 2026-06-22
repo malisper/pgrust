@@ -92,6 +92,7 @@ seam_core::seam!(
     /// (placeholder.c) — add to the joinrel's tlist the PlaceHolderVars that need
     /// to be computed there.
     pub fn add_placeholders_to_joinrel(
+        mcx: mcx::Mcx<'_>,
         root: &mut PlannerInfo,
         joinrel: RelId,
         outer_rel: RelId,

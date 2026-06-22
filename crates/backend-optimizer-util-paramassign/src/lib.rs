@@ -732,7 +732,7 @@ pub fn process_subquery_nestloop_params(
             }
             Expr::PlaceHolderVar(phv) => {
                 // If not from a nestloop outer rel, complain.
-                let phinfo = find_placeholder_info(root, &phv)?;
+                let phinfo = find_placeholder_info(mcx, root, &phv)?;
                 let ph_eval_at = root.phinfo(phinfo).ph_eval_at.clone();
                 if !relids_is_subset::call(&ph_eval_at, &root.curOuterRels) {
                     return Err(elog_error("non-LATERAL parameter required by subquery"));
@@ -852,7 +852,7 @@ pub fn identify_current_nestloop_params(
                     phid,
                     phlevelsup,
                 };
-                let phinfo = find_placeholder_info(root, &probe)?;
+                let phinfo = find_placeholder_info(mcx, root, &probe)?;
                 let eval_at = root.phinfo(phinfo).ph_eval_at.clone();
 
                 if relids_is_subset::call(&eval_at, &allleftrelids) && relids_overlap::call(&eval_at, leftrelids)

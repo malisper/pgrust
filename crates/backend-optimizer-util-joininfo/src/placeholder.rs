@@ -67,7 +67,12 @@ pub fn make_placeholder_expr(
 
 /// `find_placeholder_info`
 ///		Fetch (or, if missing, create) the PlaceHolderInfo for the given PHV.
+///
+/// `mcx` is the planner-run context the freshly-created `PlaceHolderInfo`'s
+/// deep copy (`copyObject(phv)`) is interned into; it must outlive the call's
+/// `'a` brand (the planner arena governs validity, not Rust's borrow tracker).
 pub fn find_placeholder_info<'a>(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     phv: &PlaceHolderVar<'a>,
 ) -> PgResult<PhInfoId> {
@@ -95,19 +100,27 @@ pub fn find_placeholder_info<'a>(
 
     // ph_var = copyObject(phv) with phnullingrels forced empty (placeholder.c
     // convention: the PlaceHolderInfo represents the initially-calculated state).
-    // copyObject(phv): the PHV is interned into the planner-run arena (the
-    // PlaceHolderInfo lives for the run), so erase the (input-lifetime) clone to
-    // the arena's notional 'static at this sanctioned intern boundary.
-    let mut ph_var =
-        types_nodes::primnodes::placeholdervar_into_static(phv.clone());
+    // copyObject(phv): deep-copy via `clone_in` (the derived `Clone` panics when
+    // `phexpr` carries an owned-subtree variant, e.g. a SubPlan from an
+    // `(SELECT ...)` SubLink in a pulled-up subquery), then erase the clone to the
+    // planner-run arena's notional 'static at this sanctioned intern boundary.
+    let mut ph_var = types_nodes::primnodes::placeholdervar_into_static(
+        phv.clone_in(mcx)
+            .map_err(|e| PgError::error(alloc::format!("find_placeholder_info: clone_in: {e:?}")))?,
+    );
     ph_var.phnullingrels = ExprRelids { words: Vec::new() };
 
-    let phexpr = ph_var
-        .phexpr
-        .as_ref()
-        .expect("find_placeholder_info: PHV has no phexpr")
-        .as_ref()
-        .clone();
+    // Deep-copy the (already-arena-owned) phexpr subtree via `clone_in` — the
+    // derived `Expr::clone` panics if it carries a SubPlan.
+    let phexpr: Expr<'static> = types_nodes::primnodes::Expr::erase_lifetime(
+        ph_var
+            .phexpr
+            .as_ref()
+            .expect("find_placeholder_info: PHV has no phexpr")
+            .as_ref()
+            .clone_in(mcx)
+            .map_err(|e| PgError::error(alloc::format!("find_placeholder_info: clone_in: {e:?}")))?,
+    );
 
     // Any referenced rels outside the PHV's syntactic scope are LATERAL refs
     // (ph_lateral, not ph_eval_at). If no referenced rels are within the
@@ -127,7 +140,12 @@ pub fn find_placeholder_info<'a>(
     let ph_width = backend_utils_cache_lsyscache_seams::get_typavgwidth::call(typid, typmod)?;
 
     // Intern phexpr into the node arena for the consumer-facing handle mirror.
-    let ph_var_phexpr: NodeId = root.alloc_node(phexpr.clone());
+    let phexpr_for_arena: Expr<'static> = types_nodes::primnodes::Expr::erase_lifetime(
+        phexpr
+            .clone_in(mcx)
+            .map_err(|e| PgError::error(alloc::format!("find_placeholder_info: clone_in: {e:?}")))?,
+    );
+    let ph_var_phexpr: NodeId = root.alloc_node(phexpr_for_arena);
     let ph_var_phrels = phrels.clone();
 
     let phinfo = PlaceHolderInfo {
@@ -162,7 +180,7 @@ pub fn find_placeholder_info<'a>(
 
     // The PHV's contained expression may contain other, lower-level PHVs; get
     // those into the PlaceHolderInfo list too.
-    find_placeholders_in_expr(root, &phexpr)?;
+    find_placeholders_in_expr(mcx, root, &phexpr)?;
 
     Ok(phinfo_id)
 }
@@ -173,11 +191,12 @@ pub fn find_placeholder_info<'a>(
 /// (the joininfo unit ports `find_placeholder_info`); consumed by
 /// `add_vars_to_targetlist` / `add_vars_to_attr_needed` in init-subselect.
 pub fn phinfo_add_needed<'a>(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     phv: &PlaceHolderVar<'a>,
     where_needed: &Relids,
 ) -> PgResult<()> {
-    let phinfo_id = find_placeholder_info(root, phv)?;
+    let phinfo_id = find_placeholder_info(mcx, root, phv)?;
     let cur = bms::relids_copy::call(&root.phinfo(phinfo_id).ph_needed);
     root.phinfo_mut(phinfo_id).ph_needed = bms::relids_add_members::call(cur, where_needed);
     Ok(())
@@ -203,28 +222,30 @@ pub fn find_placeholders_in_jointree<'mcx>(
         let jointree = run
             .jointree(root.parse)
             .expect("find_placeholders_in_jointree: root->parse->jointree != NULL");
-        find_placeholders_in_from_expr(root, jointree)?;
+        find_placeholders_in_from_expr(run.mcx(), root, jointree)?;
     }
     Ok(())
 }
 
 /// `find_placeholders_recurse` — the `FromExpr` arm (top-level jointree entry).
 fn find_placeholders_in_from_expr<'mcx>(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     f: &types_nodes::rawnodes::FromExpr<'mcx>,
 ) -> PgResult<()> {
     // First, recurse to handle child joins.
     for item in f.fromlist.iter() {
-        find_placeholders_recurse(root, item)?;
+        find_placeholders_recurse(mcx, root, item)?;
     }
     // Now process the top-level quals.
-    find_placeholders_in_quals(root, f.quals.as_deref())?;
+    find_placeholders_in_quals(mcx, root, f.quals.as_deref())?;
     Ok(())
 }
 
 /// `find_placeholders_recurse`
 ///		Recursively scan a jointree node for PlaceHolderVars in its quals.
 fn find_placeholders_recurse<'mcx>(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     jtnode: &types_nodes::nodes::Node<'mcx>,
 ) -> PgResult<()> {
@@ -236,22 +257,22 @@ fn find_placeholders_recurse<'mcx>(
             let f = jtnode.expect_fromexpr();
             // First, recurse to handle child joins.
             for item in f.fromlist.iter() {
-                find_placeholders_recurse(root, item)?;
+                find_placeholders_recurse(mcx, root, item)?;
             }
             // Now process the top-level quals.
-            find_placeholders_in_quals(root, f.quals.as_deref())?;
+            find_placeholders_in_quals(mcx, root, f.quals.as_deref())?;
         }
         ntag::T_JoinExpr => {
             let j = jtnode.expect_joinexpr();
             // First, recurse to handle child joins.
             if let Some(larg) = j.larg.as_deref() {
-                find_placeholders_recurse(root, larg)?;
+                find_placeholders_recurse(mcx, root, larg)?;
             }
             if let Some(rarg) = j.rarg.as_deref() {
-                find_placeholders_recurse(root, rarg)?;
+                find_placeholders_recurse(mcx, root, rarg)?;
             }
             // Process the qual clauses.
-            find_placeholders_in_quals(root, j.quals.as_deref())?;
+            find_placeholders_in_quals(mcx, root, j.quals.as_deref())?;
         }
         other => {
             panic!(
@@ -283,6 +304,7 @@ fn find_placeholders_recurse<'mcx>(
 /// `placeholdersFrozen` — the `too late to create a new PlaceHolderInfo` error.
 /// Mirror C: walk each element of a `List`, and a single `Expr` directly.
 fn find_placeholders_in_quals(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     quals: Option<&types_nodes::nodes::Node<'_>>,
 ) -> PgResult<()> {
@@ -292,12 +314,12 @@ fn find_placeholders_in_quals(
             if let Some(items) = n.as_list() {
                 for it in items.iter() {
                     if let Some(e) = it.as_expr() {
-                        find_placeholders_in_expr(root, e)?;
+                        find_placeholders_in_expr(mcx, root, e)?;
                     }
                 }
                 Ok(())
             } else if let Some(e) = n.as_expr() {
-                find_placeholders_in_expr(root, e)
+                find_placeholders_in_expr(mcx, root, e)
             } else {
                 Ok(())
             }
@@ -308,7 +330,7 @@ fn find_placeholders_in_quals(
 /// `find_placeholders_in_expr`
 ///		Find all PlaceHolderVars in the given expression, and create
 ///		PlaceHolderInfo entries for them.
-fn find_placeholders_in_expr(root: &mut PlannerInfo, expr: &Expr<'_>) -> PgResult<()> {
+fn find_placeholders_in_expr(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo, expr: &Expr<'_>) -> PgResult<()> {
     // pull_var_clause does more than we need, but it's convenient.
     let vars = ext_seam::pull_var_clause_expr::call(
         expr,
@@ -318,61 +340,76 @@ fn find_placeholders_in_expr(root: &mut PlannerInfo, expr: &Expr<'_>) -> PgResul
         // Ignore any plain Vars.
         if let Expr::PlaceHolderVar(phv) = v {
             // Create a PlaceHolderInfo entry if there's not one already.
-            let _ = find_placeholder_info(root, &phv)?;
+            let _ = find_placeholder_info(mcx, root, &phv)?;
         }
     }
     Ok(())
 }
 
+/// Deep-copy the `phexpr` subtree of the PlaceHolderInfo `phid` via `clone_in`
+/// (the derived `Expr::clone` panics on a context-allocated child, e.g. a
+/// SubPlan from an `(SELECT ...)` SubLink in a pulled-up subquery).
+fn clone_phinfo_phexpr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    root: &PlannerInfo,
+    phid: PhInfoId,
+    ctx: &'static str,
+) -> PgResult<Expr<'mcx>> {
+    root.phinfo(phid)
+        .ph_var
+        .phexpr
+        .as_ref()
+        .unwrap_or_else(|| panic!("{ctx}: PHV has no phexpr"))
+        .as_ref()
+        .clone_in(mcx)
+        .map_err(|e| PgError::error(alloc::format!("{ctx}: clone_in: {e:?}")))
+}
+
 /// `fix_placeholder_input_needed_levels`
 ///		Adjust the "needed at" levels for placeholder inputs.
-pub fn fix_placeholder_input_needed_levels(root: &mut PlannerInfo) -> PgResult<()> {
+pub fn fix_placeholder_input_needed_levels(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo) -> PgResult<()> {
     let list = root.placeholder_list.clone();
     for phid in list {
-        let phexpr = root
-            .phinfo(phid)
-            .ph_var
-            .phexpr
-            .as_ref()
-            .expect("fix_placeholder_input_needed_levels: PHV has no phexpr")
-            .as_ref()
-            .clone();
+        let phexpr = types_nodes::primnodes::Expr::erase_lifetime(clone_phinfo_phexpr(
+            mcx,
+            root,
+            phid,
+            "fix_placeholder_input_needed_levels",
+        )?);
         let ph_eval_at = bms::relids_copy::call(&root.phinfo(phid).ph_eval_at);
         let vars = ext_seam::pull_var_clause_expr::call(
             &phexpr,
             PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
         );
-        ext_seam::add_vars_to_targetlist::call(root, vars, ph_eval_at)?;
+        ext_seam::add_vars_to_targetlist::call(mcx, root, vars, ph_eval_at)?;
     }
     Ok(())
 }
 
 /// `rebuild_placeholder_attr_needed`
 ///	  Put back attr_needed bits for Vars/PHVs needed in PlaceHolderVars.
-pub fn rebuild_placeholder_attr_needed(root: &mut PlannerInfo) -> PgResult<()> {
+pub fn rebuild_placeholder_attr_needed(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo) -> PgResult<()> {
     let list = root.placeholder_list.clone();
     for phid in list {
-        let phexpr = root
-            .phinfo(phid)
-            .ph_var
-            .phexpr
-            .as_ref()
-            .expect("rebuild_placeholder_attr_needed: PHV has no phexpr")
-            .as_ref()
-            .clone();
+        let phexpr = types_nodes::primnodes::Expr::erase_lifetime(clone_phinfo_phexpr(
+            mcx,
+            root,
+            phid,
+            "rebuild_placeholder_attr_needed",
+        )?);
         let ph_eval_at = bms::relids_copy::call(&root.phinfo(phid).ph_eval_at);
         let vars = ext_seam::pull_var_clause_expr::call(
             &phexpr,
             PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
         );
-        ext_seam::add_vars_to_attr_needed::call(root, vars, ph_eval_at)?;
+        ext_seam::add_vars_to_attr_needed::call(mcx, root, vars, ph_eval_at)?;
     }
     Ok(())
 }
 
 /// `add_placeholders_to_base_rels`
 ///		Add any required PlaceHolderVars to base rels' targetlists.
-pub fn add_placeholders_to_base_rels(root: &mut PlannerInfo) -> PgResult<()> {
+pub fn add_placeholders_to_base_rels(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo) -> PgResult<()> {
     let list = root.placeholder_list.clone();
     for phid in list {
         let eval_at = bms::relids_copy::call(&root.phinfo(phid).ph_eval_at);
@@ -386,8 +423,15 @@ pub fn add_placeholders_to_base_rels(root: &mut PlannerInfo) -> PgResult<()> {
                 // outer join, so its phnullingrels should be empty.
                 debug_assert!(root.phinfo(phid).ph_var.phnullingrels.words.is_empty());
 
-                // Copy the PHV and append to the rel's reltarget exprs.
-                let phv = root.phinfo(phid).ph_var.clone();
+                // Copy the PHV (deep-clone via `clone_in`; the derived `Clone`
+                // panics on a SubPlan-bearing phexpr) and append to the rel's
+                // reltarget exprs.
+                let phv = types_nodes::primnodes::placeholdervar_into_static(
+                    root.phinfo(phid)
+                        .ph_var
+                        .clone_in(mcx)
+                        .map_err(|e| PgError::error(alloc::format!("add_placeholders_to_base_rels: clone_in: {e:?}")))?,
+                );
                 let phv_node = root.alloc_node(Expr::PlaceHolderVar(phv));
                 root.rel_mut(rel)
                     .reltarget
@@ -407,6 +451,7 @@ pub fn add_placeholders_to_base_rels(root: &mut PlannerInfo) -> PgResult<()> {
 ///		if computable PHVs contain lateral references, add those references to the
 ///		joinrel's direct_lateral_relids.
 pub fn add_placeholders_to_joinrel(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     joinrel: types_pathnodes::RelId,
     outer_rel: types_pathnodes::RelId,
@@ -440,15 +485,24 @@ pub fn add_placeholders_to_joinrel(
                 if !bms::relids_is_subset::call(&ph_eval_at, &outer_relids)
                     && !bms::relids_is_subset::call(&ph_eval_at, &inner_relids)
                 {
-                    let phv = root.phinfo(phid).ph_var.clone();
+                    // Deep-clone via `clone_in` (derived `Clone` panics on a
+                    // SubPlan-bearing phexpr).
+                    let phv = types_nodes::primnodes::placeholdervar_into_static(
+                        root.phinfo(phid)
+                            .ph_var
+                            .clone_in(mcx)
+                            .map_err(|e| PgError::error(alloc::format!("add_placeholders_to_joinrel: clone_in: {e:?}")))?,
+                    );
                     // It'll start out not nulled by anything.
                     debug_assert!(phv.phnullingrels.words.is_empty());
-                    let phexpr = phv
-                        .phexpr
-                        .as_ref()
-                        .expect("add_placeholders_to_joinrel: PHV has no phexpr")
-                        .as_ref()
-                        .clone();
+                    let phexpr: Expr<'static> = types_nodes::primnodes::Expr::erase_lifetime(
+                        phv.phexpr
+                            .as_ref()
+                            .expect("add_placeholders_to_joinrel: PHV has no phexpr")
+                            .as_ref()
+                            .clone_in(mcx)
+                            .map_err(|e| PgError::error(alloc::format!("add_placeholders_to_joinrel: phexpr clone_in: {e:?}")))?,
+                    );
                     let ph_width = root.phinfo(phid).ph_width;
 
                     let phv_node = root.alloc_node(Expr::PlaceHolderVar(phv));

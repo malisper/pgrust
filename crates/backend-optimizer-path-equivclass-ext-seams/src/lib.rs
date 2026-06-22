@@ -221,6 +221,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `add_vars_to_targetlist(root, vars, where_needed)` (initsplan.c).
     pub fn add_vars_to_targetlist<'mcx>(
+        mcx: mcx::Mcx<'_>,
         root: &mut PlannerInfo,
         vars: Vec<Expr<'mcx>>,
         where_needed: Relids,
@@ -229,6 +230,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `add_vars_to_attr_needed(root, vars, where_needed)` (initsplan.c).
     pub fn add_vars_to_attr_needed<'mcx>(
+        mcx: mcx::Mcx<'_>,
         root: &mut PlannerInfo,
         vars: Vec<Expr<'mcx>>,
         where_needed: Relids,

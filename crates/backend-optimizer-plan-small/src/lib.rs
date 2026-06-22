@@ -270,7 +270,7 @@ pub fn query_planner<'mcx>(
      * Vars or placeholders to be needed above a join when they weren't so marked
      * before.
      */
-    joininfo::placeholder::fix_placeholder_input_needed_levels(root)?;
+    joininfo::placeholder::fix_placeholder_input_needed_levels(run.mcx(), root)?;
 
     /*
      * Remove any useless outer joins.  Ideally this would be done during
@@ -295,7 +295,7 @@ pub fn query_planner<'mcx>(
      * done after join removal because removal could change whether a
      * placeholder is evaluable at a base rel.
      */
-    joininfo::placeholder::add_placeholders_to_base_rels(root)?;
+    joininfo::placeholder::add_placeholders_to_base_rels(run.mcx(), root)?;
 
     /*
      * Construct the lateral reference sets now that we have finalized

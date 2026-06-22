@@ -105,7 +105,7 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `rebuild_eclass_attr_needed(root)` (equivclass.c:2574).
-    pub fn rebuild_eclass_attr_needed(root: &mut PlannerInfo) -> PgResult<()>
+    pub fn rebuild_eclass_attr_needed(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo) -> PgResult<()>
 );
 seam_core::seam!(
     /// `have_relevant_eclass_joinclause(root, rel1, rel2)` (equivclass.c:3370).

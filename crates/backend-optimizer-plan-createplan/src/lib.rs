@@ -444,7 +444,7 @@ pub(crate) fn replace_nestloop_params_mutator<'mcx>(
         debug_assert_eq!(phv.phlevelsup, 0);
 
         // Check whether we need to replace the PHV.
-        let phinfo_id = match placeholder::find_placeholder_info::call(root, phv) {
+        let phinfo_id = match placeholder::find_placeholder_info::call(mcx, root, phv) {
             Ok(id) => id,
             Err(e) => {
                 *err = Some(e);
@@ -6269,7 +6269,7 @@ fn create_nestloop_plan<'mcx>(
                     Some(v) => v.as_slice(),
                     None => outer_plan.plan_head().targetlist.as_deref().unwrap_or(&[]),
                 };
-                let phv_expr = Expr::PlaceHolderVar(phv.clone());
+                let phv_expr = Expr::PlaceHolderVar(phv.clone_in(mcx)?);
                 if backend_optimizer_util_vars::tlist::tlist_member(&phv_expr, cur_tlist).is_some() {
                     nest_params.push(NestLoopParam { paramno, paramval: phv_expr });
                     continue;
@@ -6281,12 +6281,12 @@ fn create_nestloop_plan<'mcx>(
                 // ignores phexpr, so doing this after the tlist_member check is
                 // safe. (createplan.c:4451)
                 if let Some(phexpr) = phv.phexpr.take() {
-                    let phexpr_node = root.alloc_node((*phexpr).clone());
+                    let phexpr_node = root.alloc_node((*phexpr).clone_in(mcx)?);
                     let fixed_id = replace_nestloop_params(mcx, root, phexpr_node)?;
                     let fixed = root.node(fixed_id).clone_in(mcx)?;
                     phv.phexpr = Some(alloc::boxed::Box::new(fixed));
                 }
-                let phv_for_tle = Expr::PlaceHolderVar(phv.clone());
+                let phv_for_tle = Expr::PlaceHolderVar(phv.clone_in(mcx)?);
 
                 // Make a (shallow) copy of the outer tlist if we haven't yet, and
                 // append a junk TLE carrying the PHV. (createplan.c:4462)
@@ -6302,7 +6302,7 @@ fn create_nestloop_plan<'mcx>(
                     }
                 };
                 let resno = (tlist_vec.len() + 1) as i16;
-                let tle = make_nestparam_target_entry(mcx, phv_for_tle.clone(), resno)?;
+                let tle = make_nestparam_target_entry(mcx, phv_for_tle.clone_in(mcx)?, resno)?;
                 tlist_vec.push(tle);
 
                 // Track whether the tlist is still parallel-safe.

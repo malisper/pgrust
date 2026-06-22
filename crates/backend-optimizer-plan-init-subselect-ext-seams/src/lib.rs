@@ -43,7 +43,7 @@ seam_core::seam!(
     /// `find_placeholder_info(root, phv); phinfo->ph_needed = bms_add_members(
     /// phinfo->ph_needed, where_needed)` (placeholder.c / initsplan.c) — update
     /// a PlaceHolderVar's `ph_needed` set.
-    pub fn phinfo_add_needed<'mcx>(root: &mut PlannerInfo, phv: &PlaceHolderVar<'mcx>, where_needed: &Relids) -> PgResult<()>
+    pub fn phinfo_add_needed<'mcx>(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo, phv: &PlaceHolderVar<'mcx>, where_needed: &Relids) -> PgResult<()>
 );
 
 seam_core::seam!(

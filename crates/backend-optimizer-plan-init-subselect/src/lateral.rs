@@ -227,8 +227,9 @@ fn extract_lateral_references<'mcx>(
     // Push Vars into their source relations' targetlists, and PHVs into
     // root->placeholder_list.
     crate::targetlist::add_vars_to_targetlist(
+        mcx,
         root,
-        clone_exprs(&newvars),
+        clone_exprs(mcx, &newvars),
         bms::relids_copy::call(&where_needed),
     )
     .expect("add_vars_to_targetlist");
@@ -285,7 +286,7 @@ pub fn rebuild_lateral_attr_needed(root: &mut PlannerInfo, run: &PlannerRun<'_>)
 
         let where_needed = bms::relids_make_singleton::call(rti);
 
-        crate::targetlist::add_vars_to_attr_needed(root, vars, where_needed)
+        crate::targetlist::add_vars_to_attr_needed(run.mcx(), root, vars, where_needed)
             .expect("add_vars_to_attr_needed");
     }
 }
@@ -334,7 +335,7 @@ pub fn create_lateral_join_info(root: &mut PlannerInfo, run: &PlannerRun<'_>) {
                     lateral_relids = bms::relids_add_member::call(lateral_relids.take(), var.varno);
                 }
                 Expr::PlaceHolderVar(phv) => {
-                    let phinfo_id = joininfo::find_placeholder_info(root, &phv)
+                    let phinfo_id = joininfo::find_placeholder_info(run.mcx(), root, &phv)
                         .expect("find_placeholder_info");
                     let ph_eval_at = bms::relids_copy::call(&root.phinfo(phinfo_id).ph_eval_at);
 
@@ -501,9 +502,16 @@ pub fn create_lateral_join_info(root: &mut PlannerInfo, run: &PlannerRun<'_>) {
     }
 }
 
-/// Deep-clone a slice of owned `Expr`s (the lifetime-free planner `Expr`
-/// derives `Clone`, so this is a straightforward element-wise copy — the C
-/// `copyObject` over already-fresh nodes).
-fn clone_exprs<'mcx>(v: &[Expr<'mcx>]) -> Vec<Expr<'mcx>> {
-    v.to_vec()
+/// Deep-clone a slice of owned `Expr`s into `mcx` (the C `copyObject` over
+/// already-fresh nodes). Must route through `Expr::clone_in` rather than the
+/// derived `Clone`, because a lateral reference can carry an owned-subtree
+/// variant (e.g. a `SubPlan` produced by an `(SELECT ...)` SubLink inside a
+/// pulled-up subquery) whose derived `clone()` panics.
+fn clone_exprs<'mcx>(mcx: mcx::Mcx<'mcx>, v: &[Expr<'mcx>]) -> Vec<Expr<'mcx>> {
+    v.iter()
+        .map(|e| {
+            e.clone_in(mcx)
+                .unwrap_or_else(|err| panic!("clone_exprs: clone_in: {err:?}"))
+        })
+        .collect()
 }

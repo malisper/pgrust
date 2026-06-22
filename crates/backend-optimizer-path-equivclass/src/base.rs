@@ -253,7 +253,7 @@ fn generate_base_implied_equalities_no_const<'mcx>(
             PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
         );
         let ec_relids = root.ec(ec).ec_relids.clone();
-        ec_seam::add_vars_to_targetlist::call(root, vars, ec_relids)?;
+        ec_seam::add_vars_to_targetlist::call(run.mcx(), root, vars, ec_relids)?;
     }
     Ok(())
 }
