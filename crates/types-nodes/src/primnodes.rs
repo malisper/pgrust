@@ -2921,3 +2921,142 @@ mod clone_in_tests {
         assert!(sl.subselect.is_some());
     }
 }
+
+/// Miri regression for the arena use-after-free class (the P0 of the
+/// `expr-mcx` lifetime campaign).
+///
+/// The campaign interns planner nodes into a long-lived arena by
+/// `Expr::erase_lifetime` (`PlannerInfo::alloc_node`:
+/// `node_arena.push(ArenaNode::Expr(node.erase_lifetime()))`). `erase_lifetime`
+/// only relabels the lifetime parameter `'mcx -> 'static`; it does **not**
+/// deep-copy the node's backing allocations. So if any payload of the interned
+/// node (here a by-reference `Datum::ByRef(PgVec<'mcx, u8>)`, whose buffer lives
+/// in a *transient* `MemoryContext`) outlives that context, reading it back is a
+/// use-after-free.
+///
+/// Two production SIGSEGVs came from exactly this: interning a node/Datum whose
+/// backing lived in a transient parse/relation context that then reset. In a
+/// release build that surfaces as a flaky segfault; under Miri it is a
+/// deterministic UB diagnostic.
+///
+/// These tests model the bug mechanism in pure Rust (no FFI): a durable
+/// `Vec<Expr<'static>>` standing in for `PlannerInfo::node_arena`, a transient
+/// **bump** `MemoryContext` standing in for the parse/relation context, and the
+/// real `Const`/`Datum::ByRef`/`Expr::erase_lifetime` types. The bump backend is
+/// load-bearing: it frees its whole arena on context drop (the C
+/// "freed-with-its-context" model), so the interned `PgVec`'s buffer pointer
+/// genuinely dangles — a malloc backend frees each box individually and would
+/// not reproduce the wholesale-reset shape.
+///
+/// Run with:
+///   MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" \
+///     cargo +nightly miri test -p types-nodes arena_uaf
+#[cfg(test)]
+mod arena_uaf_tests {
+    use super::*;
+    use mcx::MemoryContext;
+    use types_tuple::backend_access_common_heaptuple::Datum;
+
+    /// Build a `Const` carrying a by-reference `Datum` whose 8-byte image is
+    /// allocated in `mcx` (a `PgVec<'mcx, u8>` inside that context's arena).
+    fn byref_const<'mcx>(mcx: Mcx<'mcx>) -> Const<'mcx> {
+        let datum = Datum::from_byref_bytes_in(mcx, &[1u8, 2, 3, 4, 5, 6, 7, 8])
+            .expect("byref datum builds");
+        Const {
+            consttype: 17, // bytea, pass-by-reference
+            constlen: -1,
+            constvalue: datum,
+            constisnull: false,
+            constbyval: false,
+            ..Default::default()
+        }
+    }
+
+    /// THE BUG. Interning a node whose by-ref payload lives in a transient
+    /// context, then dropping that context, then reading the interned payload,
+    /// is a use-after-free. Under Miri this aborts with a "pointer to freed
+    /// allocation" / dangling-deref diagnostic — deterministically, every run.
+    ///
+    /// `#[cfg(miri)]`-only: under a normal `cargo test` this would dereference
+    /// freed memory and either read garbage or segfault flakily, so it must not
+    /// run there. Its whole purpose is to be the Miri tripwire for this class.
+    ///
+    /// `#[ignore]`d so a plain `cargo miri test` (the green gate) skips it — it
+    /// *intentionally* triggers UB, which aborts the whole test binary, so it
+    /// cannot share a run with the passing tests. Invoke it as an explicit
+    /// negative check that MUST fail (CI asserts non-zero exit):
+    ///   MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo +nightly \
+    ///     miri test -p types-nodes -- --ignored interning_byref_from_transient
+    /// Expected: "Undefined Behavior: pointer not dereferenceable: ... has been
+    /// freed, so this pointer is dangling" at the `as_ref_bytes()` deref.
+    #[cfg(miri)]
+    #[ignore = "intentionally triggers UB to prove Miri catches the arena UAF class; run with --ignored and assert it FAILS"]
+    #[test]
+    fn interning_byref_from_transient_context_is_uaf() {
+        // The durable arena (stands in for `PlannerInfo::node_arena`).
+        let mut node_arena: alloc::vec::Vec<Expr<'static>> = alloc::vec::Vec::new();
+
+        // A transient bump context (stands in for a parse/relation context).
+        let transient = MemoryContext::new_bump("transient-relcx");
+
+        // Build a by-ref Const in the transient context and intern it into the
+        // durable arena via erase_lifetime — exactly what alloc_node does.
+        let c = byref_const(transient.mcx());
+        node_arena.push(Expr::Const(c).erase_lifetime());
+
+        // The transient context resets/frees its whole arena.
+        drop(transient);
+
+        // Read the interned by-ref payload back. Its PgVec buffer pointed into
+        // the now-freed bump arena: this deref is the use-after-free. Miri must
+        // flag it here.
+        let interned = &node_arena[0];
+        let bytes = match interned {
+            Expr::Const(c) => c.constvalue.as_ref_bytes(),
+            _ => unreachable!(),
+        };
+        // Touch the bytes so the read is not elided.
+        let _sum: u32 = bytes.iter().map(|&b| b as u32).sum();
+    }
+
+    /// THE FIX. Clone the by-ref payload into the *durable* context BEFORE
+    /// interning (C: `copyObject`/`datumCopy` into the long-lived context). Now
+    /// the interned node's backing lives as long as the arena, so dropping the
+    /// transient context is harmless and the read is sound. Miri passes this.
+    ///
+    /// Runs under both normal `cargo test` and Miri (it is genuinely sound), so
+    /// it documents the correct pattern and is exercised by the normal gate too.
+    #[test]
+    fn cloning_into_durable_context_before_interning_is_sound() {
+        // A durable context that outlives the arena's use, leaked to make its
+        // Mcx genuinely 'static (matching the arena-intern convention; cf.
+        // clone_in_tests). Leaked memory is expected — run Miri with
+        // -Zmiri-ignore-leaks.
+        let durable: &'static MemoryContext = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+            MemoryContext::new("durable-planner"),
+        ));
+        let durable_mcx = durable.mcx();
+
+        let mut node_arena: alloc::vec::Vec<Expr<'static>> = alloc::vec::Vec::new();
+
+        {
+            let transient = MemoryContext::new_bump("transient-relcx");
+            let c = byref_const(transient.mcx());
+
+            // Deep-copy the node into the durable context FIRST, then intern.
+            // Expr::clone_in re-homes Datum::ByRef into durable_mcx (its Const
+            // arm calls constvalue.clone_in).
+            let durable_expr = Expr::Const(c).clone_in(durable_mcx).expect("clone_in");
+            node_arena.push(durable_expr.erase_lifetime());
+
+            drop(transient); // harmless now: the interned bytes live in `durable`
+        }
+
+        let interned = &node_arena[0];
+        let bytes = match interned {
+            Expr::Const(c) => c.constvalue.as_ref_bytes(),
+            _ => unreachable!(),
+        };
+        assert_eq!(bytes, &[1u8, 2, 3, 4, 5, 6, 7, 8]);
+    }
+}
