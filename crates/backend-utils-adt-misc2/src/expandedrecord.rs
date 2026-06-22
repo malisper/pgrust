@@ -537,8 +537,18 @@ const OFF_T_HOFF: usize = 22;
 const OFF_T_BITS: usize = 23;
 
 /// `HeapTupleHeaderSetDatumLength` + `SetTypeId` + `SetTypMod`.
+///
+/// `HeapTupleHeaderSetDatumLength(tup, len)` is `SET_VARSIZE(tup, len)`, i.e.
+/// `SET_VARSIZE_4B` which stores the *tagged* 4-byte varlena header
+/// `((uint32) len) << 2` (low two bits 00 = uncompressed 4-byte). The composite
+/// datum image is read back through `FormedTuple::from_datum_image`, which
+/// expects exactly this tagged word (`VARSIZE_4B == va_header >> 2`); writing
+/// the raw byte length instead leaves the low bits non-zero, so the reader
+/// mis-flags the image as an extended (short-header / compressed / external)
+/// varlena and decodes the `t_choice.t_datum` fields at the wrong offsets.
 fn set_datum_header(dest: &mut [u8], len: usize, typeid: Oid, typmod: i32) {
-    dest[OFF_DATUM_LEN..OFF_DATUM_LEN + 4].copy_from_slice(&(len as i32).to_ne_bytes());
+    let tagged_len = (len as u32) << 2; // SET_VARSIZE_4B: VARTAG 4B_U (low bits 00)
+    dest[OFF_DATUM_LEN..OFF_DATUM_LEN + 4].copy_from_slice(&tagged_len.to_ne_bytes());
     dest[OFF_DATUM_TYPMOD..OFF_DATUM_TYPMOD + 4].copy_from_slice(&typmod.to_ne_bytes());
     dest[OFF_DATUM_TYPEID..OFF_DATUM_TYPEID + 4].copy_from_slice(&typeid.to_ne_bytes());
 }

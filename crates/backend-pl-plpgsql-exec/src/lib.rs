@@ -1543,11 +1543,15 @@ fn record_rowtype(
         PLpgSQL_datum::Rec(rec) => rec.rectypeid,
         _ => return None,
     };
-    if handle != 0 {
-        if let Some((typeid, typmod)) =
-            erh_table::with_erh(handle, |_mcx, erh| (erh.er_typeid, erh.er_typmod))
-        {
-            return Some((typeid, typmod));
+    // Mirror `plpgsql_exec_get_datum_type_info` DTYPE_REC (pl_exec.c):
+    //   if (rec->erh == NULL || rec->rectypeid != RECORDOID)
+    //       *typeId = rec->rectypeid;             /* declared type */
+    //   else
+    //       *typeId = rec->erh->er_typeid;        /* actual type of a RECORD var */
+    //   *typMod = -1;  /* never expose a RECORD variable's mutable typmod */
+    if handle != 0 && declared == RECORDOID {
+        if let Some(typeid) = erh_table::with_erh(handle, |_mcx, erh| erh.er_typeid) {
+            return Some((typeid, -1));
         }
     }
     Some((declared, -1))

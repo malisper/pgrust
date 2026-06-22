@@ -24,6 +24,9 @@ use types_tuple::backend_access_common_heaptuple::{Datum as RichDatum, FormedTup
 /// per-call side-channel).
 const TRIG_CURRENT: TriggerDataRef = TriggerDataRef(0);
 
+/// `RECORDOID` (`catalog/pg_type_d.h`) — the anonymous-composite pseudo-type.
+const RECORDOID: types_plpgsql::Oid = 2249;
+
 // ---- TriggerEvent bit tests (commands/trigger.h) --------------------------
 const TRIGGER_EVENT_INSERT: u32 = 0x0000;
 const TRIGGER_EVENT_DELETE: u32 = 0x0001;
@@ -311,33 +314,53 @@ pub fn exec_move_row_into_record_impl(
         return Ok(());
     }
 
+    // C's `make_expanded_record_for_rec` (pl_exec.c): a record variable declared
+    // with a fixed composite type (`rec->rectypeid != RECORDOID`, e.g. `r tt`)
+    // must produce an expanded record of *that* type — `er_typeid = rectypeid` —
+    // not an anonymous RECORD. Only a genuinely RECORD-typed variable adopts the
+    // ad-hoc tupdesc built from the result columns. Honoring this is what lets a
+    // later `row(r.*)` / `r.*` star-expansion resolve the declared rowtype's
+    // field set (a RECORDOID-stamped header has no resolvable named columns).
+    let rectypeid = match &estate.datums[target_dno as usize] {
+        PLpgSQL_datum::Rec(rec) => rec.rectypeid,
+        _ => panic!("exec_move_row_into_record_impl: datum {target_dno} is not a REC"),
+    };
+
     let ctx = Box::new(MemoryContext::new("PL/pgSQL expanded record"));
     let header: ExpandedRecordHeader<'static> = {
         let mcx: Mcx<'static> =
             unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
 
-        // CreateTemplateTupleDesc(natts) + TupleDescInitEntry per column, then
-        // BlessTupleDesc to assign the transient record type's typmod.
-        let mut td =
-            backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, columns.len() as i32)?;
-        for (i, c) in columns.iter().enumerate() {
-            backend_access_common_tupdesc::TupleDescInitEntry(
-                &mut td,
-                (i + 1) as i16,
-                Some(if c.name.is_empty() { "?column?" } else { &c.name }),
-                c.typeid,
-                c.typmod,
-                0,
-            )?;
-        }
-        let boxed: mcx::PgBox<'static, types_tuple::heaptuple::TupleDescData<'static>> =
-            mcx::PgBox::try_new_in(td, mcx).map_err(|_| mcx.oom(0))?;
-        let blessed =
-            backend_executor_execTuples::exectype_tupoutput::BlessTupleDesc(mcx, Some(boxed))?;
-        let td_ref: &types_tuple::heaptuple::TupleDescData<'static> =
-            blessed.as_ref().expect("blessed tupdesc");
-
-        let mut erh = er::make_expanded_record_from_tupdesc(mcx, td_ref)?;
+        let mut erh = if rectypeid != RECORDOID {
+            // Declared composite type: build from the type's real rowtype
+            // (make_expanded_record_from_typeid(rec->rectypeid, -1, ...)), which
+            // stamps er_typeid = rectypeid. The result columns are physically
+            // compatible with the declared rowtype (the query was planned to
+            // match), so the field values map by position.
+            er::make_expanded_record_from_typeid(mcx, rectypeid, -1)?
+        } else {
+            // RECORD variable: adopt an ad-hoc tupdesc built from the result
+            // columns and blessed to assign a transient record typmod.
+            let mut td =
+                backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, columns.len() as i32)?;
+            for (i, c) in columns.iter().enumerate() {
+                backend_access_common_tupdesc::TupleDescInitEntry(
+                    &mut td,
+                    (i + 1) as i16,
+                    Some(if c.name.is_empty() { "?column?" } else { &c.name }),
+                    c.typeid,
+                    c.typmod,
+                    0,
+                )?;
+            }
+            let boxed: mcx::PgBox<'static, types_tuple::heaptuple::TupleDescData<'static>> =
+                mcx::PgBox::try_new_in(td, mcx).map_err(|_| mcx.oom(0))?;
+            let blessed =
+                backend_executor_execTuples::exectype_tupoutput::BlessTupleDesc(mcx, Some(boxed))?;
+            let td_ref: &types_tuple::heaptuple::TupleDescData<'static> =
+                blessed.as_ref().expect("blessed tupdesc");
+            er::make_expanded_record_from_tupdesc(mcx, td_ref)?
+        };
 
         // Set the field values (a by-reference column becomes a ByRef Datum from
         // its verbatim image; the bare word is a by-value scalar).
