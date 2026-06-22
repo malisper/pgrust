@@ -40,6 +40,7 @@ backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" 
 backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
 backend-parser-parse-func-seams = { path = "../backend-parser-parse-func-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
 backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
 types-cache = { path = "../types-cache" }

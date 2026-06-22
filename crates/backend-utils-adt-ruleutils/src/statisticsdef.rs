@@ -234,3 +234,73 @@ pub fn pg_get_statisticsobj_worker<'mcx>(
 
     Ok(Some(PgString::from_str_in(&buf, mcx)?))
 }
+
+/// `PRETTYFLAG_INDENT` (ruleutils.c 89).
+const PRETTYFLAG_INDENT: i32 = 0x0002;
+
+/// `pg_get_statisticsobjdef_expressions(statextid)` (ruleutils.c 1838-1900),
+/// minus the fmgr-result `text[]` boundary: deparse each statistics expression
+/// into a string and return them as a list. Returns `Ok(None)` when the
+/// statistics object is gone or has no expressions (the C function
+/// `PG_RETURN_NULL()`s in both cases). The fmgr adapter wraps the returned
+/// strings into a `text[]` array result.
+pub fn pg_get_statisticsobjdef_expressions<'mcx>(
+    mcx: Mcx<'mcx>,
+    statextid: Oid,
+) -> PgResult<Option<Vec<PgString<'mcx>>>> {
+    // statexttup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statextid));
+    // if (!HeapTupleIsValid(statexttup)) PG_RETURN_NULL();
+    let fields =
+        backend_utils_cache_syscache_seams::statext_objdef_fields::call(mcx, statextid)?;
+    let (_stxnamespace, _stxname, stxrelid, _stxkeys, _stxkind, stxexprs_text) = match fields {
+        Some(t) => t,
+        // C: if (!HeapTupleIsValid(statexttup)) PG_RETURN_NULL();
+        None => return Ok(None),
+    };
+
+    // has_exprs = !heap_attisnull(statexttup, Anum_pg_statistic_ext_stxexprs, NULL);
+    // if (!has_exprs) { ReleaseSysCache(statexttup); PG_RETURN_NULL(); }
+    //
+    // datum = SysCacheGetAttrNotNull(STATEXTOID, statexttup,
+    //                                Anum_pg_statistic_ext_stxexprs);
+    // tmp = TextDatumGetCString(datum);
+    // exprs = (List *) stringToNode(tmp);
+    let exprs_node = match &stxexprs_text {
+        Some(s) => backend_nodes_read_seams::string_to_node::call(mcx, s.as_str())?,
+        None => return Ok(None),
+    };
+    let exprs_items: Vec<_> = exprs_node
+        .as_list()
+        .map(|items| items.iter().collect())
+        .unwrap_or_default();
+    if exprs_items.is_empty() {
+        return Ok(None);
+    }
+
+    // context = deparse_context_for(get_relation_name(statextrec->stxrelid),
+    //                               statextrec->stxrelid);
+    let relname = backend_utils_cache_lsyscache_seams::get_rel_name::call(mcx, stxrelid)?
+        .ok_or_else(|| PgError::error(format!("cache lookup failed for relation {stxrelid}")))?;
+
+    // foreach(lc, exprs) {
+    //     str = deparse_expression_pretty(expr, context, false, false,
+    //                                     PRETTYFLAG_INDENT, 0);
+    //     astate = accumArrayResult(astate, cstring_to_text(str), false, TEXTOID, ...);
+    // }
+    let mut out = Vec::with_capacity(exprs_items.len());
+    for expr in &exprs_items {
+        let context = crate::deparse_context_for(mcx, relname.as_str(), stxrelid)?;
+        let str = crate::deparse_expression_pretty(
+            mcx,
+            expr.as_ref(),
+            context,
+            false,
+            false,
+            PRETTYFLAG_INDENT,
+            0,
+        )?;
+        out.push(str);
+    }
+
+    Ok(Some(out))
+}

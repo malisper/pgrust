@@ -21505,6 +21505,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-ruleutils-seams",
+ "backend-utils-adt-varlena-seams",
  "backend-utils-adt-xml-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-partcache-seams",

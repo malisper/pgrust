@@ -471,26 +471,53 @@ fn fc_pg_get_statisticsobjdef_columns(fcinfo: &mut FunctionCallInfoBaseData) -> 
 }
 
 /// `pg_get_statisticsobjdef_expressions(oid) -> _text` (oid 6173). Builds a
-/// `text[]` of the per-expression deparses (ruleutils.c 1838-1900). The
-/// result is a `text` *array* (`construct_array`), whose by-ref array image is
-/// not expressible at this fmgr adapter yet, and the body bottoms out on the
-/// same unported `Form_pg_statistic_ext` deform as the worker. SEAM-AND-ERR:
-/// resolvable (so the empty-input psql describe target list type-checks), but
-/// not executable until the catalog deform + text-array result writer land —
-/// surfaced as a clean `feature not supported` error (threaded by the
-/// dispatcher) rather than a panic.
+/// `text[]` of the per-expression deparses (ruleutils.c 1838-1900). The worker
+/// reads the `stxexprs` `pg_node_tree`, `stringToNode`s it, and
+/// `deparse_expression_pretty(PRETTYFLAG_INDENT)` each expression; this adapter
+/// wraps each result string into a `text` Datum (`cstring_to_text`) and
+/// `construct_array(..., TEXTOID, -1, false, 'i')` (the `accumArrayResult` +
+/// `makeArrayResult` pair), returning the on-disk array varlena image on the
+/// by-ref lane. `PG_RETURN_NULL()` when the object is gone / has no expressions.
 fn fc_pg_get_statisticsobjdef_expressions(
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
+    /// `TEXTOID` (pg_type.dat).
+    const TEXTOID: Oid = 25;
+
     let statextid = arg_oid(fcinfo, 0);
-    Err(types_error::PgError::error(alloc::format!(
-        "ruleutils pg_get_statisticsobjdef_expressions(statext {statextid}): the \
-         Form_pg_statistic_ext stxexprs deform + text[] (`_text`) array result \
-         writer are unported for this entry — the deparse_expression engine is \
-         ported, but the catalog read and the array result boundary are not yet \
-         installed"
-    ))
-    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED))
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    let exprs = crate::statisticsdef::pg_get_statisticsobjdef_expressions(mcx, statextid)?;
+    let strs = match exprs {
+        Some(v) => v,
+        None => return ret_null(fcinfo),
+    };
+
+    // foreach: astate = accumArrayResult(astate, cstring_to_text(str), false,
+    //                                    TEXTOID, CurrentMemoryContext);
+    let mut elems: Vec<types_tuple::Datum> = Vec::with_capacity(strs.len());
+    for s in &strs {
+        elems.push(backend_utils_adt_varlena_seams::cstring_to_text_v::call(
+            mcx,
+            s.as_str(),
+        )?);
+    }
+
+    // makeArrayResult(astate, ...): construct_array over the text elements
+    // (text storage: typlen = -1 varlena, typbyval = false, typalign = 'i').
+    let arr = backend_utils_adt_arrayfuncs_seams::construct_array_values_bytes::call(
+        mcx,
+        &elems,
+        TEXTOID,
+        -1,
+        false,
+        b'i' as core::ffi::c_char,
+    )?;
+
+    // PG_RETURN_DATUM: a `text[]` result is pass-by-reference — carry the
+    // on-disk array varlena image on the by-ref lane.
+    fcinfo.set_ref_result(RefPayload::Varlena(arr.as_slice().to_vec()));
+    Ok(Datum::from_usize(0))
 }
 
 /// `pg_get_function_arguments(oid) -> text` (oid 2162).
