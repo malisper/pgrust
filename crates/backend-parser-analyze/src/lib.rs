@@ -280,9 +280,20 @@ fn transform_one_body_stmt<'mcx>(
     backend_parser_small1::setup_parse_sql_function(&mut pstate, pinfo.clone());
     let q = transformStmt(mcx, &mut pstate, stmt)?;
     if q.commandType == CmdType::CMD_UTILITY {
+        // C: errmsg("%s is not yet supported in unquoted SQL function body",
+        //           GetCommandTagName(CreateCommandTag(q->utilityStmt)))
+        let tagname = match &q.utilityStmt {
+            Some(ustmt) => {
+                let tag = backend_tcop_utility_seams::create_command_tag::call(ustmt.as_ref())?;
+                backend_tcop_cmdtag::get_command_tag_name(tag.0)
+            }
+            None => "statement",
+        };
         return Err(ereport(ERROR)
             .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("statement is not yet supported in unquoted SQL function body")
+            .errmsg(format!(
+                "{tagname} is not yet supported in unquoted SQL function body"
+            ))
             .into_error());
     }
     backend_parser_small1::free_parsestate(pstate)?;

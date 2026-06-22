@@ -33,6 +33,11 @@ backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds
 backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
 backend-catalog-dependency = { path = "../backend-catalog-dependency" }
 
+# CreateCommandTag classification (utility.c) for the "%s is not yet supported
+# in unquoted SQL function body" error message; get_command_tag_name renders it.
+backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
+backend-tcop-cmdtag = { path = "../backend-tcop-cmdtag" }
+
 # Merged sibling owners called directly (cycle-free; they depend on the
 # analyze *-seams* decls, never on this impl crate).
 backend-parser-clause = { path = "../backend-parser-clause" }

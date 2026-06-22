@@ -13951,6 +13951,8 @@ dependencies = [
  "backend-parser-small1",
  "backend-rewrite-core",
  "backend-rewrite-rewritehandler-seams",
+ "backend-tcop-cmdtag",
+ "backend-tcop-utility-seams",
  "backend-utils-adt-format-type",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache",
