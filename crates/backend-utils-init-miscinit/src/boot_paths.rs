@@ -818,6 +818,53 @@ pub fn convert_and_check_filename<'mcx>(
     mcx::PgString::from_str_in(&filename, mcx)
 }
 
+/// The data-directory-relative path the `pg_ls_*` directory functions feed to
+/// `pg_ls_dir_files` (genfile.c). `XLOGDIR` is "pg_wal"; `Log_directory` is the
+/// GUC (default "log"); the logical-decoding subdirs are the fixed
+/// `PG_LOGICAL_SNAPSHOTS_DIR` / `PG_LOGICAL_MAPPINGS_DIR` constants. These are
+/// resolved relative to the data directory (the backend `chdir`s to `DataDir`),
+/// exactly as the C `pg_ls_dir_files(fcinfo, XLOGDIR, ...)` callers pass them.
+pub fn wal_or_log_subdir<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    which: backend_common_path_seams::WellKnownDir,
+) -> mcx::PgString<'mcx> {
+    use backend_common_path_seams::WellKnownDir;
+    use backend_utils_misc_guc_tables::vars::Log_directory;
+
+    let path: String = match which {
+        WellKnownDir::LogDir => Log_directory.read().unwrap_or_default(),
+        WellKnownDir::WalDir => "pg_wal".to_string(),
+        WellKnownDir::ArchiveStatusDir => "pg_wal/archive_status".to_string(),
+        WellKnownDir::SummariesDir => "pg_wal/summaries".to_string(),
+        WellKnownDir::LogicalSnapDir => "pg_logical/snapshots".to_string(),
+        WellKnownDir::LogicalMapDir => "pg_logical/mappings".to_string(),
+    };
+    mcx::PgString::from_str_in(&path, mcx)
+        .expect("wal_or_log_subdir: out of memory forming directory path")
+}
+
+/// `TempTablespacePath(path, tblspc)` (tablespace.c): the `pgsql_tmp` directory
+/// for the given tablespace OID, relative to the data directory. For the default
+/// (and global) tablespace it is `base/pgsql_tmp`; otherwise
+/// `pg_tblspc/<oid>/<TABLESPACE_VERSION_DIRECTORY>/pgsql_tmp`.
+pub fn temp_tablespace_path<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    tblspc: types_core::Oid,
+) -> mcx::PgString<'mcx> {
+    use types_storage::file::{PG_TBLSPC_DIR, PG_TEMP_FILES_DIR, TABLESPACE_VERSION_DIRECTORY};
+    // C: DEFAULTTABLESPACE_OID (1663) and GLOBALTABLESPACE_OID (1664) map to
+    // the cluster's base directory; other tablespaces live under pg_tblspc.
+    const DEFAULTTABLESPACE_OID: types_core::Oid = 1663;
+    const GLOBALTABLESPACE_OID: types_core::Oid = 1664;
+    let path = if tblspc == DEFAULTTABLESPACE_OID || tblspc == GLOBALTABLESPACE_OID {
+        format!("base/{PG_TEMP_FILES_DIR}")
+    } else {
+        format!("{PG_TBLSPC_DIR}/{tblspc}/{TABLESPACE_VERSION_DIRECTORY}/{PG_TEMP_FILES_DIR}")
+    };
+    mcx::PgString::from_str_in(&path, mcx)
+        .expect("temp_tablespace_path: out of memory forming directory path")
+}
+
 /// `pstrdup(path); get_parent_directory(buf)` (`path.c`): strip the last path
 /// component (and the slash(es) just ahead of it), returning the parent
 /// directory. Never erases a leading slash.

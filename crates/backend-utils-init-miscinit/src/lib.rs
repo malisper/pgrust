@@ -1148,6 +1148,12 @@ pub fn init_seams() {
     backend_common_path_seams::convert_and_check_filename::set(
         boot_paths::convert_and_check_filename,
     );
+    // The data-directory-relative paths the genfile.c `pg_ls_*` SRFs enumerate
+    // (XLOGDIR / Log_directory / pg_logical subdirs / the per-tablespace
+    // pgsql_tmp), bodied in `boot_paths` over the `DataDir`/`Log_directory`
+    // globals they resolve against.
+    backend_common_path_seams::wal_or_log_subdir::set(boot_paths::wal_or_log_subdir);
+    backend_common_path_seams::temp_tablespace_path::set(boot_paths::temp_tablespace_path);
     backend_common_exec_seams::set_pglocale_pgservice::set(
         startup_paths::set_pglocale_pgservice,
     );

@@ -80,6 +80,7 @@ mod ts_parse;
 mod ts_stat;
 mod pg_get_keywords;
 mod pg_tablespace_databases;
+mod pg_ls_dir;
 mod pg_listening_channels;
 mod pg_get_multixact_members;
 mod pg_get_catalog_foreign_keys;
@@ -214,6 +215,12 @@ pub fn init_seams() {
     // emitting one `oid` per database directory under a tablespace (its
     // directory-scan core is `backend-utils-adt-misc::pg_tablespace_databases`).
     pg_tablespace_databases::register_pg_tablespace_databases();
+    // The `genfile.c` directory-listing SRFs (`pg_ls_dir`/`pg_ls_dir_1arg`/
+    // `pg_ls_waldir`/`pg_ls_logdir`/`pg_ls_archive_statusdir`/
+    // `pg_ls_summariesdir`/`pg_ls_tmpdir_{noargs,1arg}`) — materialize-mode SRFs
+    // whose `AllocateDir`/`ReadDir`/`stat` walk cores are
+    // `backend-utils-adt-misc2::admin`.
+    pg_ls_dir::register_pg_ls_dir();
     // `pg_listening_channels()` (OID 3035) — the materialize-mode SRF emitting one
     // `text` per LISTENed channel (its collector core is
     // `backend-commands-async::pg_listening_channels_rows`).

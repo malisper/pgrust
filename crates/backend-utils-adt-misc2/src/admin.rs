@@ -308,7 +308,12 @@ pub fn pg_ls_dir<'mcx>(
 ) -> PgResult<Datum<'mcx>> {
     let location = path::convert_and_check_filename::call(mcx, dirname)?;
 
-    funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
+    // C: InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC) — pg_ls_dir is
+    // declared `RETURNS SETOF text`, a scalar result whose descriptor must come
+    // from the executor's already-resolved `expectedDesc` (a plain
+    // `get_call_result_type` would reject the non-composite type with "return
+    // type must be a row type").
+    funcapi::InitMaterializedSRF::call(fcinfo, types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC)?;
     let rsinfo = fcinfo
         .resultinfo
         .as_mut()
