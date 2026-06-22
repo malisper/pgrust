@@ -52,6 +52,25 @@ pub struct MatCell {
 /// One materialized result row -- a column-major series of [`MatCell`].
 pub type MatRow = Vec<MatCell>;
 
+/// One column of the descriptor the callee built for its materialized result
+/// (`rsinfo->setDesc`). Carries the metadata needed to rebuild the
+/// `TupleDescData` in the dispatcher's per-query arena (the dual-home boundary
+/// is lifetime-free, so the descriptor cannot travel as a `TupleDescData<'mcx>`).
+/// This is how a SETOF-record SQL function communicates its *own* output rowtype
+/// back to the targetlist SRF machinery, which otherwise only has an empty /
+/// indeterminate `expectedDesc` for a `RETURNS [SETOF] record` function.
+#[derive(Debug, Default, Clone)]
+pub struct MatDescCol {
+    /// `attname`.
+    pub name: String,
+    /// `atttypid`.
+    pub typid: types_core::Oid,
+    /// `atttypmod`.
+    pub typmod: i32,
+    /// `attcollation`.
+    pub collation: types_core::Oid,
+}
+
 /// A live SFRM_Materialize sink: the SRF dispatcher's `ReturnSetInfo` projected
 /// to the lifetime-free fields the callee reads/writes across the fmgr boundary.
 #[derive(Debug, Default)]
@@ -64,6 +83,13 @@ pub struct MatSrfSink {
     /// SETOF function this is the single result column's type; the dispatcher
     /// cross-checks it against the caller's `expectedDesc`.
     pub set_desc_types: Vec<types_core::Oid>,
+    /// `rsinfo->setDesc` columns (name/type/typmod/collation) -- the FULL
+    /// descriptor the callee built for its materialized rows. A SETOF-record SQL
+    /// function fills this with its body's output rowtype so the dispatcher can
+    /// rebuild a real `setDesc` even when the caller's `expectedDesc` is the
+    /// indeterminate RECORD (no column-definition list). Empty when the callee
+    /// did not supply a descriptor (the caller's `expectedDesc` is then used).
+    pub set_desc_cols: Vec<MatDescCol>,
     /// The accumulated materialized rows (`rsinfo->setResult`, the tuplestore).
     pub rows: Vec<MatRow>,
     /// Whether the callee actually ran in materialize mode and filled the sink

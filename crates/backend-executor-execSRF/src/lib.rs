@@ -681,7 +681,44 @@ fn materialize_sink_into_rsinfo<'mcx>(
     // column whose type is `funcrettype` (C's `CreateTemplateTupleDesc(1)` +
     // `TupleDescInitEntry`). Both are charged to the per-query context.
     let result_desc: PgBox<'mcx, TupleDescData<'mcx>> = if returns_tuple {
-        mcx::alloc_in(per_query, expected_desc.clone_in(per_query)?)?
+        // When the caller's `expectedDesc` is the indeterminate RECORD (an empty
+        // descriptor: a `RETURNS [SETOF] record` function called WITHOUT a column
+        // definition list, e.g. `SELECT array_to_set(...)`) but the callee
+        // supplied its OWN output rowtype (`sink.set_desc_cols`, the fmgr_sql
+        // body's result descriptor), build the real `setDesc` from the callee's
+        // columns and BLESS it (assign a RECORD typmod) so the whole-row
+        // composite Datum the caller forms carries a resolvable rowtype identity
+        // (else "record type has not been registered" downstream in printtup).
+        // C's `fmgr_sql` sets `rsinfo->setDesc` from its junkfilter result slot's
+        // descriptor (which is already a blessed RECORD typmod), so the
+        // expectedDesc is irrelevant for this RECORD-in-targetlist case.
+        if expected_desc.natts.max(0) == 0 && !sink.set_desc_cols.is_empty() {
+            let ncols = sink.set_desc_cols.len();
+            let td = backend_access_common_tupdesc::CreateTemplateTupleDesc(per_query, ncols as i32)?;
+            let mut td = mcx::alloc_in(per_query, td)?;
+            for (i, col) in sink.set_desc_cols.iter().enumerate() {
+                backend_access_common_tupdesc::TupleDescInitEntry(
+                    &mut td,
+                    (i + 1) as i16,
+                    Some(col.name.as_str()),
+                    col.typid,
+                    col.typmod,
+                    0,
+                )?;
+                backend_access_common_tupdesc::TupleDescInitEntryCollation(
+                    &mut td,
+                    (i + 1) as i16,
+                    col.collation,
+                )?;
+            }
+            // Bless: stamp tdtypeid = RECORDOID and register a typmod.
+            const RECORDOID: Oid = 2249;
+            td.tdtypeid = RECORDOID;
+            backend_utils_cache_typcache_seams::assign_record_type_typmod::call(&mut td)?;
+            td
+        } else {
+            mcx::alloc_in(per_query, expected_desc.clone_in(per_query)?)?
+        }
     } else {
         let td = backend_access_common_tupdesc::CreateTemplateTupleDesc(per_query, 1)?;
         let mut td = mcx::alloc_in(per_query, td)?;

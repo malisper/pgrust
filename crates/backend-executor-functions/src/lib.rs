@@ -1399,8 +1399,39 @@ fn accum_receive<'mcx>(mcx: Mcx<'mcx>, _state: u64, slot: &mut SlotData<'mcx>) -
             isnull: cell.isnull,
         });
     }
+    // Record the result descriptor (column name/type/typmod/collation) into the
+    // sink so the targetlist SRF machinery can rebuild a real `setDesc` even when
+    // the caller's `expectedDesc` is the indeterminate RECORD (no column-def
+    // list), e.g. `SELECT array_to_set(...)` where `array_to_set RETURNS SETOF
+    // record`. C's `fmgr_sql` sets `rsinfo->setDesc` from the function's own
+    // junkfilter result descriptor (and `tuplestore_donestoring` blesses the
+    // RECORD typmod downstream). Done once (the descriptor is constant across
+    // rows).
+    let desc_cols: Option<alloc::vec::Vec<types_fmgr::mat_srf::MatDescCol>> = slot
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()
+        .map(|d| {
+            (0..d.natts.max(0) as usize)
+                .map(|i| {
+                    let a = &d.attrs[i];
+                    types_fmgr::mat_srf::MatDescCol {
+                        name: alloc::string::String::from_utf8_lossy(a.attname.name_str())
+                            .into_owned(),
+                        typid: a.atttypid,
+                        typmod: a.atttypmod,
+                        collation: a.attcollation,
+                    }
+                })
+                .collect()
+        });
     types_fmgr::mat_srf::with_top(|sink| {
         if let Some(sink) = sink {
+            if sink.set_desc_cols.is_empty() {
+                if let Some(cols) = desc_cols {
+                    sink.set_desc_cols = cols;
+                }
+            }
             sink.rows.push(row);
         }
     });

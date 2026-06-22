@@ -10030,6 +10030,7 @@ dependencies = [
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-cache-ts-cache",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-fmgr-funcapi",

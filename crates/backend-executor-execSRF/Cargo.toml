@@ -21,6 +21,10 @@ backend-executor-execSRF-seams = { path = "../backend-executor-execSRF-seams" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# BlessTupleDesc (assign_record_type_typmod): register the RECORD typmod for a
+# SETOF-record function's own output descriptor when the targetlist caller has
+# only the indeterminate RECORD expectedDesc.
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 # Materialize-mode tuplestore drain: the funcResultSlot pool slot
