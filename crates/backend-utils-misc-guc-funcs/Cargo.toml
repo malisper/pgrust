@@ -32,5 +32,7 @@ backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-storage-ipc-ipci-seams = { path = "../backend-storage-ipc-ipci-seams" }
 backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 
 [dev-dependencies]

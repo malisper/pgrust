@@ -629,7 +629,7 @@ fn with_registry<R>(f: impl FnOnce(&GucRegistry) -> R) -> R {
 
 /// `find_option(name, false, true, WARNING)->flags` (guc.c:1235): the flag word
 /// of a known variable, or `None` if unknown.
-fn find_option_flags(name: &str) -> Option<i32> {
+pub(crate) fn find_option_flags(name: &str) -> Option<i32> {
     with_registry(|reg| reg.find_option(name).map(|var| var.gen().flags))
 }
 

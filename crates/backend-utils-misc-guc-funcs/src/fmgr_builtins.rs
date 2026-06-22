@@ -167,6 +167,71 @@ fn fc_set_config_by_name(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datu
     Ok(ret_text(fcinfo, new_value.unwrap_or_default()))
 }
 
+/// `pg_settings_get_flags(PG_FUNCTION_ARGS)` (guc_funcs.c:541):
+/// `pg_settings_get_flags(text) -> text[]`. `record = find_option(varname,
+/// false, true, ERROR); if (record == NULL) PG_RETURN_NULL();` then collect the
+/// six externally-visible flag names that are set into a `text[]` array.
+fn fc_pg_settings_get_flags(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    use types_guc::{
+        GUC_EXPLAIN, GUC_NOT_IN_SAMPLE, GUC_NO_RESET, GUC_NO_RESET_ALL, GUC_NO_SHOW_ALL,
+        GUC_RUNTIME_COMPUTED,
+    };
+
+    let varname = arg_text(fcinfo, 0);
+
+    // record = find_option(varname, false, true, ERROR);
+    // /* return NULL if no such variable */
+    // if (record == NULL) PG_RETURN_NULL();
+    let Some(flags) = crate::find_option_flags(varname) else {
+        return Ok(ret_null(fcinfo));
+    };
+
+    // Collect the set flag names in the exact C order.
+    let mut names: alloc::vec::Vec<&'static str> = alloc::vec::Vec::with_capacity(6);
+    if flags & GUC_EXPLAIN != 0 {
+        names.push("EXPLAIN");
+    }
+    if flags & GUC_NO_RESET != 0 {
+        names.push("NO_RESET");
+    }
+    if flags & GUC_NO_RESET_ALL != 0 {
+        names.push("NO_RESET_ALL");
+    }
+    if flags & GUC_NO_SHOW_ALL != 0 {
+        names.push("NO_SHOW_ALL");
+    }
+    if flags & GUC_NOT_IN_SAMPLE != 0 {
+        names.push("NOT_IN_SAMPLE");
+    }
+    if flags & GUC_RUNTIME_COMPUTED != 0 {
+        names.push("RUNTIME_COMPUTED");
+    }
+
+    // a = construct_array_builtin(flags, cnt, TEXTOID);
+    // PG_RETURN_ARRAYTYPE_P(a);
+    //
+    // Build the element `text` Datums and the result ArrayType image in a
+    // scratch context, then copy the (header-ful) array varlena bytes onto the
+    // by-ref result lane (the boundary owns the result image).
+    let scratch = mcx::MemoryContext::new("pg_settings_get_flags");
+    let mcx = scratch.mcx();
+
+    let mut elems: alloc::vec::Vec<Datum> = alloc::vec::Vec::with_capacity(names.len());
+    for n in &names {
+        elems.push(backend_utils_adt_varlena_seams::cstring_to_text::call(mcx, n)?);
+    }
+
+    let arr = backend_utils_adt_arrayfuncs_seams::construct_array_builtin_v::call(
+        mcx,
+        elems.as_slice(),
+        types_tuple::heaptuple::TEXTOID,
+    )?;
+
+    let image = arr.as_ref_bytes().to_vec();
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Ok(Datum::from_usize(0))
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -210,5 +275,7 @@ pub fn register_guc_funcs_builtins() {
         ),
         // set_config(text, text, bool) -> text  (prosrc set_config_by_name, proisstrict='f')
         builtin(2078, "set_config_by_name", 3, false, false, fc_set_config_by_name),
+        // pg_settings_get_flags(text) -> text[]  (prosrc pg_settings_get_flags)
+        builtin(6240, "pg_settings_get_flags", 1, true, false, fc_pg_settings_get_flags),
     ]);
 }
