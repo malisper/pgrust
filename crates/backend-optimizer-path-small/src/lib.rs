@@ -1111,25 +1111,30 @@ fn clause_selectivity_ext<'mcx>(
     } else if let Some(nulltest) = clause.as_nulltest() {
         // Use node specific selectivity calculation function. C reads
         // `((NullTest *) clause)->arg` directly (never NULL for a valid node).
-        if let Some(arg) = nulltest.arg.as_deref().cloned() {
+        // Pass the arg by reference — a `.clone()` panics when the arg embeds a
+        // SubPlan (e.g. `(SELECT ...) IS NOT NULL`, the #18077 nested-CTE shape),
+        // and the seam only needs an `&Expr`.
+        if let Some(arg) = nulltest.arg.as_deref() {
             s1 = seam::nulltestsel::call(
                 run,
                 root,
                 nulltest.nulltesttype as i32,
-                &arg,
+                arg,
                 var_relid,
                 jointype,
                 sjinfo,
             )?;
         }
     } else if let Some(booltest) = clause.as_booleantest() {
-        // Use node specific selectivity calculation function
-        if let Some(arg) = booltest.arg.as_deref().cloned() {
+        // Use node specific selectivity calculation function. Pass by reference
+        // (a `.clone()` would panic on a SubPlan-bearing arg, e.g.
+        // `(SELECT ...) IS TRUE`).
+        if let Some(arg) = booltest.arg.as_deref() {
             s1 = seam::booltestsel::call(
                 run,
                 root,
                 booltest.booltesttype as i32,
-                &arg,
+                arg,
                 var_relid,
                 jointype,
                 sjinfo,

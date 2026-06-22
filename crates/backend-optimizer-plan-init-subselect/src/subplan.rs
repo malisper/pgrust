@@ -1351,6 +1351,50 @@ fn inline_cte_walk_query_exprs<'mcx>(
         backend_nodes_core::node_walker::QTW_IGNORE_RANGE_TABLE,
         mcx,
     );
+
+    // C's `inline_cte_walker` is a `query_or_expression_tree_walker` that does
+    // NOT set QTW_IGNORE_RANGE_TABLE, so `range_table_walker` also visits each
+    // RTE's *expression* fields at the current query level: an RTE_VALUES's
+    // `values_lists`, an RTE_FUNCTION's `functions`, and an RTE_TABLEFUNC's
+    // `tablefunc`. A SubLink referencing the CTE can live there — e.g.
+    // `WITH cte AS (...) VALUES ((SELECT ... FROM cte))`, where the sublink sits
+    // in the top query's VALUES RTE rather than its targetList. The owned port
+    // walks RTE_SUBQUERY sub-Queries explicitly (as new levels) and otherwise
+    // ignores the range table here, so these same-level RTE expressions must be
+    // walked too, or the buried SubLink's CteScan is never rewritten and a
+    // surviving CTE reference trips "no plan was made for CTE".
+    if err.is_none() {
+        for i in 0..query.rtable.len() {
+            match query.rtable[i].rtekind {
+                types_nodes::parsenodes::RTEKind::RTE_VALUES => {
+                    for j in 0..query.rtable[i].values_lists.len() {
+                        if err.is_some() {
+                            break;
+                        }
+                        let n: &mut Node<'mcx> = &mut query.rtable[i].values_lists[j];
+                        visit_node(n, ctx, &mut err, mcx);
+                    }
+                }
+                types_nodes::parsenodes::RTEKind::RTE_FUNCTION => {
+                    for j in 0..query.rtable[i].functions.len() {
+                        if err.is_some() {
+                            break;
+                        }
+                        let n: &mut Node<'mcx> = &mut query.rtable[i].functions[j];
+                        visit_node(n, ctx, &mut err, mcx);
+                    }
+                }
+                types_nodes::parsenodes::RTEKind::RTE_TABLEFUNC => {
+                    if let Some(tf) = query.rtable[i].tablefunc.as_mut() {
+                        let n: &mut Node<'mcx> = &mut *tf;
+                        visit_node(n, ctx, &mut err, mcx);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     match err {
         Some(e) => Err(e),
         None => Ok(()),

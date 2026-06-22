@@ -629,6 +629,16 @@ pub fn transformValuesClause<'mcx>(
 
     backend_parser_parse_collate::assign_query_collations(Some(pstate), &mut qry)?;
 
+    // Copy the CTE refcounts bumped while transforming the VALUES rows (a SubLink
+    // in a VALUES row can reference a WITH CTE, e.g.
+    // `WITH cte AS (...) VALUES ((SELECT ... FROM cte))`) from the live
+    // `p_ctenamespace` back into `qry.cteList`. In C the two alias one shared
+    // CommonTableExpr so the bump is automatic; the owned model holds separate
+    // clones, so without this `qry.cteList[cte].cterefcount` stays 0 and the
+    // planner's SS_process_ctes drops the CTE plan ("no plan was made for CTE").
+    // The peer SELECT/INSERT/MERGE transforms already do this; VALUES omitted it.
+    crate::sync_cte_refcounts(pstate, &mut qry.cteList);
+
     Ok(qry)
 }
 

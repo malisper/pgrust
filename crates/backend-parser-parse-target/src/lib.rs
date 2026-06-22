@@ -1923,14 +1923,29 @@ fn make_fake_pstate_owned<'mcx>(
 }
 
 /// Clone the read-only spine of a `ParseState` for the fake-pstate recursion:
-/// the `p_rtable` and (recursively) the `parentParseState`.  No other field is
-/// read by `GetRTEByRangeTablePosn`/`GetCTEForRTE`.
+/// the `p_rtable`, the `p_ctenamespace`, and (recursively) the
+/// `parentParseState`.  `GetRTEByRangeTablePosn` walks `p_rtable`; `GetCTEForRTE`
+/// (reached when `expandRecordVariable` drills a RECORD column that resolves to a
+/// CTE reference, e.g. `(c1).f1` where `c1` ultimately comes from an outer-WITH
+/// CTE) walks `p_ctenamespace`.  C's `make_fake_pstate` aliases the *live* parent
+/// `pstate`, so its CTE namespace is visible up the chain; the owned model holds
+/// the chain by value, so the namespace must be copied here or `GetCTEForRTE`
+/// finds an empty namespace and errors with "could not find CTE".
 fn clone_pstate_chain<'mcx>(
     mcx: Mcx<'mcx>,
     src: &ParseState<'mcx>,
 ) -> PgResult<ParseState<'mcx>> {
     let mut out = ParseState::new(mcx)?;
     out.p_rtable = clone_rtable(&src.p_rtable, mcx)?;
+    out.p_ctenamespace = {
+        let mut ns: PgVec<'mcx, types_nodes::rawnodes::CommonTableExpr<'mcx>> = PgVec::new_in(mcx);
+        ns.try_reserve(src.p_ctenamespace.len())
+            .map_err(|_| mcx.oom(src.p_ctenamespace.len()))?;
+        for cte in src.p_ctenamespace.iter() {
+            ns.push(cte.clone_in(mcx)?);
+        }
+        ns
+    };
     out.parentParseState = match src.parentParseState.as_deref() {
         Some(p) => Some(PgBox::new_in(clone_pstate_chain(mcx, p)?, mcx)),
         None => None,
