@@ -90,29 +90,109 @@ pub fn ExecInitPartitionWithCheckOptions<'mcx>(
 ) -> PgResult<()> {
     // if (node && node->withCheckOptionLists != NIL) { ... }
     //
-    // wcoList = linitial(node->withCheckOptionLists);  — the first plan's WCO
-    // list is the reference; both that relation and this partition have the same
-    // columns, so a simple varattno translation suffices.
+    // Both the reference relation and this partition have the same columns, so a
+    // simple varattno translation suffices.
     let node = match mtstate.plan_node {
         Some(n) => n,
         None => return Ok(()),
     };
+    //   wcoList = linitial(node->withCheckOptionLists);  — the first plan's WCO
+    // list is the reference. Clone each WithCheckOption out of the plan node into
+    // the per-query context so its `qual` can be remapped to the partition's
+    // attnos without mutating the shared plan.
     let ref_wco_list = match node.withCheckOptionLists.as_ref() {
         Some(lists) if !lists.is_empty() => lists[0].as_slice(),
         _ => return Ok(()),
     };
+    let mut cloned_wcos: alloc::vec::Vec<types_nodes::rawnodes::WithCheckOption<'mcx>> =
+        alloc::vec::Vec::with_capacity(ref_wco_list.len());
+    for wco_node in ref_wco_list {
+        let wco = wco_node.as_withcheckoption().ok_or_else(|| {
+            types_error::PgError::error(
+                "ExecInitPartitionWithCheckOptions: withCheckOptionLists element is not a \
+                 WithCheckOption node",
+            )
+        })?;
+        cloned_wcos.push(wco.clone_in(mcx)?);
+    }
 
-    // Convert Vars to the partition's attnos (build_attrmap_by_name +
-    // map_variable_attnos), ExecInitQual each wco->qual, and store
-    // ri_WithCheckOptions / ri_WithCheckOptionExprs — all execExpr/rewrite-owned.
-    backend_executor_execExpr_seams::partition_init_with_check_options::call(
+    // Convert Vars in each WCO qual to contain this partition's attribute numbers.
+    //   part_attmap =
+    //       build_attrmap_by_name(RelationGetDescr(partrel),
+    //                             RelationGetDescr(firstResultRel),
+    //                             false);
+    let part_desc = estate
+        .result_rel(leaf_part_rri)
+        .ri_RelationDesc
+        .as_ref()
+        .expect(
+            "ExecInitPartitionWithCheckOptions: leaf partition ResultRelInfo has no open relation",
+        )
+        .rd_att_clone_in(mcx)?;
+    let part_reltype = estate
+        .result_rel(leaf_part_rri)
+        .ri_RelationDesc
+        .as_ref()
+        .expect(
+            "ExecInitPartitionWithCheckOptions: leaf partition ResultRelInfo has no open relation",
+        )
+        .rd_rel
+        .reltype;
+    let first_desc = estate
+        .result_rel(first_result_rel)
+        .ri_RelationDesc
+        .as_ref()
+        .expect(
+            "ExecInitPartitionWithCheckOptions: first result ResultRelInfo has no open relation",
+        )
+        .rd_att_clone_in(mcx)?;
+    let part_attmap = backend_access_common_next_seams::build_attrmap_by_name::call(
         mcx,
+        &part_desc,
+        &first_desc,
+        false,
+    )?;
+
+    //   wcoList = (List *)
+    //       map_variable_attnos((Node *) wcoList,
+    //                           firstVarno, 0,
+    //                           part_attmap,
+    //                           RelationGetForm(partrel)->reltype,
+    //                           &found_whole_row);
+    //   /* We ignore the value of found_whole_row. */
+    //
+    // C maps the whole `List *` of WithCheckOption nodes in one call; the T_List
+    // mutator arm recurses into each WithCheckOption's `qual`. Over the owned
+    // model, map each WCO's `qual` node individually, then rewrap it as a
+    // `WithCheckOption` Node so the (working) per-rel `exec_init_with_check_options`
+    // seam — the same one ExecInitModifyTable uses — can ExecInitQual each qual and
+    // store ri_WithCheckOptions / ri_WithCheckOptionExprs.
+    let mut remapped_wco_nodes: mcx::PgVec<'mcx, types_nodes::nodes::Node<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, cloned_wcos.len())?;
+    for mut wco in cloned_wcos {
+        if let Some(qual) = wco.qual.take() {
+            let (mapped_qual, _found_whole_row) =
+                backend_rewrite_rewritemanip_seams::map_variable_attnos_node::call(
+                    mcx,
+                    qual,
+                    first_varno as i32,
+                    0,
+                    &part_attmap.attnums,
+                    part_reltype,
+                )?;
+            wco.qual = Some(mapped_qual);
+        }
+        remapped_wco_nodes.push(types_nodes::nodes::Node::mk_with_check_option(mcx, wco)?);
+    }
+
+    // ExecInitQual each wco->qual and store ri_WithCheckOptions /
+    // ri_WithCheckOptionExprs — the per-rel WCO compile is execExpr-owned and is
+    // identical to the non-partition ExecInitModifyTable path.
+    backend_executor_execExpr_seams::exec_init_with_check_options::call(
         mtstate,
         estate,
         leaf_part_rri,
-        first_result_rel,
-        first_varno,
-        ref_wco_list,
+        remapped_wco_nodes.as_slice(),
     )
 }
 
