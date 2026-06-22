@@ -50,6 +50,7 @@ backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-xml-seams = { path = "../backend-utils-adt-xml-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

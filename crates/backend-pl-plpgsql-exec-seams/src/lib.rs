@@ -118,6 +118,14 @@ pub struct RaiseEreport {
     pub datatype: Option<std::string::String>,
     pub table: Option<std::string::String>,
     pub schema: Option<std::string::String>,
+    /// The PL/pgSQL error-context line(s) for the live exec stack, supplied for
+    /// a non-`ERROR` level RAISE. C's `error_context_stack` callbacks fire at
+    /// report time for every elevel; the owned model attaches context lazily on
+    /// *propagation*, which covers `ERROR` but not a `NOTICE`/`WARNING` reported
+    /// straight to the client. This carries the same lines so they appear in the
+    /// non-`ERROR` message too (psql `SHOW_CONTEXT always`). Empty for `ERROR`
+    /// (that path attaches on propagation, avoiding a duplicate).
+    pub context: Option<std::string::String>,
 }
 
 seam_core::seam!(

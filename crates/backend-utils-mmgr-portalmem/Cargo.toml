@@ -26,6 +26,11 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 # inward seams installed by this crate
 backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
 
+# The materialized-SRF protocol for `pg_cursor` (the `pg_cursors` view SRF):
+# `InitMaterializedSRF`/`tuplestore_putvalues` and the `text` result Datums.
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+
 # outward seams to not-yet-ported (or cyclic) owners
 backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }

@@ -559,6 +559,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `construct_array(elems, nelems, elmtype, elmlen, elmbyval, elmalign)`
+    /// (arrayfuncs.c) over the canonical *value-carrying* [`DatumV`] elements —
+    /// the constructive inverse of [`deconstruct_array_values_bytes`]. Builds a
+    /// 1-D `ArrayType` byte image from `elems` (no NULLs), allocated in `mcx`,
+    /// returned as the on-disk varlena bytes (no header re-stamp needed at the
+    /// catalog-store boundary). Used by `ALTER COLUMN ... TYPE`'s
+    /// `attmissingval` repack (tablecmds.c:14937), which deconstructs the
+    /// old-type missing-value array and reconstructs it under the new type's
+    /// `(elmlen, elmbyval, elmalign)` triple. Fallible on dimension/size
+    /// overflow (`ereport(ERROR)`).
+    pub fn construct_array_values_bytes<'mcx>(
+        mcx: Mcx<'mcx>,
+        elems: &[DatumV<'mcx>],
+        elmtype: Oid,
+        elmlen: i16,
+        elmbyval: bool,
+        elmalign: core::ffi::c_char,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
     /// `(oidvector *) DatumGetPointer(datum)` then read `->values[0 ..
     /// ->dim1]` (e.g. `proargtypes`, `pg_index.indclass`) operating on the
     /// on-disk `oidvector` byte image `bytes` (a `Datum::ByRef` attribute

@@ -226,21 +226,13 @@ seam_core::seam!(
 // `attrelid` + `heap_modify_tuple` + `CatalogTupleUpdate`), so the former
 // `relation_clear_missing_update` mirror-and-panic sub-seam is gone.
 
-seam_core::seam!(
-    /// `StoreAttrMissingVal`'s pg_attribute mutation (heap.c): `table_open(
-    /// AttributeRelationId, RowExclusiveLock)` + `SearchSysCache2(ATTNUM)` +
-    /// `construct_array(&missingval, 1, atttypid, attlen, attbyval, attalign)` +
-    /// `heap_modify_tuple` setting `atthasmissing = true` + `attmissingval` +
-    /// `CatalogTupleUpdate` + `table_close`. Blocked on the writable full-row
-    /// `ATTNUM` syscache copy + `pg_attribute` `CatalogTupleUpdate` carrier (and
-    /// `construct_array`). `missingval` is the single by-value/by-ref element.
-    /// `Err` carries the heap-mutation `ereport(ERROR)`s.
-    pub fn store_attr_missing_val(
-        relid: Oid,
-        attnum: types_core::AttrNumber,
-        missingval: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
-    ) -> PgResult<()>
-);
+// `StoreAttrMissingVal`'s pg_attribute mutation is now REAL in-crate
+// (`backend-catalog-heap` constraints.rs: keyed `systable_beginscan` on the
+// `AttributeRelidNumIndexId` over `attrelid = relid`, match `attnum`, then
+// `construct_array(&missingval, 1, atttypid, attlen, attbyval, attalign)` +
+// `heap_modify_tuple` setting `atthasmissing = true` + `attmissingval`, then
+// `CatalogTupleUpdate`), so the former `store_attr_missing_val`
+// mirror-and-panic seam is gone.
 
 /* ===========================================================================
  * Low-level relation-create seams `index_create` (catalog/index.c) calls

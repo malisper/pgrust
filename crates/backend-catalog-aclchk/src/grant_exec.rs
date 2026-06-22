@@ -103,6 +103,9 @@ const ACL_ALL_RIGHTS_SCHEMA: AclMode = ACL_USAGE | ACL_CREATE;
 const ACL_ALL_RIGHTS_FDW: AclMode = ACL_USAGE;
 const ACL_ALL_RIGHTS_FOREIGN_SERVER: AclMode = ACL_USAGE;
 
+// `ACL_ALL_RIGHTS_TABLESPACE` (`utils/acl.h`).
+const ACL_ALL_RIGHTS_TABLESPACE: AclMode = ACL_CREATE;
+
 // `ACL_ALL_RIGHTS_RELATION` / `ACL_ALL_RIGHTS_SEQUENCE` / `ACL_ALL_RIGHTS_COLUMN`
 // (`utils/acl.h`).
 const ACL_ALL_RIGHTS_RELATION: AclMode = ACL_INSERT
@@ -228,6 +231,7 @@ fn restrict_and_check_grant(
         ObjectType::Language => ACL_ALL_RIGHTS_LANGUAGE,
         ObjectType::Fdw => ACL_ALL_RIGHTS_FDW,
         ObjectType::ForeignServer => ACL_ALL_RIGHTS_FOREIGN_SERVER,
+        ObjectType::Tablespace => ACL_ALL_RIGHTS_TABLESPACE,
         other => {
             return Err(PgError::error(format!(
                 "restrict_and_check_grant: unsupported object type {other:?} in grant slice"
@@ -1392,7 +1396,7 @@ fn read_name(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>, attnum: i32) -
 fn exec_grant_stmt_oids(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<()> {
     use backend_catalog_objectaddress::consts::{
         DatabaseRelationId, ForeignDataWrapperRelationId, ForeignServerRelationId,
-        LanguageRelationId,
+        LanguageRelationId, TableSpaceRelationId,
     };
     match istmt.objtype {
         ObjectType::Table | ObjectType::Sequence => exec_grant_relation(mcx, istmt),
@@ -1432,6 +1436,13 @@ fn exec_grant_stmt_oids(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult
             istmt,
             ForeignServerRelationId,
             ACL_ALL_RIGHTS_FOREIGN_SERVER,
+            None,
+        ),
+        ObjectType::Tablespace => exec_grant_common(
+            mcx,
+            istmt,
+            TableSpaceRelationId,
+            ACL_ALL_RIGHTS_TABLESPACE,
             None,
         ),
         other => Err(PgError::error(format!(
@@ -2581,6 +2592,10 @@ fn objtype_all_privileges(objtype: ObjectType) -> PgResult<(AclMode, &'static st
         ObjectType::ForeignServer => Ok((
             ACL_ALL_RIGHTS_FOREIGN_SERVER,
             "invalid privilege type %s for foreign server",
+        )),
+        ObjectType::Tablespace => Ok((
+            ACL_ALL_RIGHTS_TABLESPACE,
+            "invalid privilege type %s for tablespace",
         )),
         other => Err(PgError::error(format!(
             "GRANT objtype {other:?} not ported (schema/relation slice)"

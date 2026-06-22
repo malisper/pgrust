@@ -732,12 +732,13 @@ fn CopyFromTextLikeOneRow<'mcx>(
                         debug_assert!(!cstate.relname_only);
                         cstate.relname_only = true;
 
+                        let relname = cstate.rel.rd_rel.relname.as_str().to_string();
                         let attname = cstate.cur_attname.clone().unwrap_or_default();
                         if let Some(attval) = &cstate.cur_attval {
                             let attval = CopyLimitPrintoutLength(attval);
-                            s::notice_skipping_row::call(cstate.cur_lineno, &attname, Some(&attval))?;
+                            s::notice_skipping_row::call(&relname, cstate.cur_lineno, &attname, Some(&attval))?;
                         } else {
-                            s::notice_skipping_row::call(cstate.cur_lineno, &attname, None)?;
+                            s::notice_skipping_row::call(&relname, cstate.cur_lineno, &attname, None)?;
                         }
 
                         cstate.relname_only = false;

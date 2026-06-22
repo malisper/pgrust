@@ -477,6 +477,25 @@ pub fn ExecReScanProjectSet<'mcx>(
     //   node->pending_srf_tuples = false;
     node.pending_srf_tuples = false;
 
+    // Reset any SRF element that was abandoned mid value-per-call series (e.g. a
+    // tSRF cut short by an enclosing LIMIT), so re-projecting from this node
+    // restarts the function rather than continuing the stale series.
+    //
+    // In C this is done implicitly: `init_MultiFuncCall` registers
+    // `shutdown_MultiFuncCall` on `node->ps_ExprContext`, and the generic
+    // `ExecReScan` calls `ReScanExprContext(node->ps_ExprContext)` (firing those
+    // callbacks, unbinding each SRF's `flinfo->fn_extra`) before dispatching to
+    // `ExecReScanProjectSet`. The owned model cannot register that bare-`fn`
+    // callback (the cross-call `fn_extra` lives on the owned call frame), so the
+    // teardown is driven here directly over this node's SRF elements.
+    if let Some(elems) = node.elems.as_mut() {
+        for elem in elems.iter_mut() {
+            if let ProjectSetElem::Srf(fcache) = elem {
+                execSRF::restart_set_expr_state::call(fcache)?;
+            }
+        }
+    }
+
     // If chgParam of subnode is not null then plan will be re-scanned by first
     // ExecProcNode.
     //   PlanState *outerPlan = outerPlanState(node);

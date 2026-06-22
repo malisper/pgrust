@@ -150,6 +150,12 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2504, "pg_get_ruledef_ext", BuiltinGapKind::NotRegistered),
     (2506, "pg_get_viewdef_ext", BuiltinGapKind::NotRegistered),
     (2510, "pg_prepared_statement", BuiltinGapKind::NotRegistered),
+    // `pg_cursor` (the `pg_cursors` view SRF) is registered in the executor-frame
+    // SRF table (`backend-executor-execSRF`), NOT the by-OID fmgr-core builtin
+    // registry whose tag-only `resultinfo` cannot carry a live `ReturnSetInfo`
+    // (the WONTFIX dual-home) — so the fmgr-core gap-guard still sees it as a
+    // not-registered builtin, exactly like `pg_prepared_statement`/
+    // `pg_event_trigger_dropped_objects` above and below.
     (2511, "pg_cursor", BuiltinGapKind::NotRegistered),
     (2556, "pg_tablespace_databases", BuiltinGapKind::NotRegistered),
     (2560, "pg_postmaster_start_time", BuiltinGapKind::NotRegistered),
@@ -268,7 +274,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3359, "macaddr_sortsupport", BuiltinGapKind::NotRegistered),
     (3376, "pg_safe_snapshot_blocking_pids", BuiltinGapKind::NotRegistered),
     (3378, "pg_isolation_test_session_is_blocked", BuiltinGapKind::NotRegistered),
-    (3382, "pg_identify_object_as_address", BuiltinGapKind::NotRegistered),
     (3383, "brin_minmax_opcinfo", BuiltinGapKind::NotRegistered),
     (3384, "brin_minmax_add_value", BuiltinGapKind::NotRegistered),
     (3385, "brin_minmax_consistent", BuiltinGapKind::NotRegistered),

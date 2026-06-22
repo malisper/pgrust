@@ -647,8 +647,8 @@ pub fn exec_supports_backward_scan(node: Option<&Node<'_>>) -> PgResult<bool> {
         // case T_SeqScan / T_TidScan / T_TidRangeScan / T_FunctionScan /
         //      T_ValuesScan / T_CteScan / T_Material / T_Sort:
         //   /* these don't evaluate tlist */ return true;
-        // (T_TidScan has no Node variant yet.)
         t if t == ntag::T_SeqScan
+            || t == ntag::T_TidScan
             || t == ntag::T_TidRangeScan
             || t == ntag::T_FunctionScan
             || t == ntag::T_ValuesScan

@@ -638,6 +638,13 @@ fn process_utility_slow_body<'mcx>(
             command_collected = true;
         }
 
+        t if t == ntag::T_AlterTableMoveAllStmt => {
+            // AlterTableMoveAll((AlterTableMoveAllStmt *) parsetree);
+            // Commands are stashed in AlterTableMoveAll.
+            rt::alter_table_move_all::call(mcx, parsetree)?;
+            command_collected = true;
+        }
+
         // The remaining DDL arms whose owner bodies are either unported or whose
         // ported bodies still lack the rich-node → owner-parse-form conversion
         // layer: ALTER EXTENSION / ALTER EXTENSION … ADD|DROP, and ALTER TABLE …

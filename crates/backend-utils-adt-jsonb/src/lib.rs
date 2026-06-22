@@ -280,32 +280,46 @@ pub fn jsonb_in_array_end(state: &mut JsonbInState) -> PgResult<()> {
 }
 
 /// C: `jsonb_in_object_field_start(void *pstate, char *fname, bool isnull)`.
-/// `fname` is the (de-escaped) field name.
-pub fn jsonb_in_object_field_start(state: &mut JsonbInState, fname: &[u8]) -> PgResult<()> {
+/// `fname` is the (de-escaped) field name. Returns `Ok(false)` when an
+/// over-length key was soft-recorded into `escontext` (C `return
+/// JSON_SEM_ACTION_FAILED`).
+pub fn jsonb_in_object_field_start(
+    state: &mut JsonbInState,
+    fname: &[u8],
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<bool> {
     // C: v.type = jbvString; v.val.string.len = strlen(fname).
-    checkStringLen(fname.len())?;
+    if !checkStringLen(fname.len(), escontext)? {
+        return Ok(false);
+    }
     let v = JsonbValue {
         typ: jbvType::jbvString,
         val: JsonbValueData::String(fname.to_vec()),
     };
     state.res = pushJsonbValue(&mut state.parse_state, JsonbIteratorToken::WJB_KEY, Some(&v))?;
-    Ok(())
+    Ok(true)
 }
 
 /// C: `jsonb_in_scalar(void *pstate, char *token, JsonTokenType tokentype)`.
+/// Returns `Ok(false)` when a soft-eligible failure (over-length string, or a
+/// `numeric_in` syntax/range error) was recorded into `escontext` (C `return
+/// JSON_SEM_ACTION_FAILED`); `Ok(true)` on success.
 pub fn jsonb_in_scalar<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut JsonbInState,
     token: Option<&[u8]>,
     tokentype: JsonTokenType,
-) -> PgResult<()> {
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<bool> {
     use JsonTokenType::*;
     let v = match tokentype {
         JSON_TOKEN_STRING => {
             let t = token.ok_or_else(|| {
                 PgError::error("jsonb_in_scalar: JSON_TOKEN_STRING carries a token")
             })?;
-            checkStringLen(t.len())?;
+            if !checkStringLen(t.len(), escontext.as_deref_mut())? {
+                return Ok(false);
+            }
             JsonbValue {
                 typ: jbvType::jbvString,
                 val: JsonbValueData::String(t.to_vec()),
@@ -318,7 +332,12 @@ pub fn jsonb_in_scalar<'mcx>(
             let text = core::str::from_utf8(t).map_err(|_| {
                 PgError::error("invalid numeric token").with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
             })?;
-            let bytes = numeric_in_to_bytes(mcx, text)?;
+            // C: DirectInputFunctionCallSafe(numeric_in, token, InvalidOid, -1,
+            // _state->escontext, &numd). A soft failure -> JSON_SEM_ACTION_FAILED.
+            let bytes = match numeric_in_to_bytes(mcx, text, escontext.as_deref_mut())? {
+                Some(b) => b,
+                None => return Ok(false),
+            };
             JsonbValue {
                 typ: jbvType::jbvNumeric,
                 val: JsonbValueData::Numeric(bytes),
@@ -368,7 +387,7 @@ pub fn jsonb_in_scalar<'mcx>(
             _ => return Err(elog_internal("unexpected parent of nested structure")),
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 // ===========================================================================
@@ -977,7 +996,10 @@ pub fn datum_to_jsonb_internal<'mcx>(
                                 .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
                         })?;
                         // jb.val.numeric = numeric_in(outputstr, InvalidOid, -1).
-                        let bytes = numeric_in_to_bytes(mcx, text)?;
+                        // No escontext: the numeric output is already valid, so
+                        // the soft-`None` arm is unreachable.
+                        let bytes = numeric_in_to_bytes(mcx, text, None)?
+                            .expect("numeric_in of a numeric_out string never soft-fails");
                         jb = JsonbValue {
                             typ: jbvType::jbvNumeric,
                             val: JsonbValueData::Numeric(bytes),
@@ -1059,7 +1081,8 @@ pub fn datum_to_jsonb_internal<'mcx>(
             // C default: OidOutputFunctionCall + checkStringLen, as a string.
             JSONTYPE_NULL | JSONTYPE_OTHER => {
                 let outputstr = catalog_fmgr::output_function_call::call(mcx, outfuncoid, val)?;
-                checkStringLen(outputstr.len())?;
+                // C: checkStringLen(outputstr.len(), NULL) — hard error path.
+                checkStringLen(outputstr.len(), None)?;
                 jb = JsonbValue {
                     typ: jbvType::jbvString,
                     val: JsonbValueData::String(outputstr),
@@ -1993,13 +2016,20 @@ fn numeric_out<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<String> {
     backend_utils_adt_numeric::io::numeric_out(mcx, num)
 }
 
-/// C: `DatumGetNumeric(DirectFunctionCall3(numeric_in, token, InvalidOid, -1))`
-/// — parse a JSON number `token` into the on-disk `numeric` varlena bytes.
-/// `typmod = -1` (no scale/precision enforcement). Returned as a plain `Vec`
-/// owned by the `JsonbValue` tree (decoupled from `mcx`'s lifetime).
-fn numeric_in_to_bytes<'mcx>(mcx: Mcx<'mcx>, token: &str) -> PgResult<Vec<u8>> {
-    let bytes = backend_utils_adt_numeric::io::numeric_in(mcx, token, -1)?;
-    Ok(bytes.as_slice().to_vec())
+/// C: `DirectInputFunctionCallSafe(numeric_in, token, InvalidOid, -1,
+/// escontext, &numd)` — parse a JSON number `token` into the on-disk `numeric`
+/// varlena bytes. `typmod = -1` (no scale/precision enforcement). Returned as a
+/// plain `Vec` owned by the `JsonbValue` tree (decoupled from `mcx`'s lifetime).
+/// `Ok(None)` when a soft-eligible failure was recorded into `escontext`.
+fn numeric_in_to_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    token: &str,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<Vec<u8>>> {
+    match backend_utils_adt_numeric::io::numeric_in_safe(mcx, token, -1, escontext)? {
+        Some(bytes) => Ok(Some(bytes.as_slice().to_vec())),
+        None => Ok(None),
+    }
 }
 
 /// C: `pushJsonbValue` re-export for the SQL-facing builders.
@@ -2026,17 +2056,24 @@ fn unknown_token() -> PgError {
 }
 
 /// C: `checkStringLen(size_t len, Node *escontext)` — exposed for the parser
-/// provider that drives the `jsonb_in_*` semantic actions.
-pub fn checkStringLen(len: usize) -> PgResult<()> {
+/// provider that drives the `jsonb_in_*` semantic actions. Returns `Ok(true)`
+/// when the length is acceptable, `Ok(false)` when an `escontext` soft-recorded
+/// the over-length error (C `ereturn(escontext, false, ...)`); with no
+/// `escontext` an over-length string raises a hard `Err`.
+pub fn checkStringLen(len: usize, escontext: Option<&mut SoftErrorContext>) -> PgResult<bool> {
     if len > JENTRY_OFFLENMASK {
-        return Err(PgError::error("string too long to represent as jsonb string")
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
-            .with_detail(format!(
-                "Due to an implementation restriction, jsonb strings cannot exceed {} bytes.",
-                JENTRY_OFFLENMASK
-            )));
+        return types_error::ereturn(
+            escontext,
+            false,
+            PgError::error("string too long to represent as jsonb string")
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                .with_detail(format!(
+                    "Due to an implementation restriction, jsonb strings cannot exceed {} bytes.",
+                    JENTRY_OFFLENMASK
+                )),
+        );
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]

@@ -12,4 +12,5 @@ path = "src/lib.rs"
 types-error = { path = "../types-error" }
 types-wchar = { path = "../types-wchar" }
 backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 common-wchar = { path = "../common-wchar" }

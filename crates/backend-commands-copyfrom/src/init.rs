@@ -181,7 +181,28 @@ pub fn init_seams() {
         },
     );
     s::notice_skipping_row::set(
-        |_lineno: u64, _attname: &str, _attval: Option<&str>| -> PgResult<()> { Ok(()) },
+        |relname: &str, lineno: u64, attname: &str, attval: Option<&str>| -> PgResult<()> {
+            // copyfromparse.c:1055-1066: VERBOSE per-row skip NOTICE. The C
+            // emits this while `relname_only` is set, so its error-context
+            // callback contributes only the `COPY <rel>` line; mirror that with
+            // an explicit errcontext.
+            let msg = match attval {
+                Some(v) => format!(
+                    "skipping row due to data type incompatibility at line {lineno} for column \"{attname}\": \"{v}\""
+                ),
+                None => format!(
+                    "skipping row due to data type incompatibility at line {lineno} for column \"{attname}\": null input"
+                ),
+            };
+            backend_utils_error::ereport(types_error::NOTICE)
+                .errmsg(msg)
+                .errcontext_msg(format!("COPY {relname}"))
+                .finish(types_error::ErrorLocation::new(
+                    "copyfromparse.c",
+                    0,
+                    "notice_skipping_row",
+                ))
+        },
     );
 
     // -- libpq frontend --

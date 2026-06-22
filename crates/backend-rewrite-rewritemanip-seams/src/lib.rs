@@ -77,6 +77,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `map_variable_attnos((Node *) returningList, firstVarno, 0, attmap,
+    /// RelationGetForm(partrel)->reltype, &found_whole_row)` (rewriteManip.c:1701)
+    /// over a `List *` of `TargetEntry`, as `execPartition.c`
+    /// `ExecInitPartitionInfo` calls it on the first plan's RETURNING list to
+    /// translate the Vars to the leaf partition's attribute numbers. In C the
+    /// `T_List` mutator arm recurses into each `TargetEntry`'s `expr`; over the
+    /// owned model the input `Vec<TargetEntry>` is consumed and returned with each
+    /// element's `expr` mapped in place, OR-ing `found_whole_row` across the list
+    /// (the caller ignores it). `Err` carries the rewrite `ereport(ERROR)` surface.
+    pub fn map_variable_attnos_targetentry_list<'mcx>(
+        mcx: Mcx<'mcx>,
+        tlist: mcx::PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>,
+        target_varno: i32,
+        attmap: &[types_core::primitive::AttrNumber],
+        to_rowtype: types_core::primitive::Oid,
+    ) -> PgResult<(mcx::PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>, bool)>
+);
+
+seam_core::seam!(
     /// `map_variable_attnos(node, target_varno, sublevels_up, attmap, to_rowtype,
     /// &found_whole_row)` (rewriteManip.c:1701) over a single `Node *`, as
     /// `commands/tablecmds.c` `MergeAttributes` calls it on inherited default and

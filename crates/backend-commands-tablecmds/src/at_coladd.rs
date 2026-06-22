@@ -12,11 +12,12 @@
 //!     `add_column_collation_dependency` (the static helpers).
 //!
 //! The phase-3 "store the DEFAULT outside the heap" (missing-value) fast path
-//! (`ExecPrepareExpr`/`ExecEvalExpr` → `StoreAttrMissingVal`) and the
-//! table-rewrite fallback bottom out on the still-unported executor expr-eval /
-//! by-ref missing-value storage; those callees panic loudly when reached (a
-//! `DEFAULT` whose value must be materialized into existing rows). ADD COLUMN
-//! without a default, and the catalog-level default storage, are complete.
+//! (`ExecPrepareExpr`/`ExecEvalExpr` → `StoreAttrMissingVal`) is implemented:
+//! a non-volatile constant `DEFAULT` on a plain, non-generated, non-domain
+//! column is stored as the attribute's `attmissingval` (no table rewrite),
+//! and existing rows read it back via the descriptor's `constr->missing`. The
+//! volatile / generated-stored / domain-constraint cases fall back to the
+//! `AT_REWRITE_DEFAULT_VAL` table rewrite.
 
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
@@ -44,7 +45,7 @@ use types_tuple::heaptuple::{MaxHeapAttributeNumber, DEFAULT_COLLATION_OID};
 
 use backend_access_common_relation::relation_open;
 use backend_catalog_dependency_seams as dep_seam;
-use backend_catalog_heap::{CheckAttributeType, InsertPgAttributeTuples};
+use backend_catalog_heap::{CheckAttributeType, InsertPgAttributeTuples, CHKATYPE_IS_VIRTUAL};
 use backend_catalog_indexing_seams as indexing_seam;
 use backend_catalog_pg_inherits::find_inheritance_children;
 use backend_utils_cache_syscache::{SearchSysCacheAttName, SysCacheGetAttrNotNull, ATTNAME};
@@ -58,7 +59,7 @@ use crate::at_phase::{
     AlterTableUtilityContext, CheckAlterTableIsSafe, ATT_FOREIGN_TABLE, ATT_PARTITIONED_TABLE,
     ATT_TABLE,
 };
-use crate::helpers::{here, RelationRelationId};
+use crate::helpers::{here, to_access_range_var, RelationRelationId};
 
 use backend_commands_tablecmds_seams as seam;
 
@@ -545,30 +546,51 @@ pub fn ATExecAddColumn<'mcx>(
     if RELKIND_HAS_STORAGE(relkind) {
         let mut has_missing = false;
 
-        // For an identity column we can't use build_column_default() (sequence
-        // ownership isn't set yet). The NextValueExpr build + identity-sequence
-        // ownership wiring is not yet ported.
-        if col_def.identity != 0 {
-            panic!(
-                "ALTER TABLE ADD COLUMN ... GENERATED ... AS IDENTITY: the NextValueExpr \
-                 phase-3 fill + identity-sequence ownership path is not yet ported \
-                 (faithful seam-and-panic)"
-            );
-        }
-
-        // defval = build_column_default(rel, attribute->attnum).
+        // For an identity column, we can't use build_column_default(), because
+        // the sequence ownership isn't set yet.  So do it manually.
         //
-        // The owned `rel` carrier still holds the pre-ADD tuple descriptor; the
-        // catalog row for the new column was inserted in this command (and made
-        // visible by the CommandCounterIncrement above), so re-open the relation
-        // to pick up the freshly-added attribute before resolving its default.
-        let fresh_rel = relation_open(mcx, myrelid, NoLock)?;
-        let mut defval = backend_rewrite_rewritehandler_seams::build_column_default::call(
-            mcx,
-            fresh_rel.alias(),
-            newattnum as i32,
-        )?;
-        drop(fresh_rel);
+        //   NextValueExpr *nve = makeNode(NextValueExpr);
+        //   nve->seqid = RangeVarGetRelid(colDef->identitySequence, NoLock, false);
+        //   nve->typeId = attribute->atttypid;
+        //   defval = (Expr *) nve;
+        // else
+        //   defval = (Expr *) build_column_default(rel, attribute->attnum);
+        let mut defval = if col_def.identity != 0 {
+            let identity_seq = col_def
+                .identitySequence
+                .as_deref()
+                .expect("ADD COLUMN identity: identitySequence is NULL");
+            let identity_seq_access = to_access_range_var(identity_seq);
+            let seqid = backend_catalog_namespace::RangeVarGetRelid(
+                mcx,
+                &identity_seq_access,
+                NoLock,
+                false,
+            )?;
+            let nve = types_nodes::primnodes::Expr::NextValueExpr(
+                types_nodes::primnodes::NextValueExpr {
+                    seqid,
+                    typeId: attribute_typid,
+                },
+            );
+            Some(mcx::alloc_in(mcx, nve)?)
+        } else {
+            // defval = build_column_default(rel, attribute->attnum).
+            //
+            // The owned `rel` carrier still holds the pre-ADD tuple descriptor;
+            // the catalog row for the new column was inserted in this command
+            // (and made visible by the CommandCounterIncrement above), so
+            // re-open the relation to pick up the freshly-added attribute
+            // before resolving its default.
+            let fresh_rel = relation_open(mcx, myrelid, NoLock)?;
+            let dv = backend_rewrite_rewritehandler_seams::build_column_default::call(
+                mcx,
+                fresh_rel.alias(),
+                newattnum as i32,
+            )?;
+            drop(fresh_rel);
+            dv
+        };
 
         // has_domain_constraints = DomainHasConstraints(attribute->atttypid).
         let has_domain_constraints =
@@ -599,23 +621,57 @@ pub fn ATExecAddColumn<'mcx>(
                 is_generated: col_def.generated != 0,
             });
 
-            // C attempts to skip a complete table rewrite by storing the DEFAULT
-            // outside the heap (a "missing value", StoreAttrMissingVal) when the
-            // relation is a plain table, the column is non-generated, the default
-            // is non-volatile, and the type has no domain constraints. That
-            // optimization rides the by-ref `Datum` missing-value carrier
-            // (`store_attr_missing_val`), which bottoms out on the writable ATTNUM
-            // syscache copy + `pg_attribute` CatalogTupleUpdate carrier (still
-            // unported — see `backend-catalog-heap-seams::store_attr_missing_val`).
-            // Until that lands we take the always-correct path: materialize the
-            // default into existing rows via the phase-3 table rewrite. (This is
-            // observably correct; it differs from upstream only in that a rewrite
-            // happens where the missing-value fast path would have avoided one,
-            // and `atthasmissing` stays false.) The volatile case (e.g.
-            // `DEFAULT random()`) takes the rewrite path in upstream too.
-            let _ = (has_domain_constraints, &planned);
-            if col_def.generated != ATTRIBUTE_GENERATED_VIRTUAL {
-                wqueue[ti].rewrite |= AT_REWRITE_DEFAULT_VAL;
+            // Attempt to skip a complete table rewrite by storing the specified
+            // DEFAULT value outside of the heap. This is only allowed for plain
+            // relations and non-generated columns, and the default expression
+            // can't be volatile (stable is OK). Note that
+            // contain_volatile_functions deems CoerceToDomain immutable, but here
+            // we consider that coercion to a domain with constraints is volatile;
+            // else it might fail even when the table is empty.
+            if relkind == RELKIND_RELATION
+                && col_def.generated == 0
+                && !has_domain_constraints
+                && !backend_optimizer_util_clauses::contain_volatile_functions(Some(&planned))?
+            {
+                // Evaluate the default expression.
+                //   estate = CreateExecutorState();
+                //   exprState = ExecPrepareExpr(defval, estate);
+                //   missingval = ExecEvalExpr(exprState,
+                //                             GetPerTupleExprContext(estate),
+                //                             &missingIsNull);
+                let mut estate =
+                    backend_executor_execExpr_seams::create_executor_state::call(mcx)?;
+                let mut expr_state =
+                    backend_executor_execExpr_seams::exec_prepare_expr::call(&planned, &mut estate)?;
+                let econtext =
+                    backend_executor_execUtils_seams::get_per_tuple_expr_context::call(
+                        &mut estate,
+                    )?;
+                let (missingval, missing_is_null) =
+                    backend_executor_execExpr_seams::exec_eval_expr_switch_context::call(
+                        &mut expr_state,
+                        econtext,
+                        &mut estate,
+                    )?;
+
+                // If it turns out NULL, nothing to do; else store it.
+                if !missing_is_null {
+                    backend_catalog_heap::StoreAttrMissingVal(
+                        mcx, rel, newattnum, missingval,
+                    )?;
+                    // Make the additional catalog change visible.
+                    backend_access_transam_xact::CommandCounterIncrement()?;
+                    has_missing = true;
+                }
+
+                drop(expr_state);
+                backend_executor_execExpr_seams::free_executor_state::call(estate)?;
+            } else {
+                // Failed to use missing mode. We have to do a table rewrite to
+                // install the value --- unless it's a virtual generated column.
+                if col_def.generated != ATTRIBUTE_GENERATED_VIRTUAL {
+                    wqueue[ti].rewrite |= AT_REWRITE_DEFAULT_VAL;
+                }
             }
         }
 
@@ -781,8 +837,6 @@ fn columndef_colname<'a>(col_def: &'a types_nodes::rawnodes::ColumnDef<'_>) -> &
         .map(|s| s.as_str())
         .expect("ColumnDef has no colname")
 }
-
-const CHKATYPE_IS_VIRTUAL: i32 = 1 << 2;
 
 /// `AT_REWRITE_DEFAULT_VAL` (tablecmds.c) — phase-3 must rewrite to fill in a
 /// non-out-of-heap default value.

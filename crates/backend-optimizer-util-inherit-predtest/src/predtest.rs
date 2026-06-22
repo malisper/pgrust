@@ -446,14 +446,14 @@ pub(crate) fn predicate_implied_by_impl<'mcx>(
     let p: &Expr<'mcx> = if predicate_list.len() == 1 {
         &predicate_list[0]
     } else {
-        p_holder = wrap_list(predicate_list)?;
+        p_holder = wrap_list(mcx, predicate_list)?;
         &p_holder
     };
     let c_holder: Expr<'mcx>;
     let c: &Expr<'mcx> = if clause_list.len() == 1 {
         &clause_list[0]
     } else {
-        c_holder = wrap_list(clause_list)?;
+        c_holder = wrap_list(mcx, clause_list)?;
         &c_holder
     };
 
@@ -503,14 +503,14 @@ pub(crate) fn predicate_refuted_by_impl<'mcx>(
     let p: &Expr<'mcx> = if predicate_list.len() == 1 {
         &predicate_list[0]
     } else {
-        p_holder = wrap_list(predicate_list)?;
+        p_holder = wrap_list(mcx, predicate_list)?;
         &p_holder
     };
     let c_holder: Expr<'mcx>;
     let c: &Expr<'mcx> = if clause_list.len() == 1 {
         &clause_list[0]
     } else {
-        c_holder = wrap_list(clause_list)?;
+        c_holder = wrap_list(mcx, clause_list)?;
         &c_holder
     };
 
@@ -525,11 +525,15 @@ pub(crate) fn predicate_refuted_by_impl<'mcx>(
 /// implicit-AND list and an explicit AND `BoolExpr` classify identically and
 /// iterate the same component set, so we model the list as an AND `BoolExpr` —
 /// observationally identical for the proof engine.
-fn wrap_list<'mcx>(items: &[Expr<'mcx>]) -> PgResult<Expr<'mcx>> {
+fn wrap_list<'mcx>(mcx: Mcx<'mcx>, items: &[Expr<'mcx>]) -> PgResult<Expr<'mcx>> {
     let mut args = Vec::new();
     args.try_reserve(items.len()).map_err(|_| oom("wrap_list"))?;
     for e in items {
-        args.push(e.clone());
+        // Deep-clone through `clone_in` (not the derived `Clone`, which panics on
+        // the transient planner-node variants AlternativeSubPlan/SubPlan that a
+        // restriction list can legitimately contain — e.g. an EXISTS subquery
+        // hoisted to an AlternativeSubPlan in a constraint-exclusion clause list).
+        args.push(e.clone_in(mcx)?);
     }
     Ok(Expr::BoolExpr(types_nodes::primnodes::BoolExpr {
         boolop: BoolExprType::AND_EXPR,

@@ -23,14 +23,17 @@
 //! [`PgAttributeUpdateRow`] carrier and the `catalog_tuple_update_pg_attribute`
 //! seam (the shared pg_attribute write leaf, owner backend-catalog-indexing).
 //!
-//! SEAM-AND-PANIC (faithful, carrier-keystone blocked) — the relation-level
-//! `ATExecSetRelOptions`:
+//! VARIABLE-COLUMN OPTION WRITES (the `text[]` reloptions/attoptions lane) —
+//! both legs are ported via the on-disk varlena-image bridge rather than a bare
+//! `Datum`:
 //!   - `ATExecSetRelOptions` writes the variable `reloptions` (`text[]`) column
-//!     of `pg_class` via `heap_modify_tuple`. The only pg_class write carrier
-//!     (`catalog_tuple_update_pg_class`) takes the fixed-length `PgClassForm`
-//!     struct, which has no `reloptions` field — there is no pg_class
-//!     variable-column write carrier. Stays a loud stop (out-of-lane carrier
-//!     keystone).
+//!     of `pg_class`. The merged options ride the
+//!     `update_pg_class_reloptions` carrier (`heap_modify_tuple` over the
+//!     `text[]` image built by `transformRelOptionsBytes`).
+//!   - `ATExecSetOptions` writes the variable `attoptions` (`text[]`) column of
+//!     `pg_attribute`. The merged options ride the
+//!     `PgAttributeUpdateRow.attoptions` ByRef-bytes carrier (same
+//!     `transformRelOptionsBytes` → `construct_text_array_bytes` image path).
 //!
 //! [`PgAttributeUpdateRow`]: types_catalog::pg_attribute::PgAttributeUpdateRow
 
@@ -289,16 +292,6 @@ pub fn ATExecReplicaIdentity<'mcx>(
     Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
 }
 
-/// Faithful seam-and-panic for an unported column-attribute family. See module
-/// docs for why these are not yet landed.
-fn unported(what: &str) -> ! {
-    panic!(
-        "ALTER TABLE: {what} is not yet ported in backend-commands-tablecmds \
-         (faithful seam-and-panic — needs the pg_attribute/pg_class \
-         heap_deform_tuple + per-Anum Datum + heap_modify_tuple write path; \
-         see at_column.rs)"
-    );
-}
 
 // ===========================================================================
 // ATExecColumnDefault (tablecmds.c:8126) — ALTER COLUMN SET / DROP DEFAULT
@@ -886,23 +879,121 @@ fn att_field_char(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16)
 // (faithful keystone stop)
 // ===========================================================================
 
-/// `ATExecSetOptions` (tablecmds.c:9050). See module docs.
+/// `ATExecSetOptions(rel, colName, options, isReset, lockmode)`
+/// (tablecmds.c:9050) — ALTER COLUMN SET / RESET (...) per-column attoptions.
+///
+/// Reads the current `pg_attribute.attoptions` `text[]`, merges the SET/RESET
+/// `DefElem` list via `transformRelOptions`, validates with
+/// `attribute_reloptions`, and writes the resulting `text[]` varlena image back
+/// to `pg_attribute.attoptions` (or SQL NULL when the merge empties the array).
+///
+/// The merged `text[]` is built on the on-disk varlena-image lane
+/// (`transformRelOptionsBytes` → `construct_text_array_bytes`) and ridden into
+/// the catalog write through the `PgAttributeUpdateRow.attoptions` ByRef-bytes
+/// carrier — the same path `ATExecSetRelOptions` uses for `pg_class.reloptions`
+/// and `index_create` uses for index attoptions.
 pub fn ATExecSetOptions<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _rel: &Relation<'mcx>,
-    _colName: &str,
-    _options: Option<&Node<'mcx>>,
-    _isReset: bool,
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    colName: &str,
+    options: Option<&Node<'mcx>>,
+    isReset: bool,
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
-    unported(
-        "ALTER COLUMN SET/RESET OPTIONS — the attoptions write would store the \
-         text[] image transformRelOptions builds, but transformRelOptions (and \
-         construct_text_array) return a bare-word types_datum::Datum varlena \
-         pointer with NO safe bridge to the types_tuple::Datum ByRef-bytes lane \
-         the PgAttributeUpdateRow.attoptions carrier needs (same Datum-redesign \
-         keystone backend-commands-indexcmds documents for opclass options)",
-    );
+    // attrelation = table_open(AttributeRelationId, RowExclusiveLock);
+    let attrelation = relation_open(mcx, AttributeRelationId, RowExclusiveLock)?;
+
+    // tuple = SearchSysCacheAttName(RelationGetRelid(rel), colName);
+    let tuple = match SearchSysCacheAttName(mcx, rel.rd_id, colName)? {
+        Some(t) => t,
+        None => {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_COLUMN)
+                .errmsg(format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    colName,
+                    rel.name()
+                ))
+                .finish(here("ATExecSetOptions"))
+                .map(|()| unreachable!());
+        }
+    };
+
+    // attnum = attrtuple->attnum;
+    let attnum = att_field_i16(mcx, ATTNAME, &tuple, Anum_pg_attribute_attnum)?;
+    if attnum <= 0 {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("cannot alter system column \"{colName}\""))
+            .finish(here("ATExecSetOptions"))
+            .map(|()| unreachable!());
+    }
+
+    // Project the `(List *) options` (a Node::List of Node::DefElem) into the
+    // reloptions working-view DefElem list. C: `castNode(List, options)`.
+    let mut def_list: Vec<backend_access_common_reloptions::DefElem> = Vec::new();
+    if let Some(opts) = options {
+        if let Some(items) = opts.as_list() {
+            for it in items.iter() {
+                if let Some(de) = it.as_defelem() {
+                    let arg = crate::create::defel_arg(de)?;
+                    def_list.push(backend_access_common_reloptions::DefElem::new(
+                        de.defnamespace.as_ref().map(|s| s.as_str()),
+                        de.defname.as_ref().map(|s| s.as_str()).unwrap_or(""),
+                        arg,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Generate new proposed attoptions (text array).
+    //   datum = SysCacheGetAttr(ATTNAME, tuple, Anum_pg_attribute_attoptions, &isnull);
+    //   newOptions = transformRelOptions(isnull ? (Datum) 0 : datum, options,
+    //                                    NULL, NULL, false, isReset);
+    let (cur_datum, cur_isnull) = backend_utils_cache_syscache::SysCacheGetAttr(
+        mcx,
+        ATTNAME,
+        &tuple,
+        types_catalog::pg_attribute::Anum_pg_attribute_attoptions as i32,
+    )?;
+    let old_bytes: Option<&[u8]> = if cur_isnull {
+        None
+    } else {
+        Some(cur_datum.as_ref_bytes())
+    };
+    let new_options = backend_access_common_reloptions::transformRelOptionsBytes(
+        mcx,
+        old_bytes,
+        &def_list,
+        None,
+        None,
+        false,
+        isReset,
+    )?;
+    let new_options: Option<Vec<u8>> = new_options.map(|v| v.iter().copied().collect());
+
+    // Validate new options. (void) attribute_reloptions(newOptions, true);
+    backend_access_common_reloptions::attribute_reloptions(mcx, new_options.as_deref(), true)?;
+
+    // Build new tuple: replace attoptions only (the built varlena image, or SQL
+    // NULL when the merge produced no options).
+    let row = PgAttributeUpdateRow {
+        attoptions: Some(new_options),
+        ..Default::default()
+    };
+    indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, &attrelation, &tuple, &row)?;
+
+    // InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), attnum);
+    objaccess_seam::invoke_object_post_alter_hook::call(RelationRelationId, rel.rd_id, attnum as i32)?;
+
+    // ObjectAddressSubSet(address, RelationRelationId, RelationGetRelid(rel), attnum);
+    let address = object_address_subset(RelationRelationId, rel.rd_id, attnum as i32);
+
+    // heap_freetuple(newtuple); table_close(attrelation, RowExclusiveLock) — RAII.
+    drop(attrelation);
+
+    Ok(address)
 }
 
 /// `ATExecSetStorage(rel, colName, newValue, lockmode)` (tablecmds.c:9192) —

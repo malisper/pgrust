@@ -2925,31 +2925,74 @@ fn make_whole_row_var(
                 Ok(mk(toid, 0, InvalidOid))
             } else if !rte.functions.is_empty() {
                 // Subquery expanded from a set-returning function (planning-only).
-                make_whole_row_var_func(rte)
+                // C asserts !allowScalar here, so a scalar funcexpr yields RECORD.
+                make_whole_row_var_func(rte, varno, varlevelsup, false)
             } else {
                 // Normal subquery-in-FROM.
                 Ok(mk(RECORDOID, 0, InvalidOid))
             }
         }
-        RTE_FUNCTION => make_whole_row_var_func(rte),
+        RTE_FUNCTION => make_whole_row_var_func(rte, varno, varlevelsup, true),
         // Join, tablefunc, VALUES, CTE, etc. → a whole-row Var of RECORD type.
         _ => Ok(mk(RECORDOID, 0, InvalidOid)),
     }
 }
 
-/// The RTE_FUNCTION branch of `makeWholeRowVar` — needs `exprType` over the
-/// first `RangeTblFunction.funcexpr` (a `Node`). The trimmed `expr_type` works
-/// only over `Expr`; the funcexpr-as-Node typing is the funcapi seam's
-/// responsibility (mirror-PG-and-panic).
+/// The RTE_FUNCTION branch of `makeWholeRowVar` (makefuncs.c) — and the
+/// RTE_SUBQUERY-expanded-from-SRF branch, which C documents must match it.
+///
+/// If there's more than one function, or ordinality is requested, force a
+/// RECORD result (more than one column, can't be a named type). Otherwise type
+/// the single function's `funcexpr` via `exprType`: if it returns a composite,
+/// use that rowtype (like a relation); if it returns a scalar and the caller
+/// allows it (`allowScalar = true` on the parse side), return the scalar output
+/// column as-is; else fall back to RECORD.
 fn make_whole_row_var_func(
-    _rte: &types_nodes::RangeTblEntry<'_>,
+    rte: &types_nodes::RangeTblEntry<'_>,
+    varno: i32,
+    varlevelsup: types_core::Index,
+    allow_scalar: bool,
 ) -> PgResult<types_nodes::primnodes::Var> {
-    panic!(
-        "makeWholeRowVar over an RTE_FUNCTION needs exprType over the \
-         RangeTblFunction.funcexpr Node; the repo's expr_type covers only the \
-         trimmed Expr, so funcexpr-as-Node typing is blocked pending the funcapi \
-         Node-level exprType seam."
-    )
+    let mk = |toid: Oid, varattno: i32, varcollid: Oid| {
+        backend_nodes_core::makefuncs::make_var(
+            varno,
+            varattno as types_core::AttrNumber,
+            toid,
+            -1,
+            varcollid,
+            varlevelsup,
+        )
+    };
+
+    // More than one function, or ordinality → always an anonymous RECORD.
+    if rte.funcordinality || rte.functions.len() != 1 {
+        return Ok(mk(RECORDOID, 0, InvalidOid));
+    }
+
+    // fexpr = ((RangeTblFunction *) linitial(rte->functions))->funcexpr.
+    let rtf = rte.functions[0]
+        .as_rangetblfunction()
+        .ok_or_else(|| PgError::error("makeWholeRowVar: RTE_FUNCTION functions entry is not a RangeTblFunction"))?;
+    let fexpr = rtf
+        .funcexpr
+        .as_ref()
+        .and_then(|n| n.as_expr())
+        .ok_or_else(|| PgError::error("makeWholeRowVar: RangeTblFunction has no funcexpr"))?;
+
+    let toid = expr_type(Some(fexpr))?;
+    if lsyscache::type_is_rowtype::call(toid)? {
+        // Func returns composite; same as the relation case.
+        Ok(mk(toid, 0, InvalidOid))
+    } else if allow_scalar {
+        // Func returns scalar and the caller allows it (RTE_FUNCTION parse side):
+        // return its output column as-is (attno 1, with the func's collation).
+        let varcollid = expr_collation(Some(fexpr))?;
+        Ok(mk(toid, 1, varcollid))
+    } else {
+        // Func returns scalar, but we want a composite result (the
+        // SRF-expanded-subquery planning case, where allowScalar is false).
+        Ok(mk(RECORDOID, 0, InvalidOid))
+    }
 }
 
 /// `ParseFuncOrColumn(pstate, list_make1(makeString(colname)), list_make1(node),
@@ -5281,8 +5324,8 @@ fn transformJsonSerializeExpr<'mcx>(
     build_json_constructor_expr(
         pstate,
         JsonConstructorType::JSCTOR_JSON_SERIALIZE,
-        Vec::new(),
-        Some(arg),
+        alloc::vec![arg],
+        None,
         returning,
         false,
         false,
@@ -5704,8 +5747,9 @@ fn transformJsonIsPredicate<'mcx>(
     pstate: &mut ParseState<'mcx>,
     pred: types_nodes::rawexprnodes::JsonIsPredicate<'mcx>,
 ) -> PgResult<Expr<'static>> {
-    // transformJsonParseArg: recurse + coerce the subject to text/json/jsonb.
-    let arg_node = boxed_node(
+    // transformJsonParseArg: recurse + coerce the subject to text/json/jsonb,
+    // applying the bytea -> text conversion for bytea input. Mirrors C exactly.
+    let raw = boxed_node(
         pred.expr
             .as_ref()
             .map(|p| p.clone_in(aexpr_clone_ctx(pstate)))
@@ -5713,37 +5757,11 @@ fn transformJsonIsPredicate<'mcx>(
             .map(|n| mcx::alloc_in(aexpr_clone_ctx(pstate), n))
             .transpose()?,
     );
-    let mut expr = transformExprRecurse(pstate, arg_node)?
-        .ok_or_else(|| PgError::error("IS JSON: NULL argument"))?;
+    let (expr, exprtype) = transform_json_parse_arg(pstate, raw, &pred.format)?;
 
-    let mut exprtype = expr_type(Some(&expr))?;
-
-    // Coerce UNKNOWN / string-category inputs to text (transformJsonParseArg).
-    if exprtype == UNKNOWNOID {
-        expr = coerce::coerce_to_specific_type::call(pstate, expr, TEXTOID, "IS JSON")?;
-        exprtype = TEXTOID;
-    } else if exprtype != JSONOID && exprtype != JSONBOID && exprtype != BYTEAOID {
-        let (typcategory, _typispreferred) =
-            lsyscache::get_type_category_preferred::call(exprtype)?;
-        if typcategory == TYPCATEGORY_STRING {
-            let coerced = coerce::coerce_to_target_type::call(
-                pstate,
-                expr.clone(),
-                exprtype,
-                TEXTOID,
-                -1,
-                CoercionContext::COERCION_IMPLICIT,
-                CoercionForm::COERCE_IMPLICIT_CAST,
-                -1,
-            )?;
-            if let Some(c) = coerced {
-                expr = c;
-                exprtype = TEXTOID;
-            }
-        }
-    }
-
-    if exprtype != TEXTOID && exprtype != JSONOID && exprtype != JSONBOID && exprtype != BYTEAOID {
+    // make resulting expression. Note: bytea is NOT allowed here because
+    // transform_json_parse_arg already converted it to text.
+    if exprtype != TEXTOID && exprtype != JSONOID && exprtype != JSONBOID {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_DATATYPE_MISMATCH)
             .errmsg(alloc::format!(

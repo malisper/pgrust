@@ -60,6 +60,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CheckIndexCompatible(oldId, stmt->accessMethod, stmt->indexParams,
+    /// stmt->excludeOpNames, stmt->iswithoutoverlaps)` (indexcmds.c): determine
+    /// whether the existing index `old_id` is compatible enough with the new
+    /// `IndexStmt` definition that its physical storage can be reused. Used by
+    /// `ATPostAlterTypeParse`'s `TryReuseIndex` during an
+    /// `ALTER TABLE ... ALTER COLUMN TYPE` rebuild. `Err` carries the
+    /// cache-lookup / opclass-resolution `ereport(ERROR)` surface.
+    pub fn check_index_compatible<'mcx>(
+        mcx: Mcx<'mcx>,
+        old_id: Oid,
+        stmt: &IndexStmt<'mcx>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `makeObjectName(name1, name2, label)` (indexcmds.c): build an object name
     /// of the form `name1_name2_label`, truncating the components as needed to
     /// fit `NAMEDATALEN`. Returns a freshly-allocated name string. Used by

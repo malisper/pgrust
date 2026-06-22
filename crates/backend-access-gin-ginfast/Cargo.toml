@@ -16,6 +16,11 @@ types-rel = { path = "../types-rel" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 types-gin = { path = "../types-gin" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+types-acl = { path = "../types-acl" }
+types-catalog = { path = "../types-catalog" }
+types-nodes = { path = "../types-nodes" }
 
 # owned engine layers (direct deps — acyclic)
 backend-lib-rbtree = { path = "../backend-lib-rbtree" }
@@ -41,3 +46,8 @@ backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumla
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

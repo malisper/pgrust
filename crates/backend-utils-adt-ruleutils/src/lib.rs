@@ -1118,7 +1118,7 @@ pub fn set_rtable_names<'mcx>(
 pub fn select_rtable_names_for_explain<'mcx>(
     mcx: Mcx<'mcx>,
     rtable: &PgVec<'mcx, RangeTblEntry<'mcx>>,
-    rels_used: &types_nodes::bitmapset::Bitmapset<'mcx>,
+    rels_used: Option<&types_nodes::bitmapset::Bitmapset<'mcx>>,
 ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>> {
     let mut dpns = DeparseNamespace::zeroed(mcx);
 
@@ -1126,7 +1126,10 @@ pub fn select_rtable_names_for_explain<'mcx>(
     // set_rtable_names only reads alias/eref/rtekind/relid off each RTE).
     dpns.rtable = clone_rtable(mcx, rtable)?;
     // subplans = NIL; ctes = NIL; appendrels = NULL — zeroed() already.
-    set_rtable_names(mcx, &mut dpns, &[], Some(rels_used))?;
+    // `rels_used` is threaded through as-is: when it is None (the C NULL
+    // `*rels_used`, e.g. a dummy Result with no scan node), set_rtable_names
+    // names every RTE so plan-targetlist Vars keep their relation prefixes.
+    set_rtable_names(mcx, &mut dpns, &[], rels_used)?;
     // We needn't bother computing column aliases yet.
 
     Ok(dpns.rtable_names)

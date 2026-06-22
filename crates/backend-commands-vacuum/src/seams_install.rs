@@ -125,6 +125,11 @@ pub fn init_seams() {
     vacuum::relation_get_index_list::set(|relid| {
         backend_utils_cache_relcache::derived::RelationGetIndexList(relid)
     });
+    // expandTableLikeClause INCLUDING STATISTICS: `RelationGetStatExtList(rel)`
+    // by OID (relcache.c).
+    vacuum::relation_get_stat_ext_list::set(|relid| {
+        backend_utils_cache_relcache::derived::RelationGetStatExtList(relid)
+    });
     // vac_open_indexes: `index_open(indexoid, lockmode)` (indexam.c). C's
     // `vac_open_indexes` holds each opened index `Relation *` in `Irel[]` (one
     // relcache pin) under `lockmode`, and `vac_close_indexes` releases that same

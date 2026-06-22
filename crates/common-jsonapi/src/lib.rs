@@ -1480,6 +1480,9 @@ fn run_pg_parse_json(
 struct JsonbSink<'m, 'mcx> {
     mcx: Mcx<'mcx>,
     state: &'m mut backend_utils_adt_jsonb::JsonbInState,
+    /// C `JsonbInState.escontext` — the soft-error sink threaded into the
+    /// `numeric_in` / `checkStringLen` calls inside the scalar/field actions.
+    escontext: Option<&'m mut types_error::SoftErrorContext>,
     raised: Option<PgError>,
 }
 
@@ -1487,6 +1490,20 @@ impl<'m, 'mcx> JsonbSink<'m, 'mcx> {
     fn note(&mut self, r: PgResult<()>) -> JsonParseErrorType {
         match r {
             Ok(()) => JsonParseErrorType::Success,
+            Err(e) => {
+                self.raised = Some(e);
+                JsonParseErrorType::SemActionFailed
+            }
+        }
+    }
+
+    /// A semantic action that may soft-fail: `Ok(true)` => success, `Ok(false)`
+    /// => the action recorded the error into `escontext` and abandoned the
+    /// parse (C `return JSON_SEM_ACTION_FAILED`), `Err` => a hard error.
+    fn note_soft(&mut self, r: PgResult<bool>) -> JsonParseErrorType {
+        match r {
+            Ok(true) => JsonParseErrorType::Success,
+            Ok(false) => JsonParseErrorType::SemActionFailed,
             Err(e) => {
                 self.raised = Some(e);
                 JsonParseErrorType::SemActionFailed
@@ -1520,8 +1537,12 @@ impl<'m, 'mcx> SaxSink for JsonbSink<'m, 'mcx> {
     ) -> JsonParseErrorType {
         // jsonb_from_cstring uses need_escapes=true, so fname is always present.
         let name = fname.unwrap_or(&[]);
-        let r = backend_utils_adt_jsonb::jsonb_in_object_field_start(self.state, name);
-        self.note(r)
+        let r = backend_utils_adt_jsonb::jsonb_in_object_field_start(
+            self.state,
+            name,
+            self.escontext.as_deref_mut(),
+        );
+        self.note_soft(r)
     }
     fn scalar(
         &mut self,
@@ -1529,8 +1550,14 @@ impl<'m, 'mcx> SaxSink for JsonbSink<'m, 'mcx> {
         token: Option<&[u8]>,
         tokentype: JsonTokenType,
     ) -> JsonParseErrorType {
-        let r = backend_utils_adt_jsonb::jsonb_in_scalar(self.mcx, self.state, token, tj_token(tokentype));
-        self.note(r)
+        let r = backend_utils_adt_jsonb::jsonb_in_scalar(
+            self.mcx,
+            self.state,
+            token,
+            tj_token(tokentype),
+            self.escontext.as_deref_mut(),
+        );
+        self.note_soft(r)
     }
 }
 
@@ -1539,7 +1566,7 @@ fn run_parse_to_jsonb<'mcx>(
     mcx: Mcx<'mcx>,
     json: &[u8],
     unique_keys: bool,
-    escontext: Option<&mut types_error::SoftErrorContext>,
+    mut escontext: Option<&mut types_error::SoftErrorContext>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     let encoding = backend_utils_mb_mbutils::GetDatabaseEncoding();
     let mut lex = make_json_lex_context_cstring_len(json, encoding, true);
@@ -1550,9 +1577,13 @@ fn run_parse_to_jsonb<'mcx>(
     };
 
     let result = {
+        // Lend the soft-error sink to the parse callbacks (C `state.escontext =
+        // escontext`); the borrow ends when the sink drops, so `escontext` is
+        // available again for `json_errsave_error` below.
         let mut sink = JsonbSink {
             mcx,
             state: &mut state,
+            escontext: escontext.as_deref_mut(),
             raised: None,
         };
         let r = pg_parse_json(&mut lex, &mut sink);

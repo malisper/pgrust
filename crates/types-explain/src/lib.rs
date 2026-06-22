@@ -143,6 +143,22 @@ pub struct ExplainState<'mcx> {
     pub extension_state: PgVec<'mcx, Option<ExtensionStateHandle>>,
     /// `int extension_state_allocated` — allocated length of `extension_state`.
     pub extension_state_allocated: i32,
+
+    /// Owned-model back-pointers into the running `EState`'s subplan-state
+    /// tables, so `ExplainSubPlans` can reach the InitPlan/SubPlan child
+    /// plan-state trees. In C `sps->planstate` directly aliases the child
+    /// `PlanState` (and the InitPlan `SubPlanState` lives on
+    /// `planstate->initPlan`); the owned model single-owns those child states in
+    /// `EState.es_subplanstates` (keyed by the 1-based `plan_id`) and the
+    /// InitPlan `SubPlanState`s in `EState.es_initplan`, so EXPLAIN resolves a
+    /// subplan's child by `plan_id - 1` index through these non-owning slices.
+    /// Set by `ExplainPrintPlan` from the started `QueryDesc`'s EState; valid for
+    /// the duration of the synchronous plan-tree walk (the EState outlives the
+    /// walk in `ExplainPrintPlan`). `(null, 0)` when unset (a no-subplan plan).
+    pub es_subplanstates_ptr: *const (),
+    pub es_subplanstates_len: usize,
+    pub es_initplan_ptr: *const (),
+    pub es_initplan_len: usize,
 }
 
 impl<'mcx> ExplainState<'mcx> {
@@ -176,6 +192,10 @@ impl<'mcx> ExplainState<'mcx> {
             workers_state: None,
             extension_state: PgVec::new_in(mcx),
             extension_state_allocated: 0,
+            es_subplanstates_ptr: core::ptr::null(),
+            es_subplanstates_len: 0,
+            es_initplan_ptr: core::ptr::null(),
+            es_initplan_len: 0,
         }
     }
 }

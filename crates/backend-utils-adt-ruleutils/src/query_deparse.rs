@@ -131,13 +131,6 @@ fn missing_field(what: &str) -> PgError {
     elog_error(format!("ruleutils: missing required node field: {what}"))
 }
 
-/// A genuinely-unported owner reached by a query-deparse path (XML/JSON
-/// tablefunc, FieldStore indirection). Mirrors C structure and panics rather
-/// than restructuring around the gap (mirror-PG-and-panic).
-fn deferred(what: &str) -> PgError {
-    panic!("ruleutils query deparse: `{what}` is prerequisite-blocked (F2/F3 seam-and-panic)");
-}
-
 /// `PRETTY_PAREN(context)`.
 #[inline]
 fn pretty_paren(context: &DeparseContext<'_>) -> bool {
@@ -2420,34 +2413,101 @@ fn get_tablesample_def<'mcx>(
 fn process_indirection<'mcx>(
     mcx: Mcx<'mcx>,
     node: &Node<'mcx>,
-    _context: &mut DeparseContext<'mcx>,
+    context: &mut DeparseContext<'mcx>,
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
-    // Detect whether any indirection is present at the top.
-    if let Some(e) = node.as_expr() {
+    use types_nodes::primnodes::{CoerceToDomain, CoercionForm};
+
+    // CoerceToDomain *cdomain = NULL;  — tracks whether we tentatively descended
+    // past an implicit CoerceToDomain (so we can back up if its arg was not an
+    // assignment node).
+    let mut cur: Node<'mcx> = node.clone_in(mcx)?;
+    let mut cdomain: Option<CoerceToDomain> = None;
+    // Mirrors the C pointer-identity check `node == (Node *) cdomain->arg`: true
+    // exactly while `cur` is still the node we tentatively descended to past a
+    // CoerceToDomain (i.e. it has not since been replaced by a FieldStore's
+    // newval or a SubscriptingRef's refassgnexpr).
+    let mut cdomain_arg_is_cur = false;
+
+    loop {
+        let e = match cur.as_expr() {
+            Some(e) => e,
+            None => break,
+        };
         match e {
-            Expr::FieldStore(_) => {
-                return Err(deferred(
-                    "processIndirection FieldStore (get_typ_typrelid/get_attname field decoration; assignment family)",
-                ));
+            Expr::FieldStore(fstore) => {
+                cdomain_arg_is_cur = false;
+                // typrelid = get_typ_typrelid(fstore->resulttype);
+                let typrelid = backend_utils_cache_lsyscache_seams::get_typ_typrelid::call(
+                    fstore.resulttype,
+                )?;
+                if typrelid == 0 {
+                    let ty = backend_utils_adt_format_type_seams::format_type_be::call(
+                        mcx,
+                        fstore.resulttype,
+                    )?;
+                    return Err(elog_error(format!(
+                        "argument type {} of FieldStore is not a tuple type",
+                        ty.as_str()
+                    )));
+                }
+                // Assert(list_length(fstore->fieldnums) == 1);
+                // fieldname = get_attname(typrelid, linitial_int(fstore->fieldnums), false);
+                let fieldnum = *fstore
+                    .fieldnums
+                    .first()
+                    .ok_or_else(|| missing_field("FieldStore.fieldnums"))?;
+                let fieldname = get_attname(mcx, typrelid, fieldnum)?;
+                // appendStringInfo(buf, ".%s", quote_identifier(fieldname));
+                ch_(context, b'.')?;
+                let q = quote_identifier(mcx, fieldname.as_str())?;
+                str_(context, q.as_str())?;
+                // node = (Node *) linitial(fstore->newvals);
+                let newval = fstore
+                    .newvals
+                    .first()
+                    .ok_or_else(|| missing_field("FieldStore.newvals"))?;
+                cur = Node::mk_expr(mcx, newval.clone_in(mcx)?)?;
             }
-            Expr::SubscriptingRef(s) if s.refassgnexpr.is_some() => {
-                return Err(deferred(
-                    "processIndirection assignment SubscriptingRef (printSubscripts assignment path; assignment family)",
-                ));
+            Expr::SubscriptingRef(sbsref) => {
+                // if (sbsref->refassgnexpr == NULL) break;
+                let refassgn = match sbsref.refassgnexpr.as_deref() {
+                    Some(r) => r,
+                    None => break,
+                };
+                cdomain_arg_is_cur = false;
+                // printSubscripts(sbsref, context);
+                crate::expr_deparse::print_subscripts_pub(sbsref, context)?;
+                // node = (Node *) sbsref->refassgnexpr;
+                cur = Node::mk_expr(mcx, refassgn.clone_in(mcx)?)?;
             }
-            Expr::CoerceToDomain(_) => {
-                // C may descend past an implicit CoerceToDomain to find an
-                // assignment node below it; reaching that requires the same
-                // FieldStore/SubsRef handling.
-                return Err(deferred(
-                    "processIndirection CoerceToDomain descent (assignment-node indirection; assignment family)",
-                ));
+            Expr::CoerceToDomain(cd) => {
+                // If it's an explicit domain coercion, we're done.
+                if cd.coercionformat != CoercionForm::COERCE_IMPLICIT_CAST {
+                    break;
+                }
+                // Tentatively descend past the CoerceToDomain.
+                cdomain = Some(cd.clone());
+                let arg = cd
+                    .arg
+                    .as_deref()
+                    .ok_or_else(|| missing_field("CoerceToDomain.arg"))?;
+                cur = Node::mk_expr(mcx, arg.clone())?;
+                cdomain_arg_is_cur = true;
             }
-            _ => {}
+            _ => break,
         }
     }
-    // No indirection: return the node unchanged.
-    Ok(mcx::alloc_in(mcx, node.clone_in(mcx)?)?)
+
+    // If we descended past a CoerceToDomain whose argument turned out not to be
+    // a FieldStore or array assignment, back up to the CoerceToDomain.
+    //   if (cdomain && node == (Node *) cdomain->arg) node = (Node *) cdomain;
+    if let Some(cd) = cdomain {
+        if cdomain_arg_is_cur {
+            cur = Node::mk_expr(mcx, Expr::CoerceToDomain(cd))?;
+        }
+    }
+
+    Ok(mcx::alloc_in(mcx, cur)?)
 }
 
 /* -------------------------------------------------------------------------- *

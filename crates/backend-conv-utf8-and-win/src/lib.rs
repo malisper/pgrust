@@ -31,6 +31,7 @@ use backend_utils_error::ereport;
 use backend_utils_mb_conv_string_helpers::{
     check_encoding_conversion_args, ConversionResult, LocalToUtf, UtfToLocal,
 };
+use backend_utils_mb_conv_string_helpers::make_conversion_builtin;
 use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 use types_wchar::encoding::{
     pg_enc, PG_UTF8, PG_WIN1250, PG_WIN1251, PG_WIN1252, PG_WIN1253, PG_WIN1254, PG_WIN1255,
@@ -120,6 +121,11 @@ fn unexpected_encoding<T>(encoding: pg_enc) -> PgResult<T> {
         .into_error())
 }
 
-/// Wires this crate's seams. It declares none of its own, so this is a no-op
-/// kept for the uniform `seams-init` startup convention.
-pub fn init_seams() {}
+/// Registers this crate's ported conversion procedures as fmgr builtins so
+/// their `pg_proc` OIDs resolve to the in-process Rust bodies (no `dlopen`).
+pub fn init_seams() {
+    backend_utils_fmgr_core::register_builtins_native([
+        make_conversion_builtin(4358, "utf8_to_win", utf8_to_win),
+        make_conversion_builtin(4359, "win_to_utf8", win_to_utf8),
+    ]);
+}

@@ -607,6 +607,21 @@ fn read_const<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Const> {
         // (`datumCopy` of the input function's palloc'd varlena). A by-value
         // word borrows nothing and passes straight through.
         let v = read_datum(mcx, constbyval)?;
+        // C `readDatum` returns a bare pointer for a by-reference type; the
+        // canonical `Datum` distinguishes the cstring lane (`typlen == -2`, e.g.
+        // `unknown`/`cstring`) from the varlena lane. `make_const` builds the
+        // former as `Datum::Cstring` (T_String arm), so re-home a `typlen == -2`
+        // by-reference image onto the cstring lane symmetrically — otherwise the
+        // type's cstring output function (e.g. `unknownout`) panics reading a
+        // varlena-lane arg. The serialized image carries the trailing NUL
+        // (`datumGetSize` == strlen+1 for cstring); strip it.
+        let v = match &v {
+            Datum::ByRef(bytes) if constlen == -2 => {
+                let trimmed = bytes.strip_suffix(&[0u8]).unwrap_or(bytes.as_slice());
+                Datum::Cstring(alloc::string::String::from_utf8_lossy(trimmed).into_owned())
+            }
+            _ => v,
+        };
         backend_nodes_core::makefuncs::intern_const_value(&v)?
     };
 

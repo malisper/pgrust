@@ -1211,11 +1211,19 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                     let e = &rowexpr.args[i];
                     let etype = backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?.typid;
                     if etype != att.atttypid {
-                        return Err(types_error::PgError::error("ROW() column has wrong type")
-                            .with_detail(format!(
-                                "ROW() column has type {} instead of type {}",
-                                etype, att.atttypid
-                            )));
+                        // C: ereport(ERROR, errcode(ERRCODE_DATATYPE_MISMATCH),
+                        //     errmsg("ROW() column has type %s instead of type %s",
+                        //            format_type_be(exprType(e)), format_type_be(att->atttypid)));
+                        let got = backend_utils_adt_format_type_seams::format_type_be_owned::call(
+                            etype,
+                        )?;
+                        let want = backend_utils_adt_format_type_seams::format_type_be_owned::call(
+                            att.atttypid,
+                        )?;
+                        return Err(types_error::PgError::error(format!(
+                            "ROW() column has type {got} instead of type {want}"
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
                     }
                     // Evaluate column expr into its workspace cell.
                     let cell = new_result_cell(mcx, state)?;
@@ -2078,8 +2086,9 @@ pub fn exec_init_expr<'mcx, 'e>(
     // `EEOP_GROUPING_FUNC` etc. — call `parent.as_agg_state()`, an enum method),
     // whose address is not yet stable while this node is still being built. So
     // `parent` is back-filled by `ExecInitNode` (`PlanStateNode::stamp_expr_parents`)
-    // right after the node is boxed; the head is unused here.
-    let _ = parent;
+    // right after the node is boxed for the back-link; but its `sub_plan_ids`
+    // head field IS reachable here, so any expression SubPlan compiled below is
+    // drained into it at the end (the C `state->parent->subPlan = lappend(...)`).
     let mcx = estate.es_query_cxt;
 
     // C aliases the caller's `node` pointer; the owned model clones it into the
@@ -2107,6 +2116,10 @@ pub fn exec_init_expr<'mcx, 'e>(
     exec_init_expr_rec(mcx, node, &mut state, STATE_RESULT_CELL)?;
     expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
     exec_ready_expr(&mut state)?;
+
+    // C `state->parent->subPlan = lappend(...)`: drain SubPlans compiled in this
+    // expression into the parent head (see `drain_found_subplan_ids`).
+    drain_found_subplan_ids(mcx, parent, &mut state)?;
 
     mcx::alloc_in(mcx, state)
 }
@@ -2136,6 +2149,34 @@ pub fn exec_init_expr_with_params<'mcx, 'e>(
     mcx::alloc_in(mcx, state)
 }
 
+/// Drain the SubPlan-discovery channel from a freshly compiled `ExprState` into
+/// the parent `PlanState` head's `sub_plan_ids` — the owned-model equivalent of
+/// C's `state->parent->subPlan = lappend(state->parent->subPlan, sstate)` (run at
+/// SubPlan-init time, deferred here to the compile entry point where the parent
+/// head is reachable). Preserves discovery order across multiple ExprStates of
+/// the same node. No-op when the ExprState compiled no expression SubPlans.
+pub(crate) fn drain_found_subplan_ids<'mcx>(
+    mcx: Mcx<'mcx>,
+    parent: &mut PlanStateData<'mcx>,
+    state: &mut ExprState<'mcx>,
+) -> PgResult<()> {
+    let Some(ids) = state.found_subplan_ids.take() else {
+        return Ok(());
+    };
+    if ids.is_empty() {
+        return Ok(());
+    }
+    if parent.sub_plan_ids.is_none() {
+        parent.sub_plan_ids = Some(mcx::vec_with_capacity_in(mcx, ids.len())?);
+    }
+    let v = parent.sub_plan_ids.as_mut().expect("just initialized");
+    v.try_reserve(ids.len()).map_err(|_| mcx.oom(0))?;
+    for id in ids {
+        v.push(id);
+    }
+    Ok(())
+}
+
 /// `ExecInitQual(qual, parent)` (execExpr.c) — compile an implicitly-ANDed qual
 /// list into a single [`ExprState`]; empty qual → `None` (always-true).
 pub fn exec_init_qual<'mcx>(
@@ -2148,8 +2189,15 @@ pub fn exec_init_qual<'mcx>(
     // enum method `parent.as_agg_state()`) is back-filled by `ExecInitNode`
     // (`PlanStateNode::stamp_expr_parents`) once the node's enum is boxed and
     // address-stable. See `exec_init_expr`.
-    let _ = parent;
-    exec_init_qual_no_parent(qual, estate)
+    let mcx = estate.es_query_cxt;
+    let mut state = match exec_init_qual_no_parent(qual, estate)? {
+        None => return Ok(None),
+        Some(s) => s,
+    };
+    // C `state->parent->subPlan = lappend(...)`: drain SubPlans compiled in this
+    // qual into the parent head (see `drain_found_subplan_ids`).
+    drain_found_subplan_ids(mcx, parent, &mut state)?;
+    Ok(Some(state))
 }
 
 /// `ExecInitQual(qual, NULL)` (execExpr.c) — the parent-less variant of
@@ -2699,7 +2747,13 @@ pub fn exec_build_projection_info<'mcx>(
     // `slot` argument). Already a pool SlotId.
     let slot = planstate.ps_ResultTupleSlot;
 
-    exec_build_projection_info_impl(estate, target_list, econtext, slot, input_desc)
+    let mcx = estate.es_query_cxt;
+    let mut proj =
+        exec_build_projection_info_impl(estate, target_list, econtext, slot, input_desc)?;
+    // C `state->parent->subPlan = lappend(...)`: drain SubPlans compiled in the
+    // projection target list into the parent head (see `drain_found_subplan_ids`).
+    drain_found_subplan_ids(mcx, planstate, &mut proj.pi_state)?;
+    Ok(proj)
 }
 
 /// `ExecBuildUpdateProjection(targetList, evalTargetList, targetColnos, relDesc,

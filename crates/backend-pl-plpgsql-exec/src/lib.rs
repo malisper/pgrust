@@ -2987,6 +2987,20 @@ fn exec_stmt_raise(
         }
     }
 
+    // For a non-ERROR level RAISE (NOTICE/WARNING/INFO/LOG) the message reports
+    // straight to the client and never propagates, so the lazy attach-on-
+    // propagation path never runs. Supply the live PL/pgSQL error-context stack
+    // explicitly so the context line appears in the reported NOTICE/WARNING, as
+    // C's `error_context_stack` callbacks would (psql `\set SHOW_CONTEXT
+    // always`). An ERROR-level RAISE leaves this empty: that path propagates and
+    // attaches its context in `attach_plpgsql_context`, so adding it here too
+    // would duplicate the line.
+    let context = if stmt.elog_level >= ERROR_LEVEL {
+        None
+    } else {
+        Some(current_error_context_stack(estate))
+    };
+
     // Throw the error (may or may not come back).
     let report = exec_seams::RaiseEreport {
         elog_level: stmt.elog_level,
@@ -2999,6 +3013,7 @@ fn exec_stmt_raise(
         datatype: err_datatype,
         table: err_table,
         schema: err_schema,
+        context,
     };
     // For an ERROR-level RAISE the report cycle raises; propagate it as `Err`.
     // A non-ERROR level (NOTICE/WARNING/…) reports to the client and returns Ok.

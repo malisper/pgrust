@@ -27,6 +27,58 @@ use types_nodes::planstate::PlanStateNode;
 use backend_commands_explain_format as fmt;
 use backend_utils_adt_ruleutils_seams as ruleutils_s;
 
+/// Reach the running EState's `es_subplanstates` slice through the non-owning
+/// back-pointer EXPLAIN stamped on `es` (see `ExplainState::es_subplanstates_ptr`).
+/// Returns the child plan-state tree for a subplan's 1-based `plan_id`, or `None`
+/// if the slot is absent / out of range. Mirrors C `list_nth(es_subplanstates,
+/// plan_id - 1)`.
+fn resolve_subplan_planstate<'p>(
+    es: &ExplainState<'_>,
+    plan_id: i32,
+) -> Option<&'p PlanStateNode<'p>> {
+    if es.es_subplanstates_ptr.is_null() || plan_id <= 0 {
+        return None;
+    }
+    let idx = (plan_id - 1) as usize;
+    if idx >= es.es_subplanstates_len {
+        return None;
+    }
+    // SAFETY: the pointer aliases `EState.es_subplanstates`, a live
+    // `&[Option<PgBox<PlanStateNode>>]` for the duration of the synchronous walk
+    // (set in `ExplainPrintPlan` from the started QueryDesc's EState, which
+    // outlives the walk). Read-only access during the single-threaded walk.
+    let slice = unsafe {
+        core::slice::from_raw_parts(
+            es.es_subplanstates_ptr as *const Option<PgBox<'p, PlanStateNode<'p>>>,
+            es.es_subplanstates_len,
+        )
+    };
+    slice[idx].as_deref()
+}
+
+/// Reach the running EState's `es_initplan` slice (InitPlan `SubPlanState`s,
+/// keyed by 1-based `plan_id`) through the non-owning back-pointer on `es`.
+fn resolve_initplan_state<'p>(
+    es: &ExplainState<'_>,
+    plan_id: i32,
+) -> Option<&'p types_nodes::execexpr::SubPlanState<'p>> {
+    if es.es_initplan_ptr.is_null() || plan_id <= 0 {
+        return None;
+    }
+    let idx = (plan_id - 1) as usize;
+    if idx >= es.es_initplan_len {
+        return None;
+    }
+    // SAFETY: as `resolve_subplan_planstate`, but over `EState.es_initplan`.
+    let slice = unsafe {
+        core::slice::from_raw_parts(
+            es.es_initplan_ptr as *const Option<types_nodes::execexpr::SubPlanState<'p>>,
+            es.es_initplan_len,
+        )
+    };
+    slice[idx].as_ref()
+}
+
 /// `ExplainPrintPlan(es, queryDesc)` (explain.c:759). Sets the `ExplainState`
 /// plan-tree fields from the started query, applies the Gather-invisible skip,
 /// and walks the plan-state tree with [`ExplainNode`].
@@ -70,15 +122,21 @@ pub fn ExplainPrintPlan<'es, 'p>(
     // ModifyTable / Append nodes; `select_rtable_names_for_explain` then assigns
     // display names only to those (and suppresses unreferenced RTEs), so a Var
     // resolved to a referenced RTE gets its `alias.` prefix.
+    // ExplainPreScanNode leaves `*rels_used` NULL when no scan node adds a
+    // member (e.g. the whole plan collapsed to a dummy Result with One-Time
+    // Filter false). That NULL-vs-empty distinction is load-bearing: C's
+    // set_rtable_names names *every* RTE when rels_used is NULL, so a Var in the
+    // dummy Result's targetlist still gets its relation prefix
+    // (`f1.id`, `ss.unnest`). Preserve it by passing `None` (not an empty
+    // bitmapset, which would suppress all prefixes).
     let rels_used = explain_pre_scan_node(mcx, planstate, None)?;
-    let rels_used = match rels_used {
-        Some(b) => PgBox::into_inner(b),
-        None => types_nodes::bitmapset::Bitmapset {
-            words: PgVec::new_in(mcx),
-        },
-    };
+    let rels_used = rels_used.map(PgBox::into_inner);
     if let Some(rtable) = es.rtable.as_ref() {
-        let names = ruleutils_s::select_rtable_names_for_explain::call(mcx, rtable, &rels_used)?;
+        let names = ruleutils_s::select_rtable_names_for_explain::call(
+            mcx,
+            rtable,
+            rels_used.as_ref(),
+        )?;
         es.rtable_names = names;
     }
     // es->printed_subplans = NULL; (already None)
@@ -267,6 +325,15 @@ fn explain_pre_scan_node<'es, 'p>(
         for child in members {
             acc = explain_pre_scan_node(mcx, child, acc)?;
         }
+    }
+    // planstate_tree_walker (nodeFuncs.c:4777) walks a SubqueryScan's sub-plan
+    // via SubqueryScanState->subplan, which is NOT lefttree/righttree. Without
+    // this recursion the inner scan's scanrelid is never added to rels_used, so
+    // its RTE gets no display name and Vars resolving to it lose the alias prefix
+    // (e.g. window.sql's WindowAgg-under-SubqueryScan EXPLAINs dropped
+    // `empsalary.` on Window:/Sort Key: lines).
+    if let Some(subplan) = planstate.subquery_subplan_state() {
+        acc = explain_pre_scan_node(mcx, subplan, acc)?;
     }
 
     Ok(acc)
@@ -773,6 +840,26 @@ pub fn ExplainNode<'es, 'p>(
         show_plan_tlist(es, mcx, plan_node, ancestors)?;
     }
 
+    // unique join (explain.c:1935): for the three Join node types, emit
+    // `Inner Unique`. To avoid being too chatty in TEXT mode, C prints it only in
+    // non-TEXT formats, or in TEXT when VERBOSE and the join actually is
+    // inner-unique.
+    match plan_node.node_tag() {
+        ntag::T_NestLoop | ntag::T_MergeJoin | ntag::T_HashJoin => {
+            let inner_unique = match plan_node.node_tag() {
+                ntag::T_NestLoop => plan_node.expect_nestloop().join.inner_unique,
+                ntag::T_MergeJoin => plan_node.expect_mergejoin().join.inner_unique,
+                _ => plan_node.expect_hashjoin().join.inner_unique,
+            };
+            if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT
+                || (es.verbose && inner_unique)
+            {
+                fmt::ExplainPropertyBool("Inner Unique", inner_unique, es)?;
+            }
+        }
+        _ => {}
+    }
+
     // T_Result: `show_upper_qual(resconstantqual, "One-Time Filter")` runs
     // BEFORE the generic `Filter:` line (explain.c:2234). `show_upper_qual`
     // uses `useprefix = list_length(es->rtable) > 1 || es->verbose`.
@@ -863,8 +950,24 @@ pub fn ExplainNode<'es, 'p>(
             // plan->qual -> "Filter".
             let is = plan_node.expect_indexscan();
             show_scan_qual(es, mcx, plan_node, ancestors, is.indexqualorig.as_ref(), "Index Cond")?;
+            if is.indexqualorig.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Index Recheck",
+                    2,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
             show_scan_qual(es, mcx, plan_node, ancestors, is.indexorderbyorig.as_ref(), "Order By")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
             show_indexsearches_info(es, planstate)?;
         }
         ntag::T_IndexOnlyScan => {
@@ -872,8 +975,30 @@ pub fn ExplainNode<'es, 'p>(
             // plan->qual -> "Filter".
             let ios = plan_node.expect_indexonlyscan();
             show_scan_qual(es, mcx, plan_node, ancestors, ios.indexqual.as_ref(), "Index Cond")?;
+            if ios.recheckqual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Index Recheck",
+                    2,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
             show_scan_qual(es, mcx, plan_node, ancestors, ios.indexorderby.as_ref(), "Order By")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
+            // explain.c:1983: ANALYZE → "Heap Fetches" = instrument->ntuples2.
+            if es.analyze {
+                if let Some(instr) = planstate.ps_head().instrument.as_deref() {
+                    fmt::ExplainPropertyFloat("Heap Fetches", None, instr.ntuples2, 0, es)?;
+                }
+            }
             show_indexsearches_info(es, planstate)?;
         }
         ntag::T_BitmapIndexScan => {
@@ -886,7 +1011,56 @@ pub fn ExplainNode<'es, 'p>(
             // bitmapqualorig -> "Recheck Cond"; plan->qual -> "Filter".
             let bhs = plan_node.expect_bitmapheapscan();
             show_scan_qual(es, mcx, plan_node, ancestors, Some(&bhs.bitmapqualorig), "Recheck Cond")?;
+            if !bhs.bitmapqualorig.is_empty() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Index Recheck",
+                    2,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
+        }
+        ntag::T_FunctionScan => {
+            // explain.c:2067-2087: verbose-only show_expression over the list of
+            // each RangeTblFunction's funcexpr, "Function Call"; then Filter.
+            if es.verbose {
+                let fs = plan_node.expect_functionscan();
+                let mut fexprs = PgVec::new_in(mcx);
+                if let Some(functions) = fs.functions.as_ref() {
+                    for rtfunc in functions.iter() {
+                        if let Some(fe) = rtfunc.funcexpr.as_ref() {
+                            fexprs.push(mcx::alloc_in(mcx, fe.clone_in(mcx)?)?);
+                        }
+                    }
+                }
+                let list_node = mcx::alloc_in(mcx, Node::mk_list(mcx, fexprs)?)?;
+                show_expression(
+                    es,
+                    mcx,
+                    plan_node,
+                    ancestors,
+                    &list_node,
+                    "Function Call",
+                )?;
+            }
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_TableFuncScan => {
             // explain.c:2089-2095: verbose-only show_expression((Node *)
@@ -904,6 +1078,14 @@ pub fn ExplainNode<'es, 'p>(
                 )?;
             }
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_NestLoop => {
             // explain.c:2158: join.joinqual -> "Join Filter"; plan->qual -> "Filter".
@@ -956,6 +1138,14 @@ pub fn ExplainNode<'es, 'p>(
             let tidcond = build_cond_list(mcx, ts.tidquals.as_ref(), false)?;
             show_scan_qual_owned(es, mcx, plan_node, ancestors, tidcond, "TID Cond")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_TidRangeScan => {
             // explain.c:2127: tidrangequals has AND semantics, so wrap a
@@ -964,6 +1154,14 @@ pub fn ExplainNode<'es, 'p>(
             let tidcond = build_cond_list(mcx, trs.tidrangequals.as_ref(), true)?;
             show_scan_qual_owned(es, mcx, plan_node, ancestors, tidcond, "TID Cond")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_SampleScan => {
             // explain.c:2004: show_tablesample(((SampleScan *) plan)->tablesample,
@@ -973,6 +1171,14 @@ pub fn ExplainNode<'es, 'p>(
                 show_tablesample(es, mcx, plan_node, ancestors, tsc)?;
             }
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_Agg | ntag::T_WindowAgg | ntag::T_Group | ntag::T_Result => {
             // explain.c:2197/2208/2215/2237: these upper plan nodes show their
@@ -985,7 +1191,17 @@ pub fn ExplainNode<'es, 'p>(
         _ => {
             // The generic `Filter` leg (SeqScan / ValuesScan / CteScan /
             // NamedTuplestoreScan / WorkTableScan / SubqueryScan / Gather / etc).
+            // explain.c:2009-2021: `show_scan_qual(plan->qual, "Filter", ...)` then,
+            // if plan->qual, `show_instrumentation_count("Rows Removed by Filter", 1, ...)`.
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
     }
 
@@ -1238,8 +1454,27 @@ pub fn ExplainNode<'es, 'p>(
     // subPlan. The trimmed PlanState carries initPlan/subPlan as Option<PgVec>;
     // member-node nodes (Append/BitmapAnd/...) recurse through their own state.
     let head = planstate.ps_head();
-    let has_init = head.initPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
-    let has_sub = head.subPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+    // InitPlan bodies: the owned model records this node's InitPlan 1-based
+    // `plan_id`s on `head.init_plan_ids` (the `SubPlanState`s themselves live
+    // single-owned in `EState.es_initplan`), mirroring C's `node->initPlan`
+    // SubPlanState list that EXPLAIN walks. Drive the haschildren flag and the
+    // ExplainSubPlans call from those ids.
+    let has_init = head
+        .init_plan_ids
+        .as_ref()
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+        || head.initPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+    // Owned model: expression SubPlans of this node are recorded as 1-based
+    // `plan_id`s on `head.sub_plan_ids` (the split of C's `PlanState.subPlan`);
+    // the display-only `SubPlanState` for each lives in `EState.es_initplan`
+    // (keyed by plan_id) and its child plan-state tree in `es_subplanstates`.
+    let has_sub = head
+        .sub_plan_ids
+        .as_ref()
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+        || head.subPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
     let has_outer = planstate.outer_plan_state().is_some();
     let has_inner = head.righttree.is_some();
     // Member-node children: Append/MergeAppend appendplans/mergeplans,
@@ -1276,9 +1511,12 @@ pub fn ExplainNode<'es, 'p>(
         PgVec::new_in(mcx)
     };
 
-    // initPlan-s.
+    // initPlan-s. Owned model: resolve each InitPlan `SubPlanState` from
+    // `EState.es_initplan` by the `plan_id`s recorded on `head.init_plan_ids`.
     if has_init {
-        if let Some(initplans) = head.initPlan.as_ref() {
+        if let Some(ids) = head.init_plan_ids.as_ref() {
+            ExplainSubPlansByInitPlanIds(es, mcx, ids, &child_ancestors, "InitPlan")?;
+        } else if let Some(initplans) = head.initPlan.as_ref() {
             ExplainSubPlans(es, mcx, initplans, &child_ancestors, "InitPlan")?;
         }
     }
@@ -1315,9 +1553,14 @@ pub fn ExplainNode<'es, 'p>(
         }
     }
 
-    // subPlan-s.
+    // subPlan-s. Owned model: resolve each expression SubPlan's display-only
+    // `SubPlanState` from `EState.es_initplan` by the `plan_id`s recorded on
+    // `head.sub_plan_ids` (mirroring the InitPlan path above). The fallback to
+    // `head.subPlan` covers any direct-list case.
     if has_sub {
-        if let Some(subplans) = head.subPlan.as_ref() {
+        if let Some(ids) = head.sub_plan_ids.as_ref() {
+            ExplainSubPlansByInitPlanIds(es, mcx, ids, &child_ancestors, "SubPlan")?;
+        } else if let Some(subplans) = head.subPlan.as_ref() {
             ExplainSubPlans(es, mcx, subplans, &child_ancestors, "SubPlan")?;
         }
     }
@@ -1868,42 +2111,87 @@ fn ExplainSubPlans<'es, 'p>(
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
     relationship: &str,
 ) -> PgResult<()> {
+    for sps in plans.iter() {
+        explain_one_subplan(es, mcx, sps, ancestors, relationship)?;
+    }
+    Ok(())
+}
+
+/// `ExplainSubPlans` driven by `init_plan_ids` — the owned-model InitPlan path.
+/// Each InitPlan's `SubPlanState` lives single-owned in `EState.es_initplan`
+/// (keyed by 1-based `plan_id`), not on `head.initPlan`; resolve and explain each
+/// in `init_plan_ids` order (the order `ExecInitNode` appended them, matching C's
+/// `node->initPlan` list order).
+#[allow(non_snake_case)]
+fn ExplainSubPlansByInitPlanIds<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    ids: &PgVec<'p, i32>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    relationship: &str,
+) -> PgResult<()> {
+    for &plan_id in ids.iter() {
+        if let Some(sps) = resolve_initplan_state::<'p>(es, plan_id) {
+            explain_one_subplan(es, mcx, sps, ancestors, relationship)?;
+        }
+    }
+    Ok(())
+}
+
+/// The per-`SubPlanState` body of `ExplainSubPlans` (explain.c:4561 loop body):
+/// print the subplan once (tracked by `plan_id` in `es->printed_subplans`), push
+/// the `SubPlan` node as an ancestor (so ruleutils can resolve subplan-parameter
+/// referents), and recurse into the child plan-state tree (resolved through the
+/// EState back-pointer when the `SubPlanState.planstate` slot is None — the
+/// owned-model single-owned case).
+fn explain_one_subplan<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    sps: &types_nodes::execexpr::SubPlanState<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    relationship: &str,
+) -> PgResult<()> {
     use backend_nodes_core::bitmapset::{bms_add_member, bms_is_member};
 
-    for sps in plans.iter() {
-        let Some(sp) = sps.subplan.as_deref() else {
-            continue;
-        };
+    let Some(sp) = sps.subplan.as_deref() else {
+        return Ok(());
+    };
 
-        // Print a subplan only once (track plan_id across the plan tree).
-        if bms_is_member(sp.plan_id, es.printed_subplans.as_deref()) {
-            continue;
-        }
-        es.printed_subplans =
-            Some(bms_add_member(mcx, es.printed_subplans.take(), sp.plan_id)?);
+    // Print a subplan only once (track plan_id across the plan tree).
+    if bms_is_member(sp.plan_id, es.printed_subplans.as_deref()) {
+        return Ok(());
+    }
+    es.printed_subplans = Some(bms_add_member(mcx, es.printed_subplans.take(), sp.plan_id)?);
 
-        // ancestors = lcons(sp, ancestors): treat the SubPlan node as an
-        // ancestor so ruleutils can find subplan-parameter referents.
-        let sub_node = Node::mk_expr(
-            mcx,
-            types_nodes::primnodes::Expr::SubPlan(
-                types_nodes::primnodes::SubPlanExpr::from_subplan(mcx, sp)?,
-            ),
-        )?;
-        let mut child_ancestors: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
-        child_ancestors
-            .try_reserve(ancestors.len() + 1)
-            .map_err(|_| mcx.oom(0))?;
-        child_ancestors.push(mcx::alloc_in(mcx, sub_node)?);
-        for a in ancestors.iter() {
-            child_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
-        }
+    // ancestors = lcons(sp, ancestors): treat the SubPlan node as an
+    // ancestor so ruleutils can find subplan-parameter referents.
+    let sub_node = Node::mk_expr(
+        mcx,
+        types_nodes::primnodes::Expr::SubPlan(types_nodes::primnodes::SubPlanExpr::from_subplan(
+            mcx, sp,
+        )?),
+    )?;
+    let mut child_ancestors: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
+    child_ancestors
+        .try_reserve(ancestors.len() + 1)
+        .map_err(|_| mcx.oom(0))?;
+    child_ancestors.push(mcx::alloc_in(mcx, sub_node)?);
+    for a in ancestors.iter() {
+        child_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+    }
 
-        // ExplainNode(sps->planstate, ancestors, relationship, sp->plan_name, es).
-        let plan_name = sp.plan_name.as_ref().map(|s| s.as_str());
-        if let Some(child_ps) = sps.planstate.as_deref() {
-            ExplainNode(es, mcx, child_ps, &child_ancestors, Some(relationship), plan_name)?;
-        }
+    // ExplainNode(sps->planstate, ancestors, relationship, sp->plan_name, es).
+    // C aliases `sps->planstate` directly; the owned model single-owns the
+    // child plan-state tree in `EState.es_subplanstates` (keyed by plan_id),
+    // so resolve it through the EState back-pointer when the SubPlanState's
+    // own `planstate` slot is None (the common owned-model case).
+    let plan_name = sp.plan_name.as_ref().map(|s| s.as_str());
+    let child = sps
+        .planstate
+        .as_deref()
+        .or_else(|| resolve_subplan_planstate(es, sp.plan_id));
+    if let Some(child_ps) = child {
+        ExplainNode(es, mcx, child_ps, &child_ancestors, Some(relationship), plan_name)?;
     }
     Ok(())
 }
@@ -2047,6 +2335,27 @@ fn explain_scan_target_switch<'es, 'p>(
                 Ok(())
             } else {
                 fmt::ExplainPropertyText("Join Type", jointype_str, es)
+            }
+        }
+        ntag::T_SetOp => {
+            // explain.c:1763 — interpolate the set-operation command into the
+            // node name (TEXT) or emit it as a "Command" property.
+            use types_nodes::nodesetop::{
+                SETOPCMD_EXCEPT, SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL,
+            };
+            let setopcmd = match plan_node.expect_setop().cmd {
+                SETOPCMD_INTERSECT => "Intersect",
+                SETOPCMD_INTERSECT_ALL => "Intersect All",
+                SETOPCMD_EXCEPT => "Except",
+                SETOPCMD_EXCEPT_ALL => "Except All",
+                _ => "???",
+            };
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                es.str.try_push_str(" ")?;
+                es.str.try_push_str(setopcmd)?;
+                Ok(())
+            } else {
+                fmt::ExplainPropertyText("Command", setopcmd, es)
             }
         }
         _ => Ok(()),

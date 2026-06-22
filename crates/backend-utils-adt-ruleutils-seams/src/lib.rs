@@ -114,10 +114,17 @@ seam_core::seam!(
     /// in the plan (`rels_used`), returning a `List *` of `char *` (a `None`
     /// element means "use the RTE's eref alias"). Reads the catalog, so it can
     /// `ereport(ERROR)`. Allocated in `mcx`.
+    ///
+    /// `rels_used` is `Option` so the C NULL-vs-empty distinction is preserved:
+    /// in C the caller passes `*rels_used` which is left NULL when no scan node
+    /// added any member (e.g. a dummy `Result` plan). `set_rtable_names` then
+    /// names *every* RTE (the `rels_used != NULL` guard is false), so Vars in the
+    /// plan's targetlist still get relation prefixes. Passing `Some(empty_bms)`
+    /// would instead suppress all names — the bug this `Option` prevents.
     pub fn select_rtable_names_for_explain<'mcx>(
         mcx: Mcx<'mcx>,
         rtable: &PgVec<'mcx, types_nodes::parsenodes::RangeTblEntry<'mcx>>,
-        rels_used: &types_nodes::bitmapset::Bitmapset<'mcx>,
+        rels_used: Option<&types_nodes::bitmapset::Bitmapset<'mcx>>,
     ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>>
 );
 

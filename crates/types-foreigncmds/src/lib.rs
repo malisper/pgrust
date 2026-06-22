@@ -107,6 +107,8 @@ pub struct DefElem<'mcx> {
     pub arg: Option<PgBox<'mcx, DefElemArg<'mcx>>>,
     /// `defaction` — SET/ADD/DROP or unspecified.
     pub defaction: DefElemAction,
+    /// `location` — parse location of the option, for `parser_errposition`.
+    pub location: types_core::primitive::ParseLoc,
 }
 
 impl<'mcx> DefElem<'mcx> {
@@ -124,6 +126,7 @@ impl<'mcx> DefElem<'mcx> {
             defname,
             arg,
             defaction: self.defaction,
+            location: self.location,
         })
     }
 }

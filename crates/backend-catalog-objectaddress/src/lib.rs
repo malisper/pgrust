@@ -69,6 +69,9 @@ pub fn init_seams() {
     seams::event_trigger_describe_dropped_object::set(
         sql_drop_describe::event_trigger_describe_dropped_object,
     );
+    seams::event_trigger_describe_command_object::set(
+        sql_drop_describe::event_trigger_describe_command_object,
+    );
 
     // pg_rewrite by-oid projections (no RULEOID syscache exists): the
     // `getObjectDescription` / `getObjectIdentityParts` / `RemoveRewriteRuleById`
@@ -114,6 +117,12 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::default_acl_row::set(
         default_acl_lookup::default_acl_row,
     );
+    // Same by-oid projection, tuple-shaped, for `getObjectIdentityParts`'
+    // OCLASS_DEFACL leg.
+    backend_utils_cache_syscache_seams::default_acl_identity::set(|daclid| {
+        Ok(default_acl_lookup::default_acl_row(daclid)?
+            .map(|r| (r.defaclrole, r.defaclnamespace, r.defaclobjtype)))
+    });
 
     // pg_policy by-oid projection (no POLICYOID syscache exists): the
     // `getObjectDescription` OCLASS_POLICY leg fetches `(polrelid, polname)` by

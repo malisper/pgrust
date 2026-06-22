@@ -3153,31 +3153,51 @@ pub fn at_rewrite_table_scan<'mcx>(
     // Collect *valid* (non-virtual) NOT NULL attnums to recheck when rewriting
     // or when verify_new_notnull is set. Virtual generated NOT NULL columns are
     // not supported on this frontier (mirrors at_verify_not_null).
+    //
+    // notnull_attrs does *not* collect attribute numbers for valid not-null
+    // constraints over virtual generated columns; instead, they are collected
+    // in notnull_virtual_attrs for verification via ExecRelGenVirtualNotNull().
     let mut notnull_attrs: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
-    let mut has_virtual_notnull = false;
+    let mut notnull_virtual_attrs: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
     if rewriting || verify_new_notnull {
         for i in 0..new_tup_desc.natts {
-            let att = new_tup_desc.attr(i as usize);
-            // attr->attnullability == ATTNULLABLE_VALID && !attisdropped. The
-            // owned descriptor exposes attnotnull (set for a valid NOT NULL).
-            if att.attnotnull && !att.attisdropped {
+            // C: `CompactAttribute *attr = TupleDescCompactAttr(newTupDesc, i);`
+            // then tests `attr->attnullability == ATTNULLABLE_VALID`. Only *valid*
+            // not-null constraints are rechecked here — a NOT VALID not-null
+            // constraint leaves `attnotnull` set but `attnullability` is
+            // ATTNULLABLE_UNKNOWN, so a table rewrite must NOT validate it (its
+            // own VALIDATE CONSTRAINT does that). Using `attnotnull` here would
+            // spuriously reject a rewrite (e.g. ADD COLUMN ... DEFAULT) on a table
+            // whose not-yet-validated NOT NULL column still contains nulls.
+            let compact = new_tup_desc.compact_attr(i as usize);
+            if compact.attnullability == types_tuple::heaptuple::ATTNULLABLE_VALID
+                && !compact.attisdropped
+            {
+                let att = new_tup_desc.attr(i as usize);
                 if att.attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL {
-                    has_virtual_notnull = true;
+                    notnull_virtual_attrs.push(att.attnum as i32);
                 } else {
                     notnull_attrs.push(att.attnum as i32);
                 }
             }
         }
-        if !notnull_attrs.is_empty() {
+        if !notnull_attrs.is_empty() || !notnull_virtual_attrs.is_empty() {
             needscan = true;
         }
     }
-    if has_virtual_notnull {
-        panic!(
-            "backend-executor-execMain: ATRewriteTable NOT NULL recheck over a virtual generated \
-             column (ExecRelGenVirtualNotNull) is unported on this frontier"
-        );
-    }
+
+    // When adding or changing a virtual generated column with a not-null
+    // constraint, we need to evaluate whether the generation expression is null.
+    // For that, we borrow ExecRelGenVirtualNotNull(). Here, we prepare a dummy
+    // ResultRelInfo (dummy rangetable index 0, no partition root).
+    let virtual_notnull_rri: Option<types_nodes::RriId> = if !notnull_virtual_attrs.is_empty() {
+        let mut r_info = types_nodes::ResultRelInfo::default();
+        let instrument = estate.es_instrument;
+        InitResultRelInfo(mcx, &mut r_info, oldrel.alias(), 0, None, instrument)?;
+        Some(estate.add_result_rel(r_info)?)
+    } else {
+        None
+    };
 
     // Precompute the list of dropped attributes (set to NULL in the new tuple).
     let mut dropped_attrs: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
@@ -3337,6 +3357,31 @@ pub fn at_rewrite_table_scan<'mcx>(
                 )?;
                 if isnull {
                     let att = new_tup_desc.attr((attn - 1) as usize);
+                    let attname =
+                        alloc::string::String::from_utf8_lossy(att.attname.name_str())
+                            .into_owned();
+                    let relname = rel_alias.name().to_string();
+                    backend_access_table_tableam::table_endscan(scan)?;
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::ERRCODE_NOT_NULL_VIOLATION)
+                        .errmsg(alloc::format!(
+                            "column \"{attname}\" of relation \"{relname}\" contains null values"
+                        ))
+                        .into_error());
+                }
+            }
+
+            // NOT NULL recheck over virtual generated columns: evaluate the
+            // generation expression and verify it is non-null.
+            if let Some(rri) = virtual_notnull_rri {
+                let attnum = ExecRelGenVirtualNotNull(
+                    &mut estate,
+                    rri,
+                    insertslot,
+                    &notnull_virtual_attrs,
+                )?;
+                if attnum != 0 {
+                    let att = new_tup_desc.attr((attnum - 1) as usize);
                     let attname =
                         alloc::string::String::from_utf8_lossy(att.attname.name_str())
                             .into_owned();
@@ -3708,14 +3753,15 @@ fn build_slot_value_desc<'mcx>(
     let mcx = estate.es_query_cxt;
     // slot_getallattrs(slot): make the value/null arrays valid for the reader.
     let _ = backend_executor_execTuples_seams::slot_getallattrs_by_id::call(estate, slot)?;
-    // Clone the descriptor + a value snapshot so the borrow of `estate` ends
-    // before ExecBuildSlotValueDescription reads it (it takes &TupleTableSlot).
-    let tupdesc = estate
-        .slot(slot)
-        .tts_tupleDescriptor
-        .as_ref()
-        .expect("build_slot_value_desc: slot has no descriptor")
-        .clone_in(mcx)?;
+    // C passes RelationGetDescr(rel) (the relation's catalog descriptor) — not
+    // the slot's descriptor — so per-attribute flags such as attgenerated are
+    // read faithfully (a virtual generated column must render as "virtual",
+    // even when the slot's own descriptor is a stripped physical rowtype). The
+    // relation is already locked by the running command; open with NoLock.
+    const NoLock: i32 = 0;
+    let rel = backend_access_common_relation::relation_open(mcx, reloid, NoLock)?;
+    let tupdesc = rel.rd_att.clone_in(mcx)?;
+    rel.close(NoLock)?;
     let slot_ref = estate.slot(slot);
     ExecBuildSlotValueDescription(mcx, reloid, slot_ref, &tupdesc, modified_cols, 64)
 }

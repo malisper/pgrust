@@ -23,6 +23,7 @@ mod tables;
 
 use backend_utils_error::PgResult;
 use backend_utils_mb_conv_string_helpers::{ConversionResult, LocalToUtf, UtfToLocal};
+use backend_utils_mb_conv_string_helpers::make_conversion_builtin;
 use backend_utils_mb_mbutils_seams::check_encoding_conversion_args;
 use types_wchar::encoding::{pg_enc, PG_EUC_TW, PG_UTF8};
 
@@ -63,7 +64,12 @@ pub fn utf8_to_euc_tw(
 
 /// This crate owns no inward seams (conversions are dispatched via the
 /// `pg_conversion` catalog, mirroring the C module).
-pub fn init_seams() {}
+pub fn init_seams() {
+    backend_utils_fmgr_core::register_builtins_native([
+        make_conversion_builtin(4366, "euc_tw_to_utf8", euc_tw_to_utf8),
+        make_conversion_builtin(4367, "utf8_to_euc_tw", utf8_to_euc_tw),
+    ]);
+}
 
 #[cfg(test)]
 mod tests;

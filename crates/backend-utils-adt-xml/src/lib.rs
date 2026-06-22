@@ -149,9 +149,23 @@ fn xmloption_seam() -> XmlOptionType {
     }
 }
 
+/// Seam adapter for `backend-utils-adt-xml-seams::map_xml_name_to_sql_identifier`:
+/// the consumer (ruleutils `T_XmlExpr` deparse) passes a valid UTF-8 XML name
+/// and wants the decoded SQL identifier mcx-allocated.
+fn map_xml_name_to_sql_identifier_seam<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    name: &str,
+) -> PgResult<mcx::PgString<'mcx>> {
+    let ident = map_xml_name_to_sql_identifier(name.as_bytes())?;
+    mcx::PgString::from_str_in(ident.as_str(), mcx)
+}
+
 /// Install this crate's inward seams.
 pub fn init_seams() {
     backend_utils_adt_xml_seams::escape_xml::set(escape_xml_seam);
+    backend_utils_adt_xml_seams::map_xml_name_to_sql_identifier::set(
+        map_xml_name_to_sql_identifier_seam,
+    );
 
     // The `xmlbinary` / `xmloption` GUC slots: install the `conf->variable`
     // accessors (read directly from the GUC slot, never ControlFile) plus the

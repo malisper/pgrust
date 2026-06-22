@@ -24,9 +24,13 @@
 //! `*_init` then the ported `*_lexize` — keyed on the template's
 //! `tmpllexize` method name (`get_func_name`), which is stable for both the
 //! fixed-OID builtin templates and the snowball template (whose OID is assigned
-//! at initdb). Output is identical to C; the only divergence is the per-call
-//! re-init (C caches it). This mirrors the documented `dictCtx`/fmgr divergence
-//! already noted in `ts_cache.c`'s port.
+//! at initdb). Output is identical to C; for the stateless templates the only
+//! divergence is the per-call re-init (C caches it), mirroring the documented
+//! `dictCtx`/fmgr divergence already noted in `ts_cache.c`'s port. The
+//! `thesaurus` template is the exception: it carries a `stored` arena-index
+//! cursor across consecutive `getnext` calls, so its compiled `DictThesaurus`
+//! *is* cached per-OID (see [`thesaurus_cache`]) — caching is required for
+//! correctness there, not just speed.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -139,28 +143,39 @@ fn lexize_by_oid(
             Ok(convert_pgvec(r))
         }
         "thesaurus_lexize" => {
-            // The thesaurus carries multi-call arena state (`stored`) across
-            // getnext re-issues. The owned-model per-call re-init resets that
-            // arena, so the `private_state` cursor cannot persist; we run a
-            // fresh single-shot lexize (the `stored == None` entry path), which
-            // is correct for a phrase resolved within one call. Multi-call
-            // thesaurus phrase continuation is the documented re-init divergence.
-            let mut d = backend_tsearch_dict::dict_thesaurus::thesaurus_init(mcx, &options)?;
-            let mut tstate = ThesaurusSubState {
-                isend: dstate.as_ref().map(|s| s.isend).unwrap_or(false),
-                getnext: false,
-                stored: None,
-            };
-            let r = backend_tsearch_dict::dict_thesaurus::thesaurus_lexize(
-                mcx, &mut d, input, len, &mut tstate,
-            )?;
+            // The thesaurus carries multi-call arena state (`stored`, a
+            // `LexemeInfo *` in C) across `getnext` re-issues. To preserve it we
+            // cache the compiled `DictThesaurus` per dictionary OID in a backend-
+            // lifetime context (mirroring C's `lookup_ts_dictionary_cache`, which
+            // caches `dictData`), so `stored` arena indices stay valid between
+            // calls. The cursor itself rides in `DictSubState.private_state`
+            // (C's `void *private_state`), encoded as `index + 1` (0 == NULL).
+            let stored_in = dstate
+                .as_ref()
+                .map(|s| decode_stored(s.private_state))
+                .unwrap_or(None);
+            let isend_in = dstate.as_ref().map(|s| s.isend).unwrap_or(false);
+
+            let (out, getnext_out, stored_out) =
+                thesaurus_cache::with_dict(dict_id, &options, |cmcx, d| {
+                    let mut tstate = ThesaurusSubState {
+                        isend: isend_in,
+                        getnext: false,
+                        stored: stored_in,
+                    };
+                    let r = backend_tsearch_dict::dict_thesaurus::thesaurus_lexize(
+                        cmcx, d, input, len, &mut tstate,
+                    )?;
+                    // Convert the cache-context result to owned before leaving
+                    // the borrow (the cursor `stored` is exported separately).
+                    Ok((convert_pgvec(r), tstate.getnext, tstate.stored))
+                })?;
+
             if let Some(s) = dstate {
-                s.getnext = tstate.getnext;
-                // `stored` (an arena index into the freshly-built `d`) cannot be
-                // exported across the re-init boundary; leave `private_state`
-                // untouched so the caller treats this as a completed lexize.
+                s.getnext = getnext_out;
+                s.private_state = encode_stored(stored_out);
             }
-            Ok(convert_pgvec(r))
+            Ok(out)
         }
         other => Err(PgError::error(alloc::format!(
             "text search lexize method \"{other}\" is not supported"
@@ -227,4 +242,90 @@ fn deflist_pairs(
             (de.defname.as_str().to_string(), Some(arg))
         })
         .collect()
+}
+
+/// Encode the thesaurus `stored` cursor (`Option<arena index>`) into the
+/// `DictSubState.private_state` `u64` (C's `void *private_state`). `None` maps
+/// to 0 (C `NULL`); `Some(i)` maps to `i + 1`.
+fn encode_stored(stored: Option<usize>) -> u64 {
+    match stored {
+        None => 0,
+        Some(i) => i as u64 + 1,
+    }
+}
+
+/// Inverse of [`encode_stored`].
+fn decode_stored(ps: u64) -> Option<usize> {
+    if ps == 0 {
+        None
+    } else {
+        Some((ps - 1) as usize)
+    }
+}
+
+/// Backend-lifetime cache of compiled `DictThesaurus` objects, keyed by
+/// dictionary OID — the owned-model stand-in for C's `lookup_ts_dictionary_cache`
+/// caching `dictData` in the dictionary's private memory context. Caching is
+/// required (not just an optimization) because the thesaurus phrase matcher
+/// carries a `stored` arena-index cursor across consecutive `getnext` calls;
+/// a per-call re-init would invalidate those indices and the multi-word phrase
+/// substitution could never complete.
+mod thesaurus_cache {
+    use alloc::collections::BTreeMap;
+    use alloc::string::String;
+    use core::cell::RefCell;
+
+    use backend_commands_define_seams::DefElemArg;
+    use mcx::{Mcx, McxOwned, MemoryContext};
+    use types_error::PgResult;
+    use types_tsearch::DictThesaurus;
+
+    struct Cache<'mcx> {
+        mcx: Mcx<'mcx>,
+        dicts: BTreeMap<u32, DictThesaurus<'mcx>>,
+    }
+
+    mcx::bind!(CacheTy => Cache<'mcx>);
+
+    thread_local! {
+        static STATE: RefCell<Option<McxOwned<CacheTy>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` over the cached `DictThesaurus` for `dict_id`, compiling and
+    /// inserting it from `options` on first use. The closure receives the
+    /// cache's memory context (so any result it produces is allocated there and
+    /// must be converted to an owned form before returning) and a mutable
+    /// borrow of the dictionary (the phrase matcher links `nextvariant` chains
+    /// in the arena during matching, exactly as C mutates its cached `dictData`).
+    pub fn with_dict<R>(
+        dict_id: u32,
+        options: &[(String, Option<DefElemArg>)],
+        f: impl for<'mcx> FnOnce(Mcx<'mcx>, &mut DictThesaurus<'mcx>) -> PgResult<R>,
+    ) -> PgResult<R> {
+        STATE.with(|s| {
+            let mut slot = s.borrow_mut();
+            if slot.is_none() {
+                let owned = McxOwned::<CacheTy>::try_new(
+                    MemoryContext::new("Tsearch thesaurus cache"),
+                    |mcx| {
+                        Ok(Cache {
+                            mcx,
+                            dicts: BTreeMap::new(),
+                        })
+                    },
+                )?;
+                *slot = Some(owned);
+            }
+            slot.as_mut().unwrap().with_mut(|cache| {
+                if !cache.dicts.contains_key(&dict_id) {
+                    let d = backend_tsearch_dict::dict_thesaurus::thesaurus_init(
+                        cache.mcx, options,
+                    )?;
+                    cache.dicts.insert(dict_id, d);
+                }
+                let d = cache.dicts.get_mut(&dict_id).unwrap();
+                f(cache.mcx, d)
+            })
+        })
+    }
 }

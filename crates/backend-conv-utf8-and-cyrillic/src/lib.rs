@@ -23,6 +23,7 @@ mod tables;
 
 use backend_utils_error::PgResult;
 use backend_utils_mb_conv_string_helpers::{ConversionResult, LocalToUtf, UtfToLocal};
+use backend_utils_mb_conv_string_helpers::make_conversion_builtin;
 use backend_utils_mb_mbutils_seams::check_encoding_conversion_args;
 use types_wchar::encoding::{pg_enc, PG_KOI8R, PG_KOI8U, PG_UTF8};
 
@@ -97,7 +98,14 @@ pub fn koi8u_to_utf8(
 
 /// This crate owns no inward seams (conversions are dispatched via the
 /// `pg_conversion` catalog, mirroring the C module).
-pub fn init_seams() {}
+pub fn init_seams() {
+    backend_utils_fmgr_core::register_builtins_native([
+        make_conversion_builtin(4354, "utf8_to_koi8r", utf8_to_koi8r),
+        make_conversion_builtin(4355, "koi8r_to_utf8", koi8r_to_utf8),
+        make_conversion_builtin(4356, "utf8_to_koi8u", utf8_to_koi8u),
+        make_conversion_builtin(4357, "koi8u_to_utf8", koi8u_to_utf8),
+    ]);
+}
 
 #[cfg(test)]
 mod tests;

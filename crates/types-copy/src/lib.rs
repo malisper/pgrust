@@ -241,6 +241,8 @@ pub struct CopyParseOptions {
     pub escape: u8,
     /// `CopyOnErrorChoice on_error`.
     pub on_error: CopyOnErrorChoice,
+    /// `int64 reject_limit` — maximum tolerable number of errors under ON_ERROR.
+    pub reject_limit: i64,
     /// `CopyLogVerbosityChoice log_verbosity`.
     pub log_verbosity: CopyLogVerbosityChoice,
 }

@@ -1190,6 +1190,12 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::release_stats_tuple::set(
         projections::release_stats_tuple,
     );
+    backend_utils_cache_syscache_seams::statext_expressions_load::set(
+        projections::statext_expressions_load,
+    );
+    backend_utils_cache_syscache_seams::release_dummy_stats_tuple::set(
+        projections::release_dummy_stats_tuple,
+    );
     backend_utils_cache_syscache_seams::pg_statistic_stanullfrac::set(
         projections::pg_statistic_stanullfrac,
     );
@@ -1211,6 +1217,7 @@ pub fn init_seams() {
     // SearchSysCacheExists* probes.
     s::reloid_exists::set(projections::reloid_exists);
     s::tablespace_exists::set(projections::tablespace_exists);
+    s::database_exists::set(projections::database_exists);
     s::auth_oid_exists::set(projections::auth_oid_exists);
     s::namespace_name_exists::set(projections::namespace_name_exists);
     s::procoid_exists::set(projections::procoid_exists);

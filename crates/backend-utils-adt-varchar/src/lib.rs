@@ -68,6 +68,74 @@ pub mod fmgr_builtins;
 /// `seams-init::init_all`.
 pub fn init_seams() {
     fmgr_builtins::register_varchar_builtins();
+
+    // Register the `varchar()` length-coercion planner support kernel into the
+    // `simplify_function` (clauses.c) prosupport dispatch table, keyed by
+    // `varchar_support`'s pg_proc OID (3097). `simplify_function` reaches this
+    // via the `call_support_simplify` boundary when const-folding a
+    // `varchar(source, typmod, explicit)` call, flattening a widening (or
+    // unconstraining) length coercion into a bare RelabelType so that, e.g.,
+    // `ALTER COLUMN ... TYPE varchar(20)` from `varchar(10)` skips the table
+    // rewrite (ATColumnChangeRequiresRewrite sees a RelabelType, not a FuncExpr).
+    const F_VARCHAR_SUPPORT: types_core::primitive::Oid = 3097;
+    backend_optimizer_util_clauses::support_simplify::register_support_simplify(
+        F_VARCHAR_SUPPORT,
+        varchar_support,
+    );
+}
+
+/// `varchar_support(PG_FUNCTION_ARGS)` (varchar.c:565): planner support for the
+/// `varchar()` length-coercion function. Flattens calls that only widen the
+/// allowable length (or remove the limit) into a bare relabeling.
+///
+/// The C `SupportRequestSimplify` is decomposed by the `call_support_simplify`
+/// dispatch: `args` is the call's argument list (`req->fcall->args`).
+/// `Ok(Some(expr))` is the simplified clause (C's `ret`); `Ok(None)` is "no
+/// simplification" (C's `NULL`).
+#[allow(clippy::too_many_arguments)]
+fn varchar_support<'mcx>(
+    _mcx: mcx::Mcx<'mcx>,
+    _funcid: types_core::primitive::Oid,
+    _result_type: types_core::primitive::Oid,
+    _result_collid: types_core::primitive::Oid,
+    _input_collid: types_core::primitive::Oid,
+    args: &[types_nodes::primnodes::Expr<'mcx>],
+    _funcvariadic: bool,
+    _estimate: bool,
+) -> PgResult<Option<types_nodes::primnodes::Expr<'mcx>>> {
+    use types_nodes::primnodes::Expr;
+
+    // FuncExpr *expr = req->fcall; Assert(list_length(expr->args) >= 2);
+    debug_assert!(args.len() >= 2);
+
+    // typmod = (Node *) lsecond(expr->args);
+    let typmod = &args[1];
+
+    // if (IsA(typmod, Const) && !((Const *) typmod)->constisnull)
+    if let Expr::Const(typmod_const) = typmod {
+        if !typmod_const.constisnull {
+            // source = (Node *) linitial(expr->args);
+            let source = &args[0];
+            let old_typmod = backend_nodes_core::nodefuncs::expr_typmod(Some(source))?;
+            // new_typmod = DatumGetInt32(((Const *) typmod)->constvalue);
+            let new_typmod = typmod_const.constvalue.as_i32();
+            // old_max = old_typmod - VARHDRSZ; new_max = new_typmod - VARHDRSZ;
+            let varhdrsz = types_datum::varlena::VARHDRSZ as i32;
+            let old_max = old_typmod - varhdrsz;
+            let new_max = new_typmod - varhdrsz;
+
+            // if (new_typmod < 0 || (old_typmod >= 0 && old_max <= new_max))
+            //     ret = relabel_to_typmod(source, new_typmod);
+            if new_typmod < 0 || (old_typmod >= 0 && old_max <= new_max) {
+                return Ok(Some(backend_nodes_core::nodefuncs::relabel_to_typmod(
+                    source.clone(),
+                    new_typmod,
+                )?));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 use backend_utils_adt_varlena::comparison::varstr_cmp;

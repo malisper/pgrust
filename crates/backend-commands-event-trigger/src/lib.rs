@@ -39,7 +39,8 @@ use types_catalog::catalog::{
 };
 use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use types_catalog::pg_event_trigger::PgEventTriggerInsertRow;
-use types_core::primitive::{InvalidOid, Oid};
+use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use backend_catalog_objectaddress_seams as objectaddress_seams;
 use types_error::{
     PgError, PgResult, ERROR, ERRCODE_DUPLICATE_OBJECT,
     ERRCODE_E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -677,6 +678,177 @@ pub fn pg_event_trigger_dropped_objects<'mcx>(
     }
 
     // return (Datum) 0;
+    Ok(DatumV::null())
+}
+
+/// One command snapshotted out of `currentEventTriggerState->commandList` for
+/// [`pg_event_trigger_ddl_commands`], with the borrow on `CURRENT_STATE`
+/// released. `parsetree` is cloned into the SRF's per-query context so
+/// `CreateCommandName` can run after the borrow is dropped.
+struct DdlCommandSnapshot<'mcx> {
+    /// The object address used to look up identity/type/schema. `None` for the
+    /// `SCT_AlterDefaultPrivileges` / `SCT_Grant` forms (those columns are NULL).
+    address: Option<ObjectAddress>,
+    in_extension: bool,
+    parsetree: Node<'mcx>,
+}
+
+/// `pg_event_trigger_ddl_commands()` (event_trigger.c ~2052) — the
+/// `ddl_command_end` event-trigger SRF that reports the DDL commands the firing
+/// command ran, reading `currentEventTriggerState->commandList`. Faithful PG
+/// 18.3 9-column layout: `classid`, `objid`, `objsubid`, `command_tag`,
+/// `object_type`, `schema`, `identity`, `in_extension`, `command`.
+///
+/// The final `command` column (a `pg_ddl_command` carrying the
+/// `CollectedCommand` pointer the deparse functions read) is left NULL: this
+/// crate does not model the deparse pointer, and the column is never projected
+/// by a `SELECT` that does not call a deparse function.
+pub fn pg_event_trigger_ddl_commands<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+
+    const PG_EVENT_TRIGGER_DDL_COMMANDS_COLS: usize = 9;
+
+    // Protect this function from being called out of context.
+    if !state_is_set() {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED)
+            .errmsg(
+                "pg_event_trigger_ddl_commands() can only be called in an event trigger function"
+                    .to_string(),
+            )
+            .into_error());
+    }
+
+    // Build tuplestore to hold the result rows.
+    funcapi_seams::InitMaterializedSRF::call(fcinfo, 0)?;
+
+    // Snapshot the command list, cloning each parsetree into the SRF context so
+    // `CreateCommandName` and the descriptive lookups can run after the
+    // `CURRENT_STATE` borrow is released (those seams must not be entered while
+    // the thread-local is borrowed). The C `foreach(commandList)` order is
+    // append order, which our `Vec` preserves.
+    //
+    // For an IF NOT EXISTS command that found an existing object, `SCT_Simple`
+    // leaves `address.objectId == InvalidOid`; the C `continue`s — we skip it
+    // entirely (no snapshot).
+    let snapshots: Vec<DdlCommandSnapshot<'mcx>> = CURRENT_STATE.with(|s| {
+        let stack = s.borrow();
+        let st = match stack.last() {
+            Some(st) => st,
+            None => return Ok(Vec::new()),
+        };
+        let mut out: Vec<DdlCommandSnapshot<'mcx>> = Vec::new();
+        for cmd in &st.command_list {
+            let address = match &cmd.data {
+                CollectedCommandData::Simple => {
+                    // SCT_Simple covers the AlterDefaultPrivileges / Grant forms
+                    // too (modelled as Simple); they carry no useful address and
+                    // C reports their classid/objid/schema/identity as NULL.
+                    // The genuine SCT_Simple case skips Invalid-Oid IF-NOT-EXISTS
+                    // rows.
+                    if !OidIsValid(cmd.address.objectId) {
+                        // Distinguish a true SCT_Simple (skip) from the
+                        // address-less DefPrivs/Grant forms (report with NULLs):
+                        // the latter have an Invalid `classId` as well.
+                        if OidIsValid(cmd.address.classId) {
+                            continue;
+                        }
+                        None
+                    } else {
+                        Some(cmd.address)
+                    }
+                }
+                CollectedCommandData::AlterTable { class_id, object_id, .. } => {
+                    // ObjectAddressSet(addr, classId, objectId)
+                    Some(ObjectAddress {
+                        classId: *class_id,
+                        objectId: *object_id,
+                        objectSubId: 0,
+                    })
+                }
+            };
+            let parsetree = cmd.parsetree.clone_in(mcx)?;
+            out.push(DdlCommandSnapshot {
+                address,
+                in_extension: cmd.in_extension,
+                parsetree,
+            });
+        }
+        Ok::<_, PgError>(out)
+    })?;
+
+    let rsinfo = fcinfo
+        .resultinfo
+        .as_mut()
+        .expect("InitMaterializedSRF establishes fcinfo->resultinfo");
+
+    for snap in &snapshots {
+        let mut values: [DatumV<'mcx>; PG_EVENT_TRIGGER_DDL_COMMANDS_COLS] =
+            core::array::from_fn(|_| DatumV::null());
+        let mut nulls = [false; PG_EVENT_TRIGGER_DDL_COMMANDS_COLS];
+
+        match &snap.address {
+            Some(addr) => {
+                // If the object was dropped in the same command, identity is
+                // NULL and the C code `continue`s.
+                let described =
+                    objectaddress_seams::event_trigger_describe_command_object::call(mcx, addr)?;
+                let (identity, objtype, schema) = match described {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                // classid / objid / objsubid
+                values[0] = DatumV::from_oid(addr.classId);
+                values[1] = DatumV::from_oid(addr.objectId);
+                values[2] = DatumV::from_i32(addr.objectSubId);
+                // command_tag (CreateCommandName(cmd->parsetree))
+                let tag = backend_tcop_utility_seams::create_command_tag::call(&snap.parsetree)?;
+                let tagname = backend_tcop_cmdtag::get_command_tag_name(tag.0);
+                values[3] = varlena_seams::cstring_to_text_v::call(mcx, tagname)?;
+                // object_type
+                values[4] = varlena_seams::cstring_to_text_v::call(mcx, &objtype)?;
+                // schema
+                match schema {
+                    Some(s) => values[5] = varlena_seams::cstring_to_text_v::call(mcx, &s)?,
+                    None => nulls[5] = true,
+                }
+                // identity
+                values[6] = varlena_seams::cstring_to_text_v::call(mcx, &identity)?;
+                // in_extension
+                values[7] = DatumV::from_bool(snap.in_extension);
+                // command (pg_ddl_command pointer) — not modelled.
+                nulls[8] = true;
+            }
+            None => {
+                // SCT_AlterDefaultPrivileges / SCT_Grant: NULL classid/objid/
+                // objsubid/schema/identity, command_tag + object_type from the
+                // stored parse tree, in_extension, NULL command.
+                nulls[0] = true;
+                nulls[1] = true;
+                nulls[2] = true;
+                let tag = backend_tcop_utility_seams::create_command_tag::call(&snap.parsetree)?;
+                let tagname = backend_tcop_cmdtag::get_command_tag_name(tag.0);
+                values[3] = varlena_seams::cstring_to_text_v::call(mcx, tagname)?;
+                // object_type — would need stringify_adefprivs_objtype /
+                // stringify_grant_objtype; the modelled Simple form does not
+                // carry the objtype, so report NULL (not exercised by the END
+                // report, which only iterates address-bearing commands).
+                nulls[4] = true;
+                nulls[5] = true;
+                nulls[6] = true;
+                values[7] = DatumV::from_bool(snap.in_extension);
+                nulls[8] = true;
+            }
+        }
+
+        funcapi_seams::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
+    }
+
+    // PG_RETURN_VOID();
     Ok(DatumV::null())
 }
 
@@ -2253,6 +2425,9 @@ pub fn init_seams() {
     });
     backend_tcop_utility_out_seams::event_trigger_alter_table_end::set(
         event_trigger_alter_table_end,
+    );
+    backend_tcop_utility_out_seams::event_trigger_collect_alter_table_subcmd::set(
+        event_trigger_collect_alter_table_subcmd,
     );
     backend_tcop_utility_out_seams::event_trigger_supports_object_type::set(
         event_trigger_supports_object_type,

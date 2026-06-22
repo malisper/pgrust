@@ -291,10 +291,12 @@ pub fn ri_load_constraint_info(mcx: Mcx<'_>, constraint_oid: Oid) -> PgResult<Ri
     copy_into(&mut riinfo.confdelsetcols, &row.confdelsetcols);
 
     if riinfo.hasperiod {
-        let opers = backend_catalog_pg_constraint_seams::find_fk_period_opers::call(
+        // C (ri_triggers.c:2340): opclass = get_index_column_opclass(conindid, nkeys).
+        let opclass = backend_utils_cache_lsyscache_seams::get_index_column_opclass::call(
             row.conindid,
             riinfo.nkeys,
         )?;
+        let opers = backend_catalog_pg_constraint_seams::find_fk_period_opers::call(opclass)?;
         riinfo.period_contained_by_oper = opers.period_contained_by_oper;
         riinfo.agged_period_contained_by_oper = opers.agged_period_contained_by_oper;
         riinfo.period_intersect_oper = opers.period_intersect_oper;

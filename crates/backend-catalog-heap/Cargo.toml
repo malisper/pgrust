@@ -34,6 +34,7 @@ backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 
 # Constraint-cooker producers (real owners).
 backend-parser-parse-expr = { path = "../backend-parser-parse-expr" }
@@ -60,6 +61,7 @@ backend-catalog-dependency = { path = "../backend-catalog-dependency" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
 backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 
 # Seam crates (owner unported / would-cycle).

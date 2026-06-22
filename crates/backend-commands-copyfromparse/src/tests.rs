@@ -29,6 +29,7 @@ fn opts(csv: bool) -> CopyParseOptions {
         quote: b'"',
         escape: b'"',
         on_error: CopyOnErrorChoice::COPY_ON_ERROR_STOP,
+        reject_limit: 0,
         log_verbosity: CopyLogVerbosityChoice::COPY_LOG_VERBOSITY_DEFAULT,
     }
 }

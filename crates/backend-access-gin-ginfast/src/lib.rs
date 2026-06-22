@@ -61,6 +61,8 @@ use backend_access_gin_gininsert::ginEntryInsert;
 
 use backend_storage_lmgr_lmgr::{ConditionalLockPage, LockPage, UnlockPage};
 
+mod fmgr_builtins;
+
 mod page;
 use page::{
     gin_opaque_from_page, index_tuple_size, meta_to_bytes, or_flags, read_meta, set_flags,
@@ -179,6 +181,10 @@ fn addDatum<'mcx>(keys: &mut KeyArray<'mcx>, datum: Datum<'mcx>, category: GinNu
 pub fn init_seams() {
     backend_access_gin_gininsert_seams::gin_get_use_fast_update::set(gin_get_use_fast_update);
     backend_access_gin_gininsert_seams::gin_fast_insert::set(gin_fast_insert);
+
+    // Register the SQL-callable `gin_clean_pending_list(regclass)` fmgr builtin
+    // row (C: its `fmgr_builtins[]` row) so by-OID dispatch resolves it.
+    fmgr_builtins::register_gin_clean_pending_list_builtin();
 
     // GIN vacuum (`ginbulkdelete` / `ginvacuumcleanup` / autovacuum-analyze)
     // flushes the fast-update pending list through `ginInsertCleanup`, which
@@ -997,8 +1003,97 @@ pub fn ginInsertCleanup<'mcx>(
 }
 
 // ===========================================================================
+// gin_clean_pending_list (ginfast.c:1031) — SQL-callable.
+// ===========================================================================
+
+/// `gin_clean_pending_list(indexoid)` (ginfast.c:1031): the SQL-callable wrapper
+/// that force-flushes a GIN index's fast-update pending list into the entry
+/// tree, returning the number of pending-list pages deleted (`int8`). Opens the
+/// index `RowExclusiveLock`, validates it is an owned (non-other-temp) valid GIN
+/// index the caller owns, derives a `GinState`, and runs [`ginInsertCleanup`]
+/// with `full_clean = fill_fsm = force_cleanup = true`.
+pub fn gin_clean_pending_list<'mcx>(mcx: Mcx<'mcx>, indexoid: Oid) -> PgResult<u32> {
+    use backend_access_index_indexam_seams::index_open;
+    use backend_catalog_aclchk_seams::{aclcheck_error, object_ownercheck};
+    use backend_utils_init_miscinit_seams::get_user_id;
+    use types_acl::AclResult;
+    use types_catalog::catalog::RELATION_RELATION_ID;
+    use types_error::error::{
+        ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+        ERRCODE_WRONG_OBJECT_TYPE,
+    };
+    use types_nodes::parsenodes::ObjectType;
+    use types_storage::lock::RowExclusiveLock;
+    use types_tuple::access::RELKIND_INDEX;
+
+    /// `GIN_AM_OID` (pg_am_d.h).
+    const GIN_AM_OID: Oid = 2742;
+
+    let index_rel = index_open::call(mcx, indexoid, RowExclusiveLock)?;
+
+    if backend_access_transam_xlog_seams::recovery_in_progress::call() {
+        return Err(PgError::error("recovery is in progress")
+            .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint("GIN pending list cannot be cleaned up during recovery."));
+    }
+
+    // Must be a GIN index.
+    if index_rel.rd_rel.relkind != RELKIND_INDEX || index_rel.rd_rel.relam != GIN_AM_OID {
+        return Err(PgError::error(alloc::format!(
+            "\"{}\" is not a GIN index",
+            index_rel.name()
+        ))
+        .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE));
+    }
+
+    // Reject attempts to read non-local temporary relations; we have no
+    // visibility into the owning session's local buffers.
+    if rel_is_other_temp(&index_rel) {
+        return Err(
+            PgError::error("cannot access temporary indexes of other sessions")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        );
+    }
+
+    // User must own the index (comparable to privileges needed for VACUUM).
+    if !object_ownercheck::call(RELATION_RELATION_ID, indexoid, get_user_id::call())? {
+        aclcheck_error::call(
+            AclResult::AclcheckNotOwner,
+            ObjectType::Index,
+            Some(index_rel.name().to_owned()),
+        )?;
+    }
+
+    // Can't assume anything about the content of an !indisready index; a
+    // !indisvalid index is merely awaiting missed aminsert calls — make those a
+    // no-op (DEBUG1), not an error, so users can run this over every index.
+    let pages_deleted = if index_rel
+        .rd_index
+        .as_ref()
+        .map(|i| i.indisvalid)
+        .unwrap_or(false)
+    {
+        let ginstate = backend_access_gin_ginutil::initGinState(&index_rel, mcx)?;
+        ginInsertCleanup(&ginstate, mcx, &index_rel, true, true, true, None)?
+    } else {
+        // ereport(DEBUG1, ...): index is not valid.
+        0
+    };
+
+    index_rel.close(RowExclusiveLock)?;
+
+    Ok(pages_deleted)
+}
+
+// ===========================================================================
 // Helpers.
 // ===========================================================================
+
+/// `RELATION_IS_OTHER_TEMP(rel)` — a temp relation owned by another backend.
+fn rel_is_other_temp(rel: &Relation<'_>) -> bool {
+    rel.rd_rel.relpersistence == types_tuple::access::RELPERSISTENCE_TEMP
+        && rel.rd_backend != backend_utils_init_small_seams::my_proc_number::call()
+}
 
 /// Read the metapage image off a pinned metabuffer.
 fn read_metabuffer(metabuffer: Buffer) -> PgResult<GinMetaPageData> {

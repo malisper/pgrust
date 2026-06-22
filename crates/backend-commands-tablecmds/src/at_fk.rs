@@ -907,7 +907,6 @@ pub fn ATAddForeignKeyConstraint<'mcx>(
     if with_period {
         let _ = backend_catalog_pg_constraint_seams::find_fk_period_opers::call(
             opclasses[numpks as usize - 1],
-            numpks,
         )?;
     }
 

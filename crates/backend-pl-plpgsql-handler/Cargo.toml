@@ -44,6 +44,12 @@ backend-utils-resowner-resowner-seams = { path = "../backend-utils-resowner-reso
 # C-language pg_proc row (prosrc = "plpgsql_call_handler" / ...) resolves here.
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
+# resolve_polymorphic_argtypes (funcapi.c) — the full polymorphic IN+OUT
+# argument-type deduction over the call's FuncExpr that
+# cfunc_resolve_polymorphic_argtypes (funccache.c) runs; drives the
+# plpgsql_compile OUT-polymorphic argument resolution.
+backend-utils-fmgr-funcapi = { path = "../backend-utils-fmgr-funcapi" }
+
 # The in-process ported-library loader registry: register `$libdir/plpgsql` so
 # fmgr resolves the LANGUAGE C call handler / inline handler / validator without
 # the OS dynamic loader (the Rust backend exposes no C ABI).

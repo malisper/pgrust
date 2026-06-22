@@ -31,6 +31,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RestartSetExprState(fcache)` (execSRF, owned-model addition): reset a
+    /// [`SetExprState`](types_nodes::execexpr::SetExprState) abandoned mid
+    /// value-per-call series (a tSRF cut short by an enclosing LIMIT) so the next
+    /// rescan re-evaluates it from the start. This is the owned-model equivalent
+    /// of the `shutdown_MultiFuncCall` ExprContext shutdown callback C fires from
+    /// `ReScanExprContext`; nodeProjectSet drives it for each SRF element from
+    /// `ExecReScanProjectSet`. Tears down any leftover `fn_extra` multi-call
+    /// context, ends any partially-drained materialize tuplestore, and clears
+    /// `setArgsValid`.
+    pub fn restart_set_expr_state<'mcx>(
+        fcache: &mut types_nodes::execexpr::SetExprState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecMakeFunctionResultSet(fcache, econtext, argContext, &isNull,
     /// &isDone)` (execSRF.c): evaluate the SRF's arguments and call the
     /// function, returning one result row's `(Datum, isNull, isDone)`. Must be

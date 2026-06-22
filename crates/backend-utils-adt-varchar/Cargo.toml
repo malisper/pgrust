@@ -24,3 +24,6 @@ backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
+types-nodes = { path = "../types-nodes" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }

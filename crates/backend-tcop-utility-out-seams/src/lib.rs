@@ -243,6 +243,16 @@ seam!(
     pub fn event_trigger_alter_table_relid(relid: Oid)
 );
 seam!(
+    /// `EventTriggerCollectAlterTableSubcmd(subcmd, address)` (event_trigger.c)
+    /// — record one ALTER TABLE subcommand and its resulting object address on
+    /// the in-progress `SCT_AlterTable` command (`ATExecCmd`, tablecmds.c:5688).
+    /// A no-op without an active collection state.
+    pub fn event_trigger_collect_alter_table_subcmd<'mcx>(
+        subcmd: &Node<'mcx>,
+        address: ObjectAddress,
+    ) -> PgResult<()>
+);
+seam!(
     /// `ProcessUtility(wrapper)` (utility.c:1595-1606) — build the subcommand
     /// `PlannedStmt` around `stmt` with a `None` (DestNone) receiver and re-enter
     /// the dispatch. Encapsulated as a seam because the wrapper-`PlannedStmt`
@@ -898,6 +908,21 @@ seam!(
         query_string: &str,
         params: ParamListInfo,
         is_top_level: bool,
+    ) -> PgResult<()>
+);
+seam!(
+    /// `AlterTableMoveAll(stmt)` (tablecmds.c:16985) — ALTER (TABLE|INDEX|
+    /// MATERIALIZED VIEW) ALL IN TABLESPACE x [OWNED BY ...] SET TABLESPACE y
+    /// (utility.c:1767). Scans `pg_class` for the relations in the source
+    /// tablespace matching the requested relkind (skipping catalog/shared/temp/
+    /// toast and, when `OWNED BY` was given, relations not owned by one of the
+    /// named roles), then drives `ATExecSetTableSpace` per relation through
+    /// `AlterTableInternal` inside an event-trigger fence. The commands are
+    /// stashed inside, so the dispatcher sets `commandCollected = true`. The
+    /// `Node` carries the `AlterTableMoveAllStmt`.
+    pub fn alter_table_move_all<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &Node<'mcx>,
     ) -> PgResult<()>
 );
 seam!(

@@ -167,7 +167,14 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// Emit the ON_ERROR IGNORE verbose `NOTICE` (copyfromparse.c:1055-1066).
-    pub fn notice_skipping_row(lineno: u64, attname: &str, attval: Option<&str>) -> PgResult<()>
+    /// `relname` carries the COPY error-context relation name (the message is
+    /// emitted while `relname_only` is set, so the CONTEXT line is `COPY rel`).
+    pub fn notice_skipping_row(
+        relname: &str,
+        lineno: u64,
+        attname: &str,
+        attval: Option<&str>,
+    ) -> PgResult<()>
 );
 
 /* ===========================================================================

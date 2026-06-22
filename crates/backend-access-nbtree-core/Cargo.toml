@@ -16,6 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../mcx" }
 pg-prng = { path = "../pg-prng" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nbtree = { path = "../types-nbtree" }

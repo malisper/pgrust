@@ -1171,6 +1171,26 @@ seam_core::seam!(
     ) -> types_error::PgResult<()>
 );
 
+seam_core::seam!(
+    /// Poke the live relcache entry's missing-value state for one column to
+    /// match a just-written `pg_attribute.atthasmissing` / `attmissingval`
+    /// (StoreAttrMissingVal, catalog/heap.c). In C this becomes visible via the
+    /// `CatalogTupleUpdate` -> `CacheInvalidateHeapTuple` relcache rebuild; the
+    /// owned relcache does not rebuild a live entry in-transaction, so — exactly
+    /// as [`set_relcache_attnullability`] does for the not-null flag — the
+    /// missing value is poked directly onto the cached `RelationData`'s
+    /// `rd_att->constr->missing[attnum-1]` (am_present = true, am_value = image)
+    /// and the per-attribute `atthasmissing` flag (full attr + compact attr) so
+    /// the in-transaction missing-attr deform substitutes it. `image` is the
+    /// single missing-value element's lifetime-free image. `Err` if the entry is
+    /// absent.
+    pub fn set_relcache_attmissing(
+        relid: types_core::primitive::Oid,
+        attnum: types_core::primitive::AttrNumber,
+        image: types_tuple::heaptuple::MissingValueImage,
+    ) -> types_error::PgResult<()>
+);
+
 // ---------------------------------------------------------------------------
 // Relation-ref resource-owner bookkeeping (relcache.c
 // `RelationIncrementReferenceCount` / `RelationDecrementReferenceCount`, which

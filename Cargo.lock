@@ -906,8 +906,10 @@ dependencies = [
  "backend-access-gin-ginutil-seams",
  "backend-access-gin-ginvacuum-seams",
  "backend-access-heap-vacuumlazy-seams",
+ "backend-access-index-indexam-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert-seams",
+ "backend-catalog-aclchk-seams",
  "backend-lib-rbtree",
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-freespace-seams",
@@ -916,12 +918,20 @@ dependencies = [
  "backend-storage-page",
  "backend-utils-cache-relcache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
  "backend-utils-misc-guc-seams",
  "backend-utils-misc-guc-tables",
  "mcx",
+ "types-acl",
+ "types-catalog",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-gin",
+ "types-nodes",
  "types-rel",
  "types-storage",
  "types-tuple",
@@ -2283,6 +2293,7 @@ dependencies = [
  "backend-storage-page",
  "backend-storage-smgr-bulkwrite-seams",
  "backend-storage-smgr-seams",
+ "backend-utils-activity-pgstat-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-datum-seams",
  "backend-utils-adt-skipsupport-seams",
@@ -4724,11 +4735,13 @@ dependencies = [
  "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-predicate-seams",
  "backend-utils-activity-pgstat-seams",
+ "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache",
+ "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
  "backend-utils-init-miscinit",
@@ -6373,6 +6386,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-rel",
  "types-statistics",
  "types-storage",
  "types-vacuum",
@@ -6597,6 +6611,7 @@ dependencies = [
  "backend-catalog-index-seams",
  "backend-commands-trigger-seams",
  "backend-executor-execIndexing",
+ "backend-executor-execTuples-seams",
  "backend-executor-execUtils",
  "backend-utils-error",
  "backend-utils-fmgr-core",
@@ -6645,7 +6660,6 @@ version = "0.0.0"
 dependencies = [
  "backend-access-table-table",
  "backend-access-transam-xact-seams",
- "backend-catalog-aclchk-seams",
  "backend-commands-copy-seams",
  "backend-commands-copyfrom",
  "backend-commands-copyto",
@@ -6716,6 +6730,7 @@ dependencies = [
  "backend-executor-execTuples",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils",
+ "backend-executor-execUtils-seams",
  "backend-executor-nodeModifyTable-seams",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
@@ -7319,6 +7334,7 @@ dependencies = [
  "backend-foreign-foreign-seams",
  "backend-parser-parse-func-seams",
  "backend-parser-parse-type-seams",
+ "backend-parser-small1-seams",
  "backend-tcop-postgres-seams",
  "backend-tcop-utility-fc-seams",
  "backend-tcop-utility-out-seams",
@@ -7428,6 +7444,7 @@ dependencies = [
  "backend-catalog-index-seams",
  "backend-catalog-namespace",
  "backend-catalog-namespace-seams",
+ "backend-catalog-pg-class-seams",
  "backend-catalog-pg-constraint",
  "backend-catalog-pg-depend-seams",
  "backend-catalog-pg-inherits-seams",
@@ -7890,6 +7907,7 @@ dependencies = [
  "backend-parser-clause",
  "backend-parser-parse-collate",
  "backend-parser-relation",
+ "backend-parser-small1-seams",
  "backend-rewrite-rewritehandler-seams",
  "backend-storage-lmgr-lmgr",
  "backend-tcop-postgres-seams",
@@ -8243,6 +8261,7 @@ dependencies = [
  "backend-catalog-index-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
  "backend-catalog-objectaccess-seams",
  "backend-catalog-objectaddress",
  "backend-catalog-objectaddress-seams",
@@ -8960,6 +8979,7 @@ name = "backend-conv-cyrillic-and-mic"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -8971,8 +8991,10 @@ name = "backend-conv-euc-cn-and-mic"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error-fgram",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
+ "types-error",
  "types-wchar",
 ]
 
@@ -8981,9 +9003,11 @@ name = "backend-conv-euc-jp-and-sjis"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error-fgram",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
  "common-wchar",
+ "types-error",
  "types-wchar",
 ]
 
@@ -8992,9 +9016,11 @@ name = "backend-conv-euc-kr-and-mic"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error-fgram",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
  "common-wchar",
+ "types-error",
  "types-wchar",
 ]
 
@@ -9003,9 +9029,11 @@ name = "backend-conv-euc-tw-and-big5"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error-fgram",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
  "common-wchar",
+ "types-error",
  "types-wchar",
 ]
 
@@ -9014,9 +9042,11 @@ name = "backend-conv-euc2004-sjis2004"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error-fgram",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
  "common-wchar",
+ "types-error",
  "types-wchar",
 ]
 
@@ -9025,6 +9055,7 @@ name = "backend-conv-latin-and-mic"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9036,6 +9067,7 @@ name = "backend-conv-latin2-and-win1250"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9047,6 +9079,7 @@ name = "backend-conv-utf8-and-big5"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9058,6 +9091,7 @@ name = "backend-conv-utf8-and-cyrillic"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9069,6 +9103,7 @@ name = "backend-conv-utf8-and-euc-cn"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9107,6 +9142,7 @@ name = "backend-conv-utf8-and-euc-tw"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9118,6 +9154,7 @@ name = "backend-conv-utf8-and-euc2004"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9128,6 +9165,7 @@ dependencies = [
 name = "backend-conv-utf8-and-gb18030"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9138,6 +9176,7 @@ dependencies = [
 name = "backend-conv-utf8-and-gbk"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9172,6 +9211,7 @@ dependencies = [
 name = "backend-conv-utf8-and-johab"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9182,6 +9222,7 @@ dependencies = [
 name = "backend-conv-utf8-and-sjis"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9192,6 +9233,7 @@ dependencies = [
 name = "backend-conv-utf8-and-sjis2004"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9202,6 +9244,7 @@ dependencies = [
 name = "backend-conv-utf8-and-uhc"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9213,6 +9256,7 @@ name = "backend-conv-utf8-and-win"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9486,6 +9530,7 @@ dependencies = [
  "backend-catalog-index-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execIndexing-seams",
+ "backend-executor-execTuples-seams",
  "backend-executor-execUtils",
  "backend-nodes-core",
  "backend-storage-lmgr-lmgr-seams",
@@ -9897,6 +9942,7 @@ dependencies = [
  "backend-access-transam-twophase",
  "backend-catalog-partition-seams",
  "backend-catalog-pg-inherits-seams",
+ "backend-catalog-pg-publication-seams",
  "backend-commands-async",
  "backend-commands-event-trigger",
  "backend-commands-prepare",
@@ -9943,11 +9989,13 @@ dependencies = [
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-more",
+ "backend-utils-mmgr-portalmem",
  "backend-utils-sort-storage-seams",
  "mcx",
  "seam-core",
  "types-acl",
  "types-array",
+ "types-catalog",
  "types-core",
  "types-datetime",
  "types-datum",
@@ -10922,6 +10970,7 @@ name = "backend-executor-nodeModifyTable"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-next-seams",
  "backend-access-heap-heapam-handler-dml-seams",
  "backend-access-table-tableam",
  "backend-access-transam-xact-seams",
@@ -10944,6 +10993,7 @@ dependencies = [
  "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-util-var-seams",
  "backend-rewrite-rewritehandler-seams",
+ "backend-rewrite-rewritemanip-seams",
  "backend-storage-lmgr-lmgr-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-datum-seams",
@@ -14830,6 +14880,7 @@ dependencies = [
  "backend-utils-fmgr-core",
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-fmgr-funcapi",
  "backend-utils-misc-guc-tables",
  "backend-utils-resowner-resowner-seams",
  "mcx",
@@ -16860,20 +16911,32 @@ dependencies = [
 name = "backend-statistics-extended-stats"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-access-common-scankey",
  "backend-access-index-genam-seams",
  "backend-access-table-table",
+ "backend-access-table-tableam",
  "backend-catalog-indexing",
  "backend-commands-analyze-rt-seams",
+ "backend-commands-analyze-seams",
  "backend-commands-statscmds",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-nodes-core",
  "backend-nodes-nodeFuncs-seams",
+ "backend-nodes-read-seams",
  "backend-optimizer-path-small-seams",
+ "backend-optimizer-plan-init-subselect-ext-seams",
  "backend-optimizer-util-relnode-seams",
  "backend-statistics-dependencies",
  "backend-statistics-mcv",
  "backend-statistics-mvdistinct",
  "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-scalar-datum-core",
+ "backend-utils-cache-attoptcache",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
@@ -19848,8 +19911,11 @@ name = "backend-utils-adt-dbsize"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-relation",
+ "backend-catalog-aclchk-seams",
  "backend-catalog-namespace",
  "backend-catalog-storage",
+ "backend-commands-dbcommands-seams",
+ "backend-commands-tablespace-seams",
  "backend-common-relpath",
  "backend-storage-lmgr-lmgr-seams",
  "backend-tcop-postgres",
@@ -19859,6 +19925,7 @@ dependencies = [
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-relmapper",
  "backend-utils-cache-syscache",
+ "backend-utils-cache-syscache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-core",
  "backend-utils-init-miscinit",
@@ -19866,11 +19933,13 @@ dependencies = [
  "libc",
  "mcx",
  "seam-core",
+ "types-acl",
  "types-catalog",
  "types-core",
  "types-datum",
  "types-error",
  "types-fmgr",
+ "types-nodes",
  "types-numeric",
  "types-rel",
  "types-storage",
@@ -21373,6 +21442,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-ruleutils-seams",
+ "backend-utils-adt-xml-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-partcache-seams",
  "backend-utils-cache-syscache-seams",
@@ -21771,6 +21841,8 @@ name = "backend-utils-adt-varchar"
 version = "0.0.0"
 dependencies = [
  "backend-libpq-pqformat",
+ "backend-nodes-core",
+ "backend-optimizer-util-clauses",
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-pg-locale-seams",
  "backend-utils-adt-varlena",
@@ -21783,6 +21855,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-fmgr",
+ "types-nodes",
  "types-sortsupport",
  "types-stringinfo",
 ]
@@ -23614,8 +23687,10 @@ dependencies = [
  "backend-access-transam-xact-seams",
  "backend-commands-portalcmds-seams",
  "backend-storage-ipc-dsm-core",
+ "backend-utils-adt-varlena-seams",
  "backend-utils-cache-plancache-portal-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-funcapi-seams",
  "backend-utils-init-small-seams",
  "backend-utils-mmgr-mcxt-seams",
  "backend-utils-mmgr-portalmem-seams",

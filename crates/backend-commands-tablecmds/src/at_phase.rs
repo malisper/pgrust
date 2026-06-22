@@ -1256,7 +1256,26 @@ fn ATRewriteCatalogs<'mcx>(
                     Some(c) => c.clone_in(mcx)?,
                     None => unreachable!("subcmds hold Node::AlterTableCmd"),
                 };
-                ATExecCmd(mcx, wqueue, ti, &cmd, lockmode, pass, context)?;
+                // The whole `Node::AlterTableCmd` wrapper, cloned alongside, to
+                // hand to `EventTriggerCollectAlterTableSubcmd((Node *) cmd, ..)`.
+                let cmd_node = wqueue[ti].subcmds[pass as usize][si].clone_in(mcx)?;
+                // In C, `tab->rel` is a single long-lived Relation pointer whose
+                // `rd_rel`/`rd_att` are rebuilt in place by relcache invalidation
+                // as prior subcommands in this pass mutate the catalog (each
+                // subcommand routine CommandCounterIncrements). Our owned `rel`
+                // is an immutable snapshot taken once, so a later subcommand
+                // would read a stale image — e.g. two AT_AddConstraint CHECKs in
+                // the same pass would each read the same stale
+                // `rd_att->constr->num_check` (numoldchecks) and clobber relchecks
+                // to the same value instead of accumulating. Re-open before each
+                // subcommand (lock already held) to mirror C's in-place rebuild.
+                if si > 0 {
+                    if let Some(old) = wqueue[ti].rel.take() {
+                        old.close(NoLock)?;
+                    }
+                    wqueue[ti].rel = Some(relation_open(mcx, relid, NoLock)?);
+                }
+                ATExecCmd(mcx, wqueue, ti, &cmd, &cmd_node, lockmode, pass, context)?;
             }
 
             // After the ALTER TYPE / SET EXPRESSION pass, do cleanup work
@@ -1316,11 +1335,17 @@ fn ATExecCmd<'mcx>(
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     ti: usize,
     cmd: &AlterTableCmd<'mcx>,
+    subcmd_node: &Node<'mcx>,
     lockmode: LOCKMODE,
     cur_pass: AlterTablePass,
     context: &AlterTableUtilityContext<'_>,
 ) -> PgResult<()> {
-    let _address: ObjectAddress;
+    // C: `ObjectAddress address = InvalidObjectAddress;` — the break-only
+    // subtypes (AT_SetLogged, AT_SetAccessMethod, AT_DropOids, AT_ReAdd*, …)
+    // leave it Invalid, and `EventTriggerCollectAlterTableSubcmd` is still
+    // called with it below.
+    #[allow(unused_assignments)]
+    let mut _address: ObjectAddress = types_catalog::catalog_dependency::InvalidObjectAddress;
 
     // rel = tab->rel;
     let rel = wqueue[ti]
@@ -1749,13 +1774,21 @@ fn ATExecCmd<'mcx>(
                         .as_deref()
                         .expect("AT_AddConstraint: cmd.def is NULL")
                         .expect_constraint();
+                    // C: AT_AddConstraint passes ATExecAddConstraint(..., cmd->recurse,
+                    // false, ...); AT_ReAddConstraint passes (..., true, true, ...). The
+                    // re-add (constraint rebuilt after ALTER COLUMN TYPE) always recurses
+                    // — its parsed recurse flag is false, so honoring it would wrongly
+                    // reject a partitioned table with children ("constraint must be added
+                    // to child tables too") when rebuilding e.g. an identity column's
+                    // implicit NOT NULL constraint.
+                    let recurse = if is_readd { true } else { c.recurse };
                     crate::at_constraint::ATExecAddConstraint(
                         mcx,
                         wqueue,
                         ti,
                         &owned_rel,
                         newcon,
-                        c.recurse,
+                        recurse,
                         is_readd,
                         lockmode,
                     )
@@ -2135,6 +2168,22 @@ fn ATExecCmd<'mcx>(
         // here because `AlterTableType` is exhaustively matched above.
     }
 
+    // Report the subcommand to interested event triggers.
+    //   if (cmd)
+    //       EventTriggerCollectAlterTableSubcmd((Node *) cmd, address);
+    backend_tcop_utility_out_seams::event_trigger_collect_alter_table_subcmd::call(
+        subcmd_node,
+        _address,
+    )?;
+
+    // Bump the command counter to ensure the next subcommand in the sequence
+    // can see the changes so far (tablecmds.c:5694). Without this, e.g. an
+    // `ALTER COLUMN x ADD GENERATED AS IDENTITY` (AT_PASS_COL_ATTRS) followed
+    // by `ALTER COLUMN x SET DATA TYPE` (AT_PASS_ALTER_TYPE) both touch the
+    // same pg_attribute tuple, and the later pass re-fetches a row the earlier
+    // pass already updated in this command → "tuple already updated by self".
+    CommandCounterIncrement()?;
+
     let _ = (cur_pass, context);
     Ok(())
 }
@@ -2157,7 +2206,7 @@ fn ATRewriteTables<'mcx>(
     parsetree: Option<&Node<'mcx>>,
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     _lockmode: LOCKMODE,
-    _context: &AlterTableUtilityContext<'_>,
+    context: &AlterTableUtilityContext<'_>,
 ) -> PgResult<()> {
     // foreach: if (tab->rewrite > 0 || tab->verify_new_notnull) -> phase-3 scan
     for ti in 0..wqueue.len() {
@@ -2424,9 +2473,31 @@ fn ATRewriteTables<'mcx>(
     }
 
     // Finally, run any afterStmts that were queued up.
+    //
+    //   foreach(ltab, *wqueue)
+    //     foreach(lc, tab->afterStmts)
+    //       ProcessUtilityForAlterTable(stmt, context);
+    //       CommandCounterIncrement();
+    //
+    // ProcessUtilityForAlterTable(stmt, context) wraps each utility parsetree in
+    // a PlannedStmt with a DestNone receiver and re-enters the dispatch (same
+    // bridge ATParseTransformCmd uses for beforeStmts). For ADD COLUMN ...
+    // GENERATED AS IDENTITY the afterStmts list carries the ALTER SEQUENCE ...
+    // OWNED BY that wires the new identity sequence to its column.
+    let query_string = context.query_string.unwrap_or("");
     for ti in 0..wqueue.len() {
-        if !wqueue[ti].afterStmts.is_empty() {
-            unported("ATRewriteTables: afterStmts (ProcessUtilityForAlterTable)");
+        // Take the owned afterStmts out of the entry so we don't hold a borrow
+        // of `wqueue` across the re-entrant ProcessUtility dispatch.
+        let stmts = core::mem::replace(&mut wqueue[ti].afterStmts, PgVec::new_in(mcx));
+        for stmt in stmts.into_iter() {
+            backend_tcop_utility_out_seams::process_utility_wrapper::call(
+                mcx,
+                &stmt,
+                query_string,
+                -1,
+                -1,
+            )?;
+            CommandCounterIncrement()?;
         }
     }
 

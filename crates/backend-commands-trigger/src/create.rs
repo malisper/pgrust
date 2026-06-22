@@ -732,6 +732,52 @@ fn transform_trigger_transitions<'mcx>(
         // Because of the above test, we omit further ROW-related testing
         // below. If we later allow naming OLD/NEW row variables, adjust this.
 
+        // if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+        //   ereport: "%s" is a foreign table / Triggers on foreign tables ...
+        if relkind == RELKIND_FOREIGN_TABLE {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(format!("\"{}\" is a foreign table", rel.name()))
+                .errdetail("Triggers on foreign tables cannot have transition tables.")
+                .into_error());
+        }
+
+        // if (rel->rd_rel->relkind == RELKIND_VIEW)
+        //   ereport: "%s" is a view / Triggers on views cannot have transition tables.
+        if relkind == RELKIND_VIEW {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(format!("\"{}\" is a view", rel.name()))
+                .errdetail("Triggers on views cannot have transition tables.")
+                .into_error());
+        }
+
+        // We currently don't allow row-level triggers with transition tables on
+        // partition or inheritance children.
+        //   if (TRIGGER_FOR_ROW(tgtype) && has_superclass(rel->rd_id)) {
+        //       if (rel->rd_rel->relispartition)
+        //           ereport: ROW triggers ... not supported on partitions
+        //       else
+        //           ereport: ROW triggers ... not supported on inheritance children
+        //   }
+        if pt::TRIGGER_FOR_ROW(tgtype)
+            && backend_catalog_pg_inherits::has_superclass(rel.rd_id)?
+        {
+            if rel.rd_rel.relispartition {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg("ROW triggers with transition tables are not supported on partitions")
+                    .into_error());
+            } else {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg(
+                        "ROW triggers with transition tables are not supported on inheritance children",
+                    )
+                    .into_error());
+            }
+        }
+
         // if (stmt->timing != TRIGGER_TYPE_AFTER)
         if stmt.timing != pt::TRIGGER_TYPE_AFTER {
             return Err(ereport(ERROR)
@@ -749,17 +795,14 @@ fn transform_trigger_transitions<'mcx>(
         }
 
         // We currently don't allow multi-event triggers ("INSERT OR UPDATE")
-        // with transition tables, because it's not clear how to handle the
-        // distinct event types' transition tables.
-        // (tgtype event bits = TRIGGER_TYPE_INSERT|UPDATE|DELETE) — must be a
-        // single one. C: `if (stmt->events != TRIGGER_TYPE_INSERT && ... )`
-        // collapses to "exactly one event bit set".
-        let event_bits = stmt.events
-            & (pt::TRIGGER_TYPE_INSERT | pt::TRIGGER_TYPE_UPDATE | pt::TRIGGER_TYPE_DELETE);
-        let single_event = event_bits == pt::TRIGGER_TYPE_INSERT
-            || event_bits == pt::TRIGGER_TYPE_UPDATE
-            || event_bits == pt::TRIGGER_TYPE_DELETE;
-        if !single_event {
+        // with transition tables.
+        //   if (((TRIGGER_FOR_INSERT(tgtype) ? 1 : 0) +
+        //        (TRIGGER_FOR_UPDATE(tgtype) ? 1 : 0) +
+        //        (TRIGGER_FOR_DELETE(tgtype) ? 1 : 0)) != 1)
+        let nevents = ((tgtype & pt::TRIGGER_TYPE_INSERT != 0) as i32)
+            + ((tgtype & pt::TRIGGER_TYPE_UPDATE != 0) as i32)
+            + ((tgtype & pt::TRIGGER_TYPE_DELETE != 0) as i32);
+        if nevents != 1 {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("transition tables cannot be specified for triggers with more than one event")
@@ -772,40 +815,6 @@ fn transform_trigger_transitions<'mcx>(
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("transition tables cannot be specified for triggers with column lists")
-                .into_error());
-        }
-
-        // We disallow transition tables on foreign tables and views.
-        if relkind == RELKIND_FOREIGN_TABLE {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-                .errmsg("transition tables cannot be specified for triggers on foreign tables")
-                .into_error());
-        }
-        if relkind == RELKIND_VIEW {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-                .errmsg("transition tables cannot be specified for triggers on views")
-                .into_error());
-        }
-
-        // We disallow transition tables on partitions/inheritance children, as
-        // there is no way to access the row in the inheritance parent's format.
-        // (C: `rel->rd_rel->relispartition` and `has_superclass(relid)`.)
-        if rel.rd_rel.relispartition {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-                .errmsg("transition tables cannot be specified for triggers on partitions")
-                .into_error());
-        }
-        if relkind == RELKIND_RELATION
-            && backend_catalog_pg_inherits::has_superclass(rel.rd_id)?
-        {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-                .errmsg(
-                    "transition tables cannot be specified for triggers on inheritance children",
-                )
                 .into_error());
         }
 

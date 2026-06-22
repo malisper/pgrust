@@ -132,7 +132,7 @@ const ATTRIBUTE_IDENTITY_ALWAYS: i8 = b'a' as i8;
 const ATTRIBUTE_IDENTITY_BY_DEFAULT: i8 = b'd' as i8;
 
 // `restrict_nonsystem_relation_kind` bit (tcop/tcopprot.h).
-const RESTRICT_RELKIND_VIEW: i32 = 0x02;
+const RESTRICT_RELKIND_VIEW: i32 = 0x01;
 // `FirstNormalObjectId` (access/transam.h).
 const FirstNormalObjectId: Oid = 16384;
 // `SESSION_REPLICATION_ROLE_REPLICA` (utils/guc.h).
@@ -2258,9 +2258,15 @@ fn rewriteTargetView<'mcx>(
         }
     }
 
-    // restrict_nonsystem_relation_kind & RESTRICT_RELKIND_VIEW: the GUC is not
-    // carried in this slice (no consumer sets it for views on the test spine);
-    // the C default leaves it clear, so the access-restriction branch is a no-op.
+    // Check if the expansion of non-system views are restricted.
+    let restrict = backend_utils_misc_guc_tables_seams::restrict_nonsystem_relation_kind::call();
+    if (restrict & RESTRICT_RELKIND_VIEW) != 0 && view.rd_id >= FirstNormalObjectId {
+        return Err(PgError::new(
+            ERROR,
+            format!("access to non-system view \"{}\" is restricted", view.name()),
+        )
+        .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
+    }
 
     // The view must be updatable, else fail. If INSERT/UPDATE (or MERGE
     // containing INSERT/UPDATE), also require at least one updatable column.

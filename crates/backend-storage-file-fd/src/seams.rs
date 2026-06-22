@@ -729,6 +729,76 @@ pub fn close_pipe_stream(stream: PgFileStream) -> PgResult<i32> {
     allocated_desc::ClosePipeStream(stream.0 as i32)
 }
 
+/// `open_pipe_from_program` — copyfrom.c:1856-1865:
+/// `OpenPipeStream(command, PG_BINARY_R)` then `if (copy_file == NULL)
+/// ereport(ERROR, errcode_for_file_access, "could not execute command: %m")`.
+pub fn open_pipe_from_program(command: &str) -> PgResult<PgFileStream> {
+    match allocated_desc::OpenPipeStreamOrNull(command, "r")? {
+        Some(index) => Ok(PgFileStream(index as u64)),
+        None => {
+            let errno = errno_now();
+            Err(file_access_error(
+                ERROR,
+                errno,
+                format!("could not execute command \"{command}\": %m"),
+            ))
+        }
+    }
+}
+
+/// `copy_pipe_read` — `bytesread = fread(databuf, 1, maxread, copy_file)`
+/// against a COPY FROM PROGRAM pipe stream. An empty `Vec` is EOF; a read error
+/// is the C `ereport(ERROR, "could not read from COPY program: %m")`.
+pub fn copy_pipe_read(stream: PgFileStream, maxread: i32) -> PgResult<Vec<u8>> {
+    let maxread = maxread.max(0) as usize;
+    match allocated_desc::pipe_read_chunk(stream.0 as i32, maxread) {
+        Ok(bytes) => Ok(bytes),
+        Err(errno) => Err(file_access_error(
+            ERROR,
+            errno,
+            "could not read from COPY program: %m".to_string(),
+        )),
+    }
+}
+
+/// `close_pipe_from_program` — copyfrom.c:1942-1971: `ClosePipeStream(copy_file)`
+/// (`pclose`) then the exit-status check, tolerating a pre-EOF `SIGPIPE`.
+pub fn close_pipe_from_program(
+    stream: PgFileStream,
+    filename: &str,
+    raw_reached_eof: bool,
+) -> PgResult<()> {
+    let pclose_rc = allocated_desc::ClosePipeStream(stream.0 as i32)?;
+    if pclose_rc == -1 {
+        let errno = errno_now();
+        return Err(file_access_error(
+            ERROR,
+            errno,
+            "could not close pipe to external command: %m".to_string(),
+        ));
+    }
+    if pclose_rc != 0 {
+        // If we ended a COPY FROM PROGRAM before reaching EOF, then it's
+        // expectable for the called program to fail with SIGPIPE, and we should
+        // not report that as an error.
+        if !raw_reached_eof && wait_result_is_signal(pclose_rc, libc::SIGPIPE) {
+            return Ok(());
+        }
+        let detail = wait_result_to_str(pclose_rc);
+        return Err(PgError::new(ERROR, format!("program \"{filename}\" failed"))
+            .with_sqlstate(types_error::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION)
+            .with_detail(detail)
+            .with_error_location(types_error::ErrorLocation::new(SRCFILE, 0, "")));
+    }
+    Ok(())
+}
+
+/// `wait_result_is_signal(int exit_status, int signum)` (`common/wait_error.c`)
+/// — true if the child terminated due to signal `signum`.
+fn wait_result_is_signal(exit_status: i32, signum: i32) -> bool {
+    libc::WIFSIGNALED(exit_status) && libc::WTERMSIG(exit_status) == signum
+}
+
 /// `stdout_stream` — the C stdio `stdout` global as a registered stream token.
 pub fn stdout_stream() -> PgFileStream {
     PgFileStream(STDOUT_STREAM)

@@ -595,6 +595,16 @@ fn explain_print_plan<'es>(
 ) -> PgResult<()> {
     let es_mcx: Mcx<'es> = es.str.allocator();
     query_desc.work.with(|w| {
+        // Hand EXPLAIN non-owning back-pointers into the running EState's
+        // subplan-state tables so `ExplainSubPlans` can reach the InitPlan /
+        // SubPlan child plan-state trees (the owned model single-owns them in
+        // `es_subplanstates` / `es_initplan` rather than aliasing them on each
+        // `SubPlanState.planstate`, which C does). Valid for the synchronous
+        // walk below; `w` (and its EState) outlives `walk::ExplainPrintPlan`.
+        es.es_subplanstates_ptr = w.estate.es_subplanstates.as_ptr() as *const ();
+        es.es_subplanstates_len = w.estate.es_subplanstates.len();
+        es.es_initplan_ptr = w.estate.es_initplan.as_ptr() as *const ();
+        es.es_initplan_len = w.estate.es_initplan.len();
         let plannedstmt: &PlannedStmt<'_> = &w.plannedstmt;
         let planstate = w
             .planstate

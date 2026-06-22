@@ -12,12 +12,11 @@
 //! installs cooked defaults and CHECK constraints, followed by `IndexStmt`s for
 //! INCLUDING INDEXES and any constraint `CommentStmt`s.
 //!
-//! DEFERRED LEG — INCLUDING STATISTICS: the C calls
-//! `RelationGetStatExtList(relation)` + `generateClonedExtStatsStmt(...)` to
-//! clone extended-statistics objects. `generateClonedExtStatsStmt`
-//! (`statscmds.c`) is not yet ported, so the STATISTICS leg is not produced
-//! here. `CREATE TABLE ... INCLUDING STATISTICS` (or INCLUDING ALL) silently
-//! omits cloned extended statistics; all other legs are faithful.
+//! INCLUDING STATISTICS leg: `RelationGetStatExtList(relation)` +
+//! `generateClonedExtStatsStmt(...)` clone the parent's extended-statistics
+//! objects into `CreateStatsStmt`s appended to the result list (with stxkeys
+//! columns + stxexprs expressions Var-remapped through the attmap, and the
+//! source object's comment carried via `stxcomment` when INCLUDING COMMENTS).
 
 use alloc::format;
 use alloc::string::ToString;
@@ -28,7 +27,8 @@ use types_core::primitive::InvalidOid;
 use types_core::Oid;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use types_nodes::ddlnodes::{
-    AlterTableCmd, AlterTableStmt, AlterTableType, CommentStmt, ConstrType,
+    AlterTableCmd, AlterTableStmt, AlterTableType, CommentStmt, ConstrType, CreateStatsStmt,
+    StatsElem,
 };
 use types_nodes::parsenodes::DROP_RESTRICT;
 use types_nodes::nodes::Node;
@@ -45,6 +45,8 @@ use backend_commands_vacuum_seams as vacuum_seams;
 use backend_nodes_outfuncs::nodeToString;
 use backend_nodes_read_seams as read_seams;
 use backend_rewrite_core::replace::map_variable_attnos;
+use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_utils_cache_syscache_seams as syscache;
 use backend_utils_error::ereport;
 
 use crate::cloned_index::generateClonedIndexStmt;
@@ -58,12 +60,22 @@ const CONSTRAINT_RELATION_ID: Oid = 2606;
 /// `RELKIND_FOREIGN_TABLE` (`pg_class.h`).
 const RELKIND_FOREIGN_TABLE: u8 = b'f';
 
+/// `StatisticExtRelationId` (`pg_statistic_ext.h`, OID 3381).
+const STATISTIC_EXT_RELATION_ID: Oid = 3381;
+
+// `STATS_EXT_*` kinds (`pg_statistic_ext.h`).
+const STATS_EXT_NDISTINCT: u8 = b'd';
+const STATS_EXT_DEPENDENCIES: u8 = b'f';
+const STATS_EXT_MCV: u8 = b'm';
+const STATS_EXT_EXPRESSIONS: u8 = b'e';
+
 // TableLikeOption bits (`nodes/parsenodes.h`).
 const CREATE_TABLE_LIKE_COMMENTS: u32 = 1 << 0;
 const CREATE_TABLE_LIKE_CONSTRAINTS: u32 = 1 << 2;
 const CREATE_TABLE_LIKE_DEFAULTS: u32 = 1 << 3;
 const CREATE_TABLE_LIKE_GENERATED: u32 = 1 << 4;
 const CREATE_TABLE_LIKE_INDEXES: u32 = 1 << 6;
+const CREATE_TABLE_LIKE_STATISTICS: u32 = 1 << 7;
 
 /// `expandTableLikeClause(heapRel, table_like_clause)` (parse_utilcmd.c).
 ///
@@ -354,8 +366,34 @@ pub fn expandTableLikeClause<'mcx>(
         }
     }
 
-    // INCLUDING STATISTICS: DEFERRED — generateClonedExtStatsStmt unported.
-    // (See module docs.)
+    // Process extended statistics if required.
+    if options & CREATE_TABLE_LIKE_STATISTICS != 0 {
+        let parent_extstats =
+            vacuum_seams::relation_get_stat_ext_list::call(relation_oid)?;
+
+        for parent_stat_oid in parent_extstats {
+            let mut stats = generateClonedExtStatsStmt(
+                mcx,
+                &heap_rv,
+                childrel.rd_id,
+                parent_stat_oid,
+                &attmap.attnums,
+            )?;
+
+            // Copy comment on statistics object, if requested.
+            if options & CREATE_TABLE_LIKE_COMMENTS != 0 {
+                if let Some(comment) =
+                    GetComment(mcx, parent_stat_oid, STATISTIC_EXT_RELATION_ID, 0)?
+                {
+                    // We make use of CreateStatsStmt's stxcomment option, so as
+                    // not to need to know now what name the statistics will have.
+                    stats.stxcomment = Some(PgString::from_str_in(&comment, mcx)?);
+                }
+            }
+
+            result.push(mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stats)?)?);
+        }
+    }
 
     // Done with child rel.
     table_close(childrel, NoLock)?;
@@ -364,4 +402,124 @@ pub fn expandTableLikeClause<'mcx>(
     table_close(relation, NoLock)?;
 
     Ok(result)
+}
+
+/// `generateClonedExtStatsStmt(heapRel, heapRelid, source_statsid, attmap)`
+/// (parse_utilcmd.c) — build a `CreateStatsStmt` from an existing extended
+/// statistics object `source_statsid`, for the rel identified by `heapRel`
+/// (`RangeVar`) and `heapRelid`. Attribute numbers in expression Vars are
+/// adjusted according to `attmap`.
+fn generateClonedExtStatsStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_rv: &NodePtr<'mcx>,
+    heap_relid: Oid,
+    source_statsid: Oid,
+    attmap: &[types_core::AttrNumber],
+) -> PgResult<CreateStatsStmt<'mcx>> {
+    debug_assert!(heap_relid != InvalidOid);
+
+    // Fetch pg_statistic_ext tuple of source statistics object: stxkeys
+    // (covered column attnums), stxkind (1-D char[] of enabled kinds), and the
+    // raw stxexprs pg_node_tree text.
+    let (_stxnamespace, _stxname, _stxrelid, stxkeys, stxkind, stxexprs_text) =
+        syscache::statext_objdef_fields::call(mcx, source_statsid)?.ok_or_else(|| {
+            ereport(ERROR)
+                .errmsg_internal(format!(
+                    "cache lookup failed for statistics object {source_statsid}"
+                ))
+                .into_error()
+        })?;
+
+    // Determine which statistics types exist.
+    let mut stat_types: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    for &enabled in stxkind.iter() {
+        if enabled == STATS_EXT_NDISTINCT {
+            stat_types.push(make_string(mcx, "ndistinct")?);
+        } else if enabled == STATS_EXT_DEPENDENCIES {
+            stat_types.push(make_string(mcx, "dependencies")?);
+        } else if enabled == STATS_EXT_MCV {
+            stat_types.push(make_string(mcx, "mcv")?);
+        } else if enabled == STATS_EXT_EXPRESSIONS {
+            // expression stats are not exposed to users
+            continue;
+        } else {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!(
+                    "unrecognized statistics kind {}",
+                    enabled as char
+                ))
+                .into_error());
+        }
+    }
+
+    // Determine which columns the statistics are on.
+    let mut def_names: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    for &attnum in stxkeys.iter() {
+        let name = lsyscache::get_attname::call(mcx, heap_relid, attnum as i16, false)?
+            .ok_or_else(|| {
+                ereport(ERROR)
+                    .errmsg_internal(format!(
+                        "could not find attribute {attnum} of relation {heap_relid}"
+                    ))
+                    .into_error()
+            })?;
+        let selem = StatsElem {
+            name: Some(name),
+            expr: None,
+        };
+        def_names.push(mcx::alloc_in(mcx, Node::mk_stats_elem(mcx, selem)?)?);
+    }
+
+    // Now handle expressions, if there are any. The order (with respect to
+    // regular attributes) does not really matter for extended stats, so we
+    // simply append them after simple column references.
+    if let Some(exprs_text) = stxexprs_text {
+        let exprs_node = read_seams::string_to_node::call(mcx, exprs_text.as_str())?;
+        // stringToNode(exprsString) yields a List of expressions.
+        let exprs: alloc::vec::Vec<NodePtr<'mcx>> = match exprs_node.as_ref().as_list() {
+            Some(items) => {
+                let mut v = alloc::vec::Vec::with_capacity(items.len());
+                for it in items.iter() {
+                    v.push(mcx::alloc_in(mcx, it.clone_in(mcx)?)?);
+                }
+                v
+            }
+            // A single-element list can be represented as a bare node.
+            None => alloc::vec![exprs_node],
+        };
+
+        for mut expr in exprs {
+            // Adjust Vars to match new table's column numbering.
+            let mut found_whole_row = false;
+            map_variable_attnos(
+                &mut expr,
+                1,
+                0,
+                attmap,
+                InvalidOid,
+                &mut found_whole_row,
+                mcx,
+            )?;
+
+            let selem = StatsElem {
+                name: None,
+                expr: Some(expr),
+            };
+            def_names.push(mcx::alloc_in(mcx, Node::mk_stats_elem(mcx, selem)?)?);
+        }
+    }
+
+    // Finally, build the output node.
+    let mut relations: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    relations.push(mcx::alloc_in(mcx, heap_rv.as_ref().clone_in(mcx)?)?);
+
+    Ok(CreateStatsStmt {
+        defnames: PgVec::new_in(mcx),
+        stat_types,
+        exprs: def_names,
+        relations,
+        stxcomment: None,
+        transformed: true, // don't need transformStatsStmt again
+        if_not_exists: false,
+    })
 }

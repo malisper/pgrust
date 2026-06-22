@@ -1371,6 +1371,11 @@ pub fn init_seams() {
     is_temp_or_temp_toast_namespace::set(
         backend_catalog_namespace::isTempOrTempToastNamespace,
     );
+    // GetTempNamespaceProcNumber(relnamespace) — the "do it the hard way" leg of
+    // pg_relation_filepath for a temp relation in another backend's namespace.
+    get_temp_namespace_proc_number::set(
+        backend_catalog_namespace::get_temp_namespace_proc_number_no_mcx,
+    );
     proc_number_for_temp_relations::set(
         backend_catalog_storage::proc_number_for_temp_relations,
     );
@@ -1423,11 +1428,130 @@ pub fn init_seams() {
     // data-directory cwd, like C's bare stat()).
     stat::set(stat_provider);
 
-    // NOTE: `read_dir` stays uninstalled. It is the AllocateDir/ReadDir/FreeDir
-    // directory-walk substrate used only by pg_database_size / pg_tablespace_size
-    // (not by pg_relation_size or any other relation-size routine); modelling the
-    // eager AllocateDir-or-NULL + skip-"."/".." walk faithfully needs the fd.c
-    // directory-descriptor lane, which is out of scope here.
+    // AllocateDir(path) + the eager ReadDir/FreeDir walk over the runtime
+    // filesystem. Models C's `AllocateDir`-returns-NULL (errno saved) vs. the
+    // collected entries, so `calculate_database_size`'s un-NULL-checked
+    // `pg_tblspc` scan can replicate the "could not open directory" error and
+    // `db_dir_size` / `calculate_tablespace_size` can early-return 0 / -1.
+    read_dir::set(read_dir_provider);
+
+    // SearchSysCacheExists1(TABLESPACEOID/DATABASEOID, ...) — the
+    // "does the object exist" probes pg_tablespace_size_oid / pg_database_size_oid
+    // do up front, delegated to the syscache owner's already-installed seams.
+    tablespace_exists::set(backend_utils_cache_syscache_seams::tablespace_exists::call);
+    database_exists::set(backend_utils_cache_syscache_seams::database_exists::call);
+
+    // get_tablespace_oid(name, false) / get_database_oid(name, false) — the
+    // by-name entry points; missing_ok=false so a missing object raises
+    // ERRCODE_UNDEFINED_OBJECT, exactly as C passes `false`.
+    get_tablespace_oid::set(|name| {
+        backend_commands_tablespace_seams::get_tablespace_oid::call(name, false)
+    });
+    get_database_oid::set(|name| {
+        backend_commands_dbcommands_seams::get_database_oid::call(name, false)
+    });
+
+    // object_aclcheck(classId, objId, roleId, mode): the aclchk owner returns the
+    // full AclResult; dbsize's seam collapses it to bool (Ok=ACLCHECK_OK), the
+    // distinction being recovered by aclcheck_error below if it is not OK.
+    object_aclcheck::set(|class_id, obj_id, role_id, mode| {
+        Ok(backend_catalog_aclchk_seams::object_aclcheck::call(class_id, obj_id, role_id, mode)?
+            == types_acl::ACLCHECK_OK)
+    });
+
+    // aclcheck_error(aclresult, objtype, objectname): C computes the object name
+    // via get_{database,tablespace}_name at the call site and never returns. The
+    // dbsize seam carries only (objtype, obj_id); re-derive the non-OK AclResult
+    // through object_aclcheck, look up the name, and raise via the aclchk owner.
+    aclcheck_error::set(|objtype, obj_id| aclcheck_error_provider(objtype, obj_id));
+}
+
+/// `AllocateDir(path)` + iterate `ReadDir(dirdesc, path)` + `FreeDir()` over the
+/// runtime filesystem. Captures the failed-`opendir` `errno` (the one branch
+/// `calculate_database_size` consults) rather than discarding it, and collects
+/// every entry name (C skips `"."`/`".."` at the call site; `std::fs::read_dir`
+/// already omits them, an equivalent eager walk). Relative to the backend's
+/// data-directory cwd, like C's bare `AllocateDir`.
+fn read_dir_provider(path: &str) -> OpenDir {
+    match std::fs::read_dir(path) {
+        Ok(iter) => {
+            let mut entries = Vec::new();
+            for ent in iter {
+                match ent {
+                    Ok(e) => entries.push(DirEntry {
+                        name: e.file_name().to_string_lossy().into_owned(),
+                    }),
+                    // A per-entry readdir error: stop the walk with what we have,
+                    // matching C's ReadDir returning NULL at end-of-stream (the
+                    // size routines simply use the entries gathered so far).
+                    Err(_) => break,
+                }
+            }
+            OpenDir::Opened(entries)
+        }
+        Err(e) => OpenDir::Failed {
+            errno: e.raw_os_error().unwrap_or(libc::ENOENT),
+        },
+    }
+}
+
+/// `aclcheck_error(aclresult, objtype, objectname)` provider. C never returns
+/// from `aclcheck_error`; this always yields the permission-denied [`PgError`].
+/// The object name is computed via `get_{tablespace,database}_name`, and the
+/// exact non-OK `AclResult` is re-derived through `object_aclcheck` (with the
+/// same class/mode the size routine used) so the owner picks the right message.
+fn aclcheck_error_provider(objtype: AclObjectType, obj_id: Oid) -> PgError {
+    let scratch = mcx::MemoryContext::new("dbsize aclcheck_error");
+    let mcx = scratch.mcx();
+
+    let (class_id, mode, obj_type, name) = match objtype {
+        AclObjectType::Database => {
+            let name = backend_commands_dbcommands_seams::get_database_name::call(mcx, obj_id)
+                .ok()
+                .flatten()
+                .map(|s| s.to_string());
+            (
+                DatabaseRelationId,
+                ACL_CONNECT,
+                types_nodes::parsenodes::ObjectType::Database,
+                name,
+            )
+        }
+        AclObjectType::Tablespace => {
+            let name = backend_commands_tablespace_seams::get_tablespace_name::call(mcx, obj_id)
+                .ok()
+                .flatten()
+                .map(|s| s.to_string());
+            (
+                TableSpaceRelationId,
+                ACL_CREATE,
+                types_nodes::parsenodes::ObjectType::Tablespace,
+                name,
+            )
+        }
+    };
+
+    // Re-derive the non-OK AclResult the size routine observed.
+    let role_id = match get_user_id::call() {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let aclresult = match backend_catalog_aclchk_seams::object_aclcheck::call(
+        class_id, obj_id, role_id, mode,
+    ) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+
+    // aclcheck_error returns Ok(()) for ACLCHECK_OK and Err(PgError) otherwise;
+    // here aclresult is non-OK by construction, so unwrap the Err.
+    match backend_catalog_aclchk_seams::aclcheck_error::call(aclresult, obj_type, name) {
+        Ok(()) => ereport(ERROR)
+            .errcode(types_error::error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg_internal("dbsize aclcheck_error: aclresult unexpectedly OK")
+            .into_error(),
+        Err(e) => e,
+    }
 }
 
 #[cfg(test)]

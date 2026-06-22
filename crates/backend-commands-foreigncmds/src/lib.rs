@@ -26,8 +26,8 @@ use types_core::primitive::{InvalidOid, Oid};
 use types_error::error::{
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_FDW_NO_SCHEMAS, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
-    ERROR, NOTICE, WARNING,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE, WARNING,
 };
 use types_error::pg_error::{ErrorLocation, PgError};
 use types_error::PgResult;
@@ -264,6 +264,7 @@ fn transform_generic_options_impl(
             defname: mcx::PgString::from_str_in(name, mcx)?,
             arg: mk_arg(mcx, value)?,
             defaction: DefElemAction::Unspec,
+            location: -1,
         });
     }
 
@@ -280,6 +281,7 @@ fn transform_generic_options_impl(
             defname: mcx::PgString::from_str_in(name, mcx)?,
             arg: mk_arg(mcx, value)?,
             defaction,
+            location: -1,
         });
     }
 
@@ -577,10 +579,26 @@ fn lookup_fdw_validator_func<'mcx>(validator: &DefElem<'mcx>) -> PgResult<Oid> {
     /* validator's return value is ignored, so we don't check the type */
 }
 
+/// `errorConflictingDefElem(defel, pstate)` (define.c:371). Attaches
+/// `parser_errposition(pstate, defel->location)` so psql renders the `LINE n:
+/// ...` source-context with a caret under the redundant option.
+fn error_conflicting_def_elem(
+    pstate: &types_nodes::parsestmt::ParseState<'_>,
+    location: types_core::primitive::ParseLoc,
+) -> PgResult<PgError> {
+    let cursorpos = backend_parser_small1_seams::parser_errposition::call(pstate, location)?;
+    Ok(ereport(ERROR)
+        .errcode(ERRCODE_SYNTAX_ERROR)
+        .errmsg("conflicting or redundant options")
+        .errposition(cursorpos)
+        .into_error())
+}
+
 /// `parse_func_options` — process the HANDLER/VALIDATOR options of CREATE/ALTER
 /// FDW.  Returns `(handler_given, fdwhandler, validator_given, fdwvalidator)`.
 fn parse_func_options<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: &types_nodes::parsestmt::ParseState<'mcx>,
     func_options: &[DefElem<'mcx>],
 ) -> PgResult<(bool, Oid, bool, Oid)> {
     let mut handler_given = false;
@@ -593,15 +611,13 @@ fn parse_func_options<'mcx>(
         let dn = def.defname.as_str();
         if dn == "handler" {
             if handler_given {
-                return aclchk_seams::error_conflicting_def_elem::call(dn.to_string())
-                    .map(|()| (false, InvalidOid, false, InvalidOid));
+                return Err(error_conflicting_def_elem(pstate, def.location)?);
             }
             handler_given = true;
             fdwhandler = lookup_fdw_handler_func(mcx, def)?;
         } else if dn == "validator" {
             if validator_given {
-                return aclchk_seams::error_conflicting_def_elem::call(dn.to_string())
-                    .map(|()| (false, InvalidOid, false, InvalidOid));
+                return Err(error_conflicting_def_elem(pstate, def.location)?);
             }
             validator_given = true;
             fdwvalidator = lookup_fdw_validator_func(def)?;
@@ -623,6 +639,7 @@ fn parse_func_options<'mcx>(
 /// `CreateForeignDataWrapper` — CREATE FOREIGN DATA WRAPPER.
 pub fn CreateForeignDataWrapper<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: &types_nodes::parsestmt::ParseState<'mcx>,
     stmt: &CreateFdwStmt<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let fdwname = stmt.fdwname.as_str();
@@ -655,7 +672,7 @@ pub fn CreateForeignDataWrapper<'mcx>(
 
     /* Lookup handler and validator functions, if given */
     let (_handler_given, fdwhandler, _validator_given, fdwvalidator) =
-        parse_func_options(mcx, &stmt.func_options)?;
+        parse_func_options(mcx, pstate, &stmt.func_options)?;
 
     let fdwoptions = transformGenericOptions(
         mcx,
@@ -712,6 +729,7 @@ pub fn CreateForeignDataWrapper<'mcx>(
 /// `AlterForeignDataWrapper` — ALTER FOREIGN DATA WRAPPER.
 pub fn AlterForeignDataWrapper<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: &types_nodes::parsestmt::ParseState<'mcx>,
     stmt: &AlterFdwStmt<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let fdwname = stmt.fdwname.as_str();
@@ -738,7 +756,7 @@ pub fn AlterForeignDataWrapper<'mcx>(
     let fdw_id = fdw_row.fdwid;
 
     let (handler_given, fdwhandler, validator_given, fdwvalidator0) =
-        parse_func_options(mcx, &stmt.func_options)?;
+        parse_func_options(mcx, pstate, &stmt.func_options)?;
 
     let mut repl_handler: Option<Oid> = None;
     let mut repl_validator: Option<Oid> = None;
@@ -1740,7 +1758,7 @@ fn rich_defelem_to_flat<'mcx>(
         types_nodes::ddlnodes::DEFELEM_ADD => DefElemAction::Add,
         types_nodes::ddlnodes::DEFELEM_DROP => DefElemAction::Drop,
     };
-    Ok(DefElem { defname, arg, defaction })
+    Ok(DefElem { defname, arg, defaction, location: de.location })
 }
 
 /// Project a rich `List *` of `DefElem` nodes into a flat `Vec<DefElem>`.
@@ -1785,7 +1803,7 @@ fn rich_rolespec_to_flat<'mcx>(
 /// Outward-seam adapter for `CreateForeignDataWrapper(pstate, stmt)`.
 fn create_fdw_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let s = match stmt.as_createfdwstmt() {
@@ -1801,13 +1819,13 @@ fn create_fdw_seam<'mcx>(
         func_options: rich_options_to_flat(mcx, &s.func_options)?,
         options: rich_options_to_flat(mcx, &s.options)?,
     };
-    CreateForeignDataWrapper(mcx, &flat)
+    CreateForeignDataWrapper(mcx, pstate, &flat)
 }
 
 /// Outward-seam adapter for `AlterForeignDataWrapper(pstate, stmt)`.
 fn alter_fdw_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let s = match stmt.as_alterfdwstmt() {
@@ -1823,7 +1841,7 @@ fn alter_fdw_seam<'mcx>(
         func_options: rich_options_to_flat(mcx, &s.func_options)?,
         options: rich_options_to_flat(mcx, &s.options)?,
     };
-    AlterForeignDataWrapper(mcx, &flat)
+    AlterForeignDataWrapper(mcx, pstate, &flat)
 }
 
 /// Outward-seam adapter for `CreateForeignTable(stmt, relid)`.

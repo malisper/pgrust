@@ -1689,6 +1689,22 @@ pub struct ExprState<'mcx> {
     /// `None` (the C NIL `winstate->funcs`) for every non-WindowAgg expression.
     pub found_window_funcs:
         Option<PgVec<'mcx, PgBox<'mcx, crate::nodewindowagg::WindowFuncExprState<'mcx>>>>,
+
+    /// SubPlan-discovery channel (compile-time only). C's `ExecInitExprRec`
+    /// `T_SubPlan` arm does `state->parent->subPlan = lappend(state->parent->subPlan,
+    /// sstate)` — it appends the new `SubPlanState` onto the parent `PlanState`'s
+    /// `subPlan` list while compiling the node's quals/targetlist. In the owned
+    /// model the executing `SubPlanState` is single-owned on the `EEOP_SUBPLAN`
+    /// step and the parent `PlanState` is not yet address-stable at compile time
+    /// (its `parent` back-link is deferred to `stamp_expr_parents`), so the
+    /// compiler records each expression-SubPlan's 1-based `plan_id` HERE and the
+    /// compile entry point (`ExecInitQual`/`ExecInitExpr`/`ExecBuildProjectionInfo`)
+    /// drains it into `parent.sub_plan_ids` — the owned-model split of C's
+    /// `PlanState.subPlan` (whose child plan-state trees live in
+    /// `EState.es_subplanstates`, keyed by `plan_id`). Consumed by `ExecReScan`
+    /// (chgParam propagation) and EXPLAIN (SubPlan body printing). `None` (the C
+    /// NIL `parent->subPlan` before any discovery) for expressions with no SubPlan.
+    pub found_subplan_ids: Option<alloc::vec::Vec<i32>>,
 }
 
 impl<'mcx> Clone for ExprState<'mcx> {
@@ -1749,6 +1765,7 @@ impl Default for ExprState<'_> {
             json_coercion_caches: JsonCoercionCacheArena::default(),
             found_aggs: None,
             found_window_funcs: None,
+            found_subplan_ids: None,
         }
     }
 }

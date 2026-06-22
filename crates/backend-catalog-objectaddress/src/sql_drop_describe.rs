@@ -238,3 +238,90 @@ pub fn event_trigger_describe_dropped_object<'mcx>(
 
     Ok(info)
 }
+
+/// The per-command descriptive-field computation `pg_event_trigger_ddl_commands`
+/// (`event_trigger.c` ~2123-2166) performs for one `CollectedCommand` whose
+/// `addr` is an ordinary object (the `SCT_Simple` / `SCT_AlterTable` /
+/// `SCT_AlterOpFamily` / `SCT_CreateOpClass` / `SCT_AlterTSConfig` arm):
+/// `getObjectIdentity(addr, true)`, `getObjectTypeDescription(addr, true)`, and
+/// the namespace lookup (`is_objectclass_supported` →
+/// `get_object_attnum_namespace` → `get_catalog_object_by_oid` →
+/// `heap_getattr` → `get_namespace_name_or_temp`).
+///
+/// Returns `Ok(None)` when `getObjectIdentity` returns NULL (the C
+/// `if (identity == NULL) continue;` — the object was dropped in the same
+/// command). Otherwise returns `(identity, type, schema)` where `schema` is
+/// `None` for a schema-less object class. Unlike the dropped-object form there
+/// is no temp-namespace filtering: the C path always records the row.
+pub fn event_trigger_describe_command_object<'mcx>(
+    mcx: Mcx<'mcx>,
+    object: &ObjectAddress,
+) -> PgResult<Option<(String, String, Option<String>)>> {
+    use alloc::format;
+
+    // identity = getObjectIdentity(&addr, true);
+    // if (identity == NULL) continue;
+    let identity = match crate::identity::get_object_identity(mcx, object, true)? {
+        Some(s) => s.as_str().to_string(),
+        None => return Ok(None),
+    };
+
+    // type = getObjectTypeDescription(&addr, true);  /* never NULL */
+    let typedesc = get_object_type_description(mcx, object, true)?
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+
+    // Obtain schema name, if any. NULL for schema-less object classes.
+    let mut schema: Option<String> = None;
+    if is_objectclass_supported(object.classId) {
+        let nsp_attnum = get_object_attnum_namespace(object.classId)?;
+        if nsp_attnum != InvalidAttrNumber {
+            // catalog = table_open(addr.classId, AccessShareLock);
+            let catalog = backend_access_common_relation_seams::relation_open::call(
+                mcx,
+                object.classId,
+                AccessShareLock,
+            )?;
+            // objtup = get_catalog_object_by_oid(catalog,
+            //              get_object_attnum_oid(addr.classId), addr.objectId);
+            let objtup = get_catalog_object_by_oid(
+                mcx,
+                &catalog,
+                get_object_attnum_oid(object.classId)?,
+                object.objectId,
+            )?;
+            let tuple = match objtup {
+                Some(t) => t,
+                None => {
+                    catalog.close(AccessShareLock)?;
+                    return Err(backend_utils_error::ereport(types_error::ERROR)
+                        .errmsg_internal(format!(
+                            "cache lookup failed for object {}/{}",
+                            object.classId, object.objectId
+                        ))
+                        .into_error());
+                }
+            };
+            // schema_oid = heap_getattr(objtup, nspAttnum, ...); if (isnull) elog(ERROR)
+            match crate::fmgr_sql::heap_getattr(mcx, &tuple, nsp_attnum as i32, &catalog.rd_att)? {
+                Some(datum) => {
+                    let schema_oid = datum.as_oid();
+                    schema = lsyscache::get_namespace_name_or_temp::call(mcx, schema_oid)?
+                        .map(|s| s.as_str().to_string());
+                }
+                None => {
+                    catalog.close(AccessShareLock)?;
+                    return Err(backend_utils_error::ereport(types_error::ERROR)
+                        .errmsg_internal(format!(
+                            "invalid null namespace in object {}/{}/{}",
+                            object.classId, object.objectId, object.objectSubId
+                        ))
+                        .into_error());
+                }
+            }
+            catalog.close(AccessShareLock)?;
+        }
+    }
+
+    Ok(Some((identity, typedesc, schema)))
+}

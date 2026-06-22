@@ -12,6 +12,7 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::nodeindexscan::PlannedStmt;
+use types_nodes::rawnodes::SetOperationStmt;
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerGlobal, PlannerInfo, QueryId};
 
@@ -101,6 +102,7 @@ seam_core::seam!(
         recursion_carry: Option<(i32, f64)>,
         has_recursion: bool,
         tuple_fraction: f64,
+        setop_op: Option<&'mcx SetOperationStmt<'mcx>>,
     ) -> PgResult<PlannerInfo>
 );
 

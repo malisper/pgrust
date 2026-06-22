@@ -68,3 +68,17 @@ backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" 
 # errno-faithful stat: ENOENT discrimination on the std::fs metadata error.
 # (AccessShareLock rides on the already-present `types-storage` dep.)
 libc = "0.2"
+
+# The catalog/command seam OWNERS for the database/tablespace existence, OID,
+# name, and ACL touchpoints `pg_database_size` / `pg_tablespace_size` cross.
+# These are installed (by their owners) into the seam crates below; dbsize wires
+# its own (carrier-shaped) outbound seams to them from `init_seams()`. The seam
+# crates are tiny and do not depend back on dbsize, so no cycle is introduced.
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+# `AclResult` / `ACLCHECK_OK` for re-deriving the aclcheck_error message, and
+# `ObjectType` (OBJECT_DATABASE / OBJECT_TABLESPACE) for the owner's signature.
+types-acl = { path = "../types-acl" }
+types-nodes = { path = "../types-nodes" }

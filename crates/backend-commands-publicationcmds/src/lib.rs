@@ -65,7 +65,7 @@ use types_catalog::pg_publication::{
     PublicationRelObjectIndexId, PublicationRelRelationId, PublicationRelationId,
 };
 use types_core::catalog::FirstNormalObjectId;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid};
+use types_core::primitive::{AttrNumber, InvalidOid, Oid, ParseLoc};
 use types_nodes::ddlnodes::{
     AlterPublicationStmt, CreatePublicationStmt, DefElem, PublicationObjSpec, PublicationTable,
     AP_AddObjects, AP_DropObjects, AP_SetObjects, PUBLICATIONOBJ_TABLE,
@@ -459,17 +459,22 @@ fn defGetGeneratedColsOption(mcx: Mcx<'_>, def: &DefElem) -> PgResult<i8> {
         .into_error())
 }
 
-/// `errorConflictingDefElem(defel, pstate)` (defrem.c).
-fn error_conflicting_def_elem() -> PgError {
-    ereport(ERROR)
+/// `errorConflictingDefElem(defel, pstate)` (define.c:371). Attaches
+/// `parser_errposition(pstate, defel->location)` so psql renders the `LINE n:
+/// ...` source-context with a caret under the redundant option.
+fn error_conflicting_def_elem(pstate: &ParseState<'_>, location: ParseLoc) -> PgResult<PgError> {
+    let cursorpos = backend_parser_small1_seams::parser_errposition::call(pstate, location)?;
+    Ok(ereport(ERROR)
         .errcode(ERRCODE_SYNTAX_ERROR)
         .errmsg("conflicting or redundant options")
-        .into_error()
+        .errposition(cursorpos)
+        .into_error())
 }
 
 /// `parse_publication_options` (publicationcmds.c:77-177).
 fn parse_publication_options<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: &ParseState<'mcx>,
     options: &[PgBox<'mcx, Node<'mcx>>],
 ) -> PgResult<PublicationOptions> {
     let mut publish_given = false;
@@ -500,7 +505,7 @@ fn parse_publication_options<'mcx>(
 
         if dn == "publish" {
             if publish_given {
-                return Err(error_conflicting_def_elem());
+                return Err(error_conflicting_def_elem(pstate, defel.location)?);
             }
 
             /*
@@ -553,13 +558,13 @@ fn parse_publication_options<'mcx>(
             }
         } else if dn == "publish_via_partition_root" {
             if publish_via_partition_root_given {
-                return Err(error_conflicting_def_elem());
+                return Err(error_conflicting_def_elem(pstate, defel.location)?);
             }
             publish_via_partition_root_given = true;
             publish_via_partition_root = defGetBoolean(defel)?;
         } else if dn == "publish_generated_columns" {
             if publish_generated_columns_given {
-                return Err(error_conflicting_def_elem());
+                return Err(error_conflicting_def_elem(pstate, defel.location)?);
             }
             publish_generated_columns_given = true;
             publish_generated_columns = defGetGeneratedColsOption(mcx, defel)?;
@@ -923,7 +928,11 @@ fn contain_mutable_or_user_functions_checker(func_id: Oid) -> bool {
 }
 
 /// `check_simple_rowfilter_expr_walker(node, pstate)` (publicationcmds.c:584-684).
-fn check_simple_rowfilter_expr_walker(node: &Node, err: &RefCell<Option<PgError>>) -> bool {
+fn check_simple_rowfilter_expr_walker(
+    node: &Node,
+    pstate: &ParseState<'_>,
+    err: &RefCell<Option<PgError>>,
+) -> bool {
     let mut errdetail_msg: Option<&'static str> = None;
 
     /*
@@ -1017,8 +1026,13 @@ fn check_simple_rowfilter_expr_walker(node: &Node, err: &RefCell<Option<PgError>
                     }
                     Ok(false) => {
                         let coll = backend_nodes_nodeFuncs_seams::exprCollation::call(expr);
+                        // C: exprInputCollation(node). The owned tree carries the
+                        // field on the `Expr`, so resolve it via the `_expr`
+                        // form (the `_node` seam is the erased-Node stub used by
+                        // the funcapi polymorphic resolver, which always returns
+                        // InvalidOid for a non-FmgrInfo node).
                         let incoll =
-                            backend_nodes_nodeFuncs_seams::expr_input_collation_node::call(node);
+                            backend_nodes_nodeFuncs_seams::expr_input_collation_expr::call(expr);
                         if coll >= FirstNormalObjectId || incoll >= FirstNormalObjectId {
                             errdetail_msg = Some("User-defined collations are not allowed.");
                         }
@@ -1032,25 +1046,38 @@ fn check_simple_rowfilter_expr_walker(node: &Node, err: &RefCell<Option<PgError>
         }
 
         if let Some(msg) = errdetail_msg {
+            // C: parser_errposition(pstate, exprLocation(node)) — convert the
+            // expression's byte offset into the 1-based character cursor psql
+            // renders as the `LINE n: ...` caret (0 if no source text).
             let location = backend_nodes_nodeFuncs_seams::exprLocation::call(expr);
+            let cursorpos =
+                match backend_parser_small1_seams::parser_errposition::call(pstate, location) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        *err.borrow_mut() = Some(e);
+                        return true;
+                    }
+                };
             let e = ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("invalid publication WHERE expression")
                 .errdetail_internal(msg)
-                .errposition(location)
+                .errposition(cursorpos)
                 .into_error();
             *err.borrow_mut() = Some(e);
             return true;
         }
     }
 
-    expression_tree_walker(node, &mut |n| check_simple_rowfilter_expr_walker(n, err))
+    expression_tree_walker(node, &mut |n| {
+        check_simple_rowfilter_expr_walker(n, pstate, err)
+    })
 }
 
 /// `check_simple_rowfilter_expr(node, pstate)` (publicationcmds.c:691-695).
-fn check_simple_rowfilter_expr(node: &Node) -> PgResult<()> {
+fn check_simple_rowfilter_expr(node: &Node, pstate: &ParseState<'_>) -> PgResult<()> {
     let err: RefCell<Option<PgError>> = RefCell::new(None);
-    check_simple_rowfilter_expr_walker(node, &err);
+    check_simple_rowfilter_expr_walker(node, pstate, &err);
     match err.into_inner() {
         Some(e) => Err(e),
         None => Ok(()),
@@ -1160,7 +1187,7 @@ fn TransformPubWhereClauses<'mcx>(
          * check_simple_rowfilter_expr_walker.
          */
         if let Some(n) = wherenode.as_deref() {
-            check_simple_rowfilter_expr(n)?;
+            check_simple_rowfilter_expr(n, &pstate)?;
         }
 
         pri.whereClause = wherenode;
@@ -1679,7 +1706,7 @@ pub fn CreatePublication<'mcx>(
     values[idx(Anum_pg_publication_pubname)] = name_datum(mcx, pubname)?;
     values[idx(Anum_pg_publication_pubowner)] = Datum::from_oid(GetUserId());
 
-    let opts = parse_publication_options(mcx, &stmt.options)?;
+    let opts = parse_publication_options(mcx, pstate, &stmt.options)?;
 
     let puboid = GetNewOidWithIndex(&rel, PublicationObjectIndexId, Anum_pg_publication_oid as AttrNumber)?;
     values[idx(Anum_pg_publication_oid)] = Datum::from_oid(puboid);
@@ -1771,14 +1798,14 @@ pub fn CreatePublication<'mcx>(
 /// `AlterPublicationOptions(pstate, stmt, rel, tup)` (publicationcmds.c:980-1172).
 fn AlterPublicationOptions<'mcx>(
     mcx: Mcx<'mcx>,
-    _pstate: &ParseState<'mcx>,
+    pstate: &ParseState<'mcx>,
     stmt: &AlterPublicationStmt<'mcx>,
     rel: &types_rel::Relation<'mcx>,
     tup: &FormedTuple<'mcx>,
 ) -> PgResult<()> {
     let pubname = stmt.pubname.as_deref().unwrap_or("");
 
-    let opts = parse_publication_options(mcx, &stmt.options)?;
+    let opts = parse_publication_options(mcx, pstate, &stmt.options)?;
 
     let pub_oid = pubform_oid(mcx, rel, tup)?;
     let pubform_puballtables = pubform_bool(mcx, rel, tup, Anum_pg_publication_puballtables)?;

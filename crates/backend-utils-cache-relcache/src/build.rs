@@ -51,9 +51,23 @@ pub fn relation_get_composite_tupdesc<'mcx>(
     // relation_open(typrelid, AccessShareLock) — the relcache pin (RAII guard).
     let rel = crate::core_entry_store::RelationRef::open(typrelid)?;
     // CreateTupleDescCopyConstr(RelationGetDescr(rel)) — materialize a standalone
-    // copy of the entry's tuple descriptor, tagged with the composite type.
+    // copy of the entry's tuple descriptor, tagged with the composite type. The
+    // *Constr variant carries the per-attribute defaults / not-null / missing
+    // arrays; the per-attr `atthasmissing` flow (build_form_attrs ->
+    // populate_compact_attribute) requires the matching `constr->missing` to be
+    // present, else getmissingattr (heaptuple.c) asserts. Copy `rd_att->constr`
+    // into the projected descriptor, exactly as `OwnedTupleDesc::project_in`.
     let attrs = rel.with(|r| r.rd_att.build_form_attrs(r.rd_id));
     let mut td = CreateTupleDesc(mcx, &attrs)?;
+    if let Some(constr) = rel.with(|r| {
+        r.rd_att
+            .constr
+            .as_ref()
+            .map(|c| c.project_in(mcx))
+            .transpose()
+    })? {
+        td.constr = Some(constr);
+    }
     td.tdtypeid = type_id;
     td.tdtypmod = -1;
     td.tdrefcount = 1;
@@ -767,6 +781,7 @@ pub fn RelationBuildTupleDesc(relation: &mut RelationData) -> PgResult<()> {
             attcompression: attp.attcompression,
             attnotnull: attp.attnotnull,
             atthasdef: attp.atthasdef,
+            atthasmissing: attp.atthasmissing,
             attndims: attp.attndims,
             attidentity: attp.attidentity,
             attgenerated: attp.attgenerated,

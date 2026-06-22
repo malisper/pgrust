@@ -922,6 +922,36 @@ pub fn define_relation_clone_partition_objects<'mcx>(
             let idx_rel =
                 backend_access_index_indexam_seams::index_open::call(mcx, idx, AccessShareLock)?;
 
+            // if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE) — a foreign
+            // table cannot carry a unique index; a non-unique parent index is
+            // simply not cloned into the foreign partition.
+            if rel.rd_rel.relkind == types_tuple::access::RELKIND_FOREIGN_TABLE {
+                let is_unique = idx_rel
+                    .rd_index
+                    .as_ref()
+                    .map(|i| i.indisunique)
+                    .unwrap_or(false);
+                if is_unique {
+                    let parent_name = parent.name().to_string();
+                    idx_rel.close(AccessShareLock)?;
+                    rel.close(NoLock)?;
+                    parent.close(NoLock)?;
+                    return ereport(ERROR)
+                        .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                        .errmsg(format!(
+                            "cannot create foreign partition of partitioned table \"{parent_name}\""
+                        ))
+                        .errdetail(format!(
+                            "Table \"{parent_name}\" contains indexes that are unique."
+                        ))
+                        .finish(here("define_relation_clone_partition_objects"))
+                        .map(|()| ());
+                } else {
+                    idx_rel.close(AccessShareLock)?;
+                    continue;
+                }
+            }
+
             // attmap = build_attrmap_by_name(RelationGetDescr(rel),
             //                                RelationGetDescr(parent), false);
             let attmap = backend_access_common_next::attmap::build_attrmap_by_name(

@@ -933,30 +933,25 @@ fn search_statrelattinh<'mcx>(
     syscache::search_statrelattinh::call(mcx, relid, attnum, inherit)
 }
 
-/// `statext_expressions_load(statOid, inh, pos)` — load the per-expression
-/// `pg_statistic` tuple for an extended-statistics expression (unported owner).
+/// `statext_expressions_load(statOid, inh, pos)` (extended_stats.c) — load the
+/// `pos`-th per-expression `pg_statistic` tuple for an extended-statistics
+/// object's EXPRESSIONS stats. Delegated to the syscache owner, which reads the
+/// `stxdexpr` `pg_statistic[]` array off `STATEXTDATASTXOID` and rebuilds a
+/// standalone (copied) `pg_statistic` tuple from its `pos`-th element. The
+/// returned tuple is paired with [`StatsTupleFreeFunc::ReleaseDummy`].
 fn statext_expressions_load<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     stat_oid: Oid,
     inh: bool,
     pos: usize,
 ) -> PgResult<Option<StatsTuple>> {
-    let _ = (stat_oid, inh, pos);
-    panic!(
-        "selfuncs: statext_expressions_load is unported — loading a per-expression pg_statistic \
-         tuple for an extended-statistics object (statistics/extended_stats.c) has no owner; \
-         reached only after an equal() match against an EXPRESSIONS stat"
-    )
+    syscache::statext_expressions_load::call(mcx, stat_oid, inh, pos)
 }
 
-/// C `ReleaseDummy(tuple)` = `pfree(tuple)`; only applied to a copied tuple from
-/// `statext_expressions_load`, whose owner is unported (so unreachable).
+/// C `ReleaseDummy(tuple)` = `pfree(tuple)` — frees a copied tuple produced by
+/// [`statext_expressions_load`]; delegated to the syscache owner that minted it.
 fn release_dummy_stats_tuple(stats_tuple: StatsTuple) {
-    let _ = stats_tuple;
-    panic!(
-        "selfuncs: ReleaseDummy on a statext_expressions_load tuple is unreachable — its producer \
-         is unported, so no ReleaseDummy-tagged statsTuple can be created"
-    )
+    syscache::release_dummy_stats_tuple::call(stats_tuple);
 }
 
 /// `getRTEPermissionInfo(root->parse->rteperminfos, rte)->checkAsUser` — the
