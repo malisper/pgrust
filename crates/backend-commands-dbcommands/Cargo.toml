@@ -15,6 +15,9 @@ backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-sea
 # Lazy-vacuum driver's get_database_name seam homes in vacuumlazy-seams;
 # dbcommands.c is its owner.
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
+# xml.c's get_database_name(MyDatabaseId) seam (table_to_xmlschema family);
+# dbcommands.c owns get_database_name + the pg_database syscache lookup.
+backend-utils-adt-xml-libxml-seams = { path = "../backend-utils-adt-xml-libxml-seams" }
 
 # pg_database read/mutate substrate (the landed keystone owner's seams).
 backend-catalog-pg-database-seams = { path = "../backend-catalog-pg-database-seams" }

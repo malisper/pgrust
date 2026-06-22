@@ -208,6 +208,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// C: `DatumGetCString(DirectFunctionCall1(regclassout, relid))` —
+    /// `table_to_xml_internal`'s schema-qualified relation name for the
+    /// internally-built `SELECT * FROM <regclassout>` query. Unlike
+    /// `get_rel_name` (the unqualified XML element name), this qualifies the
+    /// relation with its schema when it is not visible on the search_path, so
+    /// the generated query resolves regardless of where the table lives.
+    pub fn regclass_name(relid: Oid) -> PgResult<String>
+);
+
+seam_core::seam!(
     /// C: `get_typtype(typeoid) == TYPTYPE_DOMAIN`.
     pub fn is_domain(typeoid: Oid) -> PgResult<bool>
 );

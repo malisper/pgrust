@@ -232,9 +232,33 @@ pub fn take_spi_result(receiver: DestReceiverHandle) -> SpiResult {
             .get_mut(slot)
             .and_then(Option::take)
             .expect("backend-executor-spi: take_spi_result on an unregistered DestSPI receiver");
+        // Convert the per-column raw `SPI_getbinval` images into the
+        // type-xml-facing `SpiRawValue` carrier so the xml row mapper can run
+        // `map_sql_value_to_xml_value` (its XSD special-cases need the raw
+        // Datum). NULL columns surface as `None`.
+        let raw_rows: Vec<types_xml::SpiRawRow> = taken
+            .raw_rows
+            .into_iter()
+            .map(|raw_row| {
+                raw_row
+                    .into_iter()
+                    .map(|rc| {
+                        if rc.isnull {
+                            None
+                        } else {
+                            Some(types_xml::SpiRawValue {
+                                word: rc.value as u64,
+                                byref: rc.byref,
+                            })
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
         SpiResult {
             columns: taken.columns,
             rows: taken.rows,
+            raw_rows,
         }
     })
 }

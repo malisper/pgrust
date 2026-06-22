@@ -567,6 +567,24 @@ pub fn init_seams() {
         };
         Ok(name)
     });
+    // xml.c `get_database_name(MyDatabaseId)` (table_to_xmlschema /
+    // query_to_xmlschema document-element naming). No-arg seam: keys on the
+    // backend's MyDatabaseId, projects pg_database.datname out of a scratch
+    // context to an owned String (a cache miss is a hard error — MyDatabaseId
+    // always resolves while a backend is attached).
+    backend_utils_adt_xml_libxml_seams::get_database_name::set(|| {
+        let dbid = backend_commands_tablespace_globals_seams::MyDatabaseId::call()?;
+        let ctx = mcx::MemoryContext::new("xml_get_database_name");
+        let name: String = match get_database_name(ctx.mcx(), dbid)? {
+            Some(name) => name.to_string(),
+            None => {
+                return Err(types_error::PgError::error(alloc::format!(
+                    "cache lookup failed for database {dbid}"
+                )))
+            }
+        };
+        Ok(name)
+    });
     // collationcmds.c (CREATE COLLATION, libc provider) re-declares
     // `check_encoding_locale_matches` (pg_locale.c) in its own seam crate;
     // this repo homes the function in dbcommands/heavy.rs, so install it here.

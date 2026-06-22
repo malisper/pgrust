@@ -113,3 +113,5 @@ backend-catalog-binary-upgrade-seams = { path = "../backend-catalog-binary-upgra
 backend-libpq-hba-seams = { path = "../backend-libpq-hba-seams" }
 backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
+# xml.c's table_to_xml_internal regclassout-name seam; misc2 owns regclassout.
+backend-utils-adt-xml-libxml-seams = { path = "../backend-utils-adt-xml-libxml-seams" }

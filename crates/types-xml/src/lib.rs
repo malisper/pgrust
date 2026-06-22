@@ -90,6 +90,24 @@ pub struct SpiColumn {
 /// seam note).
 pub type SpiRow = Vec<Option<String>>;
 
+/// The raw (`SPI_getbinval`) image of one column value, as needed by the xml
+/// `SPI_sql_row_to_xmlelement` path to run `map_sql_value_to_xml_value` (whose
+/// XSD special-cases for bool/date/timestamp[tz]/bytea require the raw Datum,
+/// not the type's default text rendering). `None` is SQL NULL. `Some` carries
+/// the pass-by-value Datum word and — for a pass-by-reference column — the
+/// verbatim header-ful varlena byte image.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpiRawValue {
+    /// The pass-by-value Datum machine word (`0` for a by-reference column).
+    pub word: u64,
+    /// `Some(image)` for a pass-by-reference column (header-ful varlena bytes);
+    /// `None` for a pass-by-value column.
+    pub byref: Option<Vec<u8>>,
+}
+
+/// One row's raw column values, parallel to [`SpiRow`].
+pub type SpiRawRow = Vec<Option<SpiRawValue>>;
+
 /// A SELECT result surfaced through the SPI seam.
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct SpiResult {
@@ -97,6 +115,9 @@ pub struct SpiResult {
     pub columns: Vec<SpiColumn>,
     /// One [`SpiRow`] per processed tuple.
     pub rows: Vec<SpiRow>,
+    /// One [`SpiRawRow`] per processed tuple, parallel to `rows` — the raw
+    /// `SPI_getbinval` images the xml value mapping consumes.
+    pub raw_rows: Vec<SpiRawRow>,
 }
 
 /// `pg_class` metadata for a relation, as needed by `map_sql_table_to_xmlschema`.

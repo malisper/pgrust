@@ -127,6 +127,30 @@ pub fn install() {
         })
     });
 
+    // C: `SearchSysCache1(RELOID, relid)` -> `Form_pg_class` (relname,
+    // relnamespace). `map_sql_table_to_xmlschema` only reads relname +
+    // relnamespace from this tuple; the `columns` field of `RelationInfo` is
+    // unused on that path (columns flow in separately), so we leave it empty.
+    seam::relation_info::set(|relid: Oid| -> PgResult<types_xml::RelationInfo> {
+        with_scratch(|mcx| {
+            let relname =
+                match backend_utils_cache_lsyscache::relation::get_rel_name(mcx, relid)? {
+                    Some(name) => name.to_string(),
+                    None => {
+                        return Err(PgError::error(alloc::format!(
+                            "cache lookup failed for relation {relid}"
+                        )))
+                    }
+                };
+            let relnamespace = backend_utils_cache_lsyscache::relation::get_rel_namespace(relid)?;
+            Ok(types_xml::RelationInfo {
+                relname,
+                relnamespace,
+                columns: Vec::new(),
+            })
+        })
+    });
+
     // --- namespace ---
 
     // C: `LookupExplicitNamespace(name, false)`.

@@ -88,6 +88,15 @@ pub fn init_seams() {
     );
     backend_utils_adt_misc2_seams::format_procedure_parts::set(regproc::format_procedure_parts);
     backend_utils_adt_misc2_seams::format_operator_parts::set(regproc::format_operator_parts);
+
+    // xml.c `table_to_xml_internal`: the schema-qualified relation name fed into
+    // the internally-built `SELECT * FROM <name>` query. C calls regclassout
+    // directly; we project it out of a scratch context to an owned String.
+    backend_utils_adt_xml_libxml_seams::regclass_name::set(|relid| {
+        let ctx = mcx::MemoryContext::new("xml_regclass_name");
+        let name = alloc::string::String::from(regproc::regclassout(ctx.mcx(), relid)?.as_str());
+        Ok(name)
+    });
     backend_utils_adt_regproc_seams::regprocedurein::set(seam_regprocedurein);
     backend_utils_adt_regproc_seams::regtypein::set(seam_regtypein);
     backend_utils_adt_regproc_seams::string_to_qualified_name_list::set(

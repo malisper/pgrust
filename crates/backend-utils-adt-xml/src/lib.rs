@@ -1730,8 +1730,12 @@ pub fn table_to_xml_internal(
     targetns: &str,
     top_level: bool,
 ) -> PgResult<Vec<u8>> {
+    // C: `SELECT * FROM <regclassout(relid)>` — the schema-qualified relation
+    // name, so the query resolves even when the table is not on search_path;
+    // the XML element name is the *unqualified* `get_rel_name(relid)`.
+    let qualname = seam::regclass_name::call(relid)?;
     let relname = seam::get_rel_name::call(relid)?;
-    let query = format!("SELECT * FROM {relname}");
+    let query = format!("SELECT * FROM {qualname}");
     query_to_xml_internal(
         &query,
         Some(&relname),
@@ -2591,17 +2595,33 @@ pub fn SPI_sql_row_to_xmlelement(
         result.extend_from_slice(b"<row>\n");
     }
 
-    let row = &exec.rows[rownum as usize];
+    // C: for each column, SPI_getbinval the raw datum and run
+    // map_sql_value_to_xml_value(colval, coltype, true) — its XSD special-cases
+    // (bool -> "true"/"false", date/timestamp[tz] -> ISO 8601, bytea -> base64)
+    // require the raw Datum, not the column's default text rendering. We build a
+    // live `TDatum` from the SPI raw image in a per-row scratch context and
+    // dispatch the value-carrier mapper.
+    let raw_row = exec.raw_rows.get(rownum as usize);
     for (i, col) in exec.columns.iter().enumerate() {
         let colname = map_sql_identifier_to_xml_name(col.name.as_bytes(), true, false)?;
-        match row.get(i).and_then(|v| v.as_ref()) {
+        let raw = raw_row.and_then(|r| r.get(i)).and_then(|v| v.as_ref());
+        match raw {
             None => {
                 if nulls {
                     result.extend_from_slice(format!("  <{colname} xsi:nil=\"true\"/>\n").as_bytes());
                 }
             }
-            Some(value) => {
-                result.extend_from_slice(format!("  <{colname}>{value}</{colname}>\n").as_bytes());
+            Some(rawval) => {
+                let cx = mcx::MemoryContext::new("xml SPI row value");
+                let value: TDatum = match &rawval.byref {
+                    Some(img) => TDatum::from_byref_bytes_in(cx.mcx(), img)?,
+                    None => TDatum::from_usize(rawval.word as usize),
+                };
+                let mapped =
+                    map_sql_value_to_xml_value_v(cx.mcx(), value, col.typeid, true)?;
+                result.extend_from_slice(
+                    format!("  <{colname}>{mapped}</{colname}>\n").as_bytes(),
+                );
             }
         }
     }
