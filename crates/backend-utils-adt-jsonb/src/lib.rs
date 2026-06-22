@@ -200,15 +200,31 @@ pub fn jsonb_recv<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<PgVec<'mcx, u8>>
     }
 }
 
+/// `VARDATA_ANY(jb)` — the `JsonbContainer` root after the varlena header of an
+/// arg-sourced jsonb image: skip ONE byte for a short (1-byte, low-bit-set)
+/// header, else `VARHDRSZ`. A small stored jsonb reaches an fmgr arg verbatim
+/// (the EEOP_FUNCEXPR boundary does not detoast/unpack), so a fixed 4-byte strip
+/// would land three bytes into the container once `SHORT_VARLENA_PACKING` is on.
+/// No-op while the flag is off (every stored value is 4-byte). Freshly-built
+/// jsonb (JsonbValueToJsonb / parse results) still uses a fixed `VARHDRSZ` strip.
+#[inline]
+fn vardata_any(jb: &[u8]) -> &[u8] {
+    match jb.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &jb[1..],
+        Some(_) if jb.len() >= VARHDRSZ => &jb[VARHDRSZ..],
+        _ => &[],
+    }
+}
+
 /// C: `jsonb_out(PG_FUNCTION_ARGS)` — render an on-disk jsonb varlena to text.
 pub fn jsonb_out<'mcx>(mcx: Mcx<'mcx>, jsonb: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     // C: JsonbToCString(NULL, &jb->root, VARSIZE(jb)).
-    JsonbToCString(mcx, &jsonb[VARHDRSZ..], jsonb.len() as i32)
+    JsonbToCString(mcx, vardata_any(jsonb), jsonb.len() as i32)
 }
 
 /// C: `jsonb_send(PG_FUNCTION_ARGS)` — binary send: version byte then text.
 pub fn jsonb_send<'mcx>(mcx: Mcx<'mcx>, jsonb: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let jtext = JsonbToCString(mcx, &jsonb[VARHDRSZ..], jsonb.len() as i32)?;
+    let jtext = JsonbToCString(mcx, vardata_any(jsonb), jsonb.len() as i32)?;
 
     // C: pq_begintypsend; pq_sendint8(version=1); pq_sendtext(jtext); endtypsend.
     let mut buf = PgVec::with_capacity_in(1 + jtext.len(), mcx);
@@ -446,7 +462,7 @@ pub fn JsonbTypeName(val: &JsonbValue) -> PgResult<&'static str> {
 
 /// C: `jsonb_typeof(PG_FUNCTION_ARGS)` -> text. Returns the type name string.
 pub fn jsonb_typeof(jsonb: &[u8]) -> PgResult<&'static str> {
-    JsonbContainerTypeName(&jsonb[VARHDRSZ..])
+    JsonbContainerTypeName(vardata_any(jsonb))
 }
 
 // ===========================================================================
@@ -719,7 +735,7 @@ pub fn JsonbExtractScalar(jbc: &[u8], res: &mut JsonbValue) -> PgResult<bool> {
 
 /// C: `JsonbUnquote(Jsonb *jb)` — `jb` is the full on-disk varlena bytes.
 pub fn JsonbUnquote<'mcx>(mcx: Mcx<'mcx>, jb: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let root = &jb[VARHDRSZ..];
+    let root = vardata_any(jb);
     if json_container_is_scalar(container_header(root)) {
         let mut v = JsonbValue::null();
         JsonbExtractScalar(root, &mut v)?;
@@ -776,7 +792,7 @@ fn cannotCastJsonbValue(typ: jbvType, sqltype: &str) -> PgError {
 /// jbvNull (C: `PG_RETURN_NULL()`), else the extracted `JsonbValue`.
 fn cast_extract(jb: &[u8], sqltype: &str) -> PgResult<Option<JsonbValue>> {
     let mut v = JsonbValue::null();
-    if !JsonbExtractScalar(&jb[VARHDRSZ..], &mut v)? {
+    if !JsonbExtractScalar(vardata_any(jb), &mut v)? {
         return Err(cannotCastJsonbValue(v.typ, sqltype));
     }
     if v.typ == jbvType::jbvNull {
@@ -1051,7 +1067,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
             }
             JSONTYPE_JSONB => {
                 let jsonb = jsonb_seam::jsonb_datum_bytes::call(mcx, val)?;
-                let root = &jsonb[VARHDRSZ..];
+                let root = vardata_any(&jsonb);
                 let mut it = JsonbIteratorInit(root);
                 if json_container_is_scalar(container_header(root)) {
                     // JB_ROOT_IS_SCALAR: pull WJB_BEGIN_ARRAY then WJB_ELEM.
