@@ -161,18 +161,44 @@ fn Min(a: i32, b: i32) -> i32 {
 // fmgr boundary codecs (DatumGetInetPP / InetPGetDatum).
 // ---------------------------------------------------------------------------
 
-/// `DatumGetInetPP(datum)` — decode an `inet`/`cidr` by-reference image.
+/// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
+const VARHDRSZ: usize = 4;
+/// `VARHDRSZ_SHORT` — a short (1-byte-header) varlena's header.
+const VARHDRSZ_SHORT: usize = 1;
+
+/// `VARDATA_ANY(PTR)` — payload bytes after either the 1-byte short header or the
+/// 4-byte long header. `inet`/`cidr` arrive on the by-ref lane as the on-disk
+/// varlena image (header included), so the `inet_struct` payload must be read at
+/// `VARDATA_ANY`, exactly as `network.c`'s `ip_family`/`ip_bits`/`ip_addr` do.
+#[inline]
+fn vardata_any(b: &[u8]) -> &[u8] {
+    if (b[0] & 0x01) == 0x01 {
+        &b[VARHDRSZ_SHORT..]
+    } else {
+        &b[VARHDRSZ..]
+    }
+}
+
+/// `DatumGetInetPP(datum)` — decode an `inet`/`cidr` by-reference image. The
+/// canonical by-ref `Datum` carries the full varlena (4-byte or short header),
+/// so strip the header before decoding the `inet_struct` payload.
 #[inline]
 fn datum_get_inet(datum: &Datum<'_>) -> inet_struct {
-    inet_struct::from_datum_bytes(datum.as_ref_bytes())
+    inet_struct::from_datum_bytes(vardata_any(datum.as_ref_bytes()))
 }
 
 /// `InetPGetDatum(p)` — encode an `inet`/`cidr` value as a by-reference `Datum`
-/// in `mcx` (the C macro yields a `palloc`'d varlena; here it is the owned
-/// `inet_struct` image, the varlena header being the fmgr boundary's concern).
+/// in `mcx` (the C macro yields a `palloc`'d varlena). Emit a 4-byte-header
+/// varlena image (`SET_VARSIZE`) so the prefix datums this opclass builds
+/// round-trip through `datum_get_inet` identically to the on-disk leaf values.
 #[inline]
 fn inet_get_datum<'mcx>(mcx: Mcx<'mcx>, p: &inet_struct) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &p.to_datum_bytes())?))
+    let payload = p.to_datum_bytes();
+    let total = payload.len() + VARHDRSZ;
+    let mut img = Vec::with_capacity(total);
+    img.extend_from_slice(&((total as u32) << 2).to_le_bytes());
+    img.extend_from_slice(&payload);
+    Ok(Datum::ByRef(mcx::slice_in(mcx, &img)?))
 }
 
 // ===========================================================================
