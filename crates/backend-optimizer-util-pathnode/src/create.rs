@@ -126,7 +126,7 @@ const AGG_SORTED: AggStrategy = types_pathnodes::AGG_SORTED;
 const AGG_HASHED: AggStrategy = types_pathnodes::AGG_HASHED;
 const AGG_MIXED: AggStrategy = types_pathnodes::AGG_MIXED;
 const SETOP_SORTED: SetOpStrategy = types_pathnodes::SETOP_SORTED;
-const RELOPT_BASEREL: u32 = 1;
+const RELOPT_BASEREL: u32 = types_pathnodes::RELOPT_BASEREL;
 const CMD_UPDATE: CmdType = types_pathnodes::CMD_UPDATE;
 const CMD_MERGE: CmdType = types_pathnodes::CMD_MERGE;
 
