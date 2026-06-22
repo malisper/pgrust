@@ -1396,7 +1396,14 @@ pub fn seam_list_dir<'mcx>(
             }
         }
     }
-    let mut names: Vec<String> = Vec::new();
+    // C's `readdir(3)` (under `ReadDir`) yields the `.` and `..` entries; the
+    // Rust `std::fs::read_dir` iterator behind `with_allocated_dir` omits them.
+    // `pg_ls_dir(include_dot_dirs => true)` relies on these being present (it
+    // does its own dot-dir filtering), so synthesize them here to match C's
+    // `ReadDir` entry set. The per-entry `stat` below resolves their real
+    // metadata (and a concurrently-removed `..` is skipped on ENOENT just like
+    // any other entry).
+    let mut names: Vec<String> = vec![".".to_owned(), "..".to_owned()];
     allocated_desc::with_allocated_dir(dirname, &mut |name: &str| {
         names.push(name.to_owned());
         Ok(false)
