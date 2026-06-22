@@ -6191,6 +6191,11 @@ fn invalid_behavior_err(
     detail_col: &str,
     location: i32,
 ) -> types_error::PgError {
+    // C: `errdetail("... is allowed in %s for %s.", clause, <construct>)`.
+    // The detail templates carry the literal `in this clause` placeholder for
+    // the first `%s`; substitute the actual clause name ("ON ERROR"/"ON EMPTY").
+    let detail_no_col = detail_no_col.replace("in this clause", &alloc::format!("in {clause}"));
+    let detail_col = detail_col.replace("in this clause", &alloc::format!("in {clause}"));
     match column_name {
         None => ereport(ERROR)
             .errcode(ERRCODE_SYNTAX_ERROR)

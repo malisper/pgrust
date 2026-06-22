@@ -1016,17 +1016,48 @@ fn exec_get_json_value_item_string<'mcx>(
             let s = backend_utils_adt_jsonb::jsonb_out(mcx, &jb)?;
             Ok((Some(pgstring_from_bytes(mcx, s.as_slice())?), false))
         }
-        JsonbValueData::Datetime(_) => {
-            // The per-type datetime *_out casts (date_out/time_out/timetz_out/
-            // timestamp_out/timestamptz_out via DirectFunctionCall1) live in the
-            // datetime adt unit, not threaded into the interpreter; JSON_VALUE of
-            // a jsonb datetime scalar to text is the one narrow arm not yet
-            // reachable here.
-            panic!(
-                "execExprInterp: ExecGetJsonValueItemString — the jbvDatetime arm needs the \
-                 date_out/time_out/timetz_out/timestamp_out/timestamptz_out casts \
-                 (backend-utils-adt-datetime), not yet threaded into the interpreter"
-            )
+        JsonbValueData::Datetime(dt) => {
+            // C: `DirectFunctionCall1(<typid>_out, item->val.datetime.value)`
+            // per `item->val.datetime.typid`. Each `*_out` is reached by its
+            // builtin OID through the generic output-function call. The stored
+            // `value` is the bare datum word for the by-value date/time/timestamp/
+            // timestamptz types; `timetz` is a by-reference 12-byte
+            // `{ TimeADT time, int32 zone }` rebuilt from `value` (the time word)
+            // and `tz` (the zone).
+            use types_tuple::heaptuple::{
+                DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID,
+            };
+            // Builtin `*_out` function OIDs (pg_proc.dat).
+            const DATE_OUT: u32 = 1085;
+            const TIME_OUT: u32 = 1144;
+            const TIMETZ_OUT: u32 = 1351;
+            const TIMESTAMP_OUT: u32 = 1313;
+            const TIMESTAMPTZ_OUT: u32 = 1151;
+            let (fn_oid, arg) = match dt.typid {
+                DATEOID => (DATE_OUT, Datum::ByVal(dt.value)),
+                TIMEOID => (TIME_OUT, Datum::ByVal(dt.value)),
+                TIMESTAMPOID => (TIMESTAMP_OUT, Datum::ByVal(dt.value)),
+                TIMESTAMPTZOID => (TIMESTAMPTZ_OUT, Datum::ByVal(dt.value)),
+                TIMETZOID => {
+                    // On-disk `TimeTzADT`: 8-byte `time` + 4-byte `zone`.
+                    let mut img = mcx::vec_with_capacity_in(mcx, 12)?;
+                    img.extend_from_slice(&(dt.value as i64).to_ne_bytes());
+                    img.extend_from_slice(&dt.tz.to_ne_bytes());
+                    (TIMETZ_OUT, Datum::ByRef(img))
+                }
+                other => {
+                    return Err(PgError::error(format!(
+                        "unexpected jsonb datetime type oid {}",
+                        other
+                    )))
+                }
+            };
+            let s = backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::call(
+                mcx,
+                types_core::primitive::Oid::from(fn_oid),
+                arg,
+            )?;
+            Ok((Some(s), false))
         }
     }
 }

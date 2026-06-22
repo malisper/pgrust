@@ -2340,7 +2340,9 @@ fn JsonItemFromDatum(mcx: Mcx<'_>, var: &JsonPathVariable) -> PgResult<JsonbValu
             // C: `res->val.boolean = DatumGetBool(val)`.
             val: JsonbValueData::Bool(var.value.as_usize() != 0),
         }),
-        DATEOID | TIMEOID | TIMETZOID | TIMESTAMPOID | TIMESTAMPTZOID => Ok(JsonbValue {
+        DATEOID | TIMEOID | TIMESTAMPOID | TIMESTAMPTZOID => Ok(JsonbValue {
+            // C: `res->val.datetime.value = val; tz = 0`. These are pass-by-value
+            // types, so the bare word IS the value.
             typ: jbvType::jbvDatetime,
             val: JsonbValueData::Datetime(JsonbDatetime {
                 value: var.value.as_usize(),
@@ -2349,6 +2351,23 @@ fn JsonItemFromDatum(mcx: Mcx<'_>, var: &JsonPathVariable) -> PgResult<JsonbValu
                 tz: 0,
             }),
         }),
+        TIMETZOID => {
+            // `timetz` is a by-reference 12-byte `{ TimeADT time, int32 zone }`.
+            // The repo's `jbvDatetime` carries the `time` word in `value` and the
+            // `zone` in `tz` (the convention `DtOperand::timetz` reads back).
+            let img = var_bytes()?;
+            let time = i64::from_ne_bytes(img[0..8].try_into().expect("timetz image >= 12 bytes"));
+            let zone = i32::from_ne_bytes(img[8..12].try_into().expect("timetz image >= 12 bytes"));
+            Ok(JsonbValue {
+                typ: jbvType::jbvDatetime,
+                val: JsonbValueData::Datetime(JsonbDatetime {
+                    value: time as usize,
+                    typid,
+                    typmod,
+                    tz: zone,
+                }),
+            })
+        }
         NUMERICOID => Ok(JsonbValue {
             // C: `JsonbValueInitNumericDatum(res, val)` — `val` is the numeric
             // varlena; `value_bytes` is exactly that on-disk image.
