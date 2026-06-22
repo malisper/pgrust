@@ -1409,14 +1409,27 @@ fn signtsvector_from_key<'mcx>(
     mcx: Mcx<'mcx>,
     key: &Datum<'mcx>,
 ) -> PgResult<SignTsVector> {
-    match key {
-        Datum::ByVal(w) => eprintln!("DBG from_key ByVal word={w:#x}"),
-        Datum::ByRef(b) => eprintln!("DBG from_key ByRef len={} [..12]={:?}", b.len(), &b[..b.len().min(12)]),
-        other => eprintln!("DBG from_key other={other:?}"),
-    }
     let image = backend_access_common_detoast_seams::detoast_attr::call(mcx, key.as_ref_bytes())?;
     SignTsVector::from_image(&image[4..])
         .ok_or_else(|| PgError::error("corrupt gtsvector GiST key".to_string()))
+}
+
+/// Decode an entry-vector key, tolerating the index-0 placeholder slot
+/// (`entryvec->vector[0]`, carried as `Datum::ByVal(0)`) that the C union /
+/// picksplit methods keep present but never read (they index 1-based from
+/// `FirstOffsetNumber`). A placeholder decodes to an empty `ARRKEY` — a valid
+/// `SignTsVector` the methods skip.
+fn signtsvector_from_key_or_placeholder<'mcx>(
+    mcx: Mcx<'mcx>,
+    key: &Datum<'mcx>,
+) -> PgResult<SignTsVector> {
+    if matches!(key, Datum::ByVal(_)) {
+        return Ok(SignTsVector {
+            flag: types_tsearch::tsgistidx::ARRKEY,
+            data: types_tsearch::tsgistidx::SignTsVectorData::Arr(Vec::new()),
+        });
+    }
+    signtsvector_from_key(mcx, key)
 }
 
 /// Copy a [`SignTsVector`] result onto the GiST by-reference key lane as its
@@ -1722,7 +1735,7 @@ fn dispatch_union<'mcx>(
             let n = entryvec.n as usize;
             let mut keys: Vec<SignTsVector> = Vec::with_capacity(n);
             for e in entryvec.vector.iter().take(n) {
-                keys.push(signtsvector_from_key(mcx, &e.key)?);
+                keys.push(signtsvector_from_key_or_placeholder(mcx, &e.key)?);
             }
             let refs: Vec<&SignTsVector> = keys.iter().collect();
             let u = tsgist::gtsvector_union(&refs, tsgist::SIGLEN_DEFAULT);
@@ -1811,11 +1824,6 @@ fn dispatch_compress<'mcx>(
                 // extract its per-lexeme byte slices (ARRPTR/STRPTR) to build the
                 // array key. See the DIVERGENCE note: build uses SIGLEN_DEFAULT.
                 use backend_utils_adt_tsvector_core::access::{arrptr, lexeme, tsv_size};
-                match &entry.key {
-                    Datum::ByVal(w) => eprintln!("DBG compress leaf ByVal word={w:#x}"),
-                    Datum::ByRef(b) => eprintln!("DBG compress leaf ByRef len={} [..8]={:?}", b.len(), &b[..b.len().min(8)]),
-                    other => eprintln!("DBG compress leaf other={other:?}"),
-                }
                 let detoasted = backend_access_common_detoast_seams::detoast_attr::call(
                     mcx,
                     entry.key.as_ref_bytes(),
@@ -1833,7 +1841,13 @@ fn dispatch_compress<'mcx>(
                 return mcx::alloc_in(mcx, retval);
             }
             // Inner entry: rewrite an all-0xff SIGNKEY as ALLISTRUE; otherwise
-            // pass through unchanged.
+            // pass through unchanged. A NULL key (`DatumGetPointer(entry->key)`
+            // == NULL, carried as `Datum::ByVal(0)`) is not a SIGNKEY, so C's
+            // `else if (ISSIGNKEY(..) && !ISALLTRUE(..))` falls through to
+            // `retval = entry` — pass it through without decoding.
+            if matches!(entry.key, Datum::ByVal(_)) {
+                return mcx::alloc_in(mcx, entry.clone());
+            }
             let key = signtsvector_from_key(mcx, &entry.key)?;
             if key.is_signkey() && !key.is_alltrue() {
                 // The all-0xff scan walks the stored signature; use its own
@@ -1974,7 +1988,7 @@ fn dispatch_picksplit<'mcx>(
             let n = entryvec.n as usize;
             let mut keys: Vec<SignTsVector> = Vec::with_capacity(n);
             for e in entryvec.vector.iter().take(n) {
-                keys.push(signtsvector_from_key(mcx, &e.key)?);
+                keys.push(signtsvector_from_key_or_placeholder(mcx, &e.key)?);
             }
             let refs: Vec<&SignTsVector> = keys.iter().collect();
             let sv =
