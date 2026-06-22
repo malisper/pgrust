@@ -77,6 +77,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `map_variable_attnos((Node *) clause, target_varno, 0, attmap, to_rowtype,
+    /// &found_whole_row)` (rewriteManip.c:1701) over a `List *` of `Expr`, as
+    /// `execPartition.c` `ExecInitPartitionInfo` calls it on the ON CONFLICT DO
+    /// UPDATE WHERE clause to translate the Vars to the leaf partition's attribute
+    /// numbers — once over `INNER_VAR` (the EXCLUDED pseudo-relation) and once over
+    /// `firstVarno` (the main target relation). Unlike
+    /// [`map_variable_attnos_expr_list`] (which pins `target_varno`=1 /
+    /// `to_rowtype`=`InvalidOid` for the index-clause call site), this exposes the
+    /// `target_varno` / `to_rowtype` parameters. The owned model consumes and
+    /// returns the mapped `Vec<Expr>`, OR-ing `found_whole_row` across the list
+    /// (the caller ignores it). `Err` carries the rewrite `ereport(ERROR)` surface.
+    pub fn map_variable_attnos_expr_list_varno<'mcx>(
+        mcx: Mcx<'mcx>,
+        exprs: mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>,
+        target_varno: i32,
+        attmap: &[types_core::primitive::AttrNumber],
+        to_rowtype: types_core::primitive::Oid,
+    ) -> PgResult<(mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>, bool)>
+);
+
+seam_core::seam!(
     /// `map_variable_attnos((Node *) returningList, firstVarno, 0, attmap,
     /// RelationGetForm(partrel)->reltype, &found_whole_row)` (rewriteManip.c:1701)
     /// over a `List *` of `TargetEntry`, as `execPartition.c`

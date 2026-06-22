@@ -86,6 +86,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `adjust_partition_colnos(colnos, leaf_part_rri)` (execPartition.c): adjust
+    /// an UPDATE target column-number list for the attribute differences between
+    /// the parent and the partition, using the leaf's child→root conversion map.
+    /// `ExecInitPartitionInfo`'s ON CONFLICT DO UPDATE leg calls it on
+    /// `node->onConflictCols` when the partition rowtype differs from the root.
+    /// Must not be called when no adjustment is required (the C `Assert(map !=
+    /// NULL)`). Returns the freshly-mapped colno list allocated in `mcx`. Fallible
+    /// (`elog(ERROR)` on an unexpected attno, OOM).
+    pub fn adjust_partition_colnos<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        colnos: &[i32],
+        leaf_part_rri: types_nodes::RriId,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, i32>>
+);
+
+seam_core::seam!(
     /// `ExecDoInitialPruning(estate)` (execPartition.c): perform run-time
     /// "initial" (executor-startup) partition pruning for every
     /// `PartitionPruneInfo` in `estate->es_part_prune_infos`, building each

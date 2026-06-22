@@ -562,6 +562,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecGetChildToRootMap(resultRelInfo)` (execMain.c), returning the map's
+    /// `attrMap` (a copy allocated in `mcx`) and its `outdesc` (the root rowtype
+    /// `TupleDesc`, copied in `mcx`) so the caller can re-borrow `estate` to apply
+    /// the conversion. `Ok(None)` is the C `NULL` map (rowtypes already match).
+    /// `TransitionTableAddTuple` uses this to convert a child-partition tuple into
+    /// the root-table transition tuplestore's format via `execute_attr_map_slot`.
+    pub fn exec_get_child_to_root_map_full<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<
+        Option<(
+            mcx::PgBox<'mcx, types_tuple::attmap::AttrMap<'mcx>>,
+            types_tuple::heaptuple::TupleDesc<'mcx>,
+        )>,
+    >
+);
+
+seam_core::seam!(
     /// `ExecGetAncestorResultRels(estate, resultRelInfo)` (execMain.c): return
     /// the chain of ancestor `ResultRelInfo`s (root-ward, inclusive of the
     /// root) for a partition's `ResultRelInfo`, lazily opening them.

@@ -12,7 +12,7 @@ use types_tuple::attmap::AttrMap;
 /// partition, using the leaf's child→root map. Must not be called when no
 /// adjustment is required. Fallible (`elog(ERROR)` on an unexpected attno, OOM
 /// for the new list).
-pub(crate) fn adjust_partition_colnos<'mcx>(
+pub fn adjust_partition_colnos<'mcx>(
     mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
     colnos: &[i32],

@@ -2759,19 +2759,67 @@ fn transition_table_add_tuple<'mcx>(
     }
 
     // else if ((map = ExecGetChildToRootMap(relinfo)) != NULL) { convert + store }
-    // The child→root conversion (a tuple captured on a child partition, stored in
-    // the root-table format) needs the map plus a per-table storeslot in the
-    // tuplestore's tupdesc.  The map-returning seam is not yet widened (the
-    // existing `exec_get_child_to_root_map` returns only a bool), so this leg is
-    // loud-guarded; the common direct-trigger / root-table case (map == NULL)
-    // takes the else branch below.
-    let has_map = backend_executor_execMain_seams::exec_get_child_to_root_map::call(estate, relinfo)?;
-    if has_map {
-        return Err(child_to_root_transition_unported());
+    // The tuple was captured on a child partition; convert it into the root-table
+    // transition tuplestore's format via the child→root map plus a per-table
+    // storeslot (GetAfterTriggersStoreSlot), then spool the converted slot.
+    let map = backend_executor_execMain_seams::exec_get_child_to_root_map_full::call(
+        estate.es_query_cxt,
+        estate,
+        relinfo,
+    )?;
+    if let Some((attr_map, outdesc)) = map {
+        // storeslot = GetAfterTriggersStoreSlot(table, map->outdesc);
+        // execute_attr_map_slot(map->attrMap, slot, storeslot);
+        // tuplestore_puttupleslot(tuplestore, storeslot);
+        let store_slot = get_after_triggers_store_slot(estate, target, outdesc)?;
+        backend_executor_execTuples_seams::execute_attr_map_slot_explicit::call(
+            estate,
+            &attr_map,
+            slot,
+            store_slot,
+        )?;
+        return put_into_transition_store(estate, target, store_slot);
     }
 
     // else tuplestore_puttupleslot(tuplestore, slot);
     put_into_transition_store(estate, target, slot)
+}
+
+/// `GetAfterTriggersStoreSlot(table, tupdesc)` (trigger.c:4909) — the per-table
+/// slot used to hold a child-partition tuple converted into the transition
+/// tuplestore's (root) format, created on first use with `tupdesc` (the map's
+/// `outdesc`). The C makes a standalone `MakeSingleTupleTableSlot` in
+/// `CurTransactionContext`; over the owned model the slot lives in the EState
+/// tuple-table pool (the conversion happens within the query's EState lifetime
+/// and the tuple is copied into the store immediately), and its id is cached on
+/// the `AfterTriggersTableData.storeslot` so subsequent tuples reuse it.
+fn get_after_triggers_store_slot<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    target: TransitionTarget,
+    tupdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+) -> PgResult<types_nodes::SlotId> {
+    // Already created?  (cached on the table-data)
+    let existing = crate::queue::with_after_triggers(|at| {
+        let qd = target.table.query_depth as usize;
+        at.query_stack[qd].tables[target.table.index].storeslot
+    });
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+
+    // tupdesc = CreateTupleDescCopy(tupdesc);
+    // table->storeslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+    let slot = backend_executor_execTuples_seams::make_single_tuple_table_slot::call(
+        estate.es_query_cxt,
+        tupdesc,
+        types_nodes::TupleSlotKind::Virtual,
+    )?;
+    let id = estate.push_slot_data(slot)?;
+    crate::queue::with_after_triggers(|at| {
+        let qd = target.table.query_depth as usize;
+        at.query_stack[qd].tables[target.table.index].storeslot = Some(id);
+    });
+    Ok(id)
 }
 
 /// Spool `slot` (a real EState slot) into the transition tuplestore named by
@@ -5006,19 +5054,6 @@ fn cross_partition_update_unported() -> PgError {
     PgError::error(
         "AfterTriggerExecute: cross-partition update after-trigger tuple sourcing \
          (AFTER_TRIGGER_CP_UPDATE) is firing-substrate not ported"
-            .to_string(),
-    )
-}
-
-#[cold]
-#[inline(never)]
-fn child_to_root_transition_unported() -> PgError {
-    PgError::error(
-        "TransitionTableAddTuple: capturing a transition tuple from a child \
-         partition into the root-table format needs the child→root TupleConversionMap \
-         (ExecGetChildToRootMap) returned through its seam plus the per-table \
-         storeslot; that map-returning seam is not yet widened. The direct-trigger / \
-         root-table capture path runs end-to-end"
             .to_string(),
     )
 }

@@ -1482,6 +1482,40 @@ fn exec_get_child_to_root_map<'mcx>(
     Ok(execUtils::ExecGetChildToRootMap(estate, result_rel_info)?.is_some())
 }
 
+/// `ExecGetChildToRootMap(resultRelInfo)` returning the map's `attrMap` (copied
+/// into `mcx`) and its `outdesc` (the root rowtype, copied into `mcx`), so the
+/// caller can drop the `estate` borrow and re-borrow it to apply the conversion.
+/// `None` is the C `NULL` map.  Delegates to execUtils.
+fn exec_get_child_to_root_map_full<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+) -> PgResult<
+    Option<(
+        mcx::PgBox<'mcx, types_tuple::attmap::AttrMap<'mcx>>,
+        types_tuple::heaptuple::TupleDesc<'mcx>,
+    )>,
+> {
+    let map = execUtils::ExecGetChildToRootMap(estate, result_rel_info)?;
+    let map = match map {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+    // Copy the attrMap (a PgVec<AttrNumber>) into mcx.
+    let mut attnums: mcx::PgVec<'mcx, types_core::primitive::AttrNumber> =
+        mcx::vec_with_capacity_in(mcx, map.attrMap.attnums.len())?;
+    for &a in map.attrMap.attnums.iter() {
+        attnums.push(a);
+    }
+    let attr_map = mcx::alloc_in(mcx, types_tuple::attmap::AttrMap { attnums })?;
+    // Copy the outdesc (root rowtype TupleDesc) into mcx.
+    let outdesc: types_tuple::heaptuple::TupleDesc<'mcx> = match map.outdesc.as_ref() {
+        Some(d) => Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
+        None => None,
+    };
+    Ok(Some((attr_map, outdesc)))
+}
+
 /// `get_rel_name(relid)` → owned `String` (the `aclcheck_error` objectname).
 fn lsyscache_get_rel_name(relid: Oid) -> PgResult<Option<alloc::string::String>> {
     let tmp = MemoryContext::new("execMain get_rel_name");
@@ -3870,6 +3904,7 @@ pub fn init_seams() {
     // execMain owns these seam decls (consumed by nodeModifyTable) and delegates.
     seams::exec_get_returning_slot::set(exec_get_returning_slot);
     seams::exec_get_child_to_root_map::set(exec_get_child_to_root_map);
+    seams::exec_get_child_to_root_map_full::set(exec_get_child_to_root_map_full);
 
     // PARAM_EXEC `execPlan` link plumbing. nodeSubplan parked these executor
     // PARAM_EXEC / `es_subplanstates` seams in the execProcnode-seams crate, but

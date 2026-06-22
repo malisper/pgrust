@@ -300,40 +300,270 @@ pub fn ExecInitPartitionOnConflict<'mcx>(
     // In the DO UPDATE case, we have some more state to initialize.
     //   if (node->onConflictAction == ONCONFLICT_UPDATE) { ... }
     if node.onConflictAction == ONCONFLICT_UPDATE {
-        // Assert(node->onConflictSet != NIL);
-        // Assert(rootResultRelInfo->ri_onConflict != NULL);
-        let on_conflict_set = node
-            .onConflictSet
-            .as_ref()
-            .map(|l| l.as_slice())
-            .unwrap_or(&[]);
-        let on_conflict_cols = node
-            .onConflictCols
-            .as_ref()
-            .map(|l| l.as_slice())
-            .unwrap_or(&[]);
-        let on_conflict_where: Option<&[types_nodes::primnodes::Expr]> =
-            node.onConflictWhere.as_deref();
-
-        // Build the OnConflictSetState: oc_Existing (table_slot_create), and
-        // either reuse the root's proj state (when ExecGetRootToChildMap is
-        // NULL) or build a partition-specific UPDATE SET projection + WHERE
-        // qual (map_variable_attnos over INNER_VAR then firstVarno,
-        // adjust_partition_colnos, ExecBuildUpdateProjection, ExecInitQual) —
-        // all execExpr/tableam/rewrite-owned.
-        backend_executor_execExpr_seams::partition_init_on_conflict_update::call(
+        ExecInitPartitionOnConflictUpdate(
             mcx,
             mtstate,
             estate,
             leaf_part_rri,
             root_result_rel_info,
-            first_result_rel,
             first_varno,
-            on_conflict_set,
-            on_conflict_cols,
-            on_conflict_where,
+            first_result_rel,
         )?;
     }
+
+    Ok(())
+}
+
+/// `INNER_VAR` (primnodes.h) — the EXCLUDED pseudo-relation's varno in an ON
+/// CONFLICT DO UPDATE SET / WHERE clause.
+const INNER_VAR: i32 = -1;
+
+/// The ON CONFLICT DO UPDATE `OnConflictSetState` build of
+/// `ExecInitPartitionInfo` (execPartition.c L730-861).
+///
+/// `makeNode(OnConflictSetState)`, create the per-partition `oc_Existing` slot
+/// (`table_slot_create(partrel)`), then `ExecGetRootToChildMap(leaf_part_rri)` —
+/// when the map is `NULL` (rowtype matches root) reuse the root `ri_onConflict`'s
+/// `oc_ProjSlot` / `oc_ProjInfo` / `oc_WhereClause`; otherwise translate
+/// `node->onConflictSet` twice (`map_variable_attnos` over `INNER_VAR` then
+/// `firstVarno`, with `build_attrmap_by_name(partrel, firstResultRel)`),
+/// `adjust_partition_colnos(node->onConflictCols)` to the partition,
+/// `table_slot_create(partrel)` the projection slot, build the UPDATE SET
+/// projection via `ExecBuildUpdateProjection`, and (when `node->onConflictWhere`
+/// is non-NULL) map+`ExecInitQual` the WHERE clause. Stores the built
+/// `OnConflictSetState` on `leaf_part_rri.ri_onConflict`.
+#[allow(clippy::too_many_arguments)]
+fn ExecInitPartitionOnConflictUpdate<'mcx>(
+    mcx: Mcx<'mcx>,
+    mtstate: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    leaf_part_rri: RriId,
+    _root_result_rel_info: RriId,
+    first_varno: Index,
+    first_result_rel: RriId,
+) -> PgResult<()> {
+    let node = mtstate
+        .plan_node
+        .expect("ExecInitPartitionOnConflictUpdate: ModifyTable plan node is present");
+
+    // ExprContext *econtext = mtstate->ps.ps_ExprContext;
+    let econtext = mtstate
+        .ps
+        .ps_ExprContext
+        .expect("ExecInitPartitionInfo: ON CONFLICT node has an expression context");
+
+    // Assert(node->onConflictSet != NIL);
+    // Assert(rootResultRelInfo->ri_onConflict != NULL);
+
+    // Need a separate existing slot for each partition, as the partition could
+    // be of a different AM, even if the tuple descriptors match.
+    //   onconfl->oc_Existing =
+    //       table_slot_create(leaf_part_rri->ri_RelationDesc,
+    //                         &mtstate->ps.state->es_tupleTable);
+    let part_rel = estate
+        .result_rel(leaf_part_rri)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecInitPartitionInfo: leaf partition ResultRelInfo has an open relation")
+        .alias();
+    let existing_slot = backend_access_table_tableam::table_slot_create(mcx, &part_rel)?;
+    let oc_existing = estate.push_slot_data(existing_slot)?;
+
+    //   map = ExecGetRootToChildMap(leaf_part_rri, estate);
+    //
+    // If the partition's tuple descriptor matches exactly the root parent (the
+    // common case, map == NULL), the C re-uses the parent's ON CONFLICT SET
+    // projection/where pointers. Over the owned model — where `oc_ProjInfo`
+    // (a `ProjectionInfo` value) and `oc_WhereClause` (an `ExprState` value) are
+    // held by value, not by shared pointer — we instead build them fresh against
+    // the leaf partition's descriptor (which, when map == NULL, is identical to
+    // the root's), using `node->onConflictSet` / `onConflictCols` /
+    // `onConflictWhere` directly with NO attribute remapping. When map != NULL we
+    // remap (twice over INNER_VAR then firstVarno) and adjust the target colnos
+    // to the partition, exactly as the C does.
+    let map = backend_executor_execUtils_seams::exec_get_root_to_child_map::call(
+        mcx,
+        estate,
+        leaf_part_rri,
+    )?;
+    let need_remap = map.is_some();
+
+    // partrelDesc reltype for map_variable_attnos's to_rowtype.
+    let part_reltype = estate
+        .result_rel(leaf_part_rri)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecInitPartitionInfo: leaf partition has an open relation")
+        .rd_rel
+        .reltype;
+
+    // onconflset = copyObject(node->onConflictSet);
+    let ref_set = node
+        .onConflictSet
+        .as_ref()
+        .map(|l| l.as_slice())
+        .unwrap_or(&[]);
+    let mut onconflset_init: mcx::PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, ref_set.len())?;
+    for tle in ref_set {
+        onconflset_init.push(tle.clone_in(mcx)?);
+    }
+    let onconflset = onconflset_init;
+
+    let ref_cols = node
+        .onConflictCols
+        .as_ref()
+        .map(|l| l.as_slice())
+        .unwrap_or(&[]);
+
+    // When the rowtype differs, build part_attmap once and remap the SET list /
+    // adjust the colnos. build_attrmap_by_name is fallible, so compute it lazily.
+    // part_attmap is also needed to remap the WHERE clause below.
+    let (onconflset, onconflcols_owned, part_attmap) = if need_remap {
+        // part_attmap = build_attrmap_by_name(RelationGetDescr(partrel),
+        //                                     RelationGetDescr(firstResultRel),
+        //                                     false);
+        let part_desc = estate
+            .result_rel(leaf_part_rri)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecInitPartitionInfo: leaf partition has an open relation")
+            .rd_att_clone_in(mcx)?;
+        let first_desc = estate
+            .result_rel(first_result_rel)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecInitPartitionInfo: first result ResultRelInfo has an open relation")
+            .rd_att_clone_in(mcx)?;
+        let attmap = backend_access_common_next_seams::build_attrmap_by_name::call(
+            mcx,
+            &part_desc,
+            &first_desc,
+            false,
+        )?;
+
+        // onconflset = map_variable_attnos(onconflset, INNER_VAR, 0, part_attmap,
+        //                                  partrel reltype);
+        // onconflset = map_variable_attnos(onconflset, firstVarno, 0, part_attmap,
+        //                                  partrel reltype);
+        let (set1, _fwr1) =
+            backend_rewrite_rewritemanip_seams::map_variable_attnos_targetentry_list::call(
+                mcx,
+                onconflset,
+                INNER_VAR,
+                &attmap.attnums,
+                part_reltype,
+            )?;
+        let (set2, _fwr2) =
+            backend_rewrite_rewritemanip_seams::map_variable_attnos_targetentry_list::call(
+                mcx,
+                set1,
+                first_varno as i32,
+                &attmap.attnums,
+                part_reltype,
+            )?;
+
+        // onconflcols = adjust_partition_colnos(node->onConflictCols, leaf_part_rri);
+        let cols = backend_executor_execPartition_seams::adjust_partition_colnos::call(
+            mcx,
+            estate,
+            ref_cols,
+            leaf_part_rri,
+        )?;
+        (set2, Some(cols), Some(attmap))
+    } else {
+        (onconflset, None, None)
+    };
+
+    let onconflcols: &[i32] = match &onconflcols_owned {
+        Some(v) => v.as_slice(),
+        None => ref_cols,
+    };
+
+    // Create the tuple slot for the UPDATE SET projection.
+    //   onconfl->oc_ProjSlot =
+    //       table_slot_create(partrel, &mtstate->ps.state->es_tupleTable);
+    let part_rel2 = estate
+        .result_rel(leaf_part_rri)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecInitPartitionInfo: leaf partition has an open relation")
+        .alias();
+    let proj_slot_raw = backend_access_table_tableam::table_slot_create(mcx, &part_rel2)?;
+    let oc_proj_slot = estate.push_slot_data(proj_slot_raw)?;
+
+    // build UPDATE SET projection state
+    //   onconfl->oc_ProjInfo =
+    //       ExecBuildUpdateProjection(onconflset, true, onconflcols, partrelDesc,
+    //                                 econtext, onconfl->oc_ProjSlot, &mtstate->ps);
+    let oc_proj_info =
+        backend_executor_execExpr_seams::exec_build_on_conflict_set_projection::call(
+            mtstate,
+            estate,
+            leaf_part_rri,
+            onconflset.as_slice(),
+            onconflcols,
+            econtext,
+            oc_proj_slot,
+        )?;
+
+    // If there is a WHERE clause, initialize state where it will be evaluated,
+    // mapping the attribute numbers (INNER_VAR then firstVarno) when remapping.
+    //   if (node->onConflictWhere) { ... onconfl->oc_WhereClause =
+    //       ExecInitQual((List *) clause, &mtstate->ps); }
+    let oc_where_clause = match node.onConflictWhere.as_deref() {
+        Some(ref_where) if !ref_where.is_empty() => {
+            let mut clause: mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>> =
+                mcx::vec_with_capacity_in(mcx, ref_where.len())?;
+            for e in ref_where {
+                clause.push(e.clone_in(mcx)?);
+            }
+            let clause = if let Some(attmap) = part_attmap.as_ref() {
+                let (c1, _fwr3) =
+                    backend_rewrite_rewritemanip_seams::map_variable_attnos_expr_list_varno::call(
+                        mcx,
+                        clause,
+                        INNER_VAR,
+                        &attmap.attnums,
+                        part_reltype,
+                    )?;
+                let (c2, _fwr4) =
+                    backend_rewrite_rewritemanip_seams::map_variable_attnos_expr_list_varno::call(
+                        mcx,
+                        c1,
+                        first_varno as i32,
+                        &attmap.attnums,
+                        part_reltype,
+                    )?;
+                c2
+            } else {
+                clause
+            };
+            backend_executor_execExpr_seams::exec_init_on_conflict_where::call(
+                mtstate,
+                estate,
+                Some(clause.as_slice()),
+            )?
+        }
+        _ => None,
+    };
+
+    let oc_proj_slot = Some(oc_proj_slot);
+    let oc_proj_info = Some(oc_proj_info);
+
+    // OnConflictSetState *onconfl = makeNode(OnConflictSetState);
+    // leaf_part_rri->ri_onConflict = onconfl;
+    let onconfl = mcx::alloc_in(
+        mcx,
+        types_nodes::modifytable::OnConflictSetState {
+            type_: types_nodes::nodes::T_OnConflictSetState,
+            oc_Existing: Some(oc_existing),
+            oc_ProjSlot: oc_proj_slot,
+            oc_ProjInfo: oc_proj_info,
+            oc_WhereClause: oc_where_clause,
+        },
+    )?;
+    estate.result_rel_mut(leaf_part_rri).ri_onConflict = Some(onconfl);
 
     Ok(())
 }

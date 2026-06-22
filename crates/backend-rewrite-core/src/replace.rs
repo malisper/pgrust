@@ -482,6 +482,34 @@ pub fn map_variable_attnos_expr_list<'mcx>(
     Ok((out, found_whole_row))
 }
 
+/// `map_variable_attnos((Node *) clause, target_varno, 0, attmap, to_rowtype,
+/// &found_whole_row)` over a `List *` of `Expr`, as `execPartition.c`
+/// `ExecInitPartitionInfo` calls it on the ON CONFLICT DO UPDATE WHERE clause
+/// (twice — `INNER_VAR` then `firstVarno`). Like
+/// [`map_variable_attnos_expr_list`] but with the `target_varno` / `to_rowtype`
+/// exposed rather than pinned to the `CompareIndexInfo` call site.
+pub fn map_variable_attnos_expr_list_varno<'mcx>(
+    mcx: Mcx<'mcx>,
+    exprs: PgVec<'mcx, Expr<'mcx>>,
+    target_varno: i32,
+    attmap: &[i16],
+    to_rowtype: Oid,
+) -> PgResult<(PgVec<'mcx, Expr<'mcx>>, bool)> {
+    let mut out: PgVec<'mcx, Expr<'mcx>> = mcx::vec_with_capacity_in(mcx, exprs.len())?;
+    let mut found_whole_row = false;
+    for owned in exprs.into_iter() {
+        let mut node = Node::mk_expr(mcx, owned)?;
+        let mut one_fwr = false;
+        map_variable_attnos(&mut node, target_varno, 0, attmap, to_rowtype, &mut one_fwr, mcx)?;
+        found_whole_row |= one_fwr;
+        match node.into_expr() {
+            Some(mapped) => out.push(mapped),
+            None => unreachable!("map_variable_attnos returned a non-Expr for an Expr input"),
+        }
+    }
+    Ok((out, found_whole_row))
+}
+
 /// `map_variable_attnos((Node *) returningList, firstVarno, 0, attmap,
 /// RelationGetForm(partrel)->reltype, &found_whole_row)` over a `List *` of
 /// `TargetEntry`, as `execPartition.c` `ExecInitPartitionInfo` calls it on the
