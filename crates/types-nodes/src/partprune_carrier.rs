@@ -118,6 +118,18 @@ pub struct PartitionPruneInfo<'mcx> {
     pub other_subplans: RawBms,
 }
 
+/// Erase a [`PartitionPruneInfo`]'s lifetime to the planner arena's notional
+/// `'static` (sibling of `primnodes::placeholdervar_into_static`). The contained
+/// pruning-step `Expr`s are fully owned (moved in); this is a lifetime-parameter-
+/// only erase, used when the planner appends the pruneinfo into its backend-
+/// lifetime `partPruneInfos` list (which, not Rust's borrow tracker, governs its
+/// validity).
+pub fn partpruneinfo_into_static(p: PartitionPruneInfo<'_>) -> PartitionPruneInfo<'static> {
+    // SAFETY: `p`'s children are fully owned; lifetime-parameter-only erase to the
+    // Expr tree's 'static notional lifetime (cf. placeholdervar_into_static).
+    unsafe { core::mem::transmute(p) }
+}
+
 /// `PartitionedRelPruneInfo` (nodes/plannodes.h) — pruning info for one
 /// partitioned table within a hierarchy.
 #[derive(Clone, Debug)]

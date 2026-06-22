@@ -450,7 +450,7 @@ pub fn transformExprRecurse<'mcx>(
         // `Node::Expr(SetToDefault)` arm of `transform_expr_node`).
         other => {
             if expr.is_expr() {
-                transform_expr_node(pstate, expr.into_expr().unwrap())?
+                transform_expr_node(pstate, expr.into_expr().unwrap().erase_lifetime())?
             } else {
                 // The C default raises elog(ERROR, "unrecognized node type: %d").
                 return Err(ereport(ERROR)
@@ -472,7 +472,7 @@ pub fn transformExprRecurse<'mcx>(
 /// the SQL/JSON family).
 fn transform_expr_node<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    e: Expr,
+    e: Expr<'static>,
 ) -> PgResult<Expr<'static>> {
     match e {
         // A raw-grammar BoolExpr reaches the dispatcher as the `Node::BoolExpr`
@@ -485,7 +485,7 @@ fn transform_expr_node<'mcx>(
             ))
         }
         Expr::GroupingFunc(_) => {
-            seam_transform_grouping_func(pstate, Node::mk_expr(aexpr_clone_ctx(pstate), e)?)
+            { let m = aexpr_clone_ctx(pstate); seam_transform_grouping_func(pstate, Node::mk_expr(m, e.clone_in(m)?)?) }
         }
         Expr::MergeSupportFunc(f) => transformMergeSupportFunc(pstate, f),
 
@@ -583,8 +583,9 @@ fn transform_expr_node<'mcx>(
 /// via `Node::mk_expr`) so this construction site is ready for the node-opaque
 /// flip (§6 `value_no_mcx` sub-sweep); today `mk_expr` ignores `mcx` so this is
 /// behavior-preserving.
-fn expr_to_node<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
-    Ok(Node::mk_expr(mcx, e)?)
+fn expr_to_node<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr<'static>) -> PgResult<Node<'mcx>> {
+    // The 'static parser-arena expr is deep-cloned into `mcx` for the Node.
+    Ok(Node::mk_expr(mcx, e.clone_in(mcx)?)?)
 }
 
 // ===========================================================================
@@ -604,9 +605,11 @@ fn transform_a_const<'mcx>(
     pstate: &mut ParseState<'mcx>,
     a: A_Const<'mcx>,
 ) -> PgResult<Expr<'static>> {
-    let scratch = MemoryContext::new("make_const");
-    let con = backend_parser_small1::make_const(scratch.mcx(), &*pstate, &a)?;
-    Ok(Expr::Const(con))
+    // Build the Const in the parse-state arena (not a function-local scratch that
+    // would dangle), then erase to the parser arena's notional 'static.
+    let m = aexpr_clone_ctx(pstate);
+    let con = backend_parser_small1::make_const(m, &*pstate, &a)?;
+    Ok(Expr::Const(con).erase_lifetime())
 }
 
 // ===========================================================================
@@ -791,16 +794,16 @@ fn transformAExprIn<'mcx>(
         }
     };
 
-    let mut rexprs: Vec<Expr> = Vec::with_capacity(rexpr_list.len());
-    let mut rvars: Vec<Expr> = Vec::new();
-    let mut rnonvars: Vec<Expr> = Vec::new();
+    let mut rexprs: Vec<Expr<'static>> = Vec::with_capacity(rexpr_list.len());
+    let mut rvars: Vec<Expr<'static>> = Vec::new();
+    let mut rnonvars: Vec<Expr<'static>> = Vec::new();
     let mut has_rvars = false;
     for r in rexpr_list.into_iter() {
         let rexpr = transformExprRecurse(pstate, Some(mcx::PgBox::into_inner(r)))?
             .ok_or_else(|| PgError::error("transformAExprIn: IN item is NULL"))?;
         rexprs.push(rexpr.clone());
         // contain_vars_of_level((Node *) rexpr, 0).
-        if contain_vars_of_level(&Node::mk_expr(aexpr_clone_ctx(pstate), rexpr.clone())?, 0) {
+        if contain_vars_of_level(&{ let m = aexpr_clone_ctx(pstate); Node::mk_expr(m, rexpr.clone_in(m)?)? }, 0) {
             rvars.push(rexpr);
             has_rvars = true;
         } else {
@@ -1361,7 +1364,7 @@ fn transformSQLValueFunction<'mcx>(
 
 fn transformBooleanTest<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    mut b: BooleanTest,
+    mut b: BooleanTest<'static>,
 ) -> PgResult<Expr<'static>> {
     let clausename = match b.booltesttype {
         BoolTestType::IS_TRUE => "IS TRUE",
@@ -1582,7 +1585,7 @@ fn transformCaseExpr<'mcx>(
 
     // Transform the WHEN/THEN list.
     let mut newargs: Vec<CaseWhen> = Vec::with_capacity(c.args.len());
-    let mut resultexprs: Vec<Expr> = Vec::new();
+    let mut resultexprs: Vec<Expr<'static>> = Vec::new();
     for w_ptr in c.args {
         // Each list element is a raw `Node::CaseWhen` (the grammar's
         // `makeNode(CaseWhen)`); pull out its raw `expr`/`result` children.
@@ -1635,7 +1638,7 @@ fn transformCaseExpr<'mcx>(
         // selection) and `neww->result`; the owned model needs a separate value,
         // so deep-copy via `clone_in` (the derived `.clone()` panics on embedded
         // owned sub-trees such as a SubLink CASE result — `ARRAY(SELECT ...)`).
-        resultexprs.push(wresult.clone_in(aexpr_clone_ctx(pstate))?);
+        resultexprs.push(wresult.clone_in(aexpr_clone_ctx(pstate))?.erase_lifetime());
         newargs.push(CaseWhen {
             expr: Some(Box::new(cond)),
             result: Some(Box::new(wresult)),
@@ -1660,10 +1663,10 @@ fn transformCaseExpr<'mcx>(
         .ok_or_else(|| PgError::error("transformCaseExpr: CASE default result is NULL"))?;
 
     // Common type: default result first (lcons), then WHEN results.
-    let mut common_inputs: Vec<Expr> = Vec::with_capacity(resultexprs.len() + 1);
+    let mut common_inputs: Vec<Expr<'static>> = Vec::with_capacity(resultexprs.len() + 1);
     // Deep-copy (not derived `.clone()`, which panics on a SubLink default
     // result) — C reuses the same pointer; the owned model needs its own value.
-    common_inputs.push(defresult.clone_in(aexpr_clone_ctx(pstate))?);
+    common_inputs.push(defresult.clone_in(aexpr_clone_ctx(pstate))?.erase_lifetime());
     common_inputs.extend(resultexprs);
 
     let ptype = coerce::select_common_type::call(pstate, &common_inputs, Some("CASE"))?;
@@ -1706,8 +1709,8 @@ fn transformCaseExpr<'mcx>(
 fn make_row_comparison_op<'mcx>(
     pstate: &mut ParseState<'mcx>,
     opname: &mcx::PgVec<'_, nodes::NodePtr<'_>>,
-    largs: Vec<Expr>,
-    rargs: Vec<Expr>,
+    largs: Vec<Expr<'static>>,
+    rargs: Vec<Expr<'static>>,
     location: i32,
 ) -> PgResult<Expr<'static>> {
     let nopers = largs.len();
@@ -1884,8 +1887,8 @@ fn make_row_comparison_op<'mcx>(
 fn make_row_distinct_op<'mcx>(
     pstate: &mut ParseState<'mcx>,
     opname: &mcx::PgVec<'_, nodes::NodePtr<'_>>,
-    lrow: RowExpr,
-    rrow: RowExpr,
+    lrow: RowExpr<'static>,
+    rrow: RowExpr<'static>,
     location: i32,
 ) -> PgResult<Expr<'static>> {
     let largs = lrow.args;
@@ -1919,8 +1922,8 @@ fn make_row_distinct_op<'mcx>(
 fn make_distinct_op<'mcx>(
     pstate: &mut ParseState<'mcx>,
     opname: &mcx::PgVec<'_, nodes::NodePtr<'_>>,
-    ltree: Option<Expr>,
-    rtree: Option<Expr>,
+    ltree: Option<Expr<'static>>,
+    rtree: Option<Expr<'static>>,
     location: i32,
 ) -> PgResult<Expr<'static>> {
     let opname_s = opname_strings(opname);
@@ -2394,7 +2397,7 @@ pub fn ParseExprKindName(expr_kind: ParseExprKind) -> &'static str {
 /// Clone the inner `Expr` of `pstate->p_last_srf` (the most recent
 /// set-returning function/operator). Public so `analyze.c`'s `transformCallStmt`
 /// can pass it to `ParseFuncOrColumn` (C reads `pstate->p_last_srf` directly).
-pub fn last_srf_expr<'a>(pstate: &'a ParseState<'a>) -> Option<Expr<'a>> {
+pub fn last_srf_expr<'mcx>(pstate: &ParseState<'mcx>) -> Option<Expr<'mcx>> {
     pstate
         .p_last_srf
         .as_ref()
@@ -2508,9 +2511,11 @@ fn transformColumnRef<'mcx>(
     if let Some(hook) = pstate.p_pre_columnref_hook {
         if let Some(node) = hook(pstate, &cref)? {
             let node: Node<'mcx> = mcx::PgBox::into_inner(node);
-            return node_into_expr(node).ok_or_else(|| {
-                PgError::error("transformColumnRef: pre-columnref-hook node is not an expression")
-            });
+            return node_into_expr(node)
+                .map(|e| e.erase_lifetime())
+                .ok_or_else(|| {
+                    PgError::error("transformColumnRef: pre-columnref-hook node is not an expression")
+                });
         }
     }
 
@@ -2645,9 +2650,11 @@ fn transformColumnRef<'mcx>(
     let node = resolve_columnref_finish(
         pstate, node, crerr, nspname, relname, colname, &cref, location, mcx,
     )?;
-    node_into_expr(node).ok_or_else(|| {
-        PgError::error("transformColumnRef: resolved node is not an expression")
-    })
+    node_into_expr(node)
+        .map(|e| e.erase_lifetime())
+        .ok_or_else(|| {
+            PgError::error("transformColumnRef: resolved node is not an expression")
+        })
 }
 
 /// The shared tail of `transformColumnRef`: the PostParseColumnRefHook step and
@@ -2951,7 +2958,8 @@ fn parse_func_on_whole_row<'mcx>(
     let mcx = aexpr_clone_ctx(pstate);
     let funcname = [mcx::PgString::from_str_in(colname, mcx)?];
     let arg = node_into_expr(whole)
-        .ok_or_else(|| PgError::error("parse_func_on_whole_row: whole-row ref is not an expr"))?;
+        .ok_or_else(|| PgError::error("parse_func_on_whole_row: whole-row ref is not an expr"))?
+        .erase_lifetime();
     let last_srf = last_srf_expr(pstate);
     let res = backend_parser_func::ParseFuncOrColumn(
         pstate,
@@ -2962,7 +2970,7 @@ fn parse_func_on_whole_row<'mcx>(
         false,
         location,
     )?;
-    res.map(|e| Node::mk_expr(mcx, e)).transpose()
+    res.map(|e| Node::mk_expr(mcx, e.clone_in(mcx)?)).transpose()
 }
 
 // ===========================================================================
@@ -3007,13 +3015,14 @@ fn transformIndirection<'mcx>(
                     let sref = backend_parser_small1::transformContainerSubscripts(
                         mcx,
                         pstate,
-                        result,
+                        result.clone_in(mcx)?,
                         ctype,
                         ctypmod,
                         &subscripts,
                         false,
                     )?;
-                    result = Expr::SubscriptingRef(sref);
+                    // Re-localize the 'mcx subscript node to the parser arena 'static.
+                    result = Expr::SubscriptingRef(sref).erase_lifetime();
                     subscripts = Vec::new();
                 }
 
@@ -3050,9 +3059,9 @@ fn transformIndirection<'mcx>(
         let ctype = expr_type(Some(&result))?;
         let ctypmod = expr_typmod(Some(&result))?;
         let sref = backend_parser_small1::transformContainerSubscripts(
-            mcx, pstate, result, ctype, ctypmod, &subscripts, false,
+            mcx, pstate, result.clone_in(mcx)?, ctype, ctypmod, &subscripts, false,
         )?;
-        result = Expr::SubscriptingRef(sref);
+        result = Expr::SubscriptingRef(sref).erase_lifetime();
     }
 
     Ok(result)
@@ -3290,7 +3299,7 @@ fn transformMultiAssignRef<'mcx>(
 
             // Build a resjunk tlist item containing the MULTIEXPR SubLink and
             // add it to p_multiassign_exprs.
-            let tle = make_target_entry(mcx, Expr::SubLink(sublink), 0, None, true)?;
+            let tle = make_target_entry(mcx, Expr::SubLink(sublink).clone_in(mcx)?, 0, None, true)?;
             pstate.p_multiassign_exprs.push(tle);
         } else if is_rowexpr {
             let rexpr = src.into_rowexpr().unwrap_or_else(|| unreachable!("is_rowexpr guard"));
@@ -3310,7 +3319,7 @@ fn transformMultiAssignRef<'mcx>(
             }
             // Temporarily append to p_multiassign_exprs so later columns can
             // re-fetch it.
-            let tle = make_target_entry(mcx, rexpr, 0, None, true)?;
+            let tle = make_target_entry(mcx, rexpr.clone_in(mcx)?, 0, None, true)?;
             pstate.p_multiassign_exprs.push(tle);
         } else {
             // exprLocation(maref->source).
@@ -3378,7 +3387,7 @@ fn transformMultiAssignRef<'mcx>(
             if colno == ncolumns {
                 pstate.p_multiassign_exprs.pop();
             }
-            Ok(result)
+            Ok(result.erase_lifetime())
         }
         _ => Err(PgError::error("unexpected expr type in multiassign list")),
     }
@@ -3539,7 +3548,7 @@ fn sql_fn_post_column_ref<'mcx>(
             false,
             cref.location,
         )?;
-        return res.map(|e| Node::mk_expr(mcx, e)).transpose();
+        return res.map(|e| Node::mk_expr(mcx, e.clone_in(mcx)?)).transpose();
     }
 
     Ok(Some(Node::mk_expr(
@@ -3706,7 +3715,7 @@ pub fn setup_parse_plpgsql_expr<'mcx>(
 
 fn seam_transform_column_ref_hook_currentof<'mcx>(
     _pstate: &mut ParseState<'mcx>,
-    _cexpr: Expr,
+    _cexpr: Expr<'static>,
 ) -> PgResult<Expr<'static>> {
     panic!(
         "transformCurrentOfExpr cursor-name -> REFCURSOR-Param rewrite needs the \
@@ -4373,7 +4382,7 @@ fn get_json_encoding_const<'mcx>(
         value,
         false,
         false,
-    )?))
+    )?).erase_lifetime())
 }
 
 /// `makeJsonByteaToTextConversion(expr, format, location)` (parse_expr.c:3287) —
@@ -4381,7 +4390,7 @@ fn get_json_encoding_const<'mcx>(
 /// FORMAT ENCODING before JSON parsing.
 fn make_json_bytea_to_text_conversion<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    expr: Expr,
+    expr: Expr<'static>,
     format: &Option<JsonFormat>,
     location: i32,
 ) -> PgResult<Expr<'static>> {
@@ -4566,7 +4575,7 @@ fn transform_json_constructor_output<'mcx>(
 /// (parse_expr.c:3611). Returns the (possibly coerced) expression.
 fn coerce_json_func_expr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    expr: Expr,
+    expr: Expr<'static>,
     returning: &JsonReturning,
     report_error: bool,
 ) -> PgResult<Option<Expr<'static>>> {
@@ -4636,8 +4645,8 @@ fn coerce_json_func_expr<'mcx>(
 fn build_json_constructor_expr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     r#type: JsonConstructorType,
-    args: Vec<Expr>,
-    fexpr: Option<Expr>,
+    args: Vec<Expr<'static>>,
+    fexpr: Option<Expr<'static>>,
     returning: JsonReturning,
     unique: bool,
     absent_on_null: bool,
@@ -4718,7 +4727,7 @@ fn transform_json_value_expr<'mcx>(
         expr = coerce::coerce_to_specific_type::call(pstate, expr, TEXTOID, construct_name)?;
     }
 
-    let rawexpr = expr.clone_in(aexpr_clone_ctx(pstate))?;
+    let rawexpr = expr.clone_in(aexpr_clone_ctx(pstate))?.erase_lifetime();
     let mut exprtype = expr_type(Some(&expr))?;
     let location = expr_location(Some(&expr))?;
 
@@ -4817,7 +4826,7 @@ fn transform_json_value_expr<'mcx>(
 
         let coerced = coerce::coerce_to_target_type::call(
             pstate,
-            expr.clone_in(aexpr_clone_ctx(pstate))?,
+            expr.clone_in(aexpr_clone_ctx(pstate))?.erase_lifetime(),
             exprtype,
             targettype,
             -1,
@@ -4844,7 +4853,7 @@ fn transform_json_value_expr<'mcx>(
                 make_func_expr(
                     fnoid,
                     targettype,
-                    alloc::vec![expr.clone_in(aexpr_clone_ctx(pstate))?],
+                    alloc::vec![expr.clone_in(aexpr_clone_ctx(pstate))?.erase_lifetime()],
                     InvalidOid,
                     InvalidOid,
                     CoercionForm::COERCE_EXPLICIT_CALL,
@@ -5423,7 +5432,7 @@ fn transformJsonAggConstructor<'mcx>(
     pstate: &mut ParseState<'mcx>,
     agg_ctor: &types_nodes::rawexprnodes::JsonAggConstructor<'mcx>,
     returning: JsonReturning,
-    args: Vec<Expr>,
+    args: Vec<Expr<'static>>,
     aggfnoid: Oid,
     aggtype: Oid,
     ctor_type: JsonConstructorType,
@@ -6045,7 +6054,7 @@ fn transformJsonFuncExpr<'mcx>(
         }
     }
 
-    Ok(Expr::JsonExpr(jsexpr))
+    Ok(Expr::JsonExpr(jsexpr).erase_lifetime())
 }
 
 /// A flattened raw `JsonBehavior` lifted out of its `NodePtr` so it survives
@@ -6142,7 +6151,7 @@ fn transform_json_passing_args<'mcx>(
     construct_name: &str,
     format: JsonFormatType,
     args: &mcx::PgVec<'mcx, nodes::NodePtr<'mcx>>,
-    jsexpr: &mut JsonExpr,
+    jsexpr: &mut JsonExpr<'static>,
 ) -> PgResult<()> {
     let mcx = aexpr_clone_ctx(pstate);
     for argp in args.iter() {
@@ -6186,7 +6195,7 @@ fn valid_json_behavior_default_expr(expr: Option<&Expr>) -> bool {
 /// returning)` (parse_expr.c:4742).
 fn transform_json_behavior<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    jsexpr: &JsonExpr,
+    jsexpr: &JsonExpr<'static>,
     behavior: Option<&RawJsonBehavior<'mcx>>,
     default_behavior: JsonBehaviorType,
 ) -> PgResult<Option<JsonBehavior<'static>>> {
@@ -6220,7 +6229,7 @@ fn transform_json_behavior<'mcx>(
                     .errposition(parser_errposition(pstate, expr_location(Some(&e))?))
                     .into_error());
             }
-            let enode = Node::mk_expr(mcx, e.clone())?;
+            let enode = Node::mk_expr(mcx, e.clone_in(mcx)?)?;
             if backend_optimizer_util_vars::var::contain_var_clause(&enode) {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_DATATYPE_MISMATCH)
@@ -6277,7 +6286,7 @@ fn transform_json_behavior<'mcx>(
                     let datum = me::jsonb_const_from_cstring::call(mcx, val)?;
                     expr = Some(Expr::Const(make_const(
                         mcx, JSONBOID, -1, InvalidOid, -1, datum, false, false,
-                    )?));
+                    )?).erase_lifetime());
                 } else {
                     expr = Some(e);
                 }
@@ -6376,7 +6385,7 @@ fn get_json_behavior_const<'mcx>(
 
     let mut con = make_const(mcx, typid, -1, InvalidOid, len, datum, isnull, isbyval)?;
     con.location = location;
-    Ok(Expr::Const(con))
+    Ok(Expr::Const(con).erase_lifetime())
 }
 
 // ===========================================================================

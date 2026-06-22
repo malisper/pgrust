@@ -93,7 +93,7 @@ fn part_coll_matches_expr_coll(partcoll: Oid, exprcoll: Oid) -> bool {
 
 /// `PartClauseInfo` (partprune.c): a clause matched with a partition key.
 #[derive(Clone, Debug)]
-struct PartClauseInfo {
+struct PartClauseInfo<'mcx> {
     /// Partition key number (0 to partnatts - 1).
     keyno: i32,
     /// Operator used to compare partkey to expr.
@@ -101,7 +101,7 @@ struct PartClauseInfo {
     /// Is the clause's original operator `<>`?
     op_is_ne: bool,
     /// The expr the partition key is compared to.
-    expr: Expr,
+    expr: Expr<'mcx>,
     /// Oid of the function to compare `expr` to the partition key.
     cmpfn: Oid,
     /// btree strategy identifying the operator.
@@ -141,11 +141,11 @@ enum PartitionPruneCombineOp {
 
 /// `PartitionPruneStepOp` (plannodes.h), trimmed to plan-time pruning fields.
 #[derive(Clone, Debug)]
-struct PruneStepOp {
+struct PruneStepOp<'mcx> {
     step_id: i32,
     opstrategy: i32,
     /// Lookup-key expressions (up to partnatts items), parallel to `cmpfns`.
-    exprs: Vec<Expr>,
+    exprs: Vec<Expr<'mcx>>,
     /// Comparison/hash support function OIDs, parallel to `exprs`.
     cmpfns: Vec<Oid>,
     /// Partition-key offsets matched to IS NULL (empty == C NULL set).
@@ -162,12 +162,12 @@ struct PruneStepCombine {
 
 /// `PartitionPruneStep` (plannodes.h) — base with the two concrete variants.
 #[derive(Clone, Debug)]
-enum PartitionPruneStep {
-    Op(PruneStepOp),
+enum PartitionPruneStep<'mcx> {
+    Op(PruneStepOp<'mcx>),
     Combine(PruneStepCombine),
 }
 
-impl PartitionPruneStep {
+impl<'mcx> PartitionPruneStep<'mcx> {
     fn step_id(&self) -> i32 {
         match self {
             PartitionPruneStep::Op(s) => s.step_id,
@@ -199,17 +199,17 @@ struct GeneratePruningStepsContext<'a, 'mcx> {
     /// The partition scheme (column metadata) of the partitioned relation.
     part_scheme: &'a PartitionScheme,
     /// The partition key expressions (`rel->partexprs[i]` — first per key).
-    partexprs: &'a [Expr],
+    partexprs: &'a [Expr<'mcx>],
     /// `rel->boundinfo` presence — whether a default partition can exist.
     has_default: bool,
     /// `rel->partition_qual` (NIL for a top-level partitioned table).
     has_partition_qual: bool,
     /// `rel->partition_qual` — the partition constraint clauses (implicit-AND
     /// list of bare Exprs), used by the default-partition refutation check.
-    partition_qual: &'a [Expr],
+    partition_qual: &'a [Expr<'mcx>],
     target: PartClauseTarget,
     /// Result: the list of pruning steps.
-    steps: Vec<PartitionPruneStep>,
+    steps: Vec<PartitionPruneStep<'mcx>>,
     has_mutable_op: bool,
     has_mutable_arg: bool,
     has_exec_param: bool,
@@ -289,7 +289,7 @@ fn rel_is_partitioned(root: &PlannerInfo, rel: RelId) -> bool {
 }
 
 /// Convert a partprune-core local pruning step to the plan-data carrier step.
-fn step_to_carrier(step: &PartitionPruneStep) -> CarrierStep {
+fn step_to_carrier<'mcx>(step: &PartitionPruneStep<'mcx>) -> CarrierStep<'mcx> {
     match step {
         PartitionPruneStep::Op(op) => CarrierStep::Op(CarrierStepOp {
             step_id: op.step_id,
@@ -368,10 +368,10 @@ fn make_partition_pruneinfo<'mcx>(
     // (e.g. an AlternativeSubPlan / SubPlan inside an `... OR exists(...)`
     // qual) that have no faithful derived `.clone()`; deep-copy through
     // `Expr::clone_in` (`copyObject` shape).
-    let prunequal: Vec<Expr> = prunequal_ids
+    let prunequal: Vec<Expr<'mcx>> = prunequal_ids
         .iter()
         .map(|id| root.node(*id).clone_in(mcx))
-        .collect::<PgResult<Vec<Expr>>>()?;
+        .collect::<PgResult<Vec<Expr<'mcx>>>>()?;
 
     let simple_rel_array_size = root.simple_rel_array_size;
 
@@ -468,7 +468,10 @@ fn make_partition_pruneinfo<'mcx>(
         other_subplans,
     };
 
-    root.partPruneInfos.push(pruneinfo);
+    // Interned into the planner's backend-lifetime `partPruneInfos` list; erase
+    // to the arena's notional 'static at this sanctioned intern boundary.
+    root.partPruneInfos
+        .push(types_nodes::partprune_carrier::partpruneinfo_into_static(pruneinfo));
     Ok(root.partPruneInfos.len() as i32 - 1)
 }
 
@@ -485,28 +488,28 @@ fn make_partitionedrel_pruneinfo<'mcx>(
     relid_subplan_map: &[i32],
     matchedsubplans: &mut Bitmapset,
     mcx: Mcx<'mcx>,
-) -> PgResult<Option<Vec<CarrierRelPruneInfo>>> {
+) -> PgResult<Option<Vec<CarrierRelPruneInfo<'mcx>>>> {
     let simple_rel_array_size = root.simple_rel_array_size;
     let mut relid_subpart_map: Vec<i32> = alloc::vec![0; simple_rel_array_size as usize];
 
     // First pass: per partitioned rel, generate INITIAL/EXEC steps and discover
     // whether any run-time pruning is needed.
-    struct PinfoBuild {
+    struct PinfoBuild<'mcx> {
         rtindex: u32,
-        initial_pruning_steps: Vec<CarrierStep>,
-        exec_pruning_steps: Vec<CarrierStep>,
+        initial_pruning_steps: Vec<CarrierStep<'mcx>>,
+        exec_pruning_steps: Vec<CarrierStep<'mcx>>,
         execparamids: RawBms,
     }
-    let mut pinfo_builds: Vec<PinfoBuild> = Vec::new();
+    let mut pinfo_builds: Vec<PinfoBuild<'mcx>> = Vec::new();
     let mut doruntimeprune = false;
     let mut targetpart: Option<RelId> = None;
     // The prunequal may be translated parent->child as we descend; carry it.
     // Deep-copy through `Expr::clone_in` — a prunequal clause may hold a SubPlan
     // / AlternativeSubPlan with no faithful derived `.clone()`.
-    let mut cur_prunequal: Vec<Expr> = prunequal
+    let mut cur_prunequal: Vec<Expr<'mcx>> = prunequal
         .iter()
         .map(|e| e.clone_in(mcx))
-        .collect::<PgResult<Vec<Expr>>>()?;
+        .collect::<PgResult<Vec<Expr<'mcx>>>>()?;
 
     let mut i: i32 = 1;
     let rtis: Vec<i32> = partrelids.iter().copied().collect();
@@ -517,7 +520,7 @@ fn make_partitionedrel_pruneinfo<'mcx>(
         i += 1;
 
         // Translate the pruning qual for this partition.
-        let partprunequal: Vec<Expr> = match targetpart {
+        let partprunequal: Vec<Expr<'mcx>> = match targetpart {
             None => {
                 targetpart = Some(subpart);
                 // The prunequal is presented for 'parentrel'. If targetpart is a
@@ -527,7 +530,7 @@ fn make_partitionedrel_pruneinfo<'mcx>(
                 if parent_relids != sub_relids {
                     let sub_rel_set = root.rel(subpart).relids.clone();
                     let appinfos = find_appinfos_by_relids::call(root, &sub_rel_set)?;
-                    let mut translated: Vec<Expr> = Vec::with_capacity(cur_prunequal.len());
+                    let mut translated: Vec<Expr<'mcx>> = Vec::with_capacity(cur_prunequal.len());
                     for cl in core::mem::take(&mut cur_prunequal) {
                         translated.push(
                             backend_optimizer_util_appendinfo::adjust_appendrel_attrs(
@@ -540,11 +543,11 @@ fn make_partitionedrel_pruneinfo<'mcx>(
                 cur_prunequal
                     .iter()
                     .map(|e| e.clone_in(mcx))
-                    .collect::<PgResult<Vec<Expr>>>()?
+                    .collect::<PgResult<Vec<Expr<'mcx>>>>()?
             }
             Some(tp) => {
                 // Sub-partitioned: translate from the target down to this child.
-                let mut translated: Vec<Expr> = Vec::with_capacity(cur_prunequal.len());
+                let mut translated: Vec<Expr<'mcx>> = Vec::with_capacity(cur_prunequal.len());
                 for cl in cur_prunequal.iter() {
                     translated.push(adjust_appendrel_attrs_multilevel(
                         root,
@@ -567,7 +570,7 @@ fn make_partitionedrel_pruneinfo<'mcx>(
                 partprunequal
                     .iter()
                     .map(|e| e.clone_in(mcx))
-                    .collect::<PgResult<Vec<Expr>>>()?,
+                    .collect::<PgResult<Vec<Expr<'mcx>>>>()?,
             ),
         )?;
         let gctx_initial = gen_partprune_steps(&inputs_initial, PartClauseTarget::Initial)?;
@@ -577,7 +580,7 @@ fn make_partitionedrel_pruneinfo<'mcx>(
         }
 
         // Startup steps only matter if there's a mutable op/arg.
-        let initial_pruning_steps: Vec<CarrierStep> =
+        let initial_pruning_steps: Vec<CarrierStep<'mcx>> =
             if gctx_initial.has_mutable_op || gctx_initial.has_mutable_arg {
                 gctx_initial.steps.iter().map(step_to_carrier).collect()
             } else {
@@ -585,7 +588,7 @@ fn make_partitionedrel_pruneinfo<'mcx>(
             };
 
         // exec pruning only if exec Params appear.
-        let mut exec_pruning_steps: Vec<CarrierStep> = Vec::new();
+        let mut exec_pruning_steps: Vec<CarrierStep<'mcx>> = Vec::new();
         let mut execparamids: RawBms = None;
         if gctx_initial.has_exec_param {
             let inputs_exec = collect_prune_inputs_with_clauses(
@@ -597,7 +600,7 @@ fn make_partitionedrel_pruneinfo<'mcx>(
                     partprunequal
                         .iter()
                         .map(|e| e.clone_in(mcx))
-                        .collect::<PgResult<Vec<Expr>>>()?,
+                        .collect::<PgResult<Vec<Expr<'mcx>>>>()?,
                 ),
             )?;
             let gctx_exec = gen_partprune_steps(&inputs_exec, PartClauseTarget::Exec)?;
@@ -737,7 +740,7 @@ pub fn init_seams() {
 fn get_matching_partitions_seam<'mcx>(
     mcx: Mcx<'mcx>,
     context: &mut types_nodes::partition::PartitionPruneContext<'mcx>,
-    pruning_steps: &[types_nodes::partprune_carrier::PartitionPruneStep],
+    pruning_steps: &[types_nodes::partprune_carrier::PartitionPruneStep<'mcx>],
     estate: &mut types_nodes::EStateData<'mcx>,
 ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
     get_matching_partitions_exec(mcx, context, pruning_steps, estate)
@@ -840,17 +843,17 @@ fn enable_partition_pruning() -> bool {
 struct PruneInputs<'mcx> {
     mcx: Mcx<'mcx>,
     part_scheme: PartitionScheme,
-    partexprs: Vec<Expr>,
+    partexprs: Vec<Expr<'mcx>>,
     partkey: PartitionKeyData<'mcx>,
     boundinfo: Box<PartitionBoundInfoData<'mcx>>,
     nparts: i32,
     has_default: bool,
     has_partition_qual: bool,
     /// The baserestrictinfo clauses (already deref'd to owned Exprs).
-    clauses: Vec<Expr>,
+    clauses: Vec<Expr<'mcx>>,
     /// `rel->partition_qual` — the partition constraint (implicit-AND list of
     /// Exprs), deref'd to owned Exprs. Empty for a top-level partitioned table.
-    partition_qual: Vec<Expr>,
+    partition_qual: Vec<Expr<'mcx>>,
 }
 
 /// Collect the partition metadata + restriction clauses needed to prune `rel`.
@@ -878,7 +881,7 @@ fn collect_prune_inputs_with_clauses<'mcx>(
     root: &mut PlannerInfo,
     rel: RelId,
     mcx: Mcx<'mcx>,
-    override_clauses: Option<Vec<Expr>>,
+    override_clauses: Option<Vec<Expr<'mcx>>>,
 ) -> PgResult<PruneInputs<'mcx>> {
     // Read the RelOptInfo fields we need (immutable borrow, then drop it).
     let (relid_index, nparts, has_default, has_partition_qual, partexpr_ids, restrict_ids, partqual_ids) = {
@@ -898,20 +901,20 @@ fn collect_prune_inputs_with_clauses<'mcx>(
 
     // Deref the partexprs and restriction clauses out of the planner arenas to
     // owned Exprs.
-    let partexprs: Vec<Expr> = partexpr_ids
+    let partexprs: Vec<Expr<'mcx>> = partexpr_ids
         .iter()
         .map(|id| root.node(*id).clone_in(mcx))
-        .collect::<PgResult<Vec<Expr>>>()?;
+        .collect::<PgResult<Vec<Expr<'mcx>>>>()?;
     // rel->partition_qual is a list of plain Exprs (implicit-AND form, not
     // RestrictInfos); deref each out of the planner arena.
-    let partition_qual: Vec<Expr> = partqual_ids
+    let partition_qual: Vec<Expr<'mcx>> = partqual_ids
         .iter()
         .map(|id| root.node(*id).clone_in(mcx))
-        .collect::<PgResult<Vec<Expr>>>()?;
+        .collect::<PgResult<Vec<Expr<'mcx>>>>()?;
     // The restriction clauses may carry context-allocated children (a SubPlan /
     // AlternativeSubPlan inside an `... OR exists(...)` qual) with no faithful
     // derived `.clone()`; deep-copy through `Expr::clone_in` (`copyObject`).
-    let clauses: Vec<Expr> = match override_clauses {
+    let clauses: Vec<Expr<'mcx>> = match override_clauses {
         Some(c) => c,
         None => restrict_ids
             .iter()
@@ -919,7 +922,7 @@ fn collect_prune_inputs_with_clauses<'mcx>(
                 let clause_id = root.rinfo(*rid).clause;
                 root.node(clause_id).clone_in(mcx)
             })
-            .collect::<PgResult<Vec<Expr>>>()?,
+            .collect::<PgResult<Vec<Expr<'mcx>>>>()?,
     };
 
     // Resolve the relation Oid from the RTE.
@@ -1001,9 +1004,9 @@ fn prune_cxt_state_idx(partnatts: i32, step_id: i32, keyno: i32) -> usize {
 }
 
 /// `get_matching_partitions(context, pruning_steps)` (partprune.c:846).
-fn get_matching_partitions(
+fn get_matching_partitions<'mcx>(
     context: &mut PruneContext,
-    pruning_steps: &[PartitionPruneStep],
+    pruning_steps: &[PartitionPruneStep<'mcx>],
 ) -> PgResult<Bitmapset> {
     let num_steps = pruning_steps.len();
 
@@ -1099,7 +1102,7 @@ fn gen_partprune_steps<'a, 'mcx>(
     // partition_qual is empty for a top-level partitioned table, so the common
     // path uses the baserestrictinfo clauses unchanged.
     if context.has_default && context.has_partition_qual {
-        let mut combined: Vec<Expr> =
+        let mut combined: Vec<Expr<'mcx>> =
             Vec::with_capacity(inputs.clauses.len() + inputs.partition_qual.len());
         for c in &inputs.clauses {
             combined.push(c.clone_in(inputs.mcx)?);
@@ -1116,19 +1119,19 @@ fn gen_partprune_steps<'a, 'mcx>(
 }
 
 /// `gen_partprune_steps_internal(context, clauses)` (partprune.c:990).
-fn gen_partprune_steps_internal(
-    context: &mut GeneratePruningStepsContext<'_, '_>,
-    clauses: &[Expr],
-) -> PgResult<Vec<PartitionPruneStep>> {
+fn gen_partprune_steps_internal<'mcx>(
+    context: &mut GeneratePruningStepsContext<'_, 'mcx>,
+    clauses: &[Expr<'mcx>],
+) -> PgResult<Vec<PartitionPruneStep<'mcx>>> {
     let partnatts = context.part_scheme.partnatts;
     let strategy = context.part_scheme.strategy;
 
     // keyclauses[i] holds PartClauseInfos that matched partition key i.
-    let mut keyclauses: Vec<Vec<PartClauseInfo>> = alloc::vec![Vec::new(); partnatts as usize];
+    let mut keyclauses: Vec<Vec<PartClauseInfo<'mcx>>> = alloc::vec![Vec::new(); partnatts as usize];
     let mut nullkeys: Bitmapset = Bitmapset::new();
     let mut notnullkeys: Bitmapset = Bitmapset::new();
     let mut generate_opsteps = false;
-    let mut result: Vec<PartitionPruneStep> = Vec::new();
+    let mut result: Vec<PartitionPruneStep<'mcx>> = Vec::new();
 
     // Default-vs-partition-constraint contradiction check (partprune.c:1013):
     //   if (partition_bound_has_default(rel->boundinfo) &&
@@ -1223,8 +1226,8 @@ fn gen_partprune_steps_internal(
         for i in 0..partnatts {
             let partkey = &context.partexprs[i as usize];
             let mut clause_is_not_null = false;
-            let mut pc: Option<PartClauseInfo> = None;
-            let mut clause_steps: Vec<PartitionPruneStep> = Vec::new();
+            let mut pc: Option<PartClauseInfo<'mcx>> = None;
+            let mut clause_steps: Vec<PartitionPruneStep<'mcx>> = Vec::new();
 
             let status = match_clause_to_partition_key(
                 context,
@@ -1313,7 +1316,7 @@ fn gen_partprune_steps_internal(
 /// Return the just-generated step (looked up by id from context.steps), cloned
 /// for inclusion in a result list. The C code returns the step pointer; here we
 /// clone the owned value out of the steps store.
-fn step_ref(context: &GeneratePruningStepsContext<'_, '_>, step_id: i32) -> PartitionPruneStep {
+fn step_ref<'mcx>(context: &GeneratePruningStepsContext<'_, 'mcx>, step_id: i32) -> PartitionPruneStep<'mcx> {
     context
         .steps
         .iter()
@@ -1324,11 +1327,11 @@ fn step_ref(context: &GeneratePruningStepsContext<'_, '_>, step_id: i32) -> Part
 
 /// `gen_prune_step_op(...)` (partprune.c:1342). Appends a step to context.steps
 /// and returns its step_id.
-fn gen_prune_step_op(
-    context: &mut GeneratePruningStepsContext<'_, '_>,
+fn gen_prune_step_op<'mcx>(
+    context: &mut GeneratePruningStepsContext<'_, 'mcx>,
     opstrategy: i32,
     op_is_ne: bool,
-    exprs: Vec<Expr>,
+    exprs: Vec<Expr<'mcx>>,
     cmpfns: Vec<Oid>,
     nullkeys: Vec<i32>,
 ) -> i32 {
@@ -1347,8 +1350,8 @@ fn gen_prune_step_op(
 }
 
 /// `gen_prune_step_combine(...)` (partprune.c:1375).
-fn gen_prune_step_combine(
-    context: &mut GeneratePruningStepsContext<'_, '_>,
+fn gen_prune_step_combine<'mcx>(
+    context: &mut GeneratePruningStepsContext<'_, 'mcx>,
     source_stepids: Vec<i32>,
     combine_op: PartitionPruneCombineOp,
 ) -> i32 {
@@ -1368,20 +1371,20 @@ fn gen_prune_step_combine(
 
 /// `gen_prune_steps_from_opexps(context, keyclauses, nullkeys)`
 /// (partprune.c:1412).
-fn gen_prune_steps_from_opexps(
-    context: &mut GeneratePruningStepsContext<'_, '_>,
-    keyclauses: &[Vec<PartClauseInfo>],
+fn gen_prune_steps_from_opexps<'mcx>(
+    context: &mut GeneratePruningStepsContext<'_, 'mcx>,
+    keyclauses: &[Vec<PartClauseInfo<'mcx>>],
     nullkeys: &Bitmapset,
-) -> PgResult<Vec<PartitionPruneStep>> {
+) -> PgResult<Vec<PartitionPruneStep<'mcx>>> {
     let strategy = context.part_scheme.strategy;
     let partnatts = context.part_scheme.partnatts;
-    let mut opsteps: Vec<PartitionPruneStep> = Vec::new();
+    let mut opsteps: Vec<PartitionPruneStep<'mcx>> = Vec::new();
 
     // btree_clauses indexed by op_strategy (1..=BTMaxStrategyNumber);
     // hash_clauses indexed by HTEqualStrategyNumber.
-    let mut btree_clauses: Vec<Vec<PartClauseInfo>> =
+    let mut btree_clauses: Vec<Vec<PartClauseInfo<'mcx>>> =
         alloc::vec![Vec::new(); (BT_MAX_STRATEGY_NUMBER + 1) as usize];
-    let mut hash_clauses: Vec<Vec<PartClauseInfo>> =
+    let mut hash_clauses: Vec<Vec<PartClauseInfo<'mcx>>> =
         alloc::vec![Vec::new(); (HT_EQUAL_STRATEGY_NUMBER + 1) as usize];
 
     for i in 0..partnatts {
@@ -1453,7 +1456,7 @@ fn gen_prune_steps_from_opexps(
                     }
 
                     // Build the prefix of inclusive clauses from earlier keys.
-                    let mut prefix: Vec<PartClauseInfo> = Vec::new();
+                    let mut prefix: Vec<PartClauseInfo<'mcx>> = Vec::new();
                     let mut prefix_valid = true;
                     let mut eq_idx = 0usize;
                     let mut le_idx = 0usize;
@@ -1532,7 +1535,7 @@ fn gen_prune_steps_from_opexps(
                 // Locate the clause for the greatest column.
                 let last_keyno = eq_clauses.last().unwrap().keyno;
                 // Add all clauses before the first one for last_keyno to prefix.
-                let mut prefix: Vec<PartClauseInfo> = Vec::new();
+                let mut prefix: Vec<PartClauseInfo<'mcx>> = Vec::new();
                 let mut first_last_idx = eq_clauses.len();
                 for (idx, pc) in eq_clauses.iter().enumerate() {
                     if pc.keyno == last_keyno {
@@ -1568,15 +1571,15 @@ fn gen_prune_steps_from_opexps(
 
 /// `get_steps_using_prefix(...)` (partprune.c:2467).
 #[allow(clippy::too_many_arguments)]
-fn get_steps_using_prefix(
-    context: &mut GeneratePruningStepsContext<'_, '_>,
+fn get_steps_using_prefix<'mcx>(
+    context: &mut GeneratePruningStepsContext<'_, 'mcx>,
     step_opstrategy: i32,
     step_op_is_ne: bool,
-    step_lastexpr: Expr,
+    step_lastexpr: Expr<'mcx>,
     step_lastcmpfn: Oid,
     step_nullkeys: &[i32],
-    prefix: &[PartClauseInfo],
-) -> PgResult<Vec<PartitionPruneStep>> {
+    prefix: &[PartClauseInfo<'mcx>],
+) -> PgResult<Vec<PartitionPruneStep<'mcx>>> {
     if prefix.is_empty() {
         let step = gen_prune_step_op(
             context,
@@ -1605,19 +1608,19 @@ fn get_steps_using_prefix(
 
 /// `get_steps_using_prefix_recurse(...)` (partprune.c:2525).
 #[allow(clippy::too_many_arguments)]
-fn get_steps_using_prefix_recurse(
-    context: &mut GeneratePruningStepsContext<'_, '_>,
+fn get_steps_using_prefix_recurse<'mcx>(
+    context: &mut GeneratePruningStepsContext<'_, 'mcx>,
     step_opstrategy: i32,
     step_op_is_ne: bool,
-    step_lastexpr: &Expr,
+    step_lastexpr: &Expr<'mcx>,
     step_lastcmpfn: Oid,
     step_nullkeys: &[i32],
-    prefix: &[PartClauseInfo],
+    prefix: &[PartClauseInfo<'mcx>],
     start: usize,
-    step_exprs: &[Expr],
+    step_exprs: &[Expr<'mcx>],
     step_cmpfns: &[Oid],
-) -> PgResult<Vec<PartitionPruneStep>> {
-    let mut result: Vec<PartitionPruneStep> = Vec::new();
+) -> PgResult<Vec<PartitionPruneStep<'mcx>>> {
+    let mut result: Vec<PartitionPruneStep<'mcx>> = Vec::new();
 
     let cur_keyno = prefix[start].keyno;
     let final_keyno = prefix[prefix.len() - 1].keyno;
@@ -1693,14 +1696,14 @@ fn get_steps_using_prefix_recurse(
 
 /// `match_clause_to_partition_key(...)` (partprune.c:1819).
 #[allow(clippy::too_many_arguments)]
-fn match_clause_to_partition_key(
-    context: &mut GeneratePruningStepsContext<'_, '_>,
-    clause: &Expr,
-    partkey: &Expr,
+fn match_clause_to_partition_key<'mcx>(
+    context: &mut GeneratePruningStepsContext<'_, 'mcx>,
+    clause: &Expr<'mcx>,
+    partkey: &Expr<'mcx>,
     partkeyidx: i32,
     clause_is_not_null: &mut bool,
-    pc: &mut Option<PartClauseInfo>,
-    clause_steps: &mut Vec<PartitionPruneStep>,
+    pc: &mut Option<PartClauseInfo<'mcx>>,
+    clause_steps: &mut Vec<PartitionPruneStep<'mcx>>,
 ) -> PgResult<PartClauseMatchStatus> {
     let partopfamily = context.part_scheme.partopfamily[partkeyidx as usize];
     let partcoll = context.part_scheme.partcollation[partkeyidx as usize];
@@ -1793,14 +1796,14 @@ fn match_clause_to_partition_key(
 
 /// The OpExpr branch of `match_clause_to_partition_key`.
 #[allow(clippy::too_many_arguments)]
-fn match_opexpr_to_partition_key(
-    context: &mut GeneratePruningStepsContext<'_, '_>,
-    opclause: &types_nodes::primnodes::OpExpr,
-    partkey: &Expr,
+fn match_opexpr_to_partition_key<'mcx>(
+    context: &mut GeneratePruningStepsContext<'_, 'mcx>,
+    opclause: &types_nodes::primnodes::OpExpr<'mcx>,
+    partkey: &Expr<'mcx>,
     partkeyidx: i32,
     partopfamily: Oid,
     partcoll: Oid,
-    pc: &mut Option<PartClauseInfo>,
+    pc: &mut Option<PartClauseInfo<'mcx>>,
 ) -> PgResult<PartClauseMatchStatus> {
     let strategy = context.part_scheme.strategy;
     let leftop = strip_relabel(&opclause.args[0]);
@@ -1948,14 +1951,14 @@ fn match_opexpr_to_partition_key(
 
 /// The ScalarArrayOpExpr branch of `match_clause_to_partition_key`.
 #[allow(clippy::too_many_arguments)]
-fn match_saop_to_partition_key(
-    context: &mut GeneratePruningStepsContext<'_, '_>,
-    saop: &ScalarArrayOpExpr,
-    partkey: &Expr,
+fn match_saop_to_partition_key<'mcx>(
+    context: &mut GeneratePruningStepsContext<'_, 'mcx>,
+    saop: &ScalarArrayOpExpr<'mcx>,
+    partkey: &Expr<'mcx>,
     _partkeyidx: i32,
     partopfamily: Oid,
     partcoll: Oid,
-    clause_steps: &mut Vec<PartitionPruneStep>,
+    clause_steps: &mut Vec<PartitionPruneStep<'mcx>>,
 ) -> PgResult<PartClauseMatchStatus> {
     let strategy = context.part_scheme.strategy;
     let saop_op = saop.opno;
@@ -2023,7 +2026,7 @@ fn match_saop_to_partition_key(
     }
 
     // Examine the contents of the array argument (partprune.c:2297).
-    let elem_exprs: Vec<Expr> = match rightop {
+    let elem_exprs: Vec<Expr<'mcx>> = match rightop {
         Expr::Const(arr) => {
             // For a constant array, convert the elements to per-element Const
             // nodes (excepting nulls).
@@ -2049,7 +2052,7 @@ fn match_saop_to_partition_key(
     };
 
     // Build one OpExpr per element: leftop saop_op elem.
-    let mut elem_clauses: Vec<Expr> = Vec::with_capacity(elem_exprs.len());
+    let mut elem_clauses: Vec<Expr<'mcx>> = Vec::with_capacity(elem_exprs.len());
     for elem in elem_exprs {
         let opclause = make_opclause(saop_op, BOOLOID, false, leftop.clone(), elem, 0, saop_coll);
         elem_clauses.push(opclause);
@@ -2077,10 +2080,10 @@ fn match_saop_to_partition_key(
 
 
 /// `match_boolean_partition_clause(...)` (partprune.c:3700).
-fn match_boolean_partition_clause(
+fn match_boolean_partition_clause<'mcx>(
     partopfamily: Oid,
-    clause: &Expr,
-    partkey: &Expr,
+    clause: &Expr<'mcx>,
+    partkey: &Expr<'mcx>,
     outconst: &mut Option<Expr>,
     notclause: &mut bool,
 ) -> PgResult<PartClauseMatchStatus> {
@@ -2143,9 +2146,9 @@ fn match_boolean_partition_clause(
 // =============================================================================
 
 /// `perform_pruning_base_step(context, opstep)` (partprune.c:3444).
-fn perform_pruning_base_step(
+fn perform_pruning_base_step<'mcx>(
     context: &mut PruneContext,
-    opstep: &PruneStepOp,
+    opstep: &PruneStepOp<'mcx>,
 ) -> PgResult<PruneStepResult> {
     let partnatts = context.partnatts;
     let mut values: Vec<Datum> = alloc::vec![Datum::null(); partnatts as usize];
@@ -2262,7 +2265,7 @@ fn perform_pruning_combine_step(
 }
 
 /// `partkey_datum_from_expr` (partprune.c:3787) — plan-time Const branch.
-fn partkey_datum_from_expr(expr: &Expr) -> PgResult<(Datum<'static>, bool)> {
+fn partkey_datum_from_expr<'mcx>(expr: &Expr<'mcx>) -> PgResult<(Datum<'mcx>, bool)> {
     match expr {
         Expr::Const(con) => Ok((con.constvalue.clone(), con.constisnull)),
         _ => Err(PgError::error(
@@ -2294,7 +2297,7 @@ fn partkey_datum_from_expr(expr: &Expr) -> PgResult<(Datum<'static>, bool)> {
 fn partkey_datum_from_expr_exec<'mcx>(
     context: &mut types_nodes::partition::PartitionPruneContext<'mcx>,
     estate: &mut types_nodes::EStateData<'mcx>,
-    expr: &Expr,
+    expr: &Expr<'mcx>,
     stateidx: usize,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     if let Expr::Const(con) = expr {
@@ -2331,7 +2334,7 @@ fn partkey_datum_from_expr_exec<'mcx>(
 fn get_matching_partitions_exec<'mcx>(
     mcx: Mcx<'mcx>,
     context: &mut types_nodes::partition::PartitionPruneContext<'mcx>,
-    pruning_steps: &[types_nodes::partprune_carrier::PartitionPruneStep],
+    pruning_steps: &[types_nodes::partprune_carrier::PartitionPruneStep<'mcx>],
     estate: &mut types_nodes::EStateData<'mcx>,
 ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
     let num_steps = pruning_steps.len();
@@ -2448,7 +2451,7 @@ fn perform_pruning_base_step_exec<'mcx>(
     mcx: Mcx<'mcx>,
     context: &mut types_nodes::partition::PartitionPruneContext<'mcx>,
     estate: &mut types_nodes::EStateData<'mcx>,
-    opstep: &types_nodes::partprune_carrier::PartitionPruneStepOp,
+    opstep: &types_nodes::partprune_carrier::PartitionPruneStepOp<'mcx>,
 ) -> PgResult<PruneStepResult> {
     let partnatts = context.partnatts;
     let strategy = context.strategy as i8;
@@ -3127,12 +3130,12 @@ fn call_cmp(
 /// Strip a top-level RestrictInfo wrapper (`IsA(clause, RestrictInfo)`), if any.
 /// In the owned model baserestrictinfo clauses are already deref'd to their
 /// inner Expr, so this is a no-op pass-through but mirrors the C guard.
-fn strip_restrictinfo(clause: &Expr) -> &Expr {
+fn strip_restrictinfo<'a, 'mcx>(clause: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     clause
 }
 
 /// `if (IsA(x, RelabelType)) x = ((RelabelType *) x)->arg`.
-fn strip_relabel(expr: &Expr) -> &Expr {
+fn strip_relabel<'a, 'mcx>(expr: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     match expr {
         Expr::RelabelType(r) => r.arg.as_deref().expect("RelabelType with NULL arg"),
         other => other,
@@ -3194,24 +3197,24 @@ fn node_equal(a: &Expr, b: &Expr) -> PgResult<bool> {
 fn is_notclause(clause: &Expr) -> bool {
     backend_nodes_nodeFuncs_seams::is_notclause::call(clause)
 }
-fn get_notclausearg(clause: &Expr) -> &Expr {
+fn get_notclausearg<'a, 'mcx>(clause: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     backend_nodes_nodeFuncs_seams::get_notclausearg::call(clause)
 }
-fn negate_clause(expr: &Expr) -> PgResult<Expr> {
+fn negate_clause<'mcx>(expr: &Expr<'mcx>) -> PgResult<Expr<'mcx>> {
     backend_optimizer_prep_prepqual_seams::negate_clause::call(expr.clone())
 }
-fn make_bool_const(value: bool, isnull: bool) -> Expr {
+fn make_bool_const<'mcx>(value: bool, isnull: bool) -> Expr<'mcx> {
     Expr::Const(backend_nodes_core::makefuncs::make_bool_const(value, isnull))
 }
-fn make_opclause(
+fn make_opclause<'mcx>(
     opno: Oid,
     opresulttype: Oid,
     opretset: bool,
-    leftop: Expr,
-    rightop: Expr,
+    leftop: Expr<'mcx>,
+    rightop: Expr<'mcx>,
     opcollid: Oid,
     inputcollid: Oid,
-) -> Expr {
+) -> Expr<'mcx> {
     backend_nodes_core::makefuncs::make_opclause(
         opno, opresulttype, opretset, leftop, Some(rightop), opcollid, inputcollid,
     )
@@ -3231,9 +3234,9 @@ fn make_opclause(
 /// excluded the `arr->constisnull` case.
 fn deconstruct_const_array<'mcx>(
     mcx: Mcx<'mcx>,
-    arr: &Const,
+    arr: &Const<'mcx>,
     use_or: bool,
-) -> PgResult<Option<Vec<Expr>>> {
+) -> PgResult<Option<Vec<Expr<'mcx>>>> {
     // ARR_ELEMTYPE(arrval): for a base-element constant array the element type
     // is `get_element_type(arr->consttype)`.
     let elemtype =
@@ -3259,7 +3262,7 @@ fn deconstruct_const_array<'mcx>(
         s.typalign as core::ffi::c_char,
     )?;
 
-    let mut elem_exprs: Vec<Expr> = Vec::with_capacity(deconstructed.len());
+    let mut elem_exprs: Vec<Expr<'mcx>> = Vec::with_capacity(deconstructed.len());
     for (elem_value, elem_isnull) in deconstructed.iter() {
         // A null array element must lead to a null comparison result, since
         // saop_op is known strict. We can ignore it in the useOr case, but
