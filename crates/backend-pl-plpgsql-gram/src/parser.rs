@@ -101,6 +101,28 @@ pub fn plpgsql_yyparse<'mcx>(
     Parser::new(scanner).parse()
 }
 
+/// As [`plpgsql_yyparse`], but on the error path also reports
+/// `plpgsql_latest_lineno(yyscanner)` — the most recently computed source line.
+///
+/// `plpgsql_compile_error_callback` (pl_comp.c) reads this scanner-tracked
+/// lineno to build its `compilation of PL/pgSQL function "%s" near line %d`
+/// fallback context. Because the scanner is consumed by the parse, the lineno
+/// has to be read off it on the spot; the parser still owns the scanner when
+/// the error surfaces, so this captures `cur_line_num` at exactly the point C's
+/// global yyscanner would carry into the callback.
+pub fn plpgsql_yyparse_with_lineno<'mcx>(
+    scanner: PlpgsqlScanner<'mcx>,
+) -> Result<Box<PLpgSQL_stmt_block>, (PgError, i32)> {
+    let mut parser = Parser::new(scanner);
+    match parser.parse() {
+        Ok(block) => Ok(block),
+        Err(e) => {
+            let lineno = parser.scanner.plpgsql_latest_lineno();
+            Err((e, lineno))
+        }
+    }
+}
+
 impl<'mcx> Parser<'mcx> {
     pub fn new(scanner: PlpgsqlScanner<'mcx>) -> Self {
         Parser {

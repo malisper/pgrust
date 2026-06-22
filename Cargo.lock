@@ -14876,6 +14876,7 @@ dependencies = [
  "backend-utils-fmgr-core",
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-fmgr-funcapi",
  "backend-utils-misc-guc-tables",
  "backend-utils-resowner-resowner-seams",
  "mcx",
