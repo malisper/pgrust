@@ -391,14 +391,45 @@ mod adapters {
         let ops = ps
             .resultops
             .expect("exec_build_hash32_expr: resultops is unset");
-        // C threads `&hjstate->js.ps` as `parent`, reaching the EState for
-        // SubPlan attribution; pass the non-owning EState back-link so a
-        // correlated SubPlan in a hash key can find `es_subplanstates`.
+        // C threads the *side-specific* PlanState as `parent`: the outer hash
+        // expr uses `&hjstate->js.ps`, the inner uses `&hashstate->ps` (nodeHash
+        // .c:874/886). `ExecInitSubPlanExpr` appends each compiled SubPlan to
+        // `state->parent->subPlan`, so a SubPlan in an *inner* hash key is
+        // attributed to the Hash node, and one in an *outer* hash key to the
+        // HashJoin node. EXPLAIN's `ExplainNode` walks children before printing a
+        // node's own subPlan list and dedups via `printed_subplans`, so the inner
+        // hash-key SubPlans (under Hash) print there and are skipped when the
+        // HashJoin's hashclauses qual re-lists them. The owned spine carries this
+        // attribution via each ExprState's `found_subplan_ids` discovery channel,
+        // drained into the correct node head below.
         let es_link = types_nodes::execnodes::EStateLink::from_ref(estate);
-        execExpr::exec_build_hash32_expr::call(
+        let mut state = execExpr::exec_build_hash32_expr::call(
             mcx, es_link, desc, ops, hashfuncids, collations, hash_exprs, opstrict, init_value,
             keep_nulls,
-        )
+        )?;
+
+        // Drain the SubPlans discovered in this side's hash keys into the owning
+        // node head's `sub_plan_ids` (C `state->parent->subPlan = lappend(...)`):
+        // outer keys → HashJoin head, inner keys → Hash head.
+        if let Some(ids) = state.found_subplan_ids.take() {
+            if !ids.is_empty() {
+                let head = if is_outer {
+                    &mut node.js.ps
+                } else {
+                    &mut inner_hash_state(node).ps
+                };
+                if head.sub_plan_ids.is_none() {
+                    head.sub_plan_ids = Some(mcx::vec_with_capacity_in(mcx, ids.len())?);
+                }
+                let v = head.sub_plan_ids.as_mut().expect("just initialized");
+                v.try_reserve(ids.len()).map_err(|_| mcx.oom(0))?;
+                for id in ids {
+                    v.push(id);
+                }
+            }
+        }
+
+        Ok(state)
     }
 
     pub fn setup_skew_hashfunction<'mcx>(
