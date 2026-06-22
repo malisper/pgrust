@@ -2961,14 +2961,70 @@ fn exec_stmt_return_query(
     }
 
     // Run the query, collecting every result row (static query → exec_run_select;
-    // dynamic RETURN QUERY EXECUTE → exec_dynquery_with_params).
-    let rows = if let Some(query) = stmt.query.as_deref() {
+    // dynamic RETURN QUERY EXECUTE → exec_dynquery_with_params). C sets
+    // `options.must_return_tuples = true`, so a query that produces no result
+    // descriptor (e.g. `SELECT ... INTO`, or a DML/utility command) raises
+    // "<cmd> query does not return tuples" (spi.c). The owned model surfaces the
+    // SPI result code; a non-tuple-returning command has `returned_tuptable ==
+    // false`, which we reject below with the same message.
+    let (rows, code, returned_tuptable) = if let Some(query) = stmt.query.as_deref() {
         let input_collation = INVALID_OID;
         let parse_state = build_plpgsql_parse_state(estate, query, input_collation)?;
-        exec_run_select_rows(estate, &query.query, query.parseMode, parse_state)?
+        let snapshot = build_datum_snapshot(estate)?;
+        let result = exec_seams::exec_run_select_via_spi::call(
+            query.query.clone(),
+            query.parseMode,
+            parse_state,
+            snapshot,
+            estate.readonly_func,
+        )?;
+        estate.eval_processed = result.processed;
+        (result.all_rows, result.code, result.returned_tuptable)
     } else {
-        exec_dynquery_with_params(estate, &stmt.dynquery, &stmt.params)?
+        let dynquery = stmt
+            .dynquery
+            .as_deref()
+            .expect("RETURN QUERY EXECUTE carries a query-string expression");
+        let (value, isnull, restype, _restypmod) = exec_eval_expr_impl(estate, dynquery)?;
+        if isnull {
+            return Err(types_error::PgError::error(
+                "query string argument of EXECUTE is null".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+        }
+        let byref = estate.last_eval_byref.take();
+        let querystr = convert_value_to_string(value, byref, restype)?;
+        exec_eval_cleanup(estate);
+        let using = exec_eval_using_params(estate, &stmt.params)?;
+        let result = exec_seams::exec_dynexecute_via_spi::call(
+            querystr,
+            using,
+            estate.readonly_func,
+            false, // into
+            true,  // collect_all
+            0,     // run to completion
+        )?;
+        estate.eval_processed = result.processed;
+        (result.all_rows, result.code, result.returned_tuptable)
     };
+
+    // must_return_tuples: a command that did not return a tuple table is rejected
+    // (spi.c "<cmd> query does not return tuples"). A SELECT without a result
+    // descriptor is a SELECT INTO.
+    if !returned_tuptable {
+        let cmdtag = if code == exec_seams::SPI_OK_SELINTO || code == exec_seams::SPI_OK_SELECT {
+            "SELECT INTO"
+        } else {
+            command_tag_name_for_spi_code(code)
+        };
+        return Err(types_error::PgError::error(format!(
+            "{cmdtag} query does not return tuples"
+        ))
+        .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR));
+    }
+
+    // Count how many tuples we got; set eval_processed + FOUND.
+    let processed = rows.len() as u64;
 
     // Push each row into the function's SRF result tuplestore. The tuplestore +
     // its descriptor live on the `ReturnSetInfo` the executor-frame SRF caller
@@ -2980,6 +3036,10 @@ fn exec_stmt_return_query(
     seam::return_query_put_rows(estate, rows);
 
     exec_eval_cleanup(estate);
+
+    estate.eval_processed = processed;
+    exec_set_found(estate, processed != 0);
+
     Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
@@ -3217,6 +3277,64 @@ fn convert_value_to_string(
     exec_seams::convert_value_to_string::call(value.as_usize(), byref, valtype)
 }
 
+/// `appendStringInfoStringQuoted(buf, s, -1)` (`mb/stringinfo_mb.c`): append `s`
+/// wrapped in single quotes with every embedded `'` doubled. (`maxlen` is always
+/// -1 in the strict-params callers, so no truncation/`...` arm is needed.)
+fn append_quoted(buf: &mut String, s: &str) {
+    buf.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            buf.push('\'');
+        }
+        buf.push(ch);
+    }
+    buf.push('\'');
+}
+
+/// `format_expr_params(estate, expr)` (pl_exec.c 9012) — the strict-INTO
+/// `DETAIL: parameters: <name> = <value>, ...` text, or `None` if the expr
+/// references no datums. Iterates the referenced datum numbers (C
+/// `bms_next_member(expr->paramnos)`); each is a `PLpgSQL_var` whose current
+/// value is read via `exec_eval_datum` and formatted through its output function
+/// (`convert_value_to_string`), with the literal single-quoted (NULL unquoted).
+fn format_expr_params(
+    estate: &mut PLpgSQL_execstate,
+    dnos: &[i32],
+) -> types_error::PgResult<Option<String>> {
+    if dnos.is_empty() {
+        return Ok(None);
+    }
+    let mut out = String::new();
+    let mut paramno = 0;
+    for &dno in dnos {
+        if dno < 0 || (dno as usize) >= estate.datums.len() {
+            continue;
+        }
+        let refname = match &estate.datums[dno as usize] {
+            PLpgSQL_datum::Var(v) => v.refname.clone(),
+            // C only formats PLpgSQL_var datums here (the simple-expr params are
+            // always scalar vars); skip anything else defensively.
+            _ => continue,
+        };
+        let datum = estate.datums[dno as usize].clone();
+        let (typeid, _typmod, value, isnull) = exec_eval_datum_impl(estate, &datum)?;
+        let byref = estate.last_eval_byref.take();
+        if paramno > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&refname);
+        out.push_str(" = ");
+        if isnull {
+            out.push_str("NULL");
+        } else {
+            let s = convert_value_to_string(value, byref, typeid)?;
+            append_quoted(&mut out, &s);
+        }
+        paramno += 1;
+    }
+    Ok(Some(out))
+}
+
 /// `unpack_sql_state(sql_state)` (elog.c): the inverse of `MAKE_SQLSTATE` — the
 /// 5-character text of a packed SQLSTATE. Pure bit ops.
 fn unpack_sql_state(sql_state: int32) -> String {
@@ -3356,6 +3474,11 @@ fn exec_stmt_execsql(
 
     let input_collation = INVALID_OID;
     let parse_state = build_plpgsql_parse_state(estate, expr, input_collation)?;
+    // The referenced-datum bitmap (C `expr->paramnos`) is recorded into the
+    // parse_state during analysis; keep the shared handle so the strict-INTO
+    // failure path below can format `DETAIL: parameters: ...` after the seam call
+    // has consumed `parse_state`.
+    let paramnos_handle = parse_state.paramnos.clone();
     let snapshot = build_datum_snapshot(estate)?;
 
     let result = exec_seams::exec_execsql_via_spi::call(
@@ -3429,10 +3552,22 @@ fn exec_stmt_execsql(
 
         if n == 0 {
             if stmt.strict {
-                return Err(
-                    types_error::PgError::error("query returned no rows".to_string())
-                        .with_sqlstate(types_error::ERRCODE_NO_DATA_FOUND),
-                );
+                let detail = if estate.print_strict_params {
+                    let dnos = {
+                        let mut v = paramnos_handle.borrow().clone();
+                        v.sort_unstable();
+                        v
+                    };
+                    format_expr_params(estate, &dnos)?
+                } else {
+                    None
+                };
+                let mut err = types_error::PgError::error("query returned no rows".to_string())
+                    .with_sqlstate(types_error::ERRCODE_NO_DATA_FOUND);
+                if let Some(d) = detail {
+                    err = err.with_detail(format!("parameters: {d}"));
+                }
+                return Err(err);
             }
             // Set the target to NULL(s).
             exec_move_row_into_target(estate, target, &[])?;
@@ -3447,17 +3582,31 @@ fn exec_stmt_execsql(
                 let msg = "query returned more than one row".to_string();
                 let hint =
                     "Make sure the query returns a single row, or use LIMIT 1.".to_string();
+                let detail = if estate.print_strict_params {
+                    let dnos = {
+                        let mut v = paramnos_handle.borrow().clone();
+                        v.sort_unstable();
+                        v
+                    };
+                    format_expr_params(estate, &dnos)?.map(|d| format!("parameters: {d}"))
+                } else {
+                    None
+                };
                 if errlevel == types_error::ERROR {
-                    return Err(types_error::PgError::error(msg)
+                    let mut err = types_error::PgError::error(msg)
                         .with_hint(hint)
-                        .with_sqlstate(types_error::ERRCODE_TOO_MANY_ROWS));
+                        .with_sqlstate(types_error::ERRCODE_TOO_MANY_ROWS);
+                    if let Some(d) = detail {
+                        err = err.with_detail(d);
+                    }
+                    return Err(err);
                 }
                 // A WARNING-level too-many-rows check: report and continue.
                 exec_seams::raise_ereport::call(exec_seams::RaiseEreport {
                     elog_level: errlevel.0,
                     err_code: types_error::ERRCODE_TOO_MANY_ROWS.0,
                     message: msg,
-                    detail: None,
+                    detail,
                     hint: Some(hint),
                     column: None,
                     constraint: None,
@@ -3763,6 +3912,53 @@ fn exec_eval_using_params(
     Ok(out)
 }
 
+/// `format_preparedparamsdata(estate, paramLI)` (pl_exec.c 9069) — the
+/// strict-INTO `DETAIL: parameters: $1 = <value>, ...` text for an `EXECUTE ...
+/// USING ...` statement, or `None` if there are no params. Each value is rendered
+/// through its output function (`convert_value_to_string`), quoted (NULL
+/// unquoted).
+fn format_preparedparamsdata(
+    using: &[exec_seams::DynUsingParam],
+) -> types_error::PgResult<Option<String>> {
+    if using.is_empty() {
+        return Ok(None);
+    }
+    let mut out = String::new();
+    for (i, prm) in using.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push('$');
+        out.push_str(&(i + 1).to_string());
+        out.push_str(" = ");
+        if prm.isnull {
+            out.push_str("NULL");
+        } else {
+            let s = convert_value_to_string(
+                Datum::from_usize(prm.value),
+                prm.byref.clone(),
+                prm.typeid,
+            )?;
+            append_quoted(&mut out, &s);
+        }
+    }
+    Ok(Some(out))
+}
+
+/// A command-tag display name for a non-tuple-returning SPI result code, used in
+/// the `must_return_tuples` error (`GetCommandTagName` in spi.c). Only the codes
+/// reachable from RETURN QUERY are mapped; an unmapped code falls back to the SPI
+/// success-tag table's generic name.
+fn command_tag_name_for_spi_code(code: int32) -> &'static str {
+    match code {
+        c if c == exec_seams::SPI_OK_INSERT => "INSERT",
+        c if c == exec_seams::SPI_OK_UPDATE => "UPDATE",
+        c if c == exec_seams::SPI_OK_DELETE => "DELETE",
+        c if c == exec_seams::SPI_OK_UTILITY => "UTILITY",
+        _ => "???",
+    }
+}
+
 /// `exec_stmt_dynexecute(estate, stmt)` (pl_exec.c 4440) — execute a dynamic SQL
 /// query string built at runtime (`EXECUTE '<sql>' [INTO target] [USING ...]`).
 /// Evaluate the query-string expression to text, evaluate the USING params, run
@@ -3794,6 +3990,13 @@ fn exec_stmt_dynexecute(
 
     // Execute the query without preparing a saved plan, with the USING params.
     let using = exec_eval_using_params(estate, &stmt.params)?;
+    // Keep the USING param values for the strict-INTO `DETAIL: parameters: ...`
+    // text (C `format_preparedparamsdata`), since the seam call consumes `using`.
+    let using_for_detail = if estate.print_strict_params {
+        using.clone()
+    } else {
+        Vec::new()
+    };
 
     let result = exec_seams::exec_dynexecute_via_spi::call(
         querystr.clone(),
@@ -3863,16 +4066,29 @@ fn exec_stmt_dynexecute(
         if n == 0 {
             // If STRICT and no row, throw; otherwise set target to NULL(s).
             if stmt.strict {
-                return Err(types_error::PgError::error("query returned no rows".to_string())
-                    .with_sqlstate(types_error::ERRCODE_NO_DATA_FOUND));
+                let mut err =
+                    types_error::PgError::error("query returned no rows".to_string())
+                        .with_sqlstate(types_error::ERRCODE_NO_DATA_FOUND);
+                if estate.print_strict_params {
+                    if let Some(d) = format_preparedparamsdata(&using_for_detail)? {
+                        err = err.with_detail(format!("parameters: {d}"));
+                    }
+                }
+                return Err(err);
             }
             exec_move_row_into_target(estate, target, &[])?;
         } else {
             if n > 1 && stmt.strict {
-                return Err(types_error::PgError::error(
+                let mut err = types_error::PgError::error(
                     "query returned more than one row".to_string(),
                 )
-                .with_sqlstate(types_error::ERRCODE_TOO_MANY_ROWS));
+                .with_sqlstate(types_error::ERRCODE_TOO_MANY_ROWS);
+                if estate.print_strict_params {
+                    if let Some(d) = format_preparedparamsdata(&using_for_detail)? {
+                        err = err.with_detail(format!("parameters: {d}"));
+                    }
+                }
+                return Err(err);
             }
             // Put the first result row into the target.
             exec_move_row_into_target(estate, target, &result.first_row)?;
