@@ -3149,10 +3149,19 @@ pub fn at_rewrite_table_scan<'mcx>(
     let mut notnull_virtual_attrs: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
     if rewriting || verify_new_notnull {
         for i in 0..new_tup_desc.natts {
-            let att = new_tup_desc.attr(i as usize);
-            // attr->attnullability == ATTNULLABLE_VALID && !attisdropped. The
-            // owned descriptor exposes attnotnull (set for a valid NOT NULL).
-            if att.attnotnull && !att.attisdropped {
+            // C: `CompactAttribute *attr = TupleDescCompactAttr(newTupDesc, i);`
+            // then tests `attr->attnullability == ATTNULLABLE_VALID`. Only *valid*
+            // not-null constraints are rechecked here — a NOT VALID not-null
+            // constraint leaves `attnotnull` set but `attnullability` is
+            // ATTNULLABLE_UNKNOWN, so a table rewrite must NOT validate it (its
+            // own VALIDATE CONSTRAINT does that). Using `attnotnull` here would
+            // spuriously reject a rewrite (e.g. ADD COLUMN ... DEFAULT) on a table
+            // whose not-yet-validated NOT NULL column still contains nulls.
+            let compact = new_tup_desc.compact_attr(i as usize);
+            if compact.attnullability == types_tuple::heaptuple::ATTNULLABLE_VALID
+                && !compact.attisdropped
+            {
+                let att = new_tup_desc.attr(i as usize);
                 if att.attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL {
                     notnull_virtual_attrs.push(att.attnum as i32);
                 } else {

@@ -229,18 +229,29 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
             ))
             .into_error());
     }
-    // The `rd_islocaltemp` "another session's temp relation" checks apply only
-    // to TEMP relations. The trimmed RelationData omits `rd_islocaltemp`; a TEMP
-    // partition attach therefore needs that carrier field. Reached only when
-    // either side is TEMP (never in the permanent common case).
+    // If the parent is temp, it must belong to this session (tablecmds.c:20378).
+    // `rd_islocaltemp` is reached through the relcache seam (the same form
+    // MergeAttributes uses for the equivalent inheritance check).
     if rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP
-        || attachrel.rd_rel.relpersistence == RELPERSISTENCE_TEMP
+        && !backend_utils_cache_relcache_seams::rd_islocaltemp::call(rel)?
     {
-        panic!(
-            "ATTACH PARTITION of/under a TEMP relation is not yet supported \
-             (the trimmed types_rel::RelationData omits rd_islocaltemp, needed for \
-             the cross-session temp checks — out-of-lane carrier widen; see at_attach.rs)"
-        );
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(
+                "cannot attach as partition of temporary relation of another session".to_string(),
+            )
+            .into_error());
+    }
+    // Ditto for the partition (tablecmds.c:20385).
+    if attachrel.rd_rel.relpersistence == RELPERSISTENCE_TEMP
+        && !backend_utils_cache_relcache_seams::rd_islocaltemp::call(&attachrel)?
+    {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(
+                "cannot attach temporary relation of another session as partition".to_string(),
+            )
+            .into_error());
     }
 
     // Check identity columns / columns not in parent.

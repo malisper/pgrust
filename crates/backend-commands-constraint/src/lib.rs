@@ -94,6 +94,7 @@ use backend_executor_execUtils as execUtils;
 
 use backend_catalog_index_seams as index_seams;
 use backend_commands_trigger_seams as trigger;
+use backend_executor_execTuples_seams as execTuples_seams;
 
 mod fmgr_builtins;
 
@@ -277,8 +278,14 @@ pub fn unique_key_recheck(
             if !found {
                 // All rows referenced by the index entry are dead, so skip the
                 // check.  (ExecDropSingleTupleTableSlot is deferred to
-                // FreeExecutorState; see the module note.)
+                // FreeExecutorState; see the module note.)  Clear the slot first,
+                // mirroring C's ExecDropSingleTupleTableSlot(slot): the standalone
+                // slot lives in the EState tuple-table pool, and FreeExecutorState
+                // does NOT release buffer pins, so the pin
+                // table_index_fetch_tuple may have stored into the slot must be
+                // released here or it leaks ("resource was not closed").
                 tableam::table_index_fetch_end(scan)?;
+                execTuples_seams::exec_clear_tuple::call(estate, slot)?;
                 return Ok(None);
             }
             tableam::table_index_fetch_end(scan)?;
@@ -346,7 +353,14 @@ pub fn unique_key_recheck(
             // okay to throw error.  In the HOT-update case, we must use the live
             // HOT child's TID here, else check_exclusion_constraint will think the
             // child is a conflict.
-            execIndexing::check_exclusion_constraint(
+            //
+            // On a conflict this returns Err. C lets the error escape and relies
+            // on transaction abort (which does NOT print leak warnings) to release
+            // the slot's buffer pin; in this port the pin is attributed to the
+            // committing resource owner, so the slot must be cleared on the error
+            // path too — otherwise the held pin surfaces as a spurious "resource
+            // was not closed" warning ahead of the exclusion-violation error.
+            let check = execIndexing::check_exclusion_constraint(
                 mcx,
                 estate,
                 &heap,
@@ -356,13 +370,24 @@ pub fn unique_key_recheck(
                 &values,
                 &isnull,
                 false,
-            )?;
+            );
+            if let Err(e) = check {
+                execTuples_seams::exec_clear_tuple::call(estate, slot)?;
+                return Err(e);
+            }
         }
 
         // If that worked, then this index entry is unique or non-excluded, and we
         // are done.  index_close drops the RowExclusiveLock; the per-tuple
         // ExprContext / slot are torn down by FreeExecutorState below.
         indexam::index_close(index_rel, ROW_EXCLUSIVE_LOCK)?;
+
+        // C's ExecDropSingleTupleTableSlot(slot): release the buffer pin
+        // table_index_fetch_tuple stored into the standalone slot. The slot lives
+        // in the EState tuple-table pool, and FreeExecutorState does not release
+        // buffer pins, so clearing here prevents a per-row pin leak ("resource was
+        // not closed").
+        execTuples_seams::exec_clear_tuple::call(estate, slot)?;
 
         Ok(Some(()))
     })?;

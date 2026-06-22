@@ -31,6 +31,7 @@ backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-index-indexam = { path = "../backend-access-index-indexam" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-executor-execIndexing = { path = "../backend-executor-execIndexing" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 
 # Unported owners reached through their seam crates (panic until owner lands).
 backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }

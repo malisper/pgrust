@@ -1267,9 +1267,10 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 }
 
                 // ExecConstraints: if the relation has constraints, check them.
-                // The C `CopyFromErrorCallback` is active across the whole row
-                // body, so a constraint violation here carries the COPY context
-                // line (copyfrom.c:251); attach it on error propagation.
+                // The C `CopyFromErrorCallback` is on the error_context_stack for
+                // the whole per-row body, so a constraint violation here is
+                // reported with the `COPY <rel>, line N: "<rawline>"` context
+                // (copyfrom.c:251).
                 if relation_alias(estate, result_rel_info).rd_att.constr.is_some() {
                     backend_executor_execMain_seams::exec_constraints::call(
                         estate, result_rel_info, myslot,
@@ -1292,7 +1293,8 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                         result_rel_info,
                         myslot,
                         true,
-                    )?;
+                    )
+                    .map_err(|e| e.add_context(copy_from_error_context(&state.cstate)))?;
                 }
 
                 // table_tuple_insert(rel, myslot, mycid, ti_options, bistate);
@@ -1306,7 +1308,8 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                         mycid,
                         ti_options,
                         Some(&mut bistate),
-                    )?;
+                    )
+                    .map_err(|e| e.add_context(copy_from_error_context(&state.cstate)))?;
                 }
 
                 // index entries. C captures recheckIndexes and threads it into
