@@ -682,13 +682,25 @@ pub fn transformOnConflictArbiter<'mcx>(
                 )?;
             constraint = constraint_oid;
 
-            let perminfo = pstate
+            /*
+             * The target nsitem's perminfo (p_perminfo) is, in this owned model,
+             * a separate copy from the canonical pstate.p_rteperminfos entry that
+             * becomes qry.rteperminfos. We must mutate the canonical entry, indexed
+             * by the target RTE's perminfoindex (mirrors transformInsertStmt's
+             * insertedCols marking), so the SELECT requirement reaches the executor.
+             */
+            let perminfoindex = pstate
                 .p_target_nsitem
-                .as_deref_mut()
-                .and_then(|nsi| nsi.p_perminfo.as_deref_mut())
-                .ok_or_else(|| {
-                    crate::elog_error("transformOnConflictArbiter: target nsitem has no perminfo")
-                })?;
+                .as_deref()
+                .and_then(|ns| ns.p_rte.as_deref())
+                .map(|r| r.perminfoindex)
+                .unwrap_or(0);
+            if perminfoindex == 0 {
+                return Err(crate::elog_error(
+                    "transformOnConflictArbiter: target nsitem has no perminfo",
+                ));
+            }
+            let perminfo = &mut pstate.p_rteperminfos[(perminfoindex - 1) as usize];
 
             /* Make sure the rel as a whole is marked for SELECT access */
             perminfo.requiredPerms |= ACL_SELECT;
