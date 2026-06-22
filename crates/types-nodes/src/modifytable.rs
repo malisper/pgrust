@@ -634,6 +634,18 @@ pub struct ModifyTableState<'mcx> {
     /// conditions, borrowed from the plan node (`None` element = the C `NULL`).
     pub mt_mergeJoinConditions:
         Option<PgVec<'mcx, Option<&'mcx PgVec<'mcx, Expr<'mcx>>>>>,
+    /// Back-link to the enclosing `PlanStateNode::ModifyTable` enum, stamped by
+    /// `stamp_modifytable_expr_parents` once the node is address-stable. In C
+    /// every `ExecBuildProjectionInfo`/`ExecInitQual` in `ExecInitModifyTable`/
+    /// `ExecInitMerge`/`ExecInitPartitionInfo` passes `&mtstate->ps` as the
+    /// expression `parent`. The result-relation `ExprState`s built up-front are
+    /// stamped by `stamp_modifytable_expr_parents`, but the per-leaf-partition
+    /// projections/quals built lazily by `ExecInitPartitionInfo` (RETURNING
+    /// holding `merge_action()`, `mas_proj`/`mas_whenqual`,
+    /// `ri_MergeJoinCondition`) are created *after* that stamp pass; this link
+    /// lets the lazy partition init stamp them with the same `ModifyTableState`
+    /// identity. `None` until stamped.
+    pub mt_self_link: Option<crate::planstate::PlanStateLink>,
 }
 
 /// `HTAB *mt_resultOidHash` payload (the OID→resultRelInfo-index map for

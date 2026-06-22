@@ -486,6 +486,15 @@ fn exec_init_node_finish<'mcx>(
     if let types_nodes::PlanStateNode::ModifyTable(m) = &*result {
         let result_rel_ids: Vec<types_nodes::execnodes::RriId> =
             m.resultRelInfo.iter().copied().collect();
+        // Record the enclosing-enum back-link on the ModifyTableState so the
+        // per-leaf-partition ExprStates built lazily by ExecInitPartitionInfo
+        // (after this up-front stamp pass) can be stamped with the same
+        // ModifyTableState identity. C passes `&mtstate->ps` as the expression
+        // parent at every build site, including the lazy partition init.
+        let link = types_nodes::planstate::PlanStateLink::from_ref(&*result);
+        if let types_nodes::PlanStateNode::ModifyTable(m) = &mut *result {
+            m.mt_self_link = Some(link);
+        }
         result.stamp_modifytable_expr_parents(estate, &result_rel_ids);
     }
 

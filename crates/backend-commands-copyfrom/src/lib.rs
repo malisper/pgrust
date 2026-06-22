@@ -1119,6 +1119,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 mt_updateColnosLists: None,
                 mt_mergeActionLists: None,
                 mt_mergeJoinConditions: None,
+                mt_self_link: None,
             };
 
         // singleslot = table_slot_create(rri->ri_RelationDesc, &estate->es_tupleTable);

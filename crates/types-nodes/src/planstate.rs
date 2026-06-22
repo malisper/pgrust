@@ -350,28 +350,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         }
         let link = PlanStateLink::from_ref(self);
         for &rri in result_rel_ids {
-            let rel = estate.result_rel_mut(rri);
-            // ri_projectReturning (RETURNING list — holds merge_action()).
-            if let Some(proj) = rel.ri_projectReturning.as_mut() {
-                proj.pi_state.parent = Some(link);
-            }
-            // ri_MergeJoinCondition (MERGE ON qual).
-            if let Some(jc) = rel.ri_MergeJoinCondition.as_mut() {
-                jc.parent = Some(link);
-            }
-            // Per-action mas_proj / mas_whenqual across every match kind.
-            for actions in rel.ri_MergeActions.iter_mut() {
-                if let Some(actions) = actions.as_mut() {
-                    for action in actions.iter_mut() {
-                        if let Some(proj) = action.mas_proj.as_mut() {
-                            proj.pi_state.parent = Some(link);
-                        }
-                        if let Some(qual) = action.mas_whenqual.as_mut() {
-                            qual.parent = Some(link);
-                        }
-                    }
-                }
-            }
+            stamp_result_rel_expr_parents(estate, rri, link);
         }
     }
 
@@ -731,6 +710,44 @@ impl<'mcx> PlanStateNode<'mcx> {
         }
 
         out
+    }
+}
+
+/// Stamp `link` (a `ModifyTableState` back-link) onto every MERGE/RETURNING
+/// `ExprState` a single `ResultRelInfo` owns: `ri_projectReturning` (where a
+/// `merge_action()` in RETURNING compiles to `EEOP_MERGE_SUPPORT_FUNC`),
+/// `ri_MergeJoinCondition`, and every `mas_proj`/`mas_whenqual` across the
+/// `ri_MergeActions` match-kind lists. Used both by the up-front
+/// [`PlanStateNode::stamp_modifytable_expr_parents`] pass and by the lazy
+/// per-leaf-partition init in `ExecInitPartitionInfo`, which builds these
+/// `ExprState`s after that pass and so must stamp them with the same
+/// `ModifyTableState` identity (mirroring C's `&mtstate->ps` parent).
+pub fn stamp_result_rel_expr_parents<'mcx>(
+    estate: &mut crate::execnodes::EStateData<'mcx>,
+    rri: crate::execnodes::RriId,
+    link: PlanStateLink,
+) {
+    let rel = estate.result_rel_mut(rri);
+    // ri_projectReturning (RETURNING list — holds merge_action()).
+    if let Some(proj) = rel.ri_projectReturning.as_mut() {
+        proj.pi_state.parent = Some(link);
+    }
+    // ri_MergeJoinCondition (MERGE ON qual).
+    if let Some(jc) = rel.ri_MergeJoinCondition.as_mut() {
+        jc.parent = Some(link);
+    }
+    // Per-action mas_proj / mas_whenqual across every match kind.
+    for actions in rel.ri_MergeActions.iter_mut() {
+        if let Some(actions) = actions.as_mut() {
+            for action in actions.iter_mut() {
+                if let Some(proj) = action.mas_proj.as_mut() {
+                    proj.pi_state.parent = Some(link);
+                }
+                if let Some(qual) = action.mas_whenqual.as_mut() {
+                    qual.parent = Some(link);
+                }
+            }
+        }
     }
 }
 

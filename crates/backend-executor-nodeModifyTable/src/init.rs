@@ -216,6 +216,7 @@ pub fn ExecInitModifyTable<'mcx>(
             } else {
                 Some(merge_join_conditions)
             },
+            mt_self_link: None,
             mt_resultOidAttno: 0,
             mt_lastResultOid: InvalidOid,
             mt_lastResultIndex: 0,

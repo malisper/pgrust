@@ -291,7 +291,17 @@ pub fn ExecInitPartitionReturning<'mcx>(
         estate,
         leaf_part_rri,
         returning_list.as_slice(),
-    )
+    )?;
+
+    // C builds this projection with `&mtstate->ps` as the expression parent, so
+    // a `merge_action()` in the RETURNING list (EEOP_MERGE_SUPPORT_FUNC) can
+    // recover the ModifyTableState. This leaf projection is built lazily, after
+    // the up-front stamp_modifytable_expr_parents pass, so stamp it here with the
+    // recorded ModifyTableState back-link.
+    if let Some(link) = mtstate.mt_self_link {
+        types_nodes::planstate::stamp_result_rel_expr_parents(estate, leaf_part_rri, link);
+    }
+    Ok(())
 }
 
 /// The ON CONFLICT leg of `ExecInitPartitionInfo` (execPartition.c L685-862).
@@ -930,6 +940,15 @@ pub fn ExecInitPartitionMerge<'mcx>(
                 *slot = Some(v);
             }
         }
+    }
+
+    // C builds the join-condition qual and each action's mas_proj/mas_whenqual
+    // with `&mtstate->ps` as the expression parent. These leaf ExprStates are
+    // built lazily, after the up-front stamp_modifytable_expr_parents pass, so
+    // stamp the leaf's ri_MergeJoinCondition / ri_MergeActions here with the
+    // recorded ModifyTableState back-link (mirrors ExecInitPartitionReturning).
+    if let Some(link) = mtstate.mt_self_link {
+        types_nodes::planstate::stamp_result_rel_expr_parents(estate, leaf_part_rri, link);
     }
 
     Ok(())
