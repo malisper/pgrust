@@ -3709,11 +3709,10 @@ struct TupleDescSnapshot {
 
 impl TupleDescSnapshot {
     fn capture(td: &TupleDescData<'_>) -> PgResult<Self> {
-        if td.constr.is_some() {
-            return Err(PgError::error(
-                "tuplesort: a sort TupleDesc unexpectedly carries constraints",
-            ));
-        }
+        // C's begin_cluster aliases RelationGetDescr(OldHeap) directly as the
+        // sort's tupDesc, which can carry catalog constraints/defaults. The sort
+        // only reads attrs/typmod, never the constraints, so we simply drop
+        // `constr` in the snapshot (rebuild sets it to None) rather than erroring.
         Ok(TupleDescSnapshot {
             natts: td.natts,
             tdtypeid: td.tdtypeid,
