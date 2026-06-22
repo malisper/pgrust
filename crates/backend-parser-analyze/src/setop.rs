@@ -488,6 +488,22 @@ fn transformSetOperationTree<'mcx>(
         )));
     }
 
+    // In C, when a leaf column is UNKNOWN and is a Const/Param, the coerced
+    // result is written back into the leaf query's targetlist
+    // (`ltle->expr = (Expr *) lcolnode`). In the owned model the leaf query is
+    // stored as the subquery of a range-table entry, so we capture the leaf
+    // rtindex here (the child node is a RangeTblRef exactly when it is a leaf)
+    // and update `pstate.p_rtable[rti-1].subquery.targetList` below.
+    let leaf_rti = |n: &Node<'mcx>| -> Option<i32> {
+        if n.node_tag() == ntag::T_RangeTblRef {
+            Some(n.expect_rangetblref().rtindex)
+        } else {
+            None
+        }
+    };
+    let larg_rti: Option<i32> = op.larg.as_deref().and_then(|n| leaf_rti(n));
+    let rarg_rti: Option<i32> = op.rarg.as_deref().and_then(|n| leaf_rti(n));
+
     let mut out_tl: Vec<TargetEntry<'mcx>> = Vec::new();
     for (ltle, rtle) in ltargetlist.iter().zip(rtargetlist.iter()) {
         let lcolnode = ltle
@@ -516,6 +532,16 @@ fn transformSetOperationTree<'mcx>(
         // Coerce UNKNOWN Const/Param children in place; verify others. The coerce
         // entry takes/returns the parser-arena `'static`; the pass-through `else`
         // arm erases to match (the results are re-`clone_in`'d into `mcx` below).
+        // Track whether each side was an UNKNOWN Const/Param that we coerced;
+        // in that case C writes the coerced node back into the leaf query's
+        // targetlist (handled after both sides are computed).
+        let l_writeback =
+            lcoltype == UNKNOWNOID && (matches!(lcolnode, Expr::Const(_)) || matches!(lcolnode, Expr::Param(_)));
+        let r_writeback =
+            rcoltype == UNKNOWNOID && (matches!(rcolnode, Expr::Const(_)) || matches!(rcolnode, Expr::Param(_)));
+        let lresno = ltle.resno;
+        let rresno = rtle.resno;
+
         let lcolnode2: Expr<'static> = if lcoltype != UNKNOWNOID {
             backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), lcolnode.clone_in(mcx)?.erase_lifetime(), rescoltype, context)?
         } else if matches!(lcolnode, Expr::Const(_)) || matches!(lcolnode, Expr::Param(_)) {
@@ -530,6 +556,22 @@ fn transformSetOperationTree<'mcx>(
         } else {
             rcolnode.clone_in(mcx)?.erase_lifetime()
         };
+
+        // Write the coerced UNKNOWN-Const/Param back into the leaf subquery's
+        // stored targetlist so the planned leaf emits the resolved type (C:
+        // `ltle->expr = (Expr *) lcolnode;`). Without this the leaf Result keeps
+        // an UNKNOWN-typed Const and trivial_subqueryscan() can't elide the
+        // SubqueryScan over a constant SELECT.
+        if l_writeback {
+            if let Some(rti) = larg_rti {
+                update_leaf_tlist_expr(mcx, pstate, rti, lresno, lcolnode2.clone_in(mcx)?)?;
+            }
+        }
+        if r_writeback {
+            if let Some(rti) = rarg_rti {
+                update_leaf_tlist_expr(mcx, pstate, rti, rresno, rcolnode2.clone_in(mcx)?)?;
+            }
+        }
 
         let mut coerced = [lcolnode2.clone_in(mcx)?, rcolnode2.clone_in(mcx)?];
         let rescoltypmod = backend_parser_coerce::select_common_typmod(&coerced, rescoltype)?;
@@ -565,18 +607,45 @@ fn transformSetOperationTree<'mcx>(
         out_tl.push(restle);
     }
 
-    // Note: in-place coercion of UNKNOWN Const/Param children of leaf nodes is
-    // a behaviour the C performs by mutating ltle->expr/rtle->expr of the leaf
-    // query's targetlist. Because the owned model returns per-level copies, the
-    // replacement here updates the dummy/extracted tlist only; the leaf query's
-    // stored Const is re-resolved by the planner from the colTypes. This is the
-    // documented trimmed-model boundary (see audits).
+    // The in-place coercion of UNKNOWN Const/Param leaf columns (C's
+    // `ltle->expr = (Expr *) lcolnode`) is performed above via
+    // `update_leaf_tlist_expr` into the leaf subquery stored in `p_rtable`, so
+    // the planned leaf emits the resolved type rather than UNKNOWN.
 
     if let Some(tl) = targetlist {
         *tl = out_tl;
     }
 
     mcx::alloc_in(mcx, Node::mk_set_operation_stmt(mcx, op)?)
+}
+
+/// Replace the `expr` of the (non-junk) targetlist entry with the given `resno`
+/// in the subquery stored at range-table index `rti` of the parse state. This
+/// mirrors C's in-place `ltle->expr = (Expr *) lcolnode` write into a UNION/etc.
+/// leaf query's targetlist after coercing an UNKNOWN Const/Param.
+fn update_leaf_tlist_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    rti: i32,
+    resno: types_core::primitive::AttrNumber,
+    new_expr: Expr<'mcx>,
+) -> PgResult<()> {
+    let idx = (rti - 1) as usize;
+    if idx >= pstate.p_rtable.len() {
+        return Ok(());
+    }
+    let rte = &mut pstate.p_rtable[idx];
+    let sub = match rte.subquery.as_deref_mut() {
+        Some(q) => q,
+        None => return Ok(()),
+    };
+    for tle in sub.targetList.iter_mut() {
+        if !tle.resjunk && tle.resno == resno {
+            tle.expr = Some(mcx::alloc_in(mcx, new_expr)?);
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 /// `determineRecursiveColTypes(pstate, larg, nrtargetlist)` — set up the parent
