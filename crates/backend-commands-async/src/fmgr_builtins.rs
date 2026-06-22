@@ -30,8 +30,13 @@ fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("async fn: text arg missing from by-ref lane");
-    // `VARDATA_ANY`: skip the 4-byte header on the header-ful image.
-    let bytes = if image.len() >= 4 { &image[4..] } else { &[][..] };
+    // `VARDATA_ANY`: skip ONE header byte for a short (1-byte, low-bit-set)
+    // header, else `VARHDRSZ`. No-op while `SHORT_VARLENA_PACKING` is off.
+    let bytes: &[u8] = match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= 4 => &image[4..],
+        _ => &[],
+    };
     core::str::from_utf8(bytes).expect("async fn: text arg not valid UTF-8")
 }
 

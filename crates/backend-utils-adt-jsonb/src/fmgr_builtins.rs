@@ -65,7 +65,22 @@ fn arg_jsonb_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u
 /// engine consumes.
 #[inline]
 fn arg_jsonb_root<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    &arg_jsonb_image(fcinfo, i)[VARHDRSZ..]
+    vardata_any(arg_jsonb_image(fcinfo, i))
+}
+
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image:
+/// skip ONE header byte for a short (1-byte, low-bit-set) header, else `VARHDRSZ`.
+/// A small stored jsonb/text reaches an fmgr arg verbatim (the EEOP_FUNCEXPR
+/// boundary does not detoast/unpack), so a fixed 4-byte strip would land three
+/// bytes into the JsonbContainer root / text body once `SHORT_VARLENA_PACKING` is
+/// on. Behavior-preserving while the flag is off (every stored value is 4-byte).
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
+    }
 }
 
 /// `PG_GETARG_TEXT_PP(i)` payload bytes (`VARDATA_ANY`): under the header-ful
@@ -73,7 +88,7 @@ fn arg_jsonb_root<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8
 /// leading `VARHDRSZ` header to recover the payload the cores consume.
 #[inline]
 fn arg_text_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    &arg_varlena_image(fcinfo, i)[VARHDRSZ..]
+    vardata_any(arg_varlena_image(fcinfo, i))
 }
 
 /// The FULL by-reference varlena image of arg `i` (e.g. a detoasted `text[]`

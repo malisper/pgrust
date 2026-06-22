@@ -31,10 +31,12 @@ fn arg_varlena_body<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("pg_mcv_list fn: by-ref varlena arg missing from by-ref lane");
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
+    // `VARDATA_ANY`: skip ONE header byte for a short (1-byte, low-bit-set)
+    // header, else `VARHDRSZ`. No-op while `SHORT_VARLENA_PACKING` is off.
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
     }
 }
 
