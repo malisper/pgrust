@@ -123,10 +123,47 @@ pub fn spi_eval_expr(
     let mcx = cxt.mcx();
     let interned = leak_str_in(mcx, query)?;
 
+    // `_SPI_error_callback` (spi.c): SPI installs an error-context callback for
+    // the WHOLE duration of `_SPI_prepare_plan` + `_SPI_execute_plan`, decorating
+    // BOTH a parse/analysis-time error (e.g. `operator does not exist` / a syntax
+    // error in the embedded `x + 1` expression) AND an execution-time error.
+    //   * a syntax/cursor position (`geterrposition() > 0`) is cleared and
+    //     promoted to an INTERNAL position + internal query = this embedded query
+    //     text — rendering the `LINE n: …` caret and the `QUERY: …` block against
+    //     the inner expression (not the outer `select fn(...)` call);
+    //   * otherwise a mode-dependent context line is attached.
+    // The "attached once" latch is cleared so an outer PL/pgSQL frame re-attaches
+    // its own `plpgsql_exec_error_callback` line. (Mirrors execsql.rs exactly.)
+    let spi_error_decorate = |mut e: types_error::PgError| -> types_error::PgError {
+        if e.cursor_position().unwrap_or(0) > 0 {
+            let pos = e.cursor_position().unwrap();
+            e = e
+                .with_cursor_position(0)
+                .with_internal_position(pos)
+                .with_internal_query(query.to_string());
+        } else {
+            let line = match parsemode {
+                RawParseMode::RAW_PARSE_PLPGSQL_EXPR => {
+                    format!("PL/pgSQL expression \"{query}\"")
+                }
+                RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN1
+                | RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN2
+                | RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN3 => {
+                    format!("PL/pgSQL assignment \"{query}\"")
+                }
+                _ => format!("SQL statement \"{query}\""),
+            };
+            e = e.add_context(line);
+        }
+        e.plpgsql_context_attached = false;
+        e
+    };
+
     // _SPI_prepare_plan: parse + analyze (with the PL/pgSQL parser hooks) +
     // rewrite + complete the cached plan. This records the referenced datum
     // numbers into `parse_state.paramnos`.
-    let (source, argtypes) = prepare_expr_plan(mcx, interned, parsemode, parse_state.clone())?;
+    let (source, argtypes) = prepare_expr_plan(mcx, interned, parsemode, parse_state.clone())
+        .map_err(&spi_error_decorate)?;
 
     // setup_param_list: build the value ParamListInfo from the referenced estate
     // datums. The referenced dnos drive which datums to bind; the param id is
@@ -147,7 +184,7 @@ pub fn spi_eval_expr(
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
     }
-    let (processed, raw) = out?;
+    let (processed, raw) = out.map_err(&spi_error_decorate)?;
 
     let _ = plancache::DropCachedPlan(source);
 
