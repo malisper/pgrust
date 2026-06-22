@@ -95,6 +95,72 @@ pub fn install_time_zone_abbrevs(tbl: TimeZoneAbbrevTable) {
     set_timezone_resolver(Some(&RESOLVER));
 }
 
+/// One row of `pg_timezone_abbrevs` (the `_abbrevs` half — the abbreviations
+/// defined by the active `timezone_abbreviations` GUC set): `(abbrev, gmtoffset
+/// in seconds, is_dst)`. The SRF adapter lowers `gmtoffset` to an `Interval`.
+pub struct ZoneAbbrevRow {
+    pub abbrev: String,
+    pub gmtoffset: i32,
+    pub is_dst: bool,
+}
+
+/// `pg_timezone_abbrevs_abbrevs()` (datetime.c:5210) row source: walk the active
+/// `zoneabbrevtbl->abbrevs` (the installed `timezone_abbreviations` set). Fixed
+/// (TZ/DTZ) entries carry their stored offset/is_dst directly; DYNTZ entries
+/// (those with an underlying zone name) are resolved at the current transaction
+/// start time via `FetchDynamicTimeZone` + `DetermineTimeZoneAbbrevOffsetTS`
+/// (C: `gmtoffset = -DetermineTimeZoneAbbrevOffsetTS(...)`). A `zoneabbrevtbl ==
+/// NULL` (no set installed) yields no rows.
+pub fn pg_timezone_abbrevs_abbrevs_rows() -> types_error::PgResult<Vec<ZoneAbbrevRow>> {
+    use backend_access_transam_xact::GetCurrentTransactionStartTimestamp;
+
+    // Snapshot the entries out of the thread-local table, releasing the borrow
+    // before any DYNTZ resolution (which may touch timezone state).
+    let entries: Vec<types_misc_more2::TzEntry> = ZONEABBREVTBL.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|tbl| tbl.abbrevs.clone())
+            .unwrap_or_default()
+    });
+
+    let mut rows: Vec<ZoneAbbrevRow> = Vec::new();
+    for entry in &entries {
+        let (gmtoffset, is_dst) = match &entry.zone {
+            // C: DYNTZ -> FetchDynamicTimeZone + DetermineTimeZoneAbbrevOffsetTS.
+            Some(zone) => {
+                let tzp = fetch_dynamic_time_zone(zone).ok_or_else(|| {
+                    // C: tzp == NULL -> DateTimeParseError(DTERR_BAD_ZONE_ABBREV).
+                    types_error::PgError::error(format!("time zone \"{zone}\" not recognized"))
+                        .with_sqlstate(types_error::ERRCODE_CONFIG_FILE_ERROR)
+                        .with_detail(format!(
+                            "This time zone name appears in the configuration file \
+                             for time zone abbreviation \"{}\".",
+                            entry.abbrev
+                        ))
+                })?;
+                let now = GetCurrentTransactionStartTimestamp();
+                let mut isdst: i32 = 0;
+                let off = crate::decode::DetermineTimeZoneAbbrevOffsetTS(
+                    now,
+                    &entry.abbrev,
+                    &tzp,
+                    &mut isdst,
+                )?;
+                (-off, isdst != 0)
+            }
+            // C: TZ -> is_dst=false; DTZ -> is_dst=true; gmtoffset = tp->value.
+            None => (entry.offset, entry.is_dst),
+        };
+        rows.push(ZoneAbbrevRow {
+            abbrev: entry.abbrev.clone(),
+            gmtoffset,
+            is_dst,
+        });
+    }
+
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

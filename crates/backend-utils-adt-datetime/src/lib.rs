@@ -94,6 +94,10 @@ pub mod in_range;
 // The now-family of current-time cores (timestamp.c).  `timeofday` routes its
 // pg_strftime call through the centralized strftime seam.
 pub mod current;
+
+/// Row sources for the `pg_timezone_names` / `pg_timezone_abbrevs` system views
+/// (the `pg_timezone_names` / `pg_timezone_abbrevs_zone` SRFs of datetime.c).
+pub mod tz_views;
 // Binary (wire) protocol I/O cores: the *_recv / *_send computational halves
 // (date.c / timestamp.c), expressed over owned byte buffers (no raw bytea).
 pub mod binio;

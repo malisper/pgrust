@@ -6,7 +6,7 @@
 //! `values[]` / `nulls[]` arrays and inserted through
 //! `materialized_srf_putvalues` (the repo's `tuplestore_putvalues` analog).
 
-use backend_utils_adt_arrayfuncs_seams::construct_text_array;
+use backend_utils_adt_arrayfuncs_seams::construct_text_array_bytes;
 use backend_utils_adt_varlena_seams::cstring_to_text_v;
 use backend_utils_fmgr_funcapi_seams::materialized_srf_putvalues;
 use mcx::{Mcx, PgString};
@@ -155,13 +155,18 @@ fn get_hba_options(hba: &HbaLine) -> Vec<String> {
 
 /// `construct_array_builtin(elems, n, TEXTOID)` — build a `text[]` array `Datum`
 /// from owned strings (the C `strlist_to_textarray` / `construct_array_builtin`
-/// over `TEXTOID`). The arrayfuncs owner hands back the bare varlena-pointer
-/// word; carry it in the canonical by-value arm (the misc2 `construct_int4_array`
-/// precedent).
+/// over `TEXTOID`). A `text[]` is a by-reference (varlena) type, so the array
+/// image must ride the by-reference Datum lane — the form
+/// `materialized_srf_putvalues` reads via `as_ref_bytes` when it lowers the row
+/// into the tuplestore. `construct_text_array_bytes` hands back the flat array
+/// varlena byte image for exactly this lowering (the same byref pattern
+/// `show_all_settings` uses for its `enumvals` text[] column); carrying it on the
+/// by-value pointer arm instead made `as_ref_bytes` panic
+/// (`called on a by-value attribute`).
 fn text_array_datum<'mcx>(mcx: Mcx<'mcx>, elems: &[String]) -> PgResult<Datum<'mcx>> {
     let refs: Vec<&str> = elems.iter().map(|s| s.as_str()).collect();
-    let d = construct_text_array::call(mcx, &refs)?;
-    Ok(Datum::ByVal(d.as_usize()))
+    let image = construct_text_array_bytes::call(mcx, &refs)?;
+    Datum::from_byref_bytes_in(mcx, &image)
 }
 
 /// Build a `text[]` array `Datum` of the token strings (the C

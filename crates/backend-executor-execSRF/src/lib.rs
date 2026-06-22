@@ -104,6 +104,8 @@ mod shmem_numa_srf;
 mod pg_get_shmem_allocations_srf;
 mod pg_get_aios;
 mod pg_get_backend_memory_contexts;
+mod pg_get_wait_events;
+mod pg_timezone;
 mod show_all_settings;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
@@ -320,6 +322,21 @@ pub fn init_seams() {
     // show_all_settings() (OID 2084): the pg_settings view / `\dconfig` SRF over
     // the live GUC registry (GetConfigOptionValues row projection).
     show_all_settings::register_show_all_settings();
+    // pg_get_wait_events() (OID 6318): the pg_wait_events view SRF over the
+    // generated waitEventData[] table plus registered custom (Extension/
+    // InjectionPoint) wait events.
+    pg_get_wait_events::register_pg_get_wait_events();
+    // pg_hba_file_rules() (OID 3401) and pg_ident_file_mappings() (OID 6250):
+    // the pg_hba_file_rules / pg_ident_file_mappings view SRFs. Their materialize
+    // bodies (which run InitMaterializedSRF + the hba/ident parser view fill)
+    // already live in `backend-utils-adt-misc2::admin` with the executor-frame
+    // SRF signature, so register them directly into the SRF table.
+    register_srf(3401, backend_utils_adt_misc2::admin::pg_hba_file_rules);
+    register_srf(6250, backend_utils_adt_misc2::admin::pg_ident_file_mappings);
+    // pg_timezone_names() (OID 2856) and pg_timezone_abbrevs_zone() (OID 6401):
+    // the pg_timezone_names / pg_timezone_abbrevs view SRFs over the IANA zone
+    // catalog and the session timezone's abbreviations.
+    pg_timezone::register_pg_timezone_srfs();
 }
 
 // ===========================================================================
