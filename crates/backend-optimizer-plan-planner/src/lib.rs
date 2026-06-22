@@ -7512,93 +7512,54 @@ fn add_paths_to_grouping_rel<'mcx>(
         .ok_or_else(|| PgError::error("add_paths_to_grouping_rel: grouped rel has no reltarget"))?;
 
     if can_sort {
-        // foreach(input_rel->pathlist) — consider each input path. For the empty
-        // group clause / a plain GROUP BY, get_useful_group_keys_orderings yields a
-        // single ordering with the group_pathkeys; make_ordered_path sorts/returns
-        // the path. The reordered alternatives (a cost optimization) are skipped.
+        // foreach(input_rel->pathlist) — consider each input path, then loop
+        // over the interesting GROUP BY key orderings produced by
+        // get_useful_group_keys_orderings (C:7144). Reordering the group keys
+        // to match the input path's sort order lets a presorted Index/Incremental
+        // Sort serve the GroupAggregate instead of a full Sort.
+        let cheapest_path = root.rel(input_rel).cheapest_total_path;
         let input_paths: Vec<PathId> = root.rel(input_rel).pathlist.clone();
         for path in input_paths {
-            let group_pathkeys = root.group_pathkeys.clone();
-            let ordered =
-                make_ordered_path(root, run, grouped_rel, path, path, group_pathkeys, -1.0)?;
-            let ordered = match ordered {
-                Some(p) => p,
-                None => continue,
-            };
-
-            if has_grouping_sets {
-                // consider_groupingsets_paths(root, grouped_rel, path, true,
-                // can_hash, gd, agg_costs, dNumGroups) (C:7164).
-                consider_groupingsets_paths(
-                    run,
+            let orderings = backend_optimizer_path_pathkeys::get_useful_group_keys_orderings(
+                root,
+                path,
+                backend_utils_misc_guc_tables::vars::enable_group_by_reordering.read(),
+                enable_incremental_sort(),
+                has_grouping_sets,
+            );
+            for info in orderings {
+                // restore the path (make_ordered_path replaces it per ordering).
+                let ordered = make_ordered_path(
                     root,
-                    grouped_rel,
-                    ordered,
-                    true, // is_sorted
-                    can_hash,
-                    gd.as_deref_mut().unwrap(),
-                    agg_costs,
-                    d_num_groups,
-                    &having_quals,
-                )?;
-            } else if has_aggs {
-                // We have aggregation, possibly with plain GROUP BY (C:7177).
-                let aggstrategy = if has_group_clause {
-                    types_pathnodes::AGG_SORTED
-                } else {
-                    types_pathnodes::AGG_PLAIN
-                };
-                let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
                     run,
-                    root,
                     grouped_rel,
-                    ordered,
-                    target.clone(),
-                    aggstrategy,
-                    types_pathnodes::AGGSPLIT_SIMPLE,
-                    root.processed_groupClause.clone(),
-                    having_quals.clone(),
-                    agg_costs,
-                    d_num_groups,
+                    path,
+                    cheapest_path.unwrap_or(path),
+                    info.pathkeys.clone(),
+                    -1.0,
                 )?;
-                backend_optimizer_util_pathnode::add_path(root, grouped_rel, agg_path)?;
-            } else if has_group_clause {
-                // GROUP BY without aggregation or grouping sets — make a
-                // GroupPath (C:7195). info->clauses is the processed group
-                // clause; havingQual is the HAVING qual list.
-                let group_path = backend_optimizer_util_pathnode::create::create_group_path(
-                    run,
-                    root,
-                    grouped_rel,
-                    ordered,
-                    root.processed_groupClause.clone(),
-                    having_quals.clone(),
-                    d_num_groups,
-                )?;
-                backend_optimizer_util_pathnode::add_path(root, grouped_rel, group_path)?;
-            } else {
-                unreachable!("add_paths_to_grouping_rel: no agg and no group clause");
-            }
-        }
-
-        // Instead of operating directly on the input relation, we can consider
-        // finalizing a partially aggregated path (C:7211).
-        if let Some(pgr) = partially_grouped_rel {
-            let pgr_cheapest = root.rel(pgr).cheapest_total_path;
-            let pgr_paths: Vec<PathId> = root.rel(pgr).pathlist.clone();
-            for path in pgr_paths {
-                let group_pathkeys = root.group_pathkeys.clone();
-                let cheapest = pgr_cheapest.unwrap_or(path);
-                let ordered =
-                    make_ordered_path(root, run, grouped_rel, path, cheapest, group_pathkeys, -1.0)?;
                 let ordered = match ordered {
                     Some(p) => p,
                     None => continue,
                 };
 
-                if has_aggs {
-                    // Finalize Aggregate over the partially-aggregated path
-                    // (AGGSPLIT_FINAL_DESERIAL, agg_final_costs) (C:7247).
+                if has_grouping_sets {
+                    // consider_groupingsets_paths(root, grouped_rel, path, true,
+                    // can_hash, gd, agg_costs, dNumGroups) (C:7164).
+                    consider_groupingsets_paths(
+                        run,
+                        root,
+                        grouped_rel,
+                        ordered,
+                        true, // is_sorted
+                        can_hash,
+                        gd.as_deref_mut().unwrap(),
+                        agg_costs,
+                        d_num_groups,
+                        &having_quals,
+                    )?;
+                } else if has_aggs {
+                    // We have aggregation, possibly with plain GROUP BY (C:7177).
                     let aggstrategy = if has_group_clause {
                         types_pathnodes::AGG_SORTED
                     } else {
@@ -7611,25 +7572,97 @@ fn add_paths_to_grouping_rel<'mcx>(
                         ordered,
                         target.clone(),
                         aggstrategy,
-                        types_pathnodes::AGGSPLIT_FINAL_DESERIAL,
-                        root.processed_groupClause.clone(),
+                        types_pathnodes::AGGSPLIT_SIMPLE,
+                        info.clauses.clone(),
                         having_quals.clone(),
-                        agg_final_costs,
+                        agg_costs,
                         d_num_groups,
                     )?;
                     backend_optimizer_util_pathnode::add_path(root, grouped_rel, agg_path)?;
-                } else {
-                    // GROUP BY without aggregation — finalize via GroupPath (C:7263).
+                } else if has_group_clause {
+                    // GROUP BY without aggregation or grouping sets — make a
+                    // GroupPath (C:7195). info->clauses is the (reordered)
+                    // processed group clause; havingQual is the HAVING qual list.
                     let group_path = backend_optimizer_util_pathnode::create::create_group_path(
                         run,
                         root,
                         grouped_rel,
                         ordered,
-                        root.processed_groupClause.clone(),
+                        info.clauses.clone(),
                         having_quals.clone(),
                         d_num_groups,
                     )?;
                     backend_optimizer_util_pathnode::add_path(root, grouped_rel, group_path)?;
+                } else {
+                    unreachable!("add_paths_to_grouping_rel: no agg and no group clause");
+                }
+            }
+        }
+
+        // Instead of operating directly on the input relation, we can consider
+        // finalizing a partially aggregated path (C:7211).
+        if let Some(pgr) = partially_grouped_rel {
+            let pgr_cheapest = root.rel(pgr).cheapest_total_path;
+            let pgr_paths: Vec<PathId> = root.rel(pgr).pathlist.clone();
+            for path in pgr_paths {
+                let cheapest = pgr_cheapest.unwrap_or(path);
+                let orderings = backend_optimizer_path_pathkeys::get_useful_group_keys_orderings(
+                    root,
+                    path,
+                    backend_utils_misc_guc_tables::vars::enable_group_by_reordering.read(),
+                    enable_incremental_sort(),
+                    has_grouping_sets,
+                );
+                for info in orderings {
+                    let ordered = make_ordered_path(
+                        root,
+                        run,
+                        grouped_rel,
+                        path,
+                        cheapest,
+                        info.pathkeys.clone(),
+                        -1.0,
+                    )?;
+                    let ordered = match ordered {
+                        Some(p) => p,
+                        None => continue,
+                    };
+
+                    if has_aggs {
+                        // Finalize Aggregate over the partially-aggregated path
+                        // (AGGSPLIT_FINAL_DESERIAL, agg_final_costs) (C:7247).
+                        let aggstrategy = if has_group_clause {
+                            types_pathnodes::AGG_SORTED
+                        } else {
+                            types_pathnodes::AGG_PLAIN
+                        };
+                        let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+                            run,
+                            root,
+                            grouped_rel,
+                            ordered,
+                            target.clone(),
+                            aggstrategy,
+                            types_pathnodes::AGGSPLIT_FINAL_DESERIAL,
+                            info.clauses.clone(),
+                            having_quals.clone(),
+                            agg_final_costs,
+                            d_num_groups,
+                        )?;
+                        backend_optimizer_util_pathnode::add_path(root, grouped_rel, agg_path)?;
+                    } else {
+                        // GROUP BY without aggregation — finalize via GroupPath (C:7263).
+                        let group_path = backend_optimizer_util_pathnode::create::create_group_path(
+                            run,
+                            root,
+                            grouped_rel,
+                            ordered,
+                            info.clauses.clone(),
+                            having_quals.clone(),
+                            d_num_groups,
+                        )?;
+                        backend_optimizer_util_pathnode::add_path(root, grouped_rel, group_path)?;
+                    }
                 }
             }
         }
