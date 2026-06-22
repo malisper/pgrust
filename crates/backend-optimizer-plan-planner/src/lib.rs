@@ -3229,6 +3229,28 @@ fn build_minmax_path<'mcx>(
     subroot.parse = subparse_id;
     subroot.processed_tlist = Vec::new(); // query_planner doesn't use this directly
     subroot.append_rel_list = parent_append_rel;
+    // The `translated_vars` are `NodeId` handles into the OUTER `root`'s
+    // `node_arena` (#274); in C they are plain `Node *` pointers that copyObject
+    // duplicates into the planner context, staying valid for the subroot. Here
+    // `make_minmax_subroot` gives the subroot a *fresh, empty* `node_arena`, so a
+    // copied handle would resolve against the wrong arena (or be OOB) when the
+    // subroot's `query_planner` reaches `adjust_appendrel_attrs_mutator` via
+    // `apply_child_basequals` (e.g. `min(x)` over a UNION-ALL subquery). Re-intern
+    // each referenced `Expr` into the subroot's arena and rewrite the handle,
+    // mirroring the union-all pullup re-intern (prepjointree pullup.rs).
+    {
+        let mut appinfos = core::mem::take(&mut subroot.append_rel_list);
+        for ai in appinfos.iter_mut() {
+            for id in ai.translated_vars.iter_mut() {
+                if *id == types_pathnodes::NodeId::default() {
+                    continue;
+                }
+                let expr = root.node(*id).clone_in(mcx)?;
+                *id = subroot.alloc_node(expr);
+            }
+        }
+        subroot.append_rel_list = appinfos;
+    }
     // tuple_fraction = 1.0; limit_tuples = 1.0 (planagg.c:419-420).
     subroot.tuple_fraction = 1.0;
     subroot.limit_tuples = 1.0;
