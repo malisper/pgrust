@@ -169,7 +169,17 @@ pub fn spi_execsql_dynamic(
     // attach-on-propagation analogue (docs/query-lifecycle-raii) of that
     // callback, applied at the same boundary C pushed/popped it, innermost so
     // it precedes the caller's PL/pgSQL-function context line.
-    let out = out.map_err(|e| e.add_context(format!("SQL statement \"{query}\"")));
+    // Crossing this SPI boundary means C had a fresh `error_context_stack`
+    // segment below the inner query's callbacks: any *outer* PL/pgSQL frame
+    // (e.g. the function that ran this EXECUTE) still has its own
+    // `plpgsql_exec_error_callback` pending, which must add its own context
+    // line. Clear the "attached once" latch so that outer frame re-attaches
+    // (the inner frame already attached its line before unwinding to here).
+    let out = out.map_err(|mut e| {
+        e = e.add_context(format!("SQL statement \"{query}\""));
+        e.plpgsql_context_attached = false;
+        e
+    });
     let result = out;
 
     let _ = plancache::DropCachedPlan(source);
