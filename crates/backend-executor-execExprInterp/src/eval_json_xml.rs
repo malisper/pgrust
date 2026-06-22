@@ -262,7 +262,17 @@ pub fn ExecEvalXmlExpr<'mcx>(
 /// lower-level varlena-helper convention, not the carrier convention here.)
 fn xml_arg_payload<'a>(v: &'a Datum<'a>) -> &'a [u8] {
     let img = v.as_ref_bytes();
-    &img[types_datum::varlena::VARHDRSZ.min(img.len())..]
+    // `VARDATA_ANY`: skip ONE header byte for a short (1-byte, low-bit-set)
+    // header, else `VARHDRSZ`. A small stored xml/text value arrives short-headed
+    // once `SHORT_VARLENA_PACKING` is on, where a fixed 4-byte strip would drop
+    // three payload bytes. No-op while the flag is off (every value is 4-byte).
+    match img.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &img[1..],
+        Some(_) if img.len() >= types_datum::varlena::VARHDRSZ => {
+            &img[types_datum::varlena::VARHDRSZ..]
+        }
+        _ => &[],
+    }
 }
 
 /// Write a freshly built xml/text payload into the result cell as a

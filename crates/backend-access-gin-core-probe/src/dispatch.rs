@@ -134,6 +134,21 @@ const JSONB_JSONPATH_PREDICATE_STRATEGY: u16 = 16;
 /// `jsonpath_is_lax` / `jspInit` read the header word at bytes 4..8).
 const VARHDRSZ: usize = 4;
 
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image:
+/// skip ONE header byte for a short (1-byte, low-bit-set) header, else `VARHDRSZ`.
+/// GIN index keys / args (text, jsonb) reach this dispatch as already-detoasted
+/// by-ref images, but detoast does NOT convert a short inline header to long — so
+/// a small stored value arrives short-headed once `SHORT_VARLENA_PACKING` is on,
+/// where a fixed 4-byte strip would drop three payload bytes. No-op while off.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
+    }
+}
+
 /// Encode `gin_extract_tsquery`'s `map_item_operand` (the `int *` map the C code
 /// stores in every `extra_data[]` slot) as a native-endian `i32` byte blob, the
 /// per-key opclass-private `extra_data` the GIN scan carries from `extractQuery`
@@ -233,7 +248,7 @@ fn dispatch_extract_value<'mcx>(
             let jb = value.as_ref_bytes();
             let keys = backend_utils_adt_jsonb_gin_seams::gin_extract_jsonb::call(
                 mcx,
-                &jb[VARHDRSZ..],
+                vardata_any(jb),
             )?;
             let elems = text_keys_to_datums(mcx, keys)?;
             Ok(Some((elems, PgVec::new_in(mcx))))
@@ -244,7 +259,7 @@ fn dispatch_extract_value<'mcx>(
             // native-endian hash bytes (a by-value `uint32` GIN key).
             let jb = value.as_ref_bytes();
             let keys = backend_utils_adt_jsonb_gin_seams::gin_extract_jsonb_path::call(
-                &jb[VARHDRSZ..],
+                vardata_any(jb),
             )?;
             let elems = hash_keys_to_datums(mcx, keys)?;
             Ok(Some((elems, PgVec::new_in(mcx))))
@@ -419,11 +434,11 @@ fn dispatch_jsonb_extract_query<'mcx>(
     let ext = match strategy {
         JSONB_CONTAINS_STRATEGY => {
             // Query is a jsonb; the core wants the container root after VARHDRSZ.
-            call(mcx, GinJsonbQuery::Contains(&qbytes[VARHDRSZ..]))?
+            call(mcx, GinJsonbQuery::Contains(vardata_any(qbytes)))?
         }
         JSONB_EXISTS_STRATEGY => {
             // Query is a `text` key; the core wants the raw string payload.
-            call(mcx, GinJsonbQuery::Exists(&qbytes[VARHDRSZ..]))?
+            call(mcx, GinJsonbQuery::Exists(vardata_any(qbytes)))?
         }
         JSONB_EXISTS_ANY_STRATEGY | JSONB_EXISTS_ALL_STRATEGY => {
             // Query is a `text[]`; each element's text payload is a candidate key
@@ -439,7 +454,7 @@ fn dispatch_jsonb_extract_query<'mcx>(
                         None
                     } else {
                         // VARDATA_ANY of the text element (strip the varlena header).
-                        Some(&d.as_ref_bytes()[VARHDRSZ..])
+                        Some(vardata_any(d.as_ref_bytes()))
                     }
                 })
                 .collect();
@@ -729,8 +744,8 @@ fn dispatch_compare_partial<'mcx>(
     match _flinfo.fn_oid {
         F_GIN_CMP_PREFIX => {
             // gin_cmp_prefix(partial_key, key): VARDATA_ANY of both `text` keys.
-            let a = &query_key.as_ref_bytes()[VARHDRSZ..];
-            let b = &idatum.as_ref_bytes()[VARHDRSZ..];
+            let a = vardata_any(query_key.as_ref_bytes());
+            let b = vardata_any(idatum.as_ref_bytes());
             Ok(backend_utils_adt_tsginidx::gin_cmp_prefix(a, b))
         }
         other => Err(unported(other, "comparePartial")),
