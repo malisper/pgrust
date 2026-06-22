@@ -100,6 +100,7 @@ use types_catalog::pg_rewrite::{
     RewriteRelationId, Anum_pg_rewrite_ev_action, Anum_pg_rewrite_ev_class,
     Anum_pg_rewrite_ev_enabled, Anum_pg_rewrite_ev_qual,
     Anum_pg_rewrite_ev_type, Anum_pg_rewrite_is_instead, Anum_pg_rewrite_oid,
+    Anum_pg_rewrite_rulename,
 };
 use types_catalog::pg_statistic_ext::{
     StatisticExtRelationId, StatisticExtRelidIndexId,
@@ -746,6 +747,7 @@ fn relcache_scan_pg_rewrite(relid: Oid) -> PgResult<Vec<seam::ScannedPgRewrite>>
         // rule->enabled = ev_enabled; rule->isInstead = is_instead;
         out.push(seam::ScannedPgRewrite {
             ruleid: col(&row, Anum_pg_rewrite_oid, "pg_rewrite.oid")?.as_oid(),
+            rulename: name_col(&row, Anum_pg_rewrite_rulename, "pg_rewrite.rulename")?,
             ev_type: col(&row, Anum_pg_rewrite_ev_type, "ev_type")?.as_char() as u8,
             ev_enabled: col(&row, Anum_pg_rewrite_ev_enabled, "ev_enabled")?.as_char() as u8,
             is_instead: col(&row, Anum_pg_rewrite_is_instead, "is_instead")?.as_bool(),

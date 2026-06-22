@@ -553,6 +553,18 @@ fn fc_pg_get_function_result(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<
     }
 }
 
+/// `pg_get_function_arg_default(oid, int4) -> text` (oid 3808).
+fn fc_pg_get_function_arg_default(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let funcid = arg_oid(fcinfo, 0);
+    let nth_arg = arg_int32(fcinfo, 1);
+    let m = scratch_mcx();
+    let res = crate::functiondef::pg_get_function_arg_default(m.mcx(), funcid, nth_arg)?;
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -668,6 +680,7 @@ pub fn register_ruleutils_builtins() {
         builtin(2162, "pg_get_function_arguments", 1, true, false, fc_pg_get_function_arguments),
         builtin(2232, "pg_get_function_identity_arguments", 1, true, false, fc_pg_get_function_identity_arguments),
         builtin(2165, "pg_get_function_result", 1, true, false, fc_pg_get_function_result),
+        builtin(3808, "pg_get_function_arg_default", 2, true, false, fc_pg_get_function_arg_default),
         builtin(3352, "pg_get_partkeydef", 1, true, false, fc_pg_get_partkeydef),
         builtin(3408, "pg_get_partition_constraintdef", 1, true, false, fc_pg_get_partition_constraintdef),
         builtin(3415, "pg_get_statisticsobjdef", 1, true, false, fc_pg_get_statisticsobjdef),

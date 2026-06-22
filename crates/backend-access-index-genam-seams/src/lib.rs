@@ -230,6 +230,10 @@ pub struct ScannedConstraintFk {
 pub struct ScannedPgRewrite {
     /// `Form_pg_rewrite.oid` — the rule OID (`RewriteRule.ruleId`).
     pub ruleid: Oid,
+    /// `NameStr(Form_pg_rewrite.rulename)` — used by `RelationBuildRuleLock` to
+    /// keep the rules in name order (their firing order; C relies on the
+    /// `RewriteRelRulenameIndexId` scan reading them in name order).
+    pub rulename: String,
     /// `char ev_type` — `'1'`..`'4'`; `RelationBuildRuleLock` does
     /// `rule->event = ev_type - '0'` to get the `CmdType`.
     pub ev_type: u8,

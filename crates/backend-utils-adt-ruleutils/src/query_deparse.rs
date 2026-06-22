@@ -2718,17 +2718,55 @@ fn trailing_line_len(data: &[u8]) -> usize {
 
 /// Whether `tle.expr` digs down (past FieldStore/SubsRef/implicit CoerceToDomain
 /// and implicit coercions) to a `PARAM_MULTIEXPR` Param (ruleutils.c 7271-7303).
-/// The dig-down requires the assignment family; for the plain non-multiexpr case
-/// (the common one) the answer is simply "not a bare MULTIEXPR Param".
+///
+/// The Param could be buried under FieldStores, SubscriptingRefs and
+/// CoerceToDomains (cf. `processIndirection()`), and underneath those there
+/// could be an implicit type coercion. Because we would ignore implicit type
+/// coercions anyway, we don't need to be as careful as `processIndirection()`
+/// is about descending past implicit CoerceToDomains.
 fn expr_is_multiexpr_param(expr: Option<&Expr>) -> bool {
-    // We only positively detect a bare top-level Param MULTIEXPR (the case that
-    // does not need the assignment-family dig-down). A FieldStore/SubsRef/
-    // CoerceToDomain-wrapped MULTIEXPR would require the assignment family; if
-    // one is ever encountered the targetlist render reaches processIndirection,
-    // which panics precisely there.
+    use types_nodes::primnodes::{CoercionForm, ParamKind};
+
+    let mut cur = match expr {
+        Some(e) => e,
+        None => return false,
+    };
+
+    loop {
+        match cur {
+            Expr::FieldStore(fstore) => {
+                // expr = (Node *) linitial(fstore->newvals);
+                match fstore.newvals.first() {
+                    Some(e) => cur = e,
+                    None => return false,
+                }
+            }
+            Expr::SubscriptingRef(sbsref) => {
+                // if (refassgnexpr == NULL) break; else descend into it.
+                match sbsref.refassgnexpr.as_deref() {
+                    Some(e) => cur = e,
+                    None => break,
+                }
+            }
+            Expr::CoerceToDomain(cdomain) => {
+                if cdomain.coercionformat != CoercionForm::COERCE_IMPLICIT_CAST {
+                    break;
+                }
+                match cdomain.arg.as_deref() {
+                    Some(e) => cur = e,
+                    None => break,
+                }
+            }
+            _ => break,
+        }
+    }
+
+    // expr = strip_implicit_coercions(expr);
+    let stripped = backend_nodes_core::nodefuncs::strip_implicit_coercions(cur);
+
     matches!(
-        expr,
-        Some(Expr::Param(p)) if p.paramkind == types_nodes::primnodes::ParamKind::PARAM_MULTIEXPR
+        stripped,
+        Expr::Param(p) if p.paramkind == ParamKind::PARAM_MULTIEXPR
     )
 }
 

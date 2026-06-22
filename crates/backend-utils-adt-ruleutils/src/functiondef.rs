@@ -305,6 +305,75 @@ pub fn pg_get_function_result<'mcx>(
     Ok(Some(PgString::from_str_in(&buf, mcx)?))
 }
 
+/// `is_input_argument(nth, argmodes)` (ruleutils.c 3290-3295): an argument
+/// counts as an input if there are no per-arg modes, or the mode is IN / INOUT
+/// / VARIADIC.
+fn is_input_argument(nth: usize, argmodes: &[u8]) -> bool {
+    argmodes.is_empty()
+        || matches!(
+            argmodes.get(nth).copied(),
+            Some(PROARGMODE_IN) | Some(PROARGMODE_INOUT) | Some(PROARGMODE_VARIADIC)
+        )
+}
+
+/// `pg_get_function_arg_default(funcid, nth_arg)` (ruleutils.c 3577-3650).
+/// Returns the deparsed default expression of the `nth_arg`-th argument
+/// (1-based, counting only input arguments per C's `is_input_argument`), or
+/// `Ok(None)` (`PG_RETURN_NULL`) when the proc is gone, the argument index is
+/// out of range / not an input argument, or that argument has no default.
+pub fn pg_get_function_arg_default<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+    nth_arg: i32,
+) -> PgResult<Option<PgString<'mcx>>> {
+    let info =
+        match backend_utils_cache_syscache_seams::search_pg_functiondef_info::call(mcx, funcid)? {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+    let proc = &info.form;
+
+    let arginfo = backend_utils_fmgr_funcapi_seams::get_func_arg_info::call(mcx, proc.oid)?;
+    let numargs = arginfo.argtypes.len() as i32;
+    let argmodes: &[u8] = &arginfo.argmodes;
+
+    if nth_arg < 1 || nth_arg > numargs || !is_input_argument((nth_arg - 1) as usize, argmodes) {
+        return Ok(None);
+    }
+
+    // nth_inputarg = number of input args among the first nth_arg args.
+    let mut nth_inputarg = 0i32;
+    for i in 0..nth_arg {
+        if is_input_argument(i as usize, argmodes) {
+            nth_inputarg += 1;
+        }
+    }
+
+    // proargdefaults is a List of default Exprs (last N input args); NULL means
+    // no defaults at all.
+    let defstr = match info.proargdefaults.as_ref() {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    let node = backend_nodes_read_seams::string_to_node::call(mcx, defstr.as_str())?;
+    let list = node
+        .as_list()
+        .ok_or_else(|| PgError::error("proargdefaults is not a List"))?;
+
+    // proargdefaults corresponds to the last N input arguments, where
+    // N = pronargdefaults.
+    let nth_default = nth_inputarg - 1 - (proc.pronargs as i32 - proc.pronargdefaults as i32);
+    if nth_default < 0 || nth_default >= list.len() as i32 {
+        return Ok(None);
+    }
+
+    let expr = list
+        .get(nth_default as usize)
+        .ok_or_else(|| PgError::error("too few default expressions"))?;
+    let s = deparse_expression(mcx, expr, mcx::PgVec::new_in(mcx), false, false)?;
+    Ok(Some(PgString::from_str_in(s.as_str(), mcx)?))
+}
+
 /// `%g`-style rendering of an `f32` cost/rows value (C `appendStringInfo(..,
 /// "%g", ..)`). `%g` drops trailing zeros and uses the shortest of fixed/exp.
 fn fmt_g(v: f32) -> String {

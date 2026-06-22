@@ -662,7 +662,13 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
     // `systable_beginscan(pg_rewrite, RewriteRelRulesIndexId, ev_class = rd_id)`
     // + per-row `GETSTRUCT(Form_pg_rewrite)` + the two node-string columns
     // (`ev_qual`/`ev_action`), all genam-owned catalog vocabulary.
-    let scanned = scan_pg_rewrite_seam(relation.rd_id)?;
+    let mut scanned = scan_pg_rewrite_seam(relation.rd_id)?;
+
+    // C scans `pg_rewrite` via `RewriteRelRulenameIndexId`, so the rules are
+    // read — and therefore fired — in rule-name order (relcache.c:792-799).
+    // Sort here by `rulename` to guarantee that order independent of the
+    // underlying scan's row order.
+    scanned.sort_by(|a, b| a.rulename.cmp(&b.rulename));
 
     // Build the rule list, `stringToNode`-ing the node strings into the cache
     // arena so the resulting `Query`/`Node` trees live for the entry's lifetime.
@@ -798,9 +804,9 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
         return Ok(());
     }
 
-    // `qsort(rules->rules, numlocks, ..., RewriteRuleCompare)` — sort by ruleId
-    // so the rule order is stable across rebuilds regardless of scan order.
-    rules.sort_by_key(|r| r.ruleId);
+    // C does NOT re-sort the rule array here: it keeps the `pg_rewrite` scan
+    // order, which is rule-name order (see the `scanned.sort_by(rulename)`
+    // above). Firing order is therefore rule-name order, as required.
 
     let lock =
         mcx::alloc_in(cache_mcx, RuleLock { rules }).map_err(|_| cache_mcx.oom(0))?;
