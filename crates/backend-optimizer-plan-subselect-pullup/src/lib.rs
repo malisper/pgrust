@@ -100,9 +100,17 @@ pub fn init_seams() {
 /// its embedded-owned `subselect` (the VALUES `Query`) and `testexpr`.
 fn convert_VALUES_to_ANY<'mcx>(
     mcx: Mcx<'mcx>,
-    _root: &PlannerInfo,
+    root: &PlannerInfo,
     sublink: &SubLink<'mcx>,
 ) -> PgResult<Option<Expr<'mcx>>> {
+    // C: `eval_const_expressions(root, value)` — fold using the planner's
+    // `root->glob->boundParams` so a custom plan's bound PARAM_EXTERN `$n`
+    // values collapse to Consts, letting the constant-array conversion fire.
+    // (Generic plans leave boundParams NULL and correctly keep the semijoin.)
+    let bound_params = root
+        .glob
+        .as_ref()
+        .and_then(|g| g.bound_params.clone());
     // `testexpr = (Node *) sublink->testexpr`, `values = (Query *) sublink->subselect`.
     let testexpr = match sublink.testexpr.as_deref() {
         Some(t) => t,
@@ -187,7 +195,11 @@ fn convert_VALUES_to_ANY<'mcx>(
             None => return Ok(None),
         };
         let folded =
-            backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, converted_expr)?;
+            backend_optimizer_util_clauses::fold::eval_const_expressions_with_params(
+                mcx,
+                converted_expr,
+                bound_params.clone(),
+            )?;
 
         // As we only support constant output arrays, all the items must also be
         // constant.
