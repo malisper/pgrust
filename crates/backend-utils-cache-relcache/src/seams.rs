@@ -1740,8 +1740,23 @@ fn index_usability_info(
     index: &types_rel::Relation<'_>,
 ) -> PgResult<types_matview::IndexUsabilityInfo> {
     // pred_is_nil = (RelationGetIndexPredicate(indexRel) == NIL).
-    let pred_is_nil = !backend_utils_cache_syscache_seams::pg_index_has_predicate::call(index.rd_id)?
-        .unwrap_or(false);
+    //
+    // `RelationGetIndexPredicate` (relcache.c:5210) does NOT merely test
+    // `heap_attisnull(rd_indextuple, Anum_pg_index_indpred)`; it decodes the
+    // stored predicate and runs it through `eval_const_expressions` +
+    // `canonicalize_qual` + `make_ands_implicit`. A predicate that folds to a
+    // constant TRUE (e.g. `WHERE immutable_fn(const) > 0`) therefore canonicalizes
+    // to an empty implicit-AND list == NIL, making the index usable for CONCURRENT
+    // refresh. The raw `pg_index_has_predicate` attisnull test would wrongly report
+    // it non-NIL, so resolve the fully-evaluated predicate here.
+    let pred_is_nil = {
+        let cxt = mcx::MemoryContext::new("is_usable_unique_index predicate");
+        let m = cxt.mcx();
+        match backend_utils_cache_relcache_nodexform_seams::index_predicate::call(m, index.rd_id)? {
+            None => true,
+            Some(clauses) => clauses.is_empty(),
+        }
+    };
     with_entry(index.rd_id, |rd| match rd.rd_index.as_ref() {
         Some(i) => types_matview::IndexUsabilityInfo {
             indisunique: i.indisunique,
