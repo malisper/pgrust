@@ -130,32 +130,17 @@ pub fn ExplainPrintPlan<'es, 'p>(
     // dummy Result's targetlist still gets its relation prefix
     // (`f1.id`, `ss.unnest`). Preserve it by passing `None` (not an empty
     // bitmapset, which would suppress all prefixes).
-    let mut rels_used_acc = explain_pre_scan_node(es, mcx, planstate, None)?;
-    // planstate_tree_walker (nodeFuncs.c) also walks every node's initPlan /
-    // subPlan SubPlanState subtrees (planstate_walk_subplans). The owned model
-    // single-owns each subplan's PlanState in `EState.es_subplanstates` rather
-    // than aliasing it on `SubPlanState.planstate`, so sweep the whole table
-    // here: it is exactly the union of all initPlan/subPlan child trees. Without
-    // this, scan rels reached only through a correlated SubPlan (e.g. an EXISTS
-    // sublink's join) never get added to rels_used, so their RTEs get no display
-    // name and a Var resolving to one loses its alias prefix (memoize.sql's
-    // `t2.hundred` deparsed as bare `hundred`).
-    if !es.es_subplanstates_ptr.is_null() {
-        // SAFETY: identical aliasing contract as `resolve_subplan_planstate` —
-        // the pointer aliases the live `EState.es_subplanstates` slice for the
-        // duration of this synchronous walk.
-        let subplanstates = unsafe {
-            core::slice::from_raw_parts(
-                es.es_subplanstates_ptr as *const Option<PgBox<'p, PlanStateNode<'p>>>,
-                es.es_subplanstates_len,
-            )
-        };
-        for sub in subplanstates.iter() {
-            if let Some(ps) = sub.as_deref() {
-                rels_used_acc = explain_pre_scan_node(es, mcx, ps, rels_used_acc)?;
-            }
-        }
-    }
+    // explain_pre_scan_node now mirrors C's planstate_tree_walker exactly: it
+    // recurses into each visited node's own initPlan / subPlan SubPlanState
+    // subtrees (resolved from `EState.es_subplanstates` by the plan_ids on the
+    // node's `init_plan_ids` / `sub_plan_ids`). We deliberately do NOT sweep the
+    // whole flat `es_subplanstates` table here — that over-named RTEs whenever a
+    // subplan body's RTE was identically aliased to another (correlated subselects
+    // folding into shared SubPlans), producing spurious `_N` alias suffixes
+    // (`t2_2`/`k_1`/`hjtest_*`). Per-node walking gives exactly C's rels_used, so
+    // a single referenced `gstest5 t2` stays `t2`, while genuinely-colliding RTEs
+    // at one query level still uniquify normally.
+    let rels_used_acc = explain_pre_scan_node(es, mcx, planstate, None)?;
     let rels_used = rels_used_acc.map(PgBox::into_inner);
     if let Some(rtable) = es.rtable.as_ref() {
         let names = ruleutils_s::select_rtable_names_for_explain::call(
@@ -400,6 +385,29 @@ fn explain_pre_scan_node<'es, 'p>(
     }
 
     // return planstate_tree_walker(planstate, ExplainPreScanNode, rels_used).
+    // C's planstate_tree_walker (nodeFuncs.c:4719) walks, in order: this node's
+    // initPlan SubPlanStates, then lefttree/righttree, then member children, then
+    // its subPlan SubPlanStates. Crucially the subplan recursion is PER NODE — a
+    // SubPlan body's scanrelid is added to rels_used only when that body is
+    // reachable from a node actually visited, NOT by sweeping every entry in the
+    // flat es_subplanstates table. Sweeping the flat table over-names RTEs:
+    // identical correlated subselects fold into several SubPlan nodes that share
+    // ONE plan body / ONE RTE (e.g. groupingsets gstest5's `t2`, or a hashed +
+    // non-hashed EXISTS pair sharing `k`), but the flat table can also hold
+    // distinct-but-identically-aliased subplan-body RTEs whose extra entries then
+    // collide and get spurious `_N` suffixes (`t2_2`, `k_1`, `hjtest_*`). Walking
+    // per node, deduplicated by plan_id, exactly reproduces C's rels_used.
+
+    // initPlan-s (planstate->initPlan): resolve each plan_id to its body and
+    // recurse. Mirrors planstate_walk_subplans(planstate->initPlan, ...).
+    if let Some(ids) = planstate.ps_head().init_plan_ids.as_ref() {
+        for &plan_id in ids.iter() {
+            if let Some(body) = resolve_subplan_planstate(es, plan_id) {
+                acc = explain_pre_scan_node(es, mcx, body, acc)?;
+            }
+        }
+    }
+
     // The owned PlanStateNode threads outer (lefttree) and inner (righttree),
     // plus the member-node children (Append/MergeAppend/BitmapAnd/BitmapOr) via
     // `member_input_states()` — so partition Seq Scans under an Append
@@ -423,6 +431,16 @@ fn explain_pre_scan_node<'es, 'p>(
     // `empsalary.` on Window:/Sort Key: lines).
     if let Some(subplan) = planstate.subquery_subplan_state() {
         acc = explain_pre_scan_node(es, mcx, subplan, acc)?;
+    }
+
+    // subPlan-s (planstate->subPlan): resolve each plan_id to its body and
+    // recurse. Mirrors planstate_walk_subplans(planstate->subPlan, ...).
+    if let Some(ids) = planstate.ps_head().sub_plan_ids.as_ref() {
+        for &plan_id in ids.iter() {
+            if let Some(body) = resolve_subplan_planstate(es, plan_id) {
+                acc = explain_pre_scan_node(es, mcx, body, acc)?;
+            }
+        }
     }
 
     Ok(acc)
