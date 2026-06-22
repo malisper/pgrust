@@ -511,13 +511,21 @@ pub fn exec_build_returning_projection<'mcx>(
 
     // result slot = mtstate->ps.ps_ResultTupleSlot
     let slot = mtstate.ps.ps_ResultTupleSlot;
-    let proj = execExpr_core::exec_build_projection_info_impl(
+    let mut proj = execExpr_core::exec_build_projection_info_impl(
         estate,
         rlist,
         econtext,
         slot,
         Some(&rd_att),
     )?;
+
+    // C `ExecBuildProjectionInfo(..., &mtstate->ps, ...)` passes the ModifyTable
+    // PlanState as `parent`, so any expression SubPlan compiled in the RETURNING
+    // target list is appended to `mtstate->ps.subPlan` (read by EXPLAIN to print
+    // the `SubPlan N` subtrees). The owned-model `exec_build_projection_info_impl`
+    // takes no parent, so drain the discovered SubPlan ids into the ModifyTable
+    // head here, mirroring the parent-bearing projection wrapper.
+    execExpr_core::drain_found_subplan_ids(mcx, &mut mtstate.ps, &mut proj.pi_state)?;
 
     // resultRelInfo->ri_returningList = rlist;
     let mut stored_list: mcx::PgVec<'mcx, TargetEntry<'mcx>> =
