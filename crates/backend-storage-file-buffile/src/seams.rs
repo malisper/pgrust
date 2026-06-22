@@ -6,6 +6,13 @@ use backend_storage_file_buffile_seams as seams;
 /// Install every `backend-storage-file-buffile` seam.
 pub fn init_seams() {
     seams::buf_file_create_temp::set(|mcx, inter_xact| super::BufFileCreateTemp(mcx, inter_xact));
+    seams::buf_file_create_fileset::set(|mcx, fileset, name| {
+        super::BufFileCreateFileSet(mcx, fileset, name)
+    });
+    seams::buf_file_open_fileset::set(|mcx, fileset, name, mode, missing_ok| {
+        super::BufFileOpenFileSet(mcx, fileset, name, mode, missing_ok)
+    });
+    seams::buf_file_close_ref::set(|file| super::BufFileClose(file));
     seams::buf_file_close::set(|mut file| super::BufFileClose(&mut file));
     seams::buf_file_seek::set(|file, fileno, offset, whence| {
         super::BufFileSeek(file, fileno, offset, whence)

@@ -24,6 +24,14 @@ use types_nodes::nodehash::ParallelHashJoinState;
 use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 use types_tuple::heaptuple::{MinimalTupleData, HEAP_TUPLE_HAS_MATCH};
 
+use backend_storage_ipc_barrier_seams as barrier;
+
+/// `WAIT_EVENT_HASH_BUILD_ELECT` (wait_event.h) — wait event for the parallel
+/// build-barrier election. The numeric value is cosmetic (pg_stat_activity wait
+/// reporting only); kept consistent with the sibling build events in
+/// `exec_hash.rs` (ALLOCATE=…0001, HASH_INNER=…0003).
+const WAIT_EVENT_HASH_BUILD_ELECT: u32 = 0x0A00_0002;
+
 /// Serialize a [`FormedMinimalTuple`] to its contiguous C `MinimalTuple` byte
 /// image (the flat blob, `t_len` first) — the form the batch temp file / shared
 /// tuplestore boundary carries. A well-formed in-arena tuple can only fail on
@@ -321,13 +329,44 @@ pub fn ExecHashTableCreate<'mcx>(
     }
 
     if hashtable.parallel_state.is_some() {
-        // Attach to the build barrier, elect a backend to set up the shared
-        // batch state, allocate batch 0. All of this lives in the DSA-resident
-        // shared state reached through the (unported) DSA area; the parallel
-        // setup routines raise a recoverable not-ported ERROR until
-        // sharedtuplestore/sharedfileset land.
-        crate::parallel::ExecParallelHashJoinSetUpBatches(mcx, &mut hashtable, nbatch)?;
-        crate::parallel::ExecParallelHashTableAlloc(mcx, &mut hashtable, 0)?;
+        // nodeHash.c:574-621 — the parallel build-barrier ELECT block.
+        //
+        // Attach to the build barrier. The corresponding detach is in
+        // ExecHashTableDetach. We won't attach to batch 0's batch_barrier yet
+        // (that happens later, started in PHJ_BATCH_PROBE), because batch 0 is
+        // allocated up front and loaded while hashing; we coordinate that with
+        // the build_barrier.
+        let pstate: &mut ParallelHashJoinState = crate::parallel::pstate_of(&hashtable);
+        barrier::BarrierAttach::call(&mut pstate.build_barrier);
+
+        // So far we have no idea whether there are other participants, or what
+        // phase they are on. The only thing we care about now is whether someone
+        // has already created the SharedHashJoinBatch objects and the hash table
+        // for batch 0. One backend is elected to do that now if necessary.
+        if barrier::BarrierPhase::call(&pstate.build_barrier)
+            == types_nodes::nodehash::PHJ_BUILD_ELECT
+            && barrier::BarrierArriveAndWait::call(
+                &mut pstate.build_barrier,
+                WAIT_EVENT_HASH_BUILD_ELECT,
+            )
+        {
+            pstate.nbatch = nbatch;
+            pstate.space_allowed = space_allowed;
+            pstate.growth = types_nodes::nodehash::ParallelHashGrowth::PHJ_GROWTH_OK;
+
+            // Set up the shared state for coordinating batches.
+            crate::parallel::ExecParallelHashJoinSetUpBatches(mcx, &mut hashtable, nbatch)?;
+
+            // Allocate batch 0's hash table up front so we can load it directly
+            // while hashing.
+            let pstate2: &mut ParallelHashJoinState = crate::parallel::pstate_of(&hashtable);
+            pstate2.nbuckets = nbuckets;
+            crate::parallel::ExecParallelHashTableAlloc(mcx, &mut hashtable, 0)?;
+        }
+
+        // The next Parallel Hash synchronization point is in
+        // MultiExecParallelHash, which progresses it all the way to
+        // PHJ_BUILD_RUN. The caller must not return control between now and then.
     } else {
         // Serial: allocate the bucket array and set each bucket empty.
         hashtable.buckets =

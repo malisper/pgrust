@@ -161,6 +161,16 @@ fn pstate_mut<'a>(hashtable: &HashJoinTableData<'_>) -> &'a mut ParallelHashJoin
     unsafe { &mut *(ps as usize as *mut ParallelHashJoinState) }
 }
 
+/// Public delegate of [`pstate_mut`] for `exec_hash.rs::resolve_parallel_state`,
+/// which must reach the backend-local `ParallelHashJoinState` by direct deref —
+/// NOT through `dsa_get_address` (the raw segment address is not a dsa_pointer,
+/// so resolving it would split it into a bogus segment-index/offset).
+#[inline]
+#[allow(clippy::mut_from_ref)]
+pub fn pstate_of<'a>(hashtable: &HashJoinTableData<'_>) -> &'a mut ParallelHashJoinState {
+    pstate_mut(hashtable)
+}
+
 #[inline]
 #[allow(clippy::mut_from_ref)]
 fn batch_shared_mut<'a>(
@@ -284,6 +294,26 @@ fn heap_tuple_header_clear_match(mintuple_addr: usize) {
 fn heap_tuple_header_has_match(mintuple_addr: usize) -> bool {
     let p = (mintuple_addr + MT_OFF_INFOMASK2) as *const u16;
     unsafe { (*p & HEAP_TUPLE_HAS_MATCH) != 0 }
+}
+
+/// On the parallel probe path, `hj_CurTuple.0` is the raw on-DSA HashJoinTuple
+/// address (set by `ExecParallelScanHashBucket` /
+/// `ExecParallelScanHashTableForUnmatched`). Read the current tuple's match
+/// flag straight off its on-DSA flat MinimalTuple image — the parallel analogue
+/// of the serial `HeapTupleHeaderHasMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple))`.
+#[inline]
+pub fn cur_tuple_has_match_dsa(hjtuple_addr: usize) -> bool {
+    heap_tuple_header_has_match(hjtuple_mintuple_addr(hjtuple_addr))
+}
+
+/// `HeapTupleHeaderSetMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple))` over the
+/// on-DSA HashJoinTuple at `hjtuple_addr` (the parallel probe path).
+#[inline]
+pub fn cur_tuple_set_match_dsa(hjtuple_addr: usize) {
+    let p = (hjtuple_mintuple_addr(hjtuple_addr) + MT_OFF_INFOMASK2) as *mut u16;
+    unsafe {
+        *p |= HEAP_TUPLE_HAS_MATCH;
+    }
 }
 
 // ===========================================================================
@@ -1288,27 +1318,6 @@ pub fn ExecParallelHashJoinSetUpBatches<'mcx>(
     hashtable: &mut HashJoinTableData<'mcx>,
     nbatch: i32,
 ) -> PgResult<()> {
-    // The per-batch shared state is a SharedTuplestore over a SharedFileSet
-    // (sharedtuplestore.c / sharedfileset.c), whose owner crates are not yet
-    // ported: the `sts_estimate`/`sts_initialize`/… seams reached just below
-    // (via `estimate_parallel_hash_join_batch`) are installed as
-    // `panic!("UNPORTED")`. A raw panic in a parallel WORKER's hash build does
-    // NOT unwind cleanly — it escalates through the worker's resowner/relcache
-    // teardown into a backend crash, which truncates the whole regression file.
-    // Raise the unported condition as a recoverable `ERROR` here, BEFORE the
-    // panicking seams run: the leader catches it, every backend stays alive, and
-    // the parallel-aware hash join (Parallel Hash) reads as a graceful error —
-    // the pre-port baseline behavior — instead of a crash. Parallel hash never
-    // completes today regardless (the sts seams always panic), so this changes
-    // nothing functional, only crash → clean ERROR. Remove this gate when
-    // sharedtuplestore/sharedfileset land.
-    return Err(types_error::PgError::error(
-        "utils/sort/sharedtuplestore.c not ported: parallel-aware hash join (Parallel \
-         Hash) needs the SharedTuplestore over a SharedFileSet, whose owner crate is \
-         absent in this worktree",
-    ));
-    #[allow(unreachable_code)]
-    {
     debug_assert!(hashtable.batches.is_empty());
     let area = hashtable.area.expect("parallel hash: area is None");
     let nparticipants = pstate_mut(hashtable).nparticipants;
@@ -1377,7 +1386,6 @@ pub fn ExecParallelHashJoinSetUpBatches<'mcx>(
     }
     hashtable.batches = accessors;
     Ok(())
-    }
 }
 
 // ===========================================================================
@@ -1927,11 +1935,15 @@ fn pstate_fileset_handle(
     types_execparallel::SharedFileSetHandle(addr)
 }
 
-/// `MyProcNumber` — the caller's per-backend proc number, passed to the lwlock
-/// seam (the no-ambient-globals rule). Read off the parallel subsystem.
+/// `MyProcNumber` — the caller's real per-backend PGPROC slot index, passed to
+/// the lwlock seam (the no-ambient-globals rule). This MUST be the genuine
+/// `MyProcNumber` (valid in both the leader and every worker), NOT
+/// `ParallelWorkerNumber` (which is -1 in the leader and the worker ordinal in
+/// workers) — `LWLockAcquire` panics ("cannot wait without a PGPROC structure")
+/// if it has to queue with an invalid proc number on a contended pstate lock.
 #[inline]
 fn current_proc_number() -> types_core::ProcNumber {
-    backend_access_transam_parallel::parallel_worker_number() as types_core::ProcNumber
+    backend_utils_init_small_seams::my_proc_number::call()
 }
 
 /// `sts_puttuple(accessor, &hashvalue, tuple)` over an on-DSA MinimalTuple at

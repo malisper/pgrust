@@ -9,7 +9,44 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
+use types_execparallel::FileSetHandle;
 use types_nodes::nodehashjoin::BufFile;
+
+seam_core::seam!(
+    /// `BufFileCreateFileSet(fileset, name)` (buffile.c:266): create a `BufFile`
+    /// in the given `FileSet`, which other backends attached to the same fileset
+    /// can later open read-only by `name`. Used by `sharedtuplestore.c` to spill
+    /// each participant's partition to `<name>.p<participant>`. Allocated in
+    /// `mcx` (the accessor's context).
+    pub fn buf_file_create_fileset<'mcx>(
+        mcx: Mcx<'mcx>,
+        fileset: FileSetHandle,
+        name: &str,
+    ) -> PgResult<mcx::PgBox<'mcx, BufFile>>
+);
+
+seam_core::seam!(
+    /// `BufFileOpenFileSet(fileset, name, mode, missing_ok)` (buffile.c:290):
+    /// open a file previously created with `BufFileCreateFileSet` in the same
+    /// fileset under `name`. With `missing_ok`, returns `Ok(None)` when no such
+    /// BufFile exists.
+    pub fn buf_file_open_fileset<'mcx>(
+        mcx: Mcx<'mcx>,
+        fileset: FileSetHandle,
+        name: &str,
+        mode: i32,
+        missing_ok: bool,
+    ) -> PgResult<Option<mcx::PgBox<'mcx, BufFile>>>
+);
+
+seam_core::seam!(
+    /// `BufFileClose(file)` (buffile.c) over a borrowed `&mut BufFile` — the form
+    /// `sharedtuplestore.c` needs, since it holds the read/write `BufFile` in a
+    /// backend-local slab and closes it in place (the by-value `buf_file_close`
+    /// would consume the slab's owned box). Infallible (close paths do not
+    /// `ereport(ERROR)`).
+    pub fn buf_file_close_ref(file: &mut BufFile) -> PgResult<()>
+);
 
 seam_core::seam!(
     /// `BufFileCreateTemp(interXact)` (buffile.c): create a new temporary

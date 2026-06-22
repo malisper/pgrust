@@ -14,6 +14,7 @@ types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
+types-execparallel = { path = "../types-execparallel" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 backend-utils-error = { path = "../backend-utils-error" }
@@ -27,6 +28,8 @@ backend-utils-sort-tuplestore-hold-seams = { path = "../backend-utils-sort-tuple
 
 # Outward seams this unit drives.
 backend-storage-file-buffile-seams = { path = "../backend-storage-file-buffile-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

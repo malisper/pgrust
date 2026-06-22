@@ -28,7 +28,6 @@ use backend_executor_execProcnode_seams as execProcnode;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
 use backend_storage_ipc_barrier_seams as barrier;
-use backend_utils_mmgr_dsa_seams as dsa;
 
 /// `WAIT_EVENT_HASH_BUILD_ALLOCATE` (wait_event.h) — wait event passed to
 /// `BarrierArriveAndWait` while everyone synchronizes after allocating the
@@ -66,14 +65,12 @@ fn my_log2(num: i64) -> i32 {
 unsafe fn resolve_parallel_state<'a, 'mcx>(
     hashtable: &mut types_nodes::nodehash::HashJoinTableData<'mcx>,
 ) -> &'a mut ParallelHashJoinState {
-    let area = hashtable
-        .area
-        .expect("MultiExecParallelHash: parallel hash table has no DSA area");
-    let dp = hashtable
-        .parallel_state
-        .expect("MultiExecParallelHash: parallel hash table has no parallel_state");
-    let cursor = dsa::dsa_get_address::call(area, dp);
-    &mut *(cursor.0 as *mut ParallelHashJoinState)
+    // `parallel_state` holds the backend-local address of the
+    // ParallelHashJoinState in the DSM segment (C's `ParallelHashJoinState *`),
+    // NOT a dsa_pointer — deref it directly via parallel::pstate_of rather than
+    // resolving it through `dsa_get_address` (which would split the raw segment
+    // address into a bogus segment-index/offset).
+    crate::parallel::pstate_of(hashtable)
 }
 
 /// `ExecHash(PlanState *pstate)` (nodeHash.c:91) — the per-node executor

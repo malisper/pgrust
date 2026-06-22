@@ -10,9 +10,10 @@
 //! * [`tuplestore`] — the `MinimalTuple` temporary store; ported fully onto
 //!   the landed payload-bearing `FormedMinimalTuple` carrier + flat codec,
 //!   storing flat `MinimalTuple` blobs.
-//! * [`sharedtuplestore`] — NOT ported: its `SharedFileSet` substrate
-//!   (`storage/file/sharedfileset.c`) is absent in this worktree, so its seam
-//!   surface installs as a loud panic.
+//! * [`sharedtuplestore`] — the parallel hash join's per-batch shared
+//!   tuplestores; ported onto the in-DSM `SharedTuplestore` control object +
+//!   per-participant `BufFile`s in a `SharedFileSet`, with the backend-local
+//!   accessor in a `thread_local` slab keyed by a 1-based handle token.
 //!
 //! This unit owns the inward `backend-utils-sort-storage-seams` and installs
 //! every one of them from [`init_seams`].
