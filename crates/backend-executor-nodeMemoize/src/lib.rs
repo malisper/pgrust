@@ -1208,21 +1208,33 @@ pub fn ExecMemoizeInitializeWorker<'mcx>(
     // node->shared_info =
     //     shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
     //
-    // The worker `shm_toc_lookup`s the leader's chunk by plan_node_id (the real
-    // owned shm_toc call, below) and would attach to it, storing the DSM cursor
-    // in `node->shared_info` so its own `ExecEndMemoize` copyback lands in the
-    // shared DSM bytes. Blocked on the SAME two surfaces as
-    // ExecMemoizeInitializeDSM: the DSM-resident `shared_info` carrier (the
-    // merged Memoize node holds an in-process `Box<SharedMemoizeInfo>`) and the
-    // keystone flexible-array slot accessor. Mirror-and-panic into the parallel
-    // DSM owner until those land.
+    // The lookup is `noError = true` (missing_ok): when the leader is NOT
+    // instrumenting (no EXPLAIN ANALYZE) `ExecMemoizeInitializeDSM` returns
+    // early without inserting any chunk, so this lookup finds nothing and the C
+    // leaves `node->shared_info == NULL`. We faithfully reproduce that arm:
+    // `shared_info = None`. Only when a chunk IS present (the instrumenting
+    // path) would the worker attach to it, storing the DSM cursor in
+    // `node->shared_info` so its own `ExecEndMemoize` copyback lands in the
+    // shared DSM bytes — and that DSM-resident carrier is genuinely unported
+    // (the merged Memoize node holds an in-process `Box<SharedMemoizeInfo>`,
+    // plus the keystone flexible-array slot accessor). Defer to the carrier
+    // owner only in that case rather than crashing every non-instrumented
+    // parallel Memoize worker.
     let toc = parallel::pwcxt_toc(pwcxt);
-    let _attached = parallel::shm_toc_lookup(toc, node.plan_node_id as u64, true);
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: SharedMemoizeInfo DSM \
-         attach (ExecMemoizeInitializeWorker) — needs a DSM-resident shared_info \
-         carrier and the keystone flexible-array slot accessor; unported"
-    );
+    match parallel::shm_toc_lookup(toc, node.plan_node_id as u64, true) {
+        None => {
+            // Leader was not instrumenting: no shared stats area to attach to.
+            node.shared_info = None;
+            Ok(())
+        }
+        Some(_chunk) => {
+            panic!(
+                "backend_access_transam_parallel::shared_dsm_object: SharedMemoizeInfo DSM \
+                 attach (ExecMemoizeInitializeWorker) — needs a DSM-resident shared_info \
+                 carrier and the keystone flexible-array slot accessor; unported"
+            );
+        }
+    }
 }
 
 /// `ExecMemoizeRetrieveInstrumentation(node)` — in the leader, transfer the

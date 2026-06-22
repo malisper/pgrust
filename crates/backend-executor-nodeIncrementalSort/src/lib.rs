@@ -1144,21 +1144,42 @@ pub fn ExecIncrementalSortInitializeDSM<'mcx>(
 /// space for sort statistics.
 ///
 /// `node->shared_info = shm_toc_lookup(pwcxt->toc, plan_node_id, true);
-/// node->am_worker = true;` — same DSM-carrier blocker as
-/// `ExecIncrementalSortInitializeDSM`. Doing only the `am_worker` write while
-/// skipping the attach would silently diverge from C; mirror-and-panic.
+/// node->am_worker = true;`
+///
+/// The lookup is `noError = true` (missing_ok): when the leader is NOT
+/// instrumenting (no EXPLAIN ANALYZE) `ExecIncrementalSortInitializeDSM`
+/// returns early without inserting any chunk, so this lookup finds nothing and
+/// the C leaves `node->shared_info == NULL`. We faithfully reproduce that arm:
+/// `shared_info = None`, `am_worker = true`. Only when a chunk IS present (the
+/// instrumenting path) would the DSM-resident `SharedIncrementalSortInfo`
+/// carrier be required — and that carrier is genuinely unported (the in-process
+/// `PgBox<SharedIncrementalSortInfo>` cannot hold the `shm_toc_lookup`
+/// `SharedRef`; same blocker as nodeSort/nodeAgg). Defer to the carrier owner
+/// only in that case rather than crashing every non-instrumented parallel
+/// incremental-sort worker.
 pub fn ExecIncrementalSortInitializeWorker<'mcx>(
     node: &mut IncrementalSortStateData<'mcx>,
     pwcxt: ParallelWorkerContextHandle,
 ) -> PgResult<()> {
     let plan_node_id = incremental_sort_plan(node)?.sort.plan.plan_node_id;
-    let _ = (plan_node_id, pwcxt, &mut node.am_worker);
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: SharedIncrementalSortInfo DSM \
-         attach (ExecIncrementalSortInitializeWorker) — the in-process \
-         PgBox<SharedIncrementalSortInfo> carrier cannot hold the shm_toc_lookup SharedRef; \
-         same blocker as nodeSort/nodeAgg InitializeWorker; unported"
-    );
+    let toc = backend_access_transam_parallel::pwcxt_toc(pwcxt);
+    match backend_access_transam_parallel::shm_toc_lookup(toc, plan_node_id as u64, true) {
+        None => {
+            // Leader was not instrumenting: no shared stats area to attach to.
+            node.shared_info = None;
+            node.am_worker = true;
+            Ok(())
+        }
+        Some(_chunk) => {
+            node.am_worker = true;
+            panic!(
+                "backend_access_transam_parallel::shared_dsm_object: SharedIncrementalSortInfo DSM \
+                 attach (ExecIncrementalSortInitializeWorker) — the in-process \
+                 PgBox<SharedIncrementalSortInfo> carrier cannot hold the shm_toc_lookup SharedRef; \
+                 same blocker as nodeSort/nodeAgg InitializeWorker; unported"
+            );
+        }
+    }
 }
 
 /// `ExecIncrementalSortRetrieveInstrumentation(node)` — transfer sort statistics

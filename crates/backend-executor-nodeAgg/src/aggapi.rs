@@ -345,21 +345,40 @@ pub fn ExecAggInitializeWorker<'mcx>(
     // node->shared_info =
     //     shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
     //
-    // The worker `shm_toc_lookup`s the leader's chunk by plan_node_id and would
-    // `shared_dsm_object::attach` to it, storing the `SharedRef` in
-    // `node->shared_info` so its own `ExecEndAgg` copyback lands in the shared
-    // DSM bytes. This is blocked on the SAME three surfaces as
-    // ExecAggInitializeDSM: the DSM-resident `shared_info` carrier (merged
-    // AggState holds an in-process `PgBox<SharedAggInfo>`; `SharedRef` is
-    // unstorable in types-nodes), the keystone flexible-array slot accessor, and
-    // the unported `plan_node_id` TOC key. Mirror-and-panic into the parallel
-    // DSM owner until those land.
-    let _ = (node, pwcxt);
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: SharedAggInfo DSM \
-         attach (ExecAggInitializeWorker) — needs a DSM-resident shared_info \
-         carrier and the keystone flexible-array slot accessor; unported"
-    );
+    // The lookup is `noError = true` (missing_ok): when the leader is NOT
+    // instrumenting (no EXPLAIN ANALYZE) `ExecAggInitializeDSM` returns early
+    // without inserting any chunk, so this lookup finds nothing and the C leaves
+    // `node->shared_info == NULL`. We faithfully reproduce that arm:
+    // `shared_info = None`. Only when a chunk IS present (the instrumenting
+    // path) would the worker `shared_dsm_object::attach` to it, storing the
+    // `SharedRef` in `node->shared_info` so its own `ExecEndAgg` copyback lands
+    // in the shared DSM bytes — and that DSM-resident carrier is genuinely
+    // unported (merged AggState holds an in-process `PgBox<SharedAggInfo>`;
+    // `SharedRef` is unstorable in types-nodes, plus the keystone flexible-array
+    // slot accessor). Defer to the carrier owner only in that case rather than
+    // crashing every non-instrumented parallel HashAgg worker.
+    let plan_node_id = node
+        .ss
+        .ps
+        .plan
+        .expect("ExecAggInitializeWorker: ss.ps.plan is NULL")
+        .plan_head()
+        .plan_node_id;
+    let toc = parallel_seams::pwcxt_toc(pwcxt);
+    match parallel_seams::shm_toc_lookup(toc, plan_node_id as u64, true) {
+        None => {
+            // Leader was not instrumenting: no shared stats area to attach to.
+            node.shared_info = None;
+            Ok(())
+        }
+        Some(_chunk) => {
+            panic!(
+                "backend_access_transam_parallel::shared_dsm_object: SharedAggInfo DSM \
+                 attach (ExecAggInitializeWorker) — needs a DSM-resident shared_info \
+                 carrier and the keystone flexible-array slot accessor; unported"
+            );
+        }
+    }
 }
 
 /// `ExecAggRetrieveInstrumentation(node)` — in the leader, copy the
