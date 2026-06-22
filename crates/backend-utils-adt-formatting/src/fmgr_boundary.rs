@@ -51,13 +51,16 @@ const VARHDRSZ: usize = 4;
 // Varlena marshalling (byte-identical to builtins-io / varchar).
 // ===========================================================================
 
-/// `VARDATA_ANY` of a full `struct varlena *` image: the payload bytes after
-/// the (4-byte uncompressed) length header.
+/// `VARDATA_ANY` of a full `struct varlena *` image: skip ONE header byte for a
+/// short (1-byte, low-bit-set) header, else `VARHDRSZ` (4). A small stored value
+/// reaches an fmgr arg verbatim (the EEOP_FUNCEXPR boundary does not
+/// detoast/unpack); a fixed 4-byte strip would drop three payload bytes once
+/// `SHORT_VARLENA_PACKING` is on. No-op while the flag is off (every value is 4B).
 fn varlena_payload(image: &[u8]) -> &[u8] {
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
     }
 }
 
