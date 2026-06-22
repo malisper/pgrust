@@ -443,25 +443,26 @@ fn clauselist_selectivity_ext_entries<'mcx>(
     if use_extended_stats {
         if let Some(rel) = rel {
             if root.rel(rel).rtekind == RTE_RELATION && !root.rel(rel).statlist.is_empty() {
-                // Extended statistics only consult RestrictInfo clauses; the only
-                // way a bare element reaches here is a bare-AND single-rel arm,
-                // which statext skips anyway. Pass the real RestrictInfo list.
-                if let Some(rinfos) = all_rinfos(clauses) {
-                    // Estimate as many clauses as possible using extended stats.
-                    let (sel, est) = seam::statext_clauselist_selectivity::call(
-                        run,
-                        root,
-                        &rinfos,
-                        var_relid,
-                        jointype,
-                        sjinfo,
-                        rel,
-                        &estimatedclauses,
-                        false,
-                    )?;
-                    s1 = sel;
-                    estimatedclauses = est;
-                }
+                // Estimate as many clauses as possible using extended stats.
+                // The clause list is the C `List *clauses` of `Node *` —
+                // RestrictInfos and bare-AND clauses both (the restrictinfo
+                // machinery doesn't wrap RestrictInfos on top of AND clauses);
+                // statext_is_compatible_clause dispatches on each. See C
+                // clauselist_selectivity, which passes `clauses` unconditionally.
+                let nodeids = clauses_as_nodeids(root, clauses, run.mcx())?;
+                let (sel, est) = seam::statext_clauselist_selectivity::call(
+                    run,
+                    root,
+                    &nodeids,
+                    var_relid,
+                    jointype,
+                    sjinfo,
+                    rel,
+                    &estimatedclauses,
+                    false,
+                )?;
+                s1 = sel;
+                estimatedclauses = est;
             }
         }
     }
@@ -666,21 +667,28 @@ fn clauselist_selectivity_or<'mcx>(
     if use_extended_stats {
         if let Some(rel) = rel {
             if root.rel(rel).rtekind == RTE_RELATION && !root.rel(rel).statlist.is_empty() {
-                if let Some(rinfos) = all_rinfos(clauses) {
-                    let (sel, est) = seam::statext_clauselist_selectivity::call(
-                        run,
-                        root,
-                        &rinfos,
-                        var_relid,
-                        jointype,
-                        sjinfo,
-                        rel,
-                        &estimatedclauses,
-                        true,
-                    )?;
-                    s1 = sel;
-                    estimatedclauses = est;
-                }
+                // The OR-arm list is the C `List *clauses` of `Node *` —
+                // RestrictInfos and bare-AND clauses both (an OR arm that is an
+                // AND clause arrives bare, since the restrictinfo machinery
+                // doesn't wrap RestrictInfos on top of AND clauses).
+                // statext_is_compatible_clause dispatches on each, so we must
+                // pass the full list — NOT gate on every element being a
+                // RestrictInfo (that dropped extended-stats estimation for
+                // OR-of-AND clauses entirely).
+                let nodeids = clauses_as_nodeids(root, clauses, run.mcx())?;
+                let (sel, est) = seam::statext_clauselist_selectivity::call(
+                    run,
+                    root,
+                    &nodeids,
+                    var_relid,
+                    jointype,
+                    sjinfo,
+                    rel,
+                    &estimatedclauses,
+                    true,
+                )?;
+                s1 = sel;
+                estimatedclauses = est;
             }
         }
     }
@@ -715,17 +723,31 @@ fn clauselist_selectivity_or<'mcx>(
     Ok(s1)
 }
 
-/// All entries as `RinfoId`s, or `None` if any entry is a bare expression.
-/// Extended-statistics estimation only ever consumes real RestrictInfos.
-fn all_rinfos(clauses: &[ListEntry<'_>]) -> Option<Vec<RinfoId>> {
+/// Each clause-list entry as a `NodeId`, mirroring the C `List *clauses` of
+/// `Node *` passed to `statext_clauselist_selectivity`: a RestrictInfo entry
+/// interns as `Expr::RestrictInfo(handle)`, a bare entry (a bare-AND OR-arm, or
+/// any bare clause) interns the expression itself. The extended-stats estimator
+/// (`statext_is_compatible_clause`) dispatches on the resolved node, so unlike
+/// the old `all_rinfos`, a bare clause does NOT suppress extended statistics.
+fn clauses_as_nodeids(
+    root: &mut PlannerInfo,
+    clauses: &[ListEntry<'_>],
+    mcx: mcx::Mcx<'_>,
+) -> PgResult<Vec<NodeId>> {
     let mut out = Vec::with_capacity(clauses.len());
     for e in clauses {
-        match e {
-            ListEntry::Rinfo(r) => out.push(*r),
-            ListEntry::Bare(_) => return None,
-        }
+        let nid = match e {
+            ListEntry::Rinfo(r) => {
+                root.alloc_node(Expr::RestrictInfo(r.as_expr_ref()))
+            }
+            ListEntry::Bare(expr) => {
+                let cloned = expr.clone_in(mcx)?;
+                root.alloc_node(cloned)
+            }
+        };
+        out.push(nid);
     }
-    Some(out)
+    Ok(out)
 }
 
 /* ==========================================================================

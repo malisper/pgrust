@@ -103,6 +103,26 @@ fn attr_is_user_defined(attnum: i32) -> bool {
     attnum > 0
 }
 
+/// The `RinfoId` handles of a bare-AND clause's args (the C
+/// `((BoolExpr *) clause)->args`, each of which is a `RestrictInfo *`). Used to
+/// compute the "simple" selectivity of a bare-AND OR-arm via
+/// `clauselist_selectivity_ext` (sharing code with `clause_selectivity_ext`'s
+/// AND branch). Non-RestrictInfo args are skipped (they cannot occur for the
+/// AND-of-RestrictInfos shape the restrictinfo machinery builds).
+fn and_arg_rinfos(clause: &Expr) -> Vec<RinfoId> {
+    match clause.as_boolexpr() {
+        Some(b) => b
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                Expr::RestrictInfo(r) => Some(RinfoId::from(*r)),
+                _ => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 /// `bms_member_index(keys, attnum)` (bitmapset.c): the 0-based index of `attnum`
 /// among the set members (in ascending order), or -1 if absent. Faithful to the
 /// C: count members strictly below `attnum`, then verify membership.
@@ -286,15 +306,24 @@ fn statext_is_compatible_clause_internal<'mcx>(
  * ======================================================================== */
 
 /// `statext_is_compatible_clause(root, clause, relid, &attnums, &exprs)`
-/// (extended_stats.c:1555). `clause` is a (possibly bare-AND) clause; the
-/// RestrictInfo superstructure is unwrapped here. The leakproof permission check
-/// is faithfully ported: for the MCV-supported operators (=, <>, <, <=, >, >=)
-/// every operator is leakproof, so `leakproof` stays true and the per-column
-/// permission branch is never entered. If a non-leakproof operator ever reaches
-/// this path, the permission check is enforced via the (currently unported)
-/// pull_varattnos/all_rows_selectable owners — until they land, such a clause is
-/// conservatively rejected (returns false), exactly the safe direction the C
-/// permission check would take when access is not provable.
+/// (extended_stats.c:1555). `clause` is the C `Node *` — either an
+/// `Expr::RestrictInfo` handle or a bare BoolExpr-AND clause (the restrictinfo
+/// machinery doesn't wrap RestrictInfos on top of AND clauses). This faithfully
+/// mirrors the C dispatch:
+///
+///   * bare-AND: recurse on each arg (the args are themselves RestrictInfos);
+///   * RestrictInfo: reject pseudoconstants and clauses referencing other
+///     varnos (the singleton-relid guard), then walk `rinfo->clause` via
+///     `statext_is_compatible_clause_internal`;
+///   * anything else: incompatible (return false).
+///
+/// The leakproof permission check is faithfully ported: for the MCV-supported
+/// operators (=, <>, <, <=, >, >=) every operator is leakproof, so `leakproof`
+/// stays true and the per-column permission branch is never entered. If a
+/// non-leakproof operator ever reaches this path, the permission check is
+/// enforced via the (currently unported) pull_varattnos/all_rows_selectable
+/// owners — until they land, such a clause is conservatively rejected (returns
+/// false), exactly the safe direction the C permission check would take.
 fn statext_is_compatible_clause<'mcx>(
     root: &PlannerInfo,
     clause: &Expr<'_>,
@@ -303,10 +332,12 @@ fn statext_is_compatible_clause<'mcx>(
     exprs: &mut Vec<Expr<'mcx>>,
     run: &PlannerRun<'mcx>,
 ) -> PgResult<bool> {
-    // Special-case bare BoolExpr AND clauses (no RestrictInfo built on top).
+    // Special-case handling for bare BoolExpr AND clauses, because the
+    // restrictinfo machinery doesn't build RestrictInfos on top of AND clauses.
     if is_andclause(clause) {
         let bexpr = clause.as_boolexpr().expect("is_andclause => BoolExpr");
         for arg in &bexpr.args {
+            // We expect these args to be RestrictInfos.
             if !statext_is_compatible_clause(root, arg, relid, attnums, exprs, run)? {
                 return Ok(false);
             }
@@ -314,14 +345,30 @@ fn statext_is_compatible_clause<'mcx>(
         return Ok(true);
     }
 
-    // This entry is only reached with an already-unwrapped clause Expr; the
-    // RestrictInfo pseudoconstant/singleton checks are applied by the driver's
-    // per-clause loop (see statext_mcv_clauselist_selectivity), mirroring the FD
-    // path's structure where the rinfo guards live in the driver.
+    // Otherwise it must be a RestrictInfo.
+    let rid = match clause {
+        Expr::RestrictInfo(r) => RinfoId::from(*r),
+        _ => return Ok(false),
+    };
+    let rinfo = root.rinfo(rid);
+
+    // Pseudoconstants are not really interesting here.
+    if rinfo.pseudoconstant {
+        return Ok(false);
+    }
+
+    // Clauses referencing other varnos are incompatible.
+    if bms::relids_get_singleton_member::call(&rinfo.clause_relids) != Some(relid) {
+        return Ok(false);
+    }
+
+    // Check the clause, determine what attributes it references, and whether it
+    // includes any non-leakproof operators.
+    let inner_clause: Expr = root.node(rinfo.clause).clone_in(run.mcx())?;
     let mut leakproof = true;
     if !statext_is_compatible_clause_internal(
         root,
-        clause,
+        &inner_clause,
         relid,
         attnums,
         exprs,
@@ -498,10 +545,13 @@ fn mcv_match_expression(
 
 /// `mcv_get_match_bitmap(root, clauses, keys, exprs, mcvlist, is_or)`
 /// (mcv.c:1599) — evaluate the clause list against the MCV list and return a
-/// per-item match bitmap (length `mcvlist->nitems`). `clauses` are bare clause
-/// Exprs (RestrictInfo already unwrapped); `keys`/`exprs` come from the chosen
+/// per-item match bitmap (length `mcvlist->nitems`). Each element of `clauses`
+/// is the C `Node *`: it may be a bare clause Expr or an `Expr::RestrictInfo`
+/// handle (the args of a bare-AND OR-arm are RestrictInfos), which is unwrapped
+/// to `rinfo->clause` exactly as the C does. `keys`/`exprs` come from the chosen
 /// statistic.
 fn mcv_get_match_bitmap(
+    root: &PlannerInfo,
     mcx: Mcx<'_>,
     clauses: &[Expr],
     keys: &Relids,
@@ -512,9 +562,22 @@ fn mcv_get_match_bitmap(
     let nitems = mcvlist.nitems as usize;
     let mut matches = alloc::vec![!is_or; nitems];
 
+    // Resolve each element to its bare clause: a RestrictInfo handle unwraps to
+    // `rinfo->clause` (the C `if (IsA(clause, RestrictInfo)) clause =
+    // rinfo->clause`); any other node is used as-is. The resolved clauses are
+    // owned in `mcx` so they outlive the match loop below.
+    let mut resolved: Vec<Expr> = Vec::with_capacity(clauses.len());
     for clause in clauses {
-        // if it's a RestrictInfo, extract the clause — we already hold bare Exprs.
-        let clause = clause;
+        let bare = match clause {
+            Expr::RestrictInfo(r) => {
+                root.node(root.rinfo(RinfoId::from(*r)).clause).clone_in(mcx)?
+            }
+            other => other.clone_in(mcx)?,
+        };
+        resolved.push(bare);
+    }
+
+    for clause in &resolved {
 
         if is_opclause(clause) {
             let expr = clause.as_opexpr().expect("is_opclause => OpExpr");
@@ -640,6 +703,7 @@ fn mcv_get_match_bitmap(
         } else if is_orclause(clause) || is_andclause(clause) {
             let bexpr = clause.as_boolexpr().expect("AND/OR => BoolExpr");
             let bool_matches = mcv_get_match_bitmap(
+                root,
                 mcx,
                 &bexpr.args,
                 keys,
@@ -653,7 +717,7 @@ fn mcv_get_match_bitmap(
         } else if is_notclause(clause) {
             let bexpr = clause.as_boolexpr().expect("NOT => BoolExpr");
             let not_matches =
-                mcv_get_match_bitmap(mcx, &bexpr.args, keys, exprs, mcvlist, false)?;
+                mcv_get_match_bitmap(root, mcx, &bexpr.args, keys, exprs, mcvlist, false)?;
             for i in 0..nitems {
                 matches[i] = result_merge(matches[i], is_or, !not_matches[i]);
             }
@@ -699,7 +763,7 @@ fn mcv_get_match_bitmap(
 pub fn statext_mcv_clauselist_selectivity(
     run: &PlannerRun<'_>,
     root: &mut PlannerInfo,
-    clauses: &[RinfoId],
+    clauses: &[NodeId],
     var_relid: i32,
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
@@ -719,18 +783,34 @@ pub fn statext_mcv_clauselist_selectivity(
     let nclauses = clauses.len();
 
     // Pre-process the clause list: extract attnums and expressions per clause.
-    // A clause is bare-cloned from its RestrictInfo (the rinfo guards — pseudo-
-    // constant, single-rel — are applied here, matching statext_is_compatible_
-    // clause's RestrictInfo layer).
+    // `clauses` is the C `List *clauses` of `Node *` — each element is either an
+    // `Expr::RestrictInfo` handle or a bare BoolExpr-AND clause (an OR arm that
+    // is an AND clause, since the restrictinfo machinery doesn't wrap
+    // RestrictInfos on top of AND clauses). `statext_is_compatible_clause`
+    // dispatches on each. The pseudoconstant / single-rel guard is applied
+    // inside `statext_is_compatible_clause` (per the C structure), NOT here.
     let mut list_attnums: Vec<Relids> = Vec::with_capacity(nclauses);
     let mut list_exprs: Vec<Vec<Expr>> = Vec::with_capacity(nclauses);
-    // Keep the cloned bare clause Exprs around (the match bitmap reads them).
+    // The bare clause Exprs the match bitmap reads: for a RestrictInfo this is
+    // `rinfo->clause`; for a bare-AND it is the AND BoolExpr itself (whose args
+    // are RestrictInfos, which `mcv_get_match_bitmap` unwraps).
     let mut clause_nodes: Vec<Expr> = Vec::with_capacity(nclauses);
+    // The matching RestrictInfo handle per clause (None for a bare-AND clause),
+    // used by the simple-selectivity seams.
+    let mut clause_rinfos: Vec<Option<RinfoId>> = Vec::with_capacity(nclauses);
 
-    for (listidx, &rid) in clauses.iter().enumerate() {
-        let clause: Expr = {
-            let rinfo = root.rinfo(rid);
-            root.node(rinfo.clause).clone_in(run.mcx())?
+    for (listidx, &nid) in clauses.iter().enumerate() {
+        // Resolve the node and split it into (bare clause Expr, RinfoId?).
+        let node_clone: Expr = root.node(nid).clone_in(run.mcx())?;
+        let (bare_clause, rinfo_id): (Expr, Option<RinfoId>) = match &node_clone {
+            Expr::RestrictInfo(r) => {
+                let rid = RinfoId::from(*r);
+                let bare = root.node(root.rinfo(rid).clause).clone_in(run.mcx())?;
+                (bare, Some(rid))
+            }
+            // Bare-AND (or any bare clause): use the node itself as the bare
+            // clause for the match bitmap; no top-level RestrictInfo handle.
+            _ => (node_clone.clone_in(run.mcx())?, None),
         };
 
         let mut attnums: Relids = None;
@@ -738,24 +818,14 @@ pub fn statext_mcv_clauselist_selectivity(
 
         let already = bms::relids_is_member::call(listidx as i32, estimatedclauses);
         if !already {
-            // The RestrictInfo guards (pseudoconstant / single-rel) live in
-            // statext_is_compatible_clause's RestrictInfo layer; apply them here.
-            let rinfo = root.rinfo(rid);
-            let pseudoconstant = rinfo.pseudoconstant;
-            let single_rel =
-                bms::relids_get_singleton_member::call(&rinfo.clause_relids) == Some(rel_relid as i32);
-            let compatible = if pseudoconstant || !single_rel {
-                false
-            } else {
-                statext_is_compatible_clause(
-                    root,
-                    &clause,
-                    rel_relid as i32,
-                    &mut attnums,
-                    &mut exprs,
-                    run,
-                )?
-            };
+            let compatible = statext_is_compatible_clause(
+                root,
+                &node_clone,
+                rel_relid as i32,
+                &mut attnums,
+                &mut exprs,
+                run,
+            )?;
             if !compatible {
                 attnums = None;
                 exprs = Vec::new();
@@ -764,7 +834,8 @@ pub fn statext_mcv_clauselist_selectivity(
 
         list_attnums.push(attnums);
         list_exprs.push(exprs);
-        clause_nodes.push(clause);
+        clause_nodes.push(bare_clause);
+        clause_rinfos.push(rinfo_id);
     }
 
     // Apply as many extended statistics as possible.
@@ -800,10 +871,11 @@ pub fn statext_mcv_clauselist_selectivity(
 
         // Filter the clauses to estimate with this MCV; track simple clauses.
         // `stat_clauses` holds the bare clause Exprs (the match bitmap reads
-        // them); `stat_rinfos` the matching RestrictInfo handles (the simple-
-        // selectivity seams estimate over the RestrictInfo, like C).
+        // them); `stat_rinfos` the matching RestrictInfo handle per clause
+        // (None for a bare-AND clause; the simple-selectivity seams estimate
+        // over the RestrictInfo when present, else over the bare clause node).
         let mut stat_clauses: Vec<Expr> = Vec::new();
-        let mut stat_rinfos: Vec<RinfoId> = Vec::new();
+        let mut stat_rinfos: Vec<Option<RinfoId>> = Vec::new();
         let mut simple_clauses: Relids = None;
 
         for listidx in 0..nclauses {
@@ -833,7 +905,7 @@ pub fn statext_mcv_clauselist_selectivity(
             }
 
             stat_clauses.push(clause_nodes[listidx].clone_in(run.mcx())?);
-            stat_rinfos.push(clauses[listidx]);
+            stat_rinfos.push(clause_rinfos[listidx]);
             *estimatedclauses =
                 bms::relids_add_member::call(estimatedclauses.take(), listidx as i32);
 
@@ -858,20 +930,33 @@ pub fn statext_mcv_clauselist_selectivity(
             let mut stat_sel: f64 = 0.0;
 
             for (listidx, clause) in stat_clauses.iter().enumerate() {
-                // simple selectivity of this single clause, with
+                // "Simple" selectivity of this single clause, with
                 // use_extended_stats=false (so it cannot recursively re-enter
-                // extended statistics). clauselist_selectivity of a single
-                // RestrictInfo equals clause_selectivity of it.
-                let one_rinfo = [stat_rinfos[listidx]];
-                let simple_sel = sel_seam::clauselist_selectivity_ext::call(
-                    run,
-                    root,
-                    &one_rinfo,
-                    var_relid,
-                    jointype,
-                    sjinfo,
-                    false,
-                )?;
+                // extended statistics) — the C `clause_selectivity_ext(root,
+                // clause, ...)`. When the clause carries a RestrictInfo handle,
+                // estimate over it (`clauselist_selectivity` of a single
+                // RestrictInfo equals `clause_selectivity` of it); a bare-AND
+                // clause has no top-level RestrictInfo, so estimate over the
+                // bare clause node directly.
+                let simple_sel = match stat_rinfos[listidx] {
+                    Some(rid) => {
+                        let one_rinfo = [rid];
+                        sel_seam::clauselist_selectivity_ext::call(
+                            run, root, &one_rinfo, var_relid, jointype, sjinfo, false,
+                        )?
+                    }
+                    None => {
+                        // Bare-AND clause: `clause_selectivity_ext(AND, false)`
+                        // shares code with `clauselist_selectivity` over the
+                        // AND's args (which are RestrictInfos), with
+                        // use_extended_stats=false so it cannot re-enter
+                        // extended statistics.
+                        let arg_rinfos = and_arg_rinfos(clause);
+                        sel_seam::clauselist_selectivity_ext::call(
+                            run, root, &arg_rinfos, var_relid, jointype, sjinfo, false,
+                        )?
+                    }
+                };
 
                 let overlap_simple_sel = simple_or_sel * simple_sel;
                 simple_or_sel += simple_sel - overlap_simple_sel;
@@ -880,7 +965,7 @@ pub fn statext_mcv_clauselist_selectivity(
                 // per-clause match bitmap (list_make1(clause)).
                 let one = [clause.clone_in(run.mcx())?];
                 let new_matches =
-                    mcv_get_match_bitmap(run.mcx(), &one, &stat_keys, &stat_exprs, &mcvlist, false)?;
+                    mcv_get_match_bitmap(root, run.mcx(), &one, &stat_keys, &stat_exprs, &mcvlist, false)?;
 
                 let or = mcv::mcv_clause_selectivity_or(
                     run.mcx(),
@@ -908,11 +993,17 @@ pub fn statext_mcv_clauselist_selectivity(
 
             sel = sel + stat_sel - sel * stat_sel;
         } else {
-            // Implicitly-ANDed list of clauses.
+            // Implicitly-ANDed list of clauses. Every element here is a
+            // RestrictInfo (a bare-AND clause only occurs as an OR arm, handled
+            // above), so the simple selectivity is taken over the RestrictInfos.
+            let and_rinfos: Vec<RinfoId> = stat_rinfos
+                .iter()
+                .map(|r| r.expect("implicitly-ANDed clause must carry a RestrictInfo"))
+                .collect();
             let simple_sel = sel_seam::clauselist_selectivity_ext::call(
                 run,
                 root,
-                &stat_rinfos,
+                &and_rinfos,
                 var_relid,
                 jointype,
                 sjinfo,
@@ -920,7 +1011,7 @@ pub fn statext_mcv_clauselist_selectivity(
             )?;
 
             let matches =
-                mcv_get_match_bitmap(run.mcx(), &stat_clauses, &stat_keys, &stat_exprs, &mcvlist, false)?;
+                mcv_get_match_bitmap(root, run.mcx(), &stat_clauses, &stat_keys, &stat_exprs, &mcvlist, false)?;
             let cl = mcv::mcv_clauselist_selectivity(&mcvlist, &matches);
 
             let stat_sel =

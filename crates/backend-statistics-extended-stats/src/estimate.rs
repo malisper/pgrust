@@ -37,7 +37,9 @@ use mcx::Mcx;
 use types_error::{PgError, PgResult};
 use types_nodes::primnodes::{Expr, NOT_EXPR, OR_EXPR};
 use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use types_pathnodes::{Bitmapset, JoinType, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
+use types_pathnodes::{
+    Bitmapset, JoinType, NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
+};
 
 use types_statistics::{MVDependencies, MVDependency, STATS_EXT_DEPENDENCIES};
 
@@ -561,7 +563,7 @@ fn clauselist_apply_dependencies(
 pub fn statext_clauselist_selectivity(
     run: &PlannerRun<'_>,
     root: &mut PlannerInfo,
-    clauses: &[RinfoId],
+    clauses: &[NodeId],
     var_relid: i32,
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
@@ -589,10 +591,35 @@ pub fn statext_clauselist_selectivity(
         return Ok((sel, estimated));
     }
 
+    // The functional-dependency leg consumes RestrictInfo clauses. In the
+    // implicitly-ANDed path every list element is a RestrictInfo (the
+    // restrictinfo machinery only leaves a bare AND clause inside an OR arm,
+    // which is the `is_or` path handled above). Recover the RinfoId handles
+    // from the node list.
+    let rinfos: Vec<RinfoId> = clauses
+        .iter()
+        .map(|&nid| match root.node(nid) {
+            Expr::RestrictInfo(r) => RinfoId::from(*r),
+            other => {
+                debug_assert!(
+                    false,
+                    "dependencies_clauselist_selectivity: non-RestrictInfo AND clause: {:?}",
+                    core::mem::discriminant(other)
+                );
+                // Defensive: a bare clause cannot be a functional-dependency
+                // input; mapping it to a sentinel would be wrong, so this is
+                // unreachable in the AND path. Keep the build infallible by
+                // returning an obviously-invalid handle is unsafe — instead we
+                // only reach here on a logic bug, asserted above.
+                RinfoId(u32::MAX)
+            }
+        })
+        .collect();
+
     sel *= dependencies_clauselist_selectivity(
         run,
         root,
-        clauses,
+        &rinfos,
         var_relid,
         jointype,
         sjinfo,

@@ -36,7 +36,7 @@ use types_error::PgResult;
 use types_nodes::primnodes::Expr;
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
-    EcId, EmId, JoinType, RelId, Relids, RinfoId, PlannerInfo, SpecialJoinInfo,
+    EcId, EmId, JoinType, NodeId, RelId, Relids, RinfoId, PlannerInfo, SpecialJoinInfo,
 };
 
 /* ======================================================================
@@ -147,10 +147,15 @@ seam_core::seam!(
     /// partial selectivity and writes back, via the returned `Relids`, the
     /// 0-based clause-position set it consumed (the C `*estimatedclauses`
     /// in/out parameter is folded into the return tuple).
+    ///
+    /// `clauses` is the C `List *clauses` of `Node *` — each [`NodeId`] resolves
+    /// (via `root.node`) to either an `Expr::RestrictInfo` or a bare BoolExpr-AND
+    /// clause (the restrictinfo machinery doesn't wrap RestrictInfos on top of
+    /// AND clauses), exactly as `statext_is_compatible_clause` dispatches.
     pub fn statext_clauselist_selectivity<'mcx>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        clauses: &[RinfoId],
+        clauses: &[NodeId],
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
