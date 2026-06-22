@@ -376,6 +376,29 @@ pub struct PlpgsqlParamInfo {
     pub collation: Oid,
 }
 
+/// PL/pgSQL variable-conflict resolution mode (`PLpgSQL_resolve_option`, mirror
+/// of the `types-plpgsql` enum which `types-nodes` cannot depend on without a
+/// crate cycle). Selects how the pre/post columnref hooks resolve a name that
+/// could be both a PL/pgSQL variable and a table column:
+///   * `Error`    — the default (`#variable_conflict error`): the pre hook does
+///                  not resolve; the core parser resolves the column; the post
+///                  hook re-resolves the variable and raises an ambiguity error
+///                  when BOTH a variable and a column matched.
+///   * `Variable` — `#variable_conflict use_variable`: the pre hook resolves the
+///                  variable ahead of column resolution (prefer the variable).
+///   * `Column`   — `#variable_conflict use_column`: the pre hook does not
+///                  resolve; the post hook only resolves the variable when the
+///                  core parser found no column (prefer the column).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlpgsqlResolveOption {
+    /// `PLPGSQL_RESOLVE_ERROR` — throw on ambiguity (default).
+    Error,
+    /// `PLPGSQL_RESOLVE_VARIABLE` — prefer the PL/pgSQL variable.
+    Variable,
+    /// `PLPGSQL_RESOLVE_COLUMN` — prefer the table column.
+    Column,
+}
+
 /// `PLpgSQL_expr`'s parser ref-hook state (`pl_comp.c`'s
 /// `plpgsql_parser_setup` / `plpgsql_pre_column_ref` / `plpgsql_param_ref`).
 ///
@@ -412,6 +435,13 @@ pub struct PlpgsqlExprParseState {
     /// when the variable's own collation is invalid (C `make_datum_param` keeps
     /// the datum's collation; this is a fallback for unset collations).
     pub input_collation: Oid,
+    /// `expr->func->resolve_option` — the function's `#variable_conflict` mode.
+    /// Drives the pre/post columnref hook split: in `Error`/`Column` mode the
+    /// pre hook returns `None` (lets the core parser resolve a table column
+    /// first) and the post hook re-resolves the variable to detect ambiguity
+    /// (`Error`) or yield to the column (`Column`); in `Variable` mode the pre
+    /// hook resolves the variable ahead of column resolution.
+    pub resolve_option: PlpgsqlResolveOption,
 }
 
 impl PlpgsqlExprParseState {
@@ -424,17 +454,35 @@ impl PlpgsqlExprParseState {
     }
 
     /// Build the parse state with an explicit set of enclosing block-label
-    /// names (see [`PlpgsqlExprParseState::labels`]).
+    /// names (see [`PlpgsqlExprParseState::labels`]). The resolution mode
+    /// defaults to `Error` (the stock `#variable_conflict error`).
     pub fn with_labels(
         names: alloc::collections::BTreeMap<alloc::string::String, PlpgsqlParamInfo>,
         labels: alloc::collections::BTreeSet<alloc::string::String>,
         input_collation: Oid,
+    ) -> PlpgsqlExprParseState {
+        Self::with_labels_resolve(
+            names,
+            labels,
+            input_collation,
+            PlpgsqlResolveOption::Error,
+        )
+    }
+
+    /// Build the parse state with an explicit block-label set and an explicit
+    /// `#variable_conflict` resolution mode (C `expr->func->resolve_option`).
+    pub fn with_labels_resolve(
+        names: alloc::collections::BTreeMap<alloc::string::String, PlpgsqlParamInfo>,
+        labels: alloc::collections::BTreeSet<alloc::string::String>,
+        input_collation: Oid,
+        resolve_option: PlpgsqlResolveOption,
     ) -> PlpgsqlExprParseState {
         PlpgsqlExprParseState {
             names: Rc::new(names),
             labels: Rc::new(labels),
             paramnos: Rc::new(core::cell::RefCell::new(Vec::new())),
             input_collation,
+            resolve_option,
         }
     }
 

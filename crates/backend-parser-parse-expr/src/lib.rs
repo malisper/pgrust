@@ -59,7 +59,8 @@ use mcx::MemoryContext;
 
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_CANNOT_COERCE, ERRCODE_COLLATION_MISMATCH,
+    ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_COLUMN, ERRCODE_CANNOT_COERCE,
+    ERRCODE_COLLATION_MISMATCH,
     ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
@@ -3461,16 +3462,24 @@ fn seam_transform_post_columnref_hook<'mcx>(
             let pinfo = pinfo.clone();
             sql_fn_post_column_ref(pstate, &pinfo, &cref, node.as_ref())?
         }
+        // PL/pgSQL's `plpgsql_post_column_ref`: applies the function's
+        // `#variable_conflict` precedence and raises `column reference is
+        // ambiguous` when both a plpgsql variable AND a core table column
+        // matched (the `RETURNING new.f1` trigger case). Resolution happens
+        // here (post) in `error`/`use_column` mode; the pre hook handled
+        // `use_variable` mode.
+        ParseRefHookState::PlpgsqlExpr(_) => {
+            match plpgsql_post_column_ref(pstate, &cref, node.as_ref())? {
+                Some(p) => Some(mcx::PgBox::into_inner(p)),
+                None => None,
+            }
+        }
         // No other post-columnref hook exists in the core backend; the active arm
         // installs no `p_post_columnref_hook` (C `== NULL`), so the default `var`
-        // stands. (PL/pgSQL's variable resolution is done by the pre-columnref
-        // hook above; in the default RESOLVE_ERROR variable_conflict mode the
-        // post hook only raises an ambiguity error, which a no-range-table
-        // expression never reaches.)
+        // stands.
         ParseRefHookState::None
         | ParseRefHookState::FixedParams(_)
         | ParseRefHookState::VarParams(_)
-        | ParseRefHookState::PlpgsqlExpr(_)
         | ParseRefHookState::DomainCheckValue(_) => None,
     };
 
@@ -3522,10 +3531,15 @@ fn post_columnref_hook_impl<'mcx>(
             let pinfo = pinfo.clone();
             sql_fn_post_column_ref(pstate, &pinfo, cref, var_node)?
         }
+        ParseRefHookState::PlpgsqlExpr(_) => {
+            match plpgsql_post_column_ref(pstate, cref, var_node)? {
+                Some(p) => Some(mcx::PgBox::into_inner(p)),
+                None => None,
+            }
+        }
         ParseRefHookState::None
         | ParseRefHookState::FixedParams(_)
         | ParseRefHookState::VarParams(_)
-        | ParseRefHookState::PlpgsqlExpr(_)
         | ParseRefHookState::DomainCheckValue(_) => None,
     };
     match result {
@@ -3688,27 +3702,47 @@ fn sql_fn_resolve_param_name(
     Ok(None)
 }
 
-/// `plpgsql_pre_column_ref(pstate, cref)` (pl_comp.c:1135) — the PL/pgSQL
-/// expression `p_pre_columnref_hook`. A 1- or 2-element column reference that
-/// names a PL/pgSQL variable (`var` or `block.var`) is resolved — ahead of any
-/// table-column resolution, since a PL/pgSQL expression has no range table — to
-/// a `PARAM_EXTERN` `Param` whose paramid is the variable's `dno + 1`, via the
-/// pre-resolved namespace map in the [`ParseRefHookState::PlpgsqlExpr`] arm. The
-/// referenced datum number is recorded so `setup_param_list` knows to bind it.
-/// A name that does not resolve to a variable returns `None` (falls through to
-/// the standard column resolution, which then errors if truly undefined — C
-/// `resolve_column_ref` returning NULL).
+/// `plpgsql_pre_column_ref(pstate, cref)` (pl_comp.c:998) — the PL/pgSQL
+/// expression `p_pre_columnref_hook`. Faithful to C: it resolves the reference
+/// *ahead of* the core parser's column resolution ONLY when the function's
+/// `#variable_conflict` mode is `use_variable` (`PLPGSQL_RESOLVE_VARIABLE`);
+/// in the default `error` mode and in `use_column` mode it returns `None`, so
+/// the core parser resolves a table column first and the POST hook
+/// (`plpgsql_post_column_ref`) handles the variable-vs-column precedence /
+/// ambiguity. (This split is what lets `RETURNING new.f1` inside a trigger
+/// function — where `new` is both a PL/pgSQL record AND a RETURNING alias —
+/// raise the "column reference is ambiguous" error.)
 fn plpgsql_pre_column_ref<'mcx>(
     pstate: &mut ParseState<'mcx>,
     cref: &types_nodes::rawnodes::ColumnRef<'mcx>,
 ) -> PgResult<Option<types_nodes::nodes::NodePtr<'mcx>>> {
-    use types_nodes::parsestmt::ParseRefHookState;
+    use types_nodes::parsestmt::{ParseRefHookState, PlpgsqlResolveOption};
 
     let ParseRefHookState::PlpgsqlExpr(state) = &pstate.p_ref_hook_state else {
         return Ok(None);
     };
+    // C: `if (resolve_option == PLPGSQL_RESOLVE_VARIABLE) return
+    //      resolve_column_ref(...); else return NULL;`
+    if state.resolve_option != PlpgsqlResolveOption::Variable {
+        return Ok(None);
+    }
     let state = state.clone();
+    plpgsql_resolve_column_ref(pstate, &state, cref)
+}
 
+/// `resolve_column_ref(pstate, expr, cref, error_if_no_field)` (pl_comp.c:1080) —
+/// attempt to resolve a `ColumnRef` as a PL/pgSQL variable / record-field
+/// reference. A 1- to 3-element reference that names a PL/pgSQL variable
+/// (`var`, `block.var`, `rec.field`, `block.rec.field`) is resolved — via the
+/// pre-resolved namespace map in the [`PlpgsqlExprParseState`] — to a
+/// `PARAM_EXTERN` `Param` whose paramid is the variable's `dno + 1`. The
+/// referenced datum number is recorded so `setup_param_list` knows to bind it.
+/// A name that does not resolve to a variable returns `None` (C returning NULL).
+fn plpgsql_resolve_column_ref<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    state: &types_nodes::parsestmt::PlpgsqlExprParseState,
+    cref: &types_nodes::rawnodes::ColumnRef<'mcx>,
+) -> PgResult<Option<types_nodes::nodes::NodePtr<'mcx>>> {
     // Build the candidate down-cased lookup name(s). The plpgsql scanner already
     // down-cased identifiers in the namespace; match the same way. For a single
     // field `var`; for two fields `block.var` (and also try the bare `var`,
@@ -3777,18 +3811,94 @@ fn plpgsql_pre_column_ref<'mcx>(
     Ok(Some(mcx::alloc_in(mcx, node)?))
 }
 
+/// `plpgsql_post_column_ref(pstate, cref, var)` (pl_comp.c:1011) — the PL/pgSQL
+/// expression `p_post_columnref_hook`. Runs *after* the core parser has tried to
+/// resolve the `ColumnRef` (its result is `var`, `None` if no core resolution).
+/// Faithful to C:
+///   * `use_variable` mode: return `None` — the pre hook already resolved (or
+///     found no match), so there is nothing more to do.
+///   * `use_column` mode with a core column (`var.is_some()`): return `None` —
+///     prefer the table column.
+///   * Otherwise re-resolve the reference as a PL/pgSQL variable (with
+///     `error_if_no_field = (var is None)`). If BOTH a variable AND a core
+///     column matched, raise `column reference "%s" is ambiguous` (the
+///     `RETURNING new.f1` trigger case). Otherwise the variable (or `None`)
+///     stands.
+fn plpgsql_post_column_ref<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    cref: &types_nodes::rawnodes::ColumnRef<'mcx>,
+    var: Option<&Node<'mcx>>,
+) -> PgResult<Option<types_nodes::nodes::NodePtr<'mcx>>> {
+    use types_nodes::parsestmt::{ParseRefHookState, PlpgsqlResolveOption};
+
+    let ParseRefHookState::PlpgsqlExpr(state) = &pstate.p_ref_hook_state else {
+        return Ok(None);
+    };
+    let state = state.clone();
+
+    // C: PLPGSQL_RESOLVE_VARIABLE -> NULL (already found there's no match).
+    if state.resolve_option == PlpgsqlResolveOption::Variable {
+        return Ok(None);
+    }
+    // C: PLPGSQL_RESOLVE_COLUMN && var != NULL -> NULL (prefer the column).
+    if state.resolve_option == PlpgsqlResolveOption::Column && var.is_some() {
+        return Ok(None);
+    }
+
+    // Re-resolve as a plpgsql variable. (C passes error_if_no_field = (var ==
+    // NULL); our namespace map has no record/field-not-found error path — a
+    // RECFIELD that exists is in the map, an absent one is simply not — so the
+    // flag is moot here.)
+    let myvar = plpgsql_resolve_column_ref(pstate, &state, cref)?;
+
+    // C: if (myvar != NULL && var != NULL) ereport ambiguous-column.
+    if myvar.is_some() && var.is_some() {
+        let mcx = aexpr_clone_ctx(pstate);
+        let name = namelist_to_string(&cref.fields);
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_AMBIGUOUS_COLUMN)
+            .errmsg(alloc::format!("column reference \"{name}\" is ambiguous"))
+            .errdetail(String::from(
+                "It could refer to either a PL/pgSQL variable or a table column.",
+            ))
+            .errposition(parser_errposition(pstate, cref.location))
+            .into_error());
+    }
+
+    Ok(myvar)
+}
+
+/// Marker for `pstate.p_post_columnref_hook` under PL/pgSQL expression parsing.
+/// The real dispatch reads the `PlpgsqlExpr` ref-hook arm in
+/// `seam_transform_post_columnref_hook` / `post_columnref_hook_impl` (which call
+/// `plpgsql_post_column_ref`); this value only makes the hook gate fire so the
+/// post step runs (without it, `resolve_columnref_finish` would never invoke the
+/// post hook and the variable-vs-column ambiguity would go undetected).
+fn plpgsql_post_column_ref_marker<'mcx>(
+    _pstate: &mut ParseState<'mcx>,
+    _cref: &types_nodes::rawnodes::ColumnRef<'mcx>,
+    var: Option<types_nodes::nodes::NodePtr<'mcx>>,
+) -> PgResult<Option<types_nodes::nodes::NodePtr<'mcx>>> {
+    // Unreachable: the dispatch is by ref-hook arm, not by this function pointer.
+    Ok(var)
+}
+
 /// Install the PL/pgSQL expression parser hooks on `pstate` (the
 /// `plpgsql_parser_setup` body): the pre-columnref hook that resolves variable
-/// references to Params, and the `PlpgsqlExpr` ref-hook state carrying the
-/// pre-resolved namespace map. (The post-columnref / coerce-param hooks handle
-/// the variable_conflict and unknown-coercion cases; for a PL/pgSQL expression
-/// with no range table the pre-hook resolves every variable reference, so they
-/// are not needed for the default RESOLVE_ERROR conflict mode.)
+/// references to Params in `use_variable` mode, AND the post-columnref hook that
+/// applies variable-vs-column precedence and raises the `column reference is
+/// ambiguous` error in the default `error` mode. This faithful pre/post split
+/// (C `pstate->p_pre_columnref_hook = plpgsql_pre_column_ref;
+/// pstate->p_post_columnref_hook = plpgsql_post_column_ref;`) is what lets
+/// `RETURNING new.f1` inside a trigger function — where `new` is both a PL/pgSQL
+/// record AND a RETURNING alias — raise the ambiguity error.
 pub fn setup_parse_plpgsql_expr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     state: types_nodes::parsestmt::PlpgsqlExprParseState,
 ) {
     pstate.p_pre_columnref_hook = Some(plpgsql_pre_column_ref);
+    pstate.p_post_columnref_hook =
+        Some(plpgsql_post_column_ref_marker as types_nodes::parsestmt::PostParseColumnRefHook<'_>);
     pstate.p_ref_hook_state = types_nodes::parsestmt::ParseRefHookState::PlpgsqlExpr(state);
 }
 

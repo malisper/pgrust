@@ -1142,6 +1142,12 @@ pub struct PLpgSQL_execstate {
     /// `parameters: …` DETAIL.
     pub print_strict_params: bool,
 
+    /// `func->resolve_option` — the function's `#variable_conflict` mode,
+    /// carried directly so the expression parser hooks (`plpgsql_parser_setup`
+    /// pre/post columnref split) can select variable-vs-column precedence
+    /// without dereferencing the opaque `func` back-reference.
+    pub resolve_option: PLpgSQL_resolve_option,
+
     /// the "target" label of the current EXIT/CONTINUE stmt, if any.
     pub exitlabel: Option<String>,
     // `estate->cur_error` — the live error being handled by the current

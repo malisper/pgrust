@@ -1478,7 +1478,27 @@ fn build_plpgsql_parse_state(
         cur = ns.prev.as_deref();
     }
 
-    Ok(PlpgsqlExprParseState::with_labels(names, labels, input_collation))
+    // Carry the function's `#variable_conflict` mode so the parser's pre/post
+    // columnref hook split (plpgsql_pre_column_ref / plpgsql_post_column_ref)
+    // can apply variable-vs-column precedence and raise the ambiguity error.
+    let resolve_option = match estate.resolve_option {
+        types_plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_ERROR => {
+            types_nodes::parsestmt::PlpgsqlResolveOption::Error
+        }
+        types_plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_VARIABLE => {
+            types_nodes::parsestmt::PlpgsqlResolveOption::Variable
+        }
+        types_plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_COLUMN => {
+            types_nodes::parsestmt::PlpgsqlResolveOption::Column
+        }
+    };
+
+    Ok(PlpgsqlExprParseState::with_labels_resolve(
+        names,
+        labels,
+        input_collation,
+        resolve_option,
+    ))
 }
 
 /// Project a rich expanded-record field [`RichDatum`] (the
@@ -4161,6 +4181,8 @@ pub fn plpgsql_estate_setup(
         extra_warnings: func.extra_warnings,
         extra_errors: func.extra_errors,
         print_strict_params: func.print_strict_params,
+
+        resolve_option: func.resolve_option,
 
         exitlabel: None,
         cur_error: None,

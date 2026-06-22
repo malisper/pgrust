@@ -19,7 +19,7 @@
 
 use mcx::{MemoryContext, Mcx, PgVec};
 use types_core::Oid;
-use types_error::{PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
+use types_error::{PgError, PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::CmdType;
 use types_nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
@@ -296,8 +296,48 @@ fn spi_execsql_inner(
     let mcx = cxt.mcx();
     let interned = leak_str_in(mcx, query)?;
 
+    // `_SPI_error_callback` (spi.c): SPI installs an error-context callback for
+    // the WHOLE duration of `_SPI_prepare_plan` + `_SPI_execute_plan`, so it
+    // decorates BOTH a parse/analysis-time error (e.g. the variable-vs-column
+    // `column reference is ambiguous` raised by the plpgsql post-columnref hook)
+    // AND an execution-time error. Faithful to the callback body:
+    //   * if the error carries a syntax/cursor position (`geterrposition() > 0`),
+    //     clear the cursor position and promote it to an INTERNAL position +
+    //     set the internal query to this embedded query text — this is what
+    //     renders the `LINE n: …` caret and the `QUERY: …` block against the
+    //     inner query (the `RETURNING new.f1` ambiguity case);
+    //   * otherwise attach a context line whose wording depends on the raw parse
+    //     mode (`PL/pgSQL expression`/`assignment`/`SQL statement`).
+    // The "attached once" latch is cleared either way so any outer PL/pgSQL frame
+    // re-attaches its own `plpgsql_exec_error_callback` line.
+    let spi_error_decorate = |mut e: PgError| -> PgError {
+        if e.cursor_position().unwrap_or(0) > 0 {
+            let pos = e.cursor_position().unwrap();
+            e = e
+                .with_cursor_position(0)
+                .with_internal_position(pos)
+                .with_internal_query(query.to_string());
+        } else {
+            let line = match parsemode {
+                RawParseMode::RAW_PARSE_PLPGSQL_EXPR => {
+                    format!("PL/pgSQL expression \"{query}\"")
+                }
+                RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN1
+                | RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN2
+                | RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN3 => {
+                    format!("PL/pgSQL assignment \"{query}\"")
+                }
+                _ => format!("SQL statement \"{query}\""),
+            };
+            e = e.add_context(line);
+        }
+        e.plpgsql_context_attached = false;
+        e
+    };
+
     // _SPI_prepare_plan with the PL/pgSQL parser setup.
-    let source = prepare_execsql_plan(mcx, interned, parsemode, parse_state.clone())?;
+    let source = prepare_execsql_plan(mcx, interned, parsemode, parse_state.clone())
+        .map_err(&spi_error_decorate)?;
 
     // setup_param_list: build the value ParamListInfo from the referenced datums.
     let param_li = build_param_list(&parse_state, resolve)?;
@@ -314,35 +354,10 @@ fn spi_execsql_inner(
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
     }
-    // `_SPI_error_callback` (spi.c): SPI installs an error-context callback for
-    // the duration of `_SPI_execute_plan`. When an error escapes the embedded
-    // query, the callback emits a context line whose wording depends on the
-    // plan's raw parse mode (the `switch (carg->mode)`): a PL/pgSQL expression
-    // (`RAW_PARSE_PLPGSQL_EXPR`) reads `PL/pgSQL expression "%s"`, an assignment
-    // (`RAW_PARSE_PLPGSQL_ASSIGN{1,2,3}`) reads `PL/pgSQL assignment "%s"`, and a
-    // complete statement (the default, e.g. a PERFORM's `SELECT ...`) reads
-    // `SQL statement "%s"`. This is the attach-on-propagation analogue
-    // (docs/query-lifecycle-raii) applied at the same boundary C pushed/popped
-    // the callback, innermost so it precedes the caller's PL/pgSQL-function
-    // context line. Crossing this SPI boundary means any outer PL/pgSQL frame
-    // still has its own `plpgsql_exec_error_callback` pending, so clear the
-    // "attached once" latch to let that outer frame re-attach its own line.
-    let out = out.map_err(|mut e| {
-        let line = match parsemode {
-            RawParseMode::RAW_PARSE_PLPGSQL_EXPR => {
-                format!("PL/pgSQL expression \"{query}\"")
-            }
-            RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN1
-            | RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN2
-            | RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN3 => {
-                format!("PL/pgSQL assignment \"{query}\"")
-            }
-            _ => format!("SQL statement \"{query}\""),
-        };
-        e = e.add_context(line);
-        e.plpgsql_context_attached = false;
-        e
-    });
+    // Execute-phase error: same `_SPI_error_callback` decoration as the prepare
+    // phase (cursor → internal-query promotion, or the mode-dependent context
+    // line). Applied at the same boundary C pushed/popped the callback.
+    let out = out.map_err(&spi_error_decorate);
     let result = out;
 
     let _ = plancache::DropCachedPlan(source);
