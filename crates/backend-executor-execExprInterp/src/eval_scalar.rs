@@ -31,7 +31,7 @@
 //! step-payload reads and control flow that the owned model can already express
 //! are written out faithfully.
 
-use backend_utils_fmgr_fmgr_seams::function_call_invoke_datum;
+use backend_utils_fmgr_fmgr_seams::{function_call_invoke_datum, function_call_invoke_datum_soft};
 // The bare-word newtype: the scalar form the fmgr/arrayfuncs seams and the
 // step-payload eval helpers operate on.
 use types_datum::Datum;
@@ -1043,21 +1043,37 @@ fn iocoerce_core<'mcx>(
         }
 
         if safe {
-            // EEOP_IOCOERCE_SAFE reads SOFT_ERROR_OCCURRED(fcinfo_in->context)
-            // after the call to detect a caught conversion error. The
-            // soft-error sink (ErrorSaveContext on fcinfo->context) is owned by
-            // the not-yet-ported elog/ErrorSaveContext layer (the IoCoerce
-            // frame's context stays None until that lands), so this safe variant
-            // cannot observe the soft error.
-            let _ = (in_oid, in_coll, in_datum_args);
-            panic!(
-                "ExecEvalCoerceViaIOSafe: the input function runs under a soft-error \
-                 ErrorSaveContext (fcinfo_in->context) and the arm reads \
-                 SOFT_ERROR_OCCURRED(context) to convert a caught error into a NULL \
-                 result; the soft-error sink is owned by the unported \
-                 elog/ErrorSaveContext layer (IoCoerce frame context is None); \
-                 blocked until that lands"
-            );
+            // EEOP_IOCOERCE_SAFE installs an ErrorSaveContext on the input
+            // function's call frame (`fcinfo_in->context`) and reads
+            // SOFT_ERROR_OCCURRED(context) afterwards. The soft seam threads the
+            // sink through `fcinfo->context` exactly as C's
+            // `InitFunctionCallInfoData(..., escontext, NULL)` does: a callee
+            // (e.g. int4in / numeric_in) that `ereturn`s a recoverable
+            // conversion error records it into the sink and the seam returns
+            // `Ok(None)`. On a soft error C sets `*op->resnull = true` and
+            // `*op->resvalue = 0`; otherwise it writes the converted value
+            // (resnull unchanged: null iff str was NULL — i.e. cur_isnull).
+            let mut escontext = types_error::SoftErrorContext::new(false);
+            let out = function_call_invoke_datum_soft::call(
+                mcx,
+                in_oid,
+                in_coll,
+                &in_datum_args,
+                &[],
+                None,
+                &mut escontext,
+            )?;
+            match out {
+                None => {
+                    // SOFT_ERROR_OCCURRED: *op->resnull = true; *op->resvalue = 0.
+                    crate::interp_loop::write_cell(state, resvalue_id, DatumV::null(), true);
+                }
+                Some((value, _isnull)) => {
+                    // resnull stays as cur_isnull (null iff str was NULL).
+                    crate::interp_loop::write_cell(state, resvalue_id, value, cur_isnull);
+                }
+            }
+            return Ok(());
         }
 
         let (value, isnull) =

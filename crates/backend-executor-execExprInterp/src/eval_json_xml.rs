@@ -823,12 +823,17 @@ pub fn ExecEvalJsonExprPath<'mcx>(
                             let v = mcx::slice_in(mcx, jb.as_slice())?;
                             write_cell(state, resv, Datum::ByRef(v), false);
                         } else {
+                            // C: val_string = ExecGetJsonValueItemString(jbv,
+                            //     op->resnull); the helper SETS *op->resnull
+                            // (false for a non-null scalar, true for jbvNull).
+                            // The owned port must mirror that write unconditionally
+                            // so the `if (!*op->resnull && use_io_coercion)` gate
+                            // below sees a fresh resnull, not a stale-true left
+                            // from a prior row's NULL write.
                             let (s, is_null) = exec_get_json_value_item_string(mcx, &jbv)?;
-                            if is_null {
-                                write_cell(state, resv, Datum::null(), true);
-                            }
+                            write_cell(state, resv, Datum::null(), is_null);
                             val_string = s;
-                            if !jsexpr.use_io_coercion {
+                            if !jsexpr.use_io_coercion && !is_null {
                                 // *op->resvalue = DirectFunctionCall1(textin,
                                 //     CStringGetDatum(val_string));
                                 if let Some(vs) = val_string.as_ref() {
@@ -874,33 +879,51 @@ pub fn ExecEvalJsonExprPath<'mcx>(
         let typioparam =
             types_core::primitive::Oid::from(fcinfo.args[1].value.as_usize() as u32);
         let typmod = fcinfo.args[2].value.as_usize() as i32;
-        // C: `*op->resvalue = FunctionCallInvoke(fcinfo)` with
-        // `fcinfo->context = &jsestate->escontext`, then
-        // `if (SOFT_ERROR_OCCURRED(&jsestate->escontext)) error = true`. A
-        // malformed value (e.g. coercing "1.23" to integer) records a soft error
-        // and steers ON ERROR rather than raising hard — but only when ON ERROR
-        // is not ERROR. With ON ERROR = ERROR (`throw_error`) the failure must
-        // propagate hard, so no escontext is threaded.
-        if throw_error {
-            let coerced = backend_utils_fmgr_fmgr_seams::input_function_call::call(
-                mcx, fn_oid, Some(&vs), typioparam, typmod, None,
-            )?;
-            write_cell(state, resv, coerced, false);
-        } else {
-            let mut io_escontext = types_error::SoftErrorContext::new(false);
+        // C: fcinfo_in->context = (Node *) &jsestate->escontext when ON ERROR is
+        // not ERROR, then `if (SOFT_ERROR_OCCURRED(&jsestate->escontext)) error =
+        // true;`. With `suppress_errors` (escontext present), thread the jsestate's
+        // SHARED soft sink (details_wanted) so a malformed value (e.g. int4in over
+        // "1.23") records into it and steers ON ERROR -> NULL instead of raising
+        // hard — and so ExecEvalJsonCoercionFinish can re-raise it with its
+        // message as the DETAIL. Without escontext (ON ERROR = ERROR), the hard
+        // seam.
+        if suppress_errors {
+            // Take the jsestate's soft-error sink out so its borrow does not
+            // alias `state` during the call, then restore it (preserving any
+            // saved error for ExecEvalJsonCoercionFinish).
+            let mut escontext = {
+                let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
+                core::mem::take(&mut js.escontext)
+            };
             let coerced = backend_utils_fmgr_fmgr_seams::input_function_call::call(
                 mcx,
                 fn_oid,
                 Some(&vs),
                 typioparam,
                 typmod,
-                Some(&mut io_escontext),
+                Some(&mut escontext),
             )?;
-            if io_escontext.error_occurred() {
+            let soft_failed = escontext.error_occurred();
+            {
+                let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
+                js.escontext = escontext;
+            }
+            if soft_failed {
+                // C: error = true; (resvalue/resnull left for the ON ERROR jump).
                 error = true;
             } else {
                 write_cell(state, resv, coerced, false);
             }
+        } else {
+            let coerced = backend_utils_fmgr_fmgr_seams::input_function_call::call(
+                mcx,
+                fn_oid,
+                Some(&vs),
+                typioparam,
+                typmod,
+                None,
+            )?;
+            write_cell(state, resv, coerced, false);
         }
     }
 
