@@ -54,7 +54,7 @@ use types_error::{
 use types_nodes::ddlnodes::AlterTableType;
 use types_nodes::nodes::{ntag, Node};
 use types_rel::Relation;
-use types_storage::lock::{RowExclusiveLock, ShareLock, LOCKMODE};
+use types_storage::lock::{NoLock, RowExclusiveLock, ShareLock, LOCKMODE};
 use types_nodes::parsenodes::DROP_RESTRICT;
 use types_statistics::MAX_STATISTICS_TARGET;
 use types_tuple::access::{
@@ -1703,6 +1703,12 @@ pub fn ATExecSetRelOptions<'mcx>(
     // Repeat the whole exercise for the toast table, if there's one.
     let toastid = rel.rd_rel.reltoastrelid;
     if types_core::OidIsValid(toastid) {
+        // toastrel = table_open(toastid, lockmode); — take and hold `lockmode`
+        // on the toast table until commit (C closes with NoLock). This is what
+        // makes ALTER TABLE ... SET (toast.*) show the toast relation's lock in
+        // pg_locks.
+        let toastrel = relation_open(mcx, toastid, lockmode)?;
+
         let toast_old: Option<Vec<u8>> = if operation == AlterTableType::AT_ReplaceRelOptions {
             None
         } else {
@@ -1735,7 +1741,9 @@ pub fn ATExecSetRelOptions<'mcx>(
 
         indexing_seam::update_pg_class_reloptions::call(mcx, toastid, toast_new.as_deref())?;
         // InvokeObjectPostAlterHook(RelationRelationId, toastid, 0): no-op.
-        let _ = lockmode;
+
+        // table_close(toastrel, NoLock) — keep the lock until commit.
+        toastrel.close(NoLock)?;
     }
 
     Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
