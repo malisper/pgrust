@@ -361,11 +361,13 @@ pub fn ExplainOneUtility<'mcx>(
                 .as_deref()
                 .and_then(|n| n.as_query())
                 .expect("ExplainOneUtility: CreateTableAsStmt->query is not a Query");
-            let ctas_query = ctas_query.clone_in(mcx)?;
+            let mut ctas_query = ctas_query.clone_in(mcx)?;
 
-            // IsQueryIdEnabled() jumble + post_parse_analyze_hook: query-id
-            // jumbling is off by default and no hook is installed in this build,
-            // so the C path is a no-op here (same as ExplainQuery).
+            // if (IsQueryIdEnabled()) jstate = JumbleQuery(ctas_query); (explain.c:424)
+            if backend_nodes_queryjumble_seams::is_query_id_enabled::call() {
+                ctas_query.queryId =
+                    backend_nodes_queryjumble_seams::jumble_query_compute::call(&ctas_query);
+            }
 
             // rewritten = QueryRewrite(ctas_query); Assert(length == 1);
             let rewritten = rewrite::query_rewrite_canonical::call(mcx, ctas_query)?;
@@ -409,7 +411,13 @@ pub fn ExplainOneUtility<'mcx>(
                 .as_deref()
                 .and_then(|n| n.as_query())
                 .expect("ExplainOneUtility: DeclareCursorStmt->query is not a Query");
-            let dcs_query = dcs_query.clone_in(mcx)?;
+            let mut dcs_query = dcs_query.clone_in(mcx)?;
+
+            // if (IsQueryIdEnabled()) jstate = JumbleQuery(dcs_query); (explain.c:450)
+            if backend_nodes_queryjumble_seams::is_query_id_enabled::call() {
+                dcs_query.queryId =
+                    backend_nodes_queryjumble_seams::jumble_query_compute::call(&dcs_query);
+            }
 
             let rewritten = rewrite::query_rewrite_canonical::call(mcx, dcs_query)?;
             assert_eq!(rewritten.len(), 1, "QueryRewrite(DECLARE CURSOR query) produced != 1 query");
@@ -484,13 +492,20 @@ pub fn ExplainQuery<'mcx>(
         .and_then(|n| n.as_query())
         .expect("ExplainQuery: ExplainStmt->query is not an analyzed Query node");
 
-    // IsQueryIdEnabled() jumble + post_parse_analyze_hook: query-id jumbling is
-    // off by default (compute_query_id = auto/off → disabled) and no hook is
-    // installed in this build; the C path is a no-op here.
-
     // Parse analysis was done already; run the rule rewriter. We do not do
     // AcquireRewriteLocks (the query came straight from the parser).
-    let query_copy = query.clone_in(mcx)?;
+    let mut query_copy = query.clone_in(mcx)?;
+
+    // if (IsQueryIdEnabled()) jstate = JumbleQuery(query);  (explain.c:190)
+    // Under compute_query_id, jumble the analyzed inner query and store the
+    // resulting id into query.queryId; the planner copies it into
+    // PlannedStmt.queryId, and ExplainPrintPlan prints it as "Query Identifier".
+    // (post_parse_analyze_hook is NULL by default — no JumbleState consumer.)
+    if backend_nodes_queryjumble_seams::is_query_id_enabled::call() {
+        query_copy.queryId =
+            backend_nodes_queryjumble_seams::jumble_query_compute::call(&query_copy);
+    }
+
     let rewritten = backend_rewrite_rewritehandler_seams::query_rewrite_canonical::call(
         mcx, query_copy,
     )?;

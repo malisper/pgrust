@@ -85,6 +85,19 @@ pub struct BufferUsage {
     pub temp_blk_write_time: instr_time,
 }
 
+/// `SerializeMetrics` (`commands/explain.h`) — metrics collected by the
+/// EXPLAIN (SERIALIZE) `DestReceiver`: the time spent serializing the result,
+/// the total serialized output volume in bytes, and the buffer usage incurred.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SerializeMetrics {
+    /// `instr_time timeSpent` — time spent serializing.
+    pub timeSpent: instr_time,
+    /// `uint64 bytesSent` — number of bytes that would have been sent.
+    pub bytesSent: u64,
+    /// `BufferUsage bufferUsage` — buffers accessed during serialization.
+    pub bufferUsage: BufferUsage,
+}
+
 /// `WalUsage` (`executor/instrument.h`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WalUsage {

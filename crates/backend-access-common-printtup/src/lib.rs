@@ -978,9 +978,269 @@ pub fn send_describe_statement<'mcx>(
     }
 }
 
+// ===========================================================================
+// EXPLAIN (SERIALIZE) DestReceiver (explain_dr.c) — `SerializeDestReceiver`.
+//
+// A DestReceiver that serializes passed rows into RowData messages while
+// measuring the total serialized size, but never sends the data to the client.
+// This exercises deTOASTing and datatype out/sendfuncs without hitting the
+// network. The serialization machinery is identical to printtup's (the C
+// comment says serializeAnalyzeReceive "should match printtup() as closely as
+// possible"), so it lives here alongside printtup rather than in a new crate.
+// ===========================================================================
+
+use types_core::instrument::SerializeMetrics;
+
+/// `SerializeDestReceiver` (explain_dr.c) private state. The C `DestReceiver
+/// pub` head is the router registration; the fields below are the rest of the
+/// struct. `es` is replaced by the two flags the receiver actually consults
+/// (`es->timing`, `es->buffers`) plus the resolved wire `format`, captured at
+/// construction. `attrinfo`/`nattrs`/`finfos` cache the per-column output fn
+/// lookup, re-derived when the descriptor changes (as in `serialize_prepare_info`).
+struct SerializeState {
+    /// The router handle naming this receiver (the C `DestReceiver *`).
+    dr_handle: DestReceiverHandle,
+    /// `int8 format` — 0 = wire text, 1 = wire binary.
+    format: i16,
+    /// `es->timing` — measure per-row time. (Timing is not accumulated in this
+    /// port; the metric stays zero, which the EXPLAIN regression masks to `N`.)
+    timing: bool,
+    /// `es->buffers` — accumulate buffer usage. (Likewise not accumulated;
+    /// the metric stays zero, masked to `N`.)
+    buffers: bool,
+    /// `TupleDesc attrinfo` identity + `int nattrs` — cache validity key.
+    attrinfo: Option<*const TupleDescData<'static>>,
+    nattrs: i32,
+    /// `FmgrInfo *finfos` — precomputed output/send call info, one per column.
+    finfos: Vec<FmgrInfo>,
+    /// `SerializeMetrics metrics` — the collected metrics, read back by
+    /// `GetSerializationMetrics`.
+    metrics: SerializeMetrics,
+}
+
+impl SerializeState {
+    fn new(format: i16, timing: bool, buffers: bool) -> Self {
+        SerializeState {
+            dr_handle: DestReceiverHandle::NULL,
+            format,
+            timing,
+            buffers,
+            attrinfo: None,
+            nattrs: 0,
+            finfos: Vec::new(),
+            metrics: SerializeMetrics::default(),
+        }
+    }
+}
+
+thread_local! {
+    static SERIALIZE_RECEIVERS: RefCell<Vec<Option<SerializeState>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn serialize_register(state: SerializeState) -> u64 {
+    SERIALIZE_RECEIVERS.with(|r| {
+        let mut reg = r.borrow_mut();
+        if let Some(i) = reg.iter().position(Option::is_none) {
+            reg[i] = Some(state);
+            (i + 1) as u64
+        } else {
+            reg.push(Some(state));
+            reg.len() as u64
+        }
+    })
+}
+
+fn with_serialize<R>(token: u64, f: impl FnOnce(&mut SerializeState) -> R) -> R {
+    SERIALIZE_RECEIVERS.with(|r| {
+        let mut reg = r.borrow_mut();
+        let slot = reg
+            .get_mut((token - 1) as usize)
+            .and_then(Option::as_mut)
+            .expect("backend-access-common-printtup: dispatch on an unregistered serialize receiver");
+        f(slot)
+    })
+}
+
+/// `serialize_prepare_info(receiver, typeinfo, nattrs)` (explain_dr.c) — get the
+/// function lookup info we'll need for output. A subset of
+/// `printtup_prepare_info` (no per-column format choices: one format for all).
+fn serialize_prepare_info<'mcx>(
+    st: &mut SerializeState,
+    mcx: Mcx<'mcx>,
+    typeinfo: &TupleDescData<'mcx>,
+    nattrs: i32,
+) -> PgResult<()> {
+    st.finfos.clear();
+    st.attrinfo = Some(typeinfo as *const _ as *const TupleDescData<'static>);
+    st.nattrs = nattrs;
+    if nattrs <= 0 {
+        return Ok(());
+    }
+    st.finfos
+        .try_reserve(nattrs as usize)
+        .map_err(|_| PgError::error("serialize_prepare_info: out of memory"))?;
+    for i in 0..nattrs as usize {
+        let attr = typeinfo.attr(i);
+        let finfo = if st.format == 0 {
+            // wire protocol format text
+            let (typoutput, _typisvarlena) =
+                backend_utils_cache_lsyscache_seams::get_type_output_info::call(attr.atttypid)?;
+            backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, typoutput)?
+        } else if st.format == 1 {
+            // wire protocol format binary
+            let (typsend, _typisvarlena) =
+                backend_utils_cache_lsyscache_seams::get_type_binary_output_info::call(
+                    attr.atttypid,
+                )?;
+            backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, typsend)?
+        } else {
+            return Err(PgError::error(format!("unsupported format code: {}", st.format))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
+        };
+        st.finfos.push(finfo);
+    }
+    Ok(())
+}
+
+/// `serializeAnalyzeStartup(self, operation, typeinfo)` (explain_dr.c) — start
+/// up the serialize receiver. Format was resolved at construction; reset the
+/// metrics.
+fn serialize_startup<'mcx>(
+    _mcx: Mcx<'mcx>,
+    state: u64,
+    _operation: CmdType,
+    _typeinfo: &TupleDescData<'mcx>,
+) -> PgResult<()> {
+    with_serialize(state, |st| {
+        st.metrics = SerializeMetrics::default();
+    });
+    Ok(())
+}
+
+/// `serializeAnalyzeReceive(slot, self)` (explain_dr.c) — serialize one tuple,
+/// counting the bytes that would have been sent. Matches `printtup` except the
+/// constructed `DataRow` buffer is counted, not flushed to the client.
+fn serialize_receive<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: u64,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    // Make sure the tuple is fully deconstructed (C: slot_getallattrs(slot)).
+    let columns = backend_executor_execTuples_seams::slot_getallattrs::call(mcx, slot)?;
+    let typeinfo = slot
+        .base()
+        .tts_tupleDescriptor
+        .as_deref()
+        .expect("serialize receiver: slot has no tuple descriptor");
+    let natts = typeinfo.natts;
+
+    with_serialize(state, |st| {
+        // Set or update derived attribute info, if needed.
+        let cache_valid = st
+            .attrinfo
+            .map(|p| core::ptr::eq(p as *const TupleDescData, typeinfo as *const _))
+            .unwrap_or(false);
+        if !cache_valid || st.nattrs != natts {
+            serialize_prepare_info(st, mcx, typeinfo, natts)?;
+        }
+
+        // Prepare a DataRow message (note buffer is in per-row context).
+        let mut buf = StringInfo::new_in(mcx);
+        pq_beginmessage_reuse(&mut buf, PqMsg_DataRow);
+        pq_sendint16(&mut buf, natts as u16)?;
+
+        for i in 0..natts as usize {
+            let (attr, isnull) = &columns[i];
+            if *isnull {
+                pq_sendint32(&mut buf, (-1i32) as u32)?;
+                continue;
+            }
+            if st.format == 0 {
+                // Text output
+                let outputstr =
+                    backend_utils_fmgr_fmgr_seams::output_function_call::call(mcx, &st.finfos[i], attr)?;
+                pq_sendcountedtext(&mut buf, &outputstr)?;
+            } else {
+                // Binary output
+                let outputbytes =
+                    backend_utils_fmgr_fmgr_seams::send_function_call::call(mcx, &st.finfos[i], attr)?;
+                pq_sendint32(&mut buf, outputbytes.len() as u32)?;
+                pq_sendbytes(&mut buf, &outputbytes)?;
+            }
+        }
+
+        // We mustn't flush the message (that would send data to the client).
+        // Just count the data, exactly as C's `metrics.bytesSent += buf->len`.
+        st.metrics.bytesSent += buf.len() as u64;
+        Ok::<(), PgError>(())
+    })?;
+
+    Ok(true)
+}
+
+/// `serializeAnalyzeShutdown(self)` (explain_dr.c) — drop the cached attr info.
+fn serialize_shutdown<'mcx>(_mcx: Mcx<'mcx>, state: u64) -> PgResult<()> {
+    with_serialize(state, |st| {
+        st.finfos.clear();
+        st.attrinfo = None;
+        st.nattrs = 0;
+    });
+    Ok(())
+}
+
+/// `CreateExplainSerializeDestReceiver(es)` (explain_dr.c) — build the SERIALIZE
+/// `DestReceiver` and register it into the tcop-dest router, returning its
+/// [`DestReceiverHandle`]. The flags it needs (`es->timing`, `es->buffers`) and
+/// the resolved wire `format` (0 = text, 1 = binary) are captured here, in lieu
+/// of holding the `ExplainState *`.
+pub fn create_explain_serialize_dest_receiver_routed(
+    format: i16,
+    timing: bool,
+    buffers: bool,
+) -> DestReceiverHandle {
+    let token = serialize_register(SerializeState::new(format, timing, buffers));
+    let dr = backend_tcop_dest::register_dest_receiver(
+        CommandDest::ExplainSerialize,
+        backend_tcop_dest::ReceiverVtable {
+            rStartup: serialize_startup,
+            receiveSlot: serialize_receive,
+            rShutdown: serialize_shutdown,
+        },
+        token,
+    );
+    with_serialize(token, |st| st.dr_handle = dr);
+    dr
+}
+
+/// `GetSerializationMetrics(dest)` (explain_dr.c) — collect metrics. If `dest`
+/// is not a SERIALIZE receiver (e.g. an IntoRel receiver for CREATE TABLE AS),
+/// return all-zeroes stats.
+pub fn get_serialization_metrics_routed(dest: DestReceiverHandle) -> SerializeMetrics {
+    if dest == DestReceiverHandle::NULL {
+        return SerializeMetrics::default();
+    }
+    let token = SERIALIZE_RECEIVERS.with(|r| {
+        r.borrow()
+            .iter()
+            .position(|s| matches!(s, Some(st) if st.dr_handle == dest))
+            .map(|i| (i + 1) as u64)
+    });
+    match token {
+        Some(t) => with_serialize(t, |st| st.metrics),
+        None => SerializeMetrics::default(),
+    }
+}
+
 /// Install this crate's inward seams (the printtup / debugtup dest-router
 /// constructors and `SetRemoteDestReceiverParams`). Wired into `seams-init`.
 pub fn init_seams() {
+    backend_access_common_printtup_seams::create_explain_serialize_dest_receiver::set(
+        create_explain_serialize_dest_receiver_routed,
+    );
+    backend_access_common_printtup_seams::get_serialization_metrics::set(
+        get_serialization_metrics_routed,
+    );
     backend_access_common_printtup_seams::printtup_create_dr::set(printtup_create_dr_routed);
     backend_access_common_printtup_seams::send_describe_portal::set(send_describe_portal);
     backend_access_common_printtup_seams::send_describe_statement::set(send_describe_statement);

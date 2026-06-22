@@ -7172,6 +7172,7 @@ dependencies = [
 name = "backend-commands-explain"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-printtup-seams",
  "backend-access-common-tupdesc",
  "backend-access-transam-xact-seams",
  "backend-commands-createas-seams",
@@ -7183,6 +7184,7 @@ dependencies = [
  "backend-executor-execTuples",
  "backend-executor-instrument",
  "backend-nodes-core",
+ "backend-nodes-queryjumble-seams",
  "backend-optimizer-plan-planner-seams",
  "backend-rewrite-rewritehandler-seams",
  "backend-tcop-utility-out-seams",

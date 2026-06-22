@@ -72,4 +72,9 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+# EXPLAIN (SERIALIZE): CreateExplainSerializeDestReceiver / GetSerializationMetrics
+# live in printtup (explain_dr.c's serialization machinery mirrors printtup).
+backend-access-common-printtup-seams = { path = "../backend-access-common-printtup-seams" }
+# IsQueryIdEnabled() + JumbleQuery for the EXPLAIN (compute_query_id) Query Identifier.
+backend-nodes-queryjumble-seams = { path = "../backend-nodes-queryjumble-seams" }
 portability-instr-time = { path = "../portability-instr-time" }

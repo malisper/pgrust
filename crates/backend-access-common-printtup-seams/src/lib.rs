@@ -71,3 +71,32 @@ seam_core::seam!(
         targetlist: &[types_nodes::nodes::Node<'mcx>],
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CreateExplainSerializeDestReceiver(es)` (explain_dr.c): build the
+    /// EXPLAIN (SERIALIZE) `DestReceiver` and register it into the tcop-dest
+    /// router, returning its [`DestReceiverHandle`]. The receiver serializes
+    /// each result row (running the type out/send functions, deTOASTing as a
+    /// side effect) and counts the bytes that would have been sent, but never
+    /// flushes to the client. The flags it consults (`es->timing`,
+    /// `es->buffers`) and the resolved wire `format` (0 = text, 1 = binary) are
+    /// passed in lieu of the `ExplainState *`. `commands/explain.c` reaches it
+    /// through this seam (it cannot depend on printtup directly without a
+    /// cycle); printtup installs it from its own `init_seams()`.
+    pub fn create_explain_serialize_dest_receiver(
+        format: i16,
+        timing: bool,
+        buffers: bool,
+    ) -> types_nodes::parsestmt::DestReceiverHandle
+);
+
+seam_core::seam!(
+    /// `GetSerializationMetrics(dest)` (explain_dr.c): collect the metrics a
+    /// SERIALIZE `DestReceiver` accumulated. Returns all-zeroes when `dest` is
+    /// not a SERIALIZE receiver (e.g. the IntoRel receiver used for EXPLAIN
+    /// (SERIALIZE) CREATE TABLE AS). `commands/explain.c` reaches it through
+    /// this seam; printtup installs it from its own `init_seams()`.
+    pub fn get_serialization_metrics(
+        dest: types_nodes::parsestmt::DestReceiverHandle,
+    ) -> types_core::instrument::SerializeMetrics
+);

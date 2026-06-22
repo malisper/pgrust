@@ -39,6 +39,7 @@ use backend_executor_instrument as instr;
 use backend_utils_mmgr as mmgr;
 use backend_utils_time_snapmgr_seams as snapmgr_s;
 use backend_access_transam_xact_seams as xact_s;
+use backend_access_common_printtup_seams as printtup_s;
 
 pub mod details;
 pub mod driver;
@@ -362,11 +363,6 @@ fn explain_one_plan<'mcx>(
 ) -> PgResult<()> {
     // Assert(plannedstmt->commandType != CMD_UTILITY);  (caller guarantees.)
 
-    // SERIALIZE uses its own (still-unported) receiver.
-    if es.serialize != types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_NONE {
-        panic!("explain_one_plan: SERIALIZE needs CreateExplainSerializeDestReceiver (unported)");
-    }
-
     // if (es->analyze && es->timing) INSTRUMENT_TIMER; else if (es->analyze)
     // INSTRUMENT_ROWS; if (es->buffers) INSTRUMENT_BUFFERS; if (es->wal)
     // INSTRUMENT_WAL;  — INSTRUMENT_* bits.
@@ -397,12 +393,15 @@ fn explain_one_plan<'mcx>(
     let snapshot = snapmgr_s::get_active_snapshot::call()?;
 
     // We discard the output if we have no use for it. If we're explaining
-    // CREATE TABLE AS, we'd better use the appropriate tuple receiver; otherwise
-    // the discard `None_Receiver` (passed as the NULL handle, resolved to
-    // `donothingDR` in the executor seam). The SERIALIZE receiver is rejected
-    // above.
+    // CREATE TABLE AS, we'd better use the appropriate tuple receiver; for
+    // EXPLAIN (SERIALIZE) we use the serialize receiver (which runs the type
+    // out/send functions and counts bytes, but never sends them); otherwise the
+    // discard `None_Receiver` (the NULL handle, resolved to `donothingDR`).
     //   if (into) dest = CreateIntoRelDestReceiver(into);
+    //   else if (es->serialize != NONE) dest = CreateExplainSerializeDestReceiver(es);
     //   else dest = None_Receiver;
+    let serialize =
+        es.serialize != types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_NONE;
     let dest = match into {
         // `create_into_rel_dest_receiver_setup` builds the DR_intorel receiver AND
         // binds its run-state with `into` (the owned-model stand-in for C storing
@@ -413,6 +412,16 @@ fn explain_one_plan<'mcx>(
         Some(into) => types_nodes::parsestmt::DestReceiverHandle(
             createas_s::create_into_rel_dest_receiver_setup::call(es.str.allocator(), into)?,
         ),
+        None if serialize => {
+            // format: EXPLAIN_SERIALIZE_TEXT -> 0 (wire text), BINARY -> 1.
+            let fmt: i16 =
+                if es.serialize == types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_BINARY {
+                    1
+                } else {
+                    0
+                };
+            printtup_s::create_explain_serialize_dest_receiver::call(fmt, es.timing, es.buffers)
+        }
         None => types_nodes::parsestmt::DestReceiverHandle::NULL,
     };
 
@@ -457,6 +466,15 @@ fn explain_one_plan<'mcx>(
         // We can't run ExecutorEnd 'till we're done printing the stats...
         totaltime += elapsed_time(&mut starttime);
     }
+
+    // grab serialization metrics before we destroy the DestReceiver.
+    //   if (es->serialize != EXPLAIN_SERIALIZE_NONE)
+    //       serializeMetrics = GetSerializationMetrics(dest);
+    let serialize_metrics = if serialize {
+        printtup_s::get_serialization_metrics::call(dest)
+    } else {
+        types_core::instrument::SerializeMetrics::default()
+    };
 
     // dest->rDestroy(dest): the discard receiver has no destroy side effect.
 
@@ -508,6 +526,16 @@ fn explain_one_plan<'mcx>(
     // SERIALIZE is rejected at the head of this function).
     if es.analyze {
         explain_print_triggers(es, &mut query_desc)?;
+    }
+
+    // JIT summary (es->costs) is intentionally COSTS-gated out for regression
+    // stability and otherwise unported.
+
+    // Print info about serialization of output.
+    //   if (es->serialize != EXPLAIN_SERIALIZE_NONE)
+    //       ExplainPrintSerialize(es, &serializeMetrics);
+    if serialize {
+        explain_print_serialize(es, &serialize_metrics)?;
     }
 
     // Close down the query and free resources. Include the time for this in the
@@ -581,6 +609,75 @@ fn explain_print_triggers<'es>(
     let _ = show_relname;
 
     fmt::ExplainCloseGroup("Triggers", Some("Triggers"), false, es)?;
+    Ok(())
+}
+
+/// `BYTES_TO_KILOBYTES(b)` (explain.h) — `(b + 512) / 1024`.
+fn bytes_to_kilobytes(b: u64) -> u64 {
+    (b + 512) / 1024
+}
+
+/// `ExplainPrintSerialize(es, metrics)` (explain.c:999) — append information
+/// about query output volume (the SERIALIZE option's collected metrics).
+fn explain_print_serialize(
+    es: &mut ExplainState<'_>,
+    metrics: &types_core::instrument::SerializeMetrics,
+) -> PgResult<()> {
+    // We shouldn't get called for EXPLAIN_SERIALIZE_NONE.
+    let format = if es.serialize == types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_TEXT {
+        "text"
+    } else {
+        // Assert(es->serialize == EXPLAIN_SERIALIZE_BINARY);
+        "binary"
+    };
+
+    fmt::ExplainOpenGroup("Serialization", Some("Serialization"), true, es)?;
+
+    if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        fmt::ExplainIndentText(es)?;
+        if es.timing {
+            es.str.try_push_str(&format!(
+                "Serialization: time={:.3} ms  output={}kB  format={}\n",
+                1000.0 * metrics.timeSpent.get_double(),
+                bytes_to_kilobytes(metrics.bytesSent),
+                format
+            ))?;
+        } else {
+            es.str.try_push_str(&format!(
+                "Serialization: output={}kB  format={}\n",
+                bytes_to_kilobytes(metrics.bytesSent),
+                format
+            ))?;
+        }
+
+        if es.buffers && details::peek_buffer_usage(es, Some(&metrics.bufferUsage)) {
+            es.indent += 1;
+            show_buffer_usage(es, &metrics.bufferUsage)?;
+            es.indent -= 1;
+        }
+    } else {
+        if es.timing {
+            fmt::ExplainPropertyFloat(
+                "Time",
+                Some("ms"),
+                1000.0 * metrics.timeSpent.get_double(),
+                3,
+                es,
+            )?;
+        }
+        fmt::ExplainPropertyUInteger(
+            "Output Volume",
+            Some("kB"),
+            bytes_to_kilobytes(metrics.bytesSent),
+            es,
+        )?;
+        fmt::ExplainPropertyText("Format", format, es)?;
+        if es.buffers {
+            show_buffer_usage(es, &metrics.bufferUsage)?;
+        }
+    }
+
+    fmt::ExplainCloseGroup("Serialization", Some("Serialization"), true, es)?;
     Ok(())
 }
 
