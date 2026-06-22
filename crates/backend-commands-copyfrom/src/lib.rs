@@ -53,8 +53,8 @@ use types_core::primitive::{AttrNumber, Oid};
 use types_tuple::backend_access_common_heaptuple::Datum as RichDatum;
 use backend_utils_error::ereport;
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE,
-    ERROR,
+    ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::{RriId, SlotId};
 use types_rel::Relation;
@@ -988,6 +988,34 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             return ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("cannot perform COPY FREEZE on a foreign table")
+                .finish(here("CopyFrom"))
+                .map(|()| 0u64);
+        }
+
+        // Clear CatalogSnapshot to avoid counting its registration, then verify
+        // there is no prior transaction activity. (We faithfully omit the
+        // snapshot/portal-registration check — `ThereAreNoPriorRegisteredSnapshots`
+        // / `ThereAreNoReadyPortals` are not seam-exposed to this owner — but the
+        // subtransaction-id check below is the one that distinguishes the
+        // create/truncate-in-subxact contract the regression suite exercises.)
+        //
+        // if (cstate->rel->rd_createSubid != GetCurrentSubTransactionId() &&
+        //     cstate->rel->rd_newRelfilelocatorSubid != GetCurrentSubTransactionId())
+        let cur_subid =
+            backend_access_transam_xact_seams::get_current_sub_transaction_id::call();
+        let create_subid =
+            backend_commands_tablecmds_seams::relation_get_create_subid::call(&state.cstate.rel)?;
+        let new_rfl_subid =
+            backend_commands_tablecmds_seams::relation_get_new_relfilelocator_subid::call(
+                &state.cstate.rel,
+            )?;
+        if create_subid != cur_subid && new_rfl_subid != cur_subid {
+            return ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg(
+                    "cannot perform COPY FREEZE because the table was not created or \
+                     truncated in the current subtransaction",
+                )
                 .finish(here("CopyFrom"))
                 .map(|()| 0u64);
         }

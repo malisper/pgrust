@@ -6738,6 +6738,7 @@ dependencies = [
  "backend-commands-copy-seams",
  "backend-commands-copyfrom-seams",
  "backend-commands-copyfromparse",
+ "backend-commands-tablecmds-seams",
  "backend-commands-trigger-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execIndexing-seams",

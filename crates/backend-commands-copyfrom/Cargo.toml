@@ -59,6 +59,7 @@ backend-executor-execPartition-seams = { path = "../backend-executor-execPartiti
 backend-executor-nodeModifyTable-seams = { path = "../backend-executor-nodeModifyTable-seams" }
 backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
