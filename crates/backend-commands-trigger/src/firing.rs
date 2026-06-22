@@ -51,8 +51,10 @@ use types_core::primitive::Oid;
 use types_core::xact::CommandId;
 use types_datum::Datum;
 use types_error::{
-    PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_UNDEFINED_OBJECT,
+    PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
+use backend_utils_error::ereport;
 use types_nodes::trigger::{
     TriggerData, T_TriggerData, TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW, AFTER_TRIGGER_2CTID,
     AFTER_TRIGGER_CP_UPDATE, AFTER_TRIGGER_DONE, AFTER_TRIGGER_FDW_FETCH, AFTER_TRIGGER_FDW_REUSE,
@@ -689,14 +691,27 @@ pub fn after_trigger_execute<'mcx>(
             )?);
         }
     }
-    // GetUserIdAndSecContext(&save_rolid, ...); if (save_rolid != ats_rolid)
-    // SetUserIdAndSecContext(...). The event was queued with ats_rolid =
-    // GetUserId(); firing in the same session it equals the current user, so no
-    // role switch is needed. A genuine mismatch (e.g. a deferred event fired
-    // under a different role) needs SetUserIdAndSecContext, still unported.
-    if evtshared.ats_rolid != backend_utils_init_miscinit::GetUserId() {
-        return Err(role_switch_unported());
-    }
+    // If necessary, become the role that was active when the trigger got queued
+    // (trigger.c:4544-4553). The event was queued with ats_rolid = GetUserId();
+    // for a deferred event fired under a different role (e.g. after RESET ROLE,
+    // or inside a security-restricted operation) we must SetUserIdAndSecContext
+    // to ats_rolid with SECURITY_LOCAL_USERID_CHANGE for the duration of the
+    // trigger call, then restore. The restore must run on both the Ok and Err
+    // paths, so it rides a Drop guard.
+    let (save_rolid, save_sec_context) =
+        backend_utils_init_miscinit::GetUserIdAndSecContext();
+    let _role_guard = if save_rolid != evtshared.ats_rolid {
+        backend_utils_init_miscinit::SetUserIdAndSecContext(
+            evtshared.ats_rolid,
+            save_sec_context | types_core::init::SECURITY_LOCAL_USERID_CHANGE,
+        );
+        Some(RoleRestoreGuard {
+            save_rolid,
+            save_sec_context,
+        })
+    } else {
+        None
+    };
 
     // `trigdata->tg_relation` — the live relation, aliased (refcount bump) for
     // the duration of the call (the RI accessors read relname/relnamespace/attrs
@@ -1063,8 +1078,9 @@ pub fn after_trigger_mark_events(
     events: &mut EventList,
     mut move_list: Option<&mut EventList>,
     immediate_only: bool,
-) -> bool {
+) -> PgResult<bool> {
     let mut found = false;
+    let mut deferred_found = false;
     let firing_counter = with_after_triggers(|at| at.firing_counter);
 
     let n = events.events.len();
@@ -1085,15 +1101,27 @@ pub fn after_trigger_mark_events(
             }
         }
 
+        // If it's deferred, move it to move_list, if requested.
         if defer_it {
             if let Some(ml) = move_list.as_deref_mut() {
+                deferred_found = true;
                 crate::queue::after_trigger_add_event(ml, events.events[i], &evtshared);
                 events.events[i].ate_flags |= AFTER_TRIGGER_DONE;
             }
         }
     }
 
-    found
+    // We could allow deferred triggers if, before the end of the
+    // security-restricted operation, we were to verify that a SET CONSTRAINTS
+    // ... IMMEDIATE has fired all such triggers.  For now, don't bother.
+    if deferred_found && backend_utils_init_miscinit::InSecurityRestrictedOperation() {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg("cannot fire deferred trigger within security-restricted operation")
+            .into_error());
+    }
+
+    Ok(found)
 }
 
 // ===========================================================================
@@ -1174,12 +1202,16 @@ pub fn after_trigger_end_query(estate: &mut EStateData<'_>) -> PgResult<()> {
             )
         });
 
-        let found = after_trigger_mark_events(&mut events, Some(&mut move_list), true);
+        let mark_result = after_trigger_mark_events(&mut events, Some(&mut move_list), true);
 
+        // Write the (mutated) lists back before propagating any error, so the
+        // queue state stays consistent for transaction abort.
         with_after_triggers(|at| {
             at.events = move_list;
             at.query_stack[qd].events = events;
         });
+
+        let found = mark_result?;
 
         if !found {
             break;
@@ -4967,8 +4999,9 @@ fn fire_global_event_cycle(
     let result = (|| -> PgResult<()> {
         loop {
             let mut events = with_after_triggers(|at| std::mem::take(&mut at.events));
-            let found = after_trigger_mark_events(&mut events, None, immediate_only);
+            let mark_result = after_trigger_mark_events(&mut events, None, immediate_only);
             with_after_triggers(|at| at.events = events);
+            let found = mark_result?;
 
             if !found {
                 break;
@@ -5058,14 +5091,23 @@ fn cross_partition_update_unported() -> PgError {
     )
 }
 
-#[cold]
-#[inline(never)]
-fn role_switch_unported() -> PgError {
-    PgError::error(
-        "AfterTriggerExecute: become-queued-role (GetUserIdAndSecContext / \
-         SetUserIdAndSecContext) for a non-current ats_rolid is not ported"
-            .to_string(),
-    )
+/// Restores the saved role/sec-context on scope exit (trigger.c:4569-4571
+/// `if (save_rolid != ats_rolid) SetUserIdAndSecContext(save_rolid,
+/// save_sec_context)`). Installed only when a role switch actually happened, so
+/// `Drop` unconditionally restores; runs on both the normal-return and
+/// error-unwind paths of the trigger call.
+struct RoleRestoreGuard {
+    save_rolid: Oid,
+    save_sec_context: i32,
+}
+
+impl Drop for RoleRestoreGuard {
+    fn drop(&mut self) {
+        backend_utils_init_miscinit::SetUserIdAndSecContext(
+            self.save_rolid,
+            self.save_sec_context,
+        );
+    }
 }
 
 // ===========================================================================
