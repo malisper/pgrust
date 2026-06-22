@@ -3607,6 +3607,7 @@ pub fn init_seams() {
     // Installing it now is an additive, verified no-op for the live `Node` enum
     // (nothing in the normal build calls `node_equal_seam`).
     types_nodes::opaque_node::install_node_equal_seam(node_equal_seam_adapter);
+    backend_nodes_equalfuncs_seams::equal_query::set(equal_query);
     backend_nodes_equalfuncs_seams::equal_expr_list::set(equal_expr_list_impl);
     backend_nodes_equalfuncs_seams::equal_targetentry_list::set(equal_targetentry_list_impl);
     backend_nodes_equalfuncs_seams::equal_sortgroupclause_list::set(equal_sortgroupclause_list_impl);

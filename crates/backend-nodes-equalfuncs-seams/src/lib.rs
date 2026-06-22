@@ -26,6 +26,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `equal((Node *) a, (Node *) b)` over two whole `Query` trees
+    /// (`_equalQuery`). Used by relcache.c's `equalRuleLocks` to compare the
+    /// cached `RewriteRule.actions` (each a whole post-analysis `Query`) when
+    /// deciding whether a rebuilt relcache entry's rule tree changed (the
+    /// CREATE OR REPLACE VIEW in-transaction redefinition path).
+    pub fn equal_query<'a, 'b>(
+        a: &types_nodes::copy_query::Query<'a>,
+        b: &types_nodes::copy_query::Query<'b>
+    ) -> bool
+);
+
+seam_core::seam!(
     /// `equal((List *) a, (List *) b)` over two `List *` of `Expr *` — the
     /// generic `_equalList` form for an expression list (`COMPARE_NODE_FIELD`
     /// over a `List<Expr>`). Used by prepagg's `find_compatible_agg` to compare

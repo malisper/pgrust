@@ -270,13 +270,16 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
         let keep_tupdesc = equal_tuple_descs(&old.rd_att, &newrel.rd_att);
         // C: `keep_rules = equalRuleLocks(old->rd_rules, newrel->rd_rules)` then
         // `SWAPFIELD(RuleLock *, rd_rules)` — preserve the old rule tree (avoid
-        // pointer churn) when it is logically unchanged. A full `equalRuleLocks`
-        // over the cached `Query` trees needs the `equal` node-comparison
-        // engine; here both trees were just rebuilt from the same `pg_rewrite`
-        // rows, so a presence match is the conservative keep predicate (both
-        // branches yield a correct tree — only the C pointer identity, which
-        // Rust does not expose, would differ).
-        let keep_rules = old.rd_rules.is_some() == newrel.rd_rules.is_some();
+        // pointer churn) when it is logically unchanged, otherwise install the
+        // freshly built one. A presence-only match (`is_some == is_some`) is
+        // WRONG: a `CREATE OR REPLACE VIEW v AS ...` issued IN THE SAME
+        // TRANSACTION updates the existing `_RETURN` rule's action `Query`
+        // (e.g. adds a WHERE clause) while the rule is still present, so both
+        // `rd_rules` are `Some` and the stale rule would be preserved — the
+        // rewriter would then re-expand `v` with the OLD definition (bug
+        // #17811). Do the real `equalRuleLocks` content comparison so the
+        // rebuilt rule tree wins when the rule body changed.
+        let keep_rules = equal_rule_locks(&old.rd_rules, &newrel.rd_rules);
         // C: `keep_policies = equalRSDesc(old->rd_rsdesc, newrel->rd_rsdesc)`
         // then `SWAPFIELD(RowSecurityDesc *, rd_rsdesc)`. A presence-only match
         // (`is_some == is_some`) is WRONG: when the policy set changes but both
@@ -483,6 +486,54 @@ fn equal_tuple_descs(
             true
         }
         (None, None) => true,
+        _ => false,
+    }
+}
+
+/// `equalRuleLocks(rlock1, rlock2)` (relcache.c) over the owned rule trees —
+/// the rebuild's keep-rules decision. The rule ordering is repeatable
+/// (`RelationBuildRuleLock` reads them in a consistent order), so corresponding
+/// slots are compared. Two rules match when their `ruleId`, `event`, `enabled`,
+/// `isInstead`, `qual` node, and `actions` `Query` list are all equal. Both
+/// `None` is equal; exactly one `None` is not. A presence-only comparison is
+/// unsafe (it would preserve a stale rule when the rule body changes but the
+/// rule stays present — the CREATE OR REPLACE VIEW in-transaction case), so this
+/// does the full content comparison the C performs.
+fn equal_rule_locks(
+    rl1: &Option<mcx::PgBox<'static, types_relcache_entry::RuleLock>>,
+    rl2: &Option<mcx::PgBox<'static, types_relcache_entry::RuleLock>>,
+) -> bool {
+    match (rl1, rl2) {
+        (None, None) => true,
+        (Some(l1), Some(l2)) => {
+            if l1.rules.len() != l2.rules.len() {
+                return false;
+            }
+            for (r1, r2) in l1.rules.iter().zip(l2.rules.iter()) {
+                if r1.ruleId != r2.ruleId
+                    || r1.event != r2.event
+                    || r1.enabled != r2.enabled
+                    || r1.isInstead != r2.isInstead
+                {
+                    return false;
+                }
+                // equal(rule1->qual, rule2->qual)
+                if !equal_opt_node(&r1.qual, &r2.qual) {
+                    return false;
+                }
+                // equal(rule1->actions, rule2->actions) — element-wise over the
+                // cached action `Query` trees (`_equalList` of `_equalQuery`).
+                if r1.actions.len() != r2.actions.len() {
+                    return false;
+                }
+                for (a1, a2) in r1.actions.iter().zip(r2.actions.iter()) {
+                    if !backend_nodes_equalfuncs_seams::equal_query::call(a1, a2) {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
         _ => false,
     }
 }
