@@ -243,6 +243,16 @@ seam!(
     pub fn event_trigger_alter_table_relid(relid: Oid)
 );
 seam!(
+    /// `EventTriggerCollectAlterTableSubcmd(subcmd, address)` (event_trigger.c)
+    /// — record one ALTER TABLE subcommand and its resulting object address on
+    /// the in-progress `SCT_AlterTable` command (`ATExecCmd`, tablecmds.c:5688).
+    /// A no-op without an active collection state.
+    pub fn event_trigger_collect_alter_table_subcmd<'mcx>(
+        subcmd: &Node<'mcx>,
+        address: ObjectAddress,
+    ) -> PgResult<()>
+);
+seam!(
     /// `ProcessUtility(wrapper)` (utility.c:1595-1606) — build the subcommand
     /// `PlannedStmt` around `stmt` with a `None` (DestNone) receiver and re-enter
     /// the dispatch. Encapsulated as a seam because the wrapper-`PlannedStmt`

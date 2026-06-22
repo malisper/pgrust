@@ -1256,6 +1256,9 @@ fn ATRewriteCatalogs<'mcx>(
                     Some(c) => c.clone_in(mcx)?,
                     None => unreachable!("subcmds hold Node::AlterTableCmd"),
                 };
+                // The whole `Node::AlterTableCmd` wrapper, cloned alongside, to
+                // hand to `EventTriggerCollectAlterTableSubcmd((Node *) cmd, ..)`.
+                let cmd_node = wqueue[ti].subcmds[pass as usize][si].clone_in(mcx)?;
                 // In C, `tab->rel` is a single long-lived Relation pointer whose
                 // `rd_rel`/`rd_att` are rebuilt in place by relcache invalidation
                 // as prior subcommands in this pass mutate the catalog (each
@@ -1272,7 +1275,7 @@ fn ATRewriteCatalogs<'mcx>(
                     }
                     wqueue[ti].rel = Some(relation_open(mcx, relid, NoLock)?);
                 }
-                ATExecCmd(mcx, wqueue, ti, &cmd, lockmode, pass, context)?;
+                ATExecCmd(mcx, wqueue, ti, &cmd, &cmd_node, lockmode, pass, context)?;
             }
 
             // After the ALTER TYPE / SET EXPRESSION pass, do cleanup work
@@ -1332,11 +1335,17 @@ fn ATExecCmd<'mcx>(
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     ti: usize,
     cmd: &AlterTableCmd<'mcx>,
+    subcmd_node: &Node<'mcx>,
     lockmode: LOCKMODE,
     cur_pass: AlterTablePass,
     context: &AlterTableUtilityContext<'_>,
 ) -> PgResult<()> {
-    let _address: ObjectAddress;
+    // C: `ObjectAddress address = InvalidObjectAddress;` — the break-only
+    // subtypes (AT_SetLogged, AT_SetAccessMethod, AT_DropOids, AT_ReAdd*, …)
+    // leave it Invalid, and `EventTriggerCollectAlterTableSubcmd` is still
+    // called with it below.
+    #[allow(unused_assignments)]
+    let mut _address: ObjectAddress = types_catalog::catalog_dependency::InvalidObjectAddress;
 
     // rel = tab->rel;
     let rel = wqueue[ti]
@@ -2150,6 +2159,14 @@ fn ATExecCmd<'mcx>(
         // C: `default: elog(ERROR, "unexpected alter table type")`, unreachable
         // here because `AlterTableType` is exhaustively matched above.
     }
+
+    // Report the subcommand to interested event triggers.
+    //   if (cmd)
+    //       EventTriggerCollectAlterTableSubcmd((Node *) cmd, address);
+    backend_tcop_utility_out_seams::event_trigger_collect_alter_table_subcmd::call(
+        subcmd_node,
+        _address,
+    )?;
 
     let _ = (cur_pass, context);
     Ok(())

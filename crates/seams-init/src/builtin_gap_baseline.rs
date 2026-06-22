@@ -268,7 +268,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3359, "macaddr_sortsupport", BuiltinGapKind::NotRegistered),
     (3376, "pg_safe_snapshot_blocking_pids", BuiltinGapKind::NotRegistered),
     (3378, "pg_isolation_test_session_is_blocked", BuiltinGapKind::NotRegistered),
-    (3382, "pg_identify_object_as_address", BuiltinGapKind::NotRegistered),
     (3383, "brin_minmax_opcinfo", BuiltinGapKind::NotRegistered),
     (3384, "brin_minmax_add_value", BuiltinGapKind::NotRegistered),
     (3385, "brin_minmax_consistent", BuiltinGapKind::NotRegistered),

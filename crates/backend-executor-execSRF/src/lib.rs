@@ -83,6 +83,7 @@ mod pg_get_multixact_members;
 mod pg_get_catalog_foreign_keys;
 mod pg_partition_tree;
 mod pg_event_trigger_dropped_objects;
+mod pg_event_trigger_ddl_commands;
 mod pg_get_publication_tables;
 mod pg_lock_status;
 mod pg_prepared_xact;
@@ -229,6 +230,9 @@ pub fn init_seams() {
     // `pg_event_trigger_dropped_objects` (OID 3566) — the `sql_drop`
     // event-trigger SRF listing the command's dropped objects.
     pg_event_trigger_dropped_objects::register_pg_event_trigger_dropped_objects();
+    // `pg_event_trigger_ddl_commands` (OID 4568) — the `ddl_command_end`
+    // event-trigger SRF listing the DDL commands the firing command ran.
+    pg_event_trigger_ddl_commands::register_pg_event_trigger_ddl_commands();
     // `pg_get_publication_tables(VARIADIC text[])` (OID 6119) — the published
     // tables (column lists + row filters) of one or more publications.
     pg_get_publication_tables::register_pg_get_publication_tables();
