@@ -3395,9 +3395,15 @@ pub fn expandNSItemAttrs<'mcx>(
     require_col_privs: bool,
     location: i32,
 ) -> PgResult<PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>> {
-    // Snapshot what we need (the nsitem) so we can mutate pstate below.
+    // Snapshot what we need (the nsitem) so we can mutate pstate below. For an
+    // uplevel star (`sublevels_up > 0`, e.g. `WITH t AS (SELECT OLD.*)` where
+    // OLD lives in an outer rule range table), `nsitem_index` is relative to the
+    // ancestor ParseState `sublevels_up` levels up, not the current `pstate`
+    // (C holds a direct `ParseNamespaceItem *` from the matching level, so it
+    // never indexes the wrong namespace). Resolve the owner level first.
     let (nsitem_snapshot, rtekind, perminfo_present) = {
-        let nsitem = &pstate.p_namespace[nsitem_index];
+        let owner = nsitem_level(pstate, sublevels_up);
+        let nsitem = &owner.p_namespace[nsitem_index];
         let rte = nsitem_rte(nsitem);
         (
             clone_nsitem(nsitem, mcx)?,
@@ -3409,15 +3415,21 @@ pub fn expandNSItemAttrs<'mcx>(
     let mut names: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     let vars = expandNSItemVars(mcx, pstate, &nsitem_snapshot, sublevels_up, location, Some(&mut names))?;
 
-    // Require read access to the table (handles zero-column relations).
+    // Require read access to the table (handles zero-column relations). The
+    // perminfo and rtable belong to the owner level; an uplevel relation's
+    // perms were already required at its own level (mirror the bare-Var path in
+    // ExpandSingleTable), so only mark when the relation is local.
     if rtekind == RTE_RELATION {
         debug_assert!(perminfo_present);
         let rtindex = nsitem_snapshot.p_rtindex;
+        let owner = nsitem_level(pstate, sublevels_up);
         let perminfo_index = {
-            let rte = &pstate.p_rtable[(rtindex - 1) as usize];
-            getRTEPermissionInfo(&pstate.p_rteperminfos, rte)?
+            let rte = &owner.p_rtable[(rtindex - 1) as usize];
+            getRTEPermissionInfo(&owner.p_rteperminfos, rte)?
         };
-        pstate.p_rteperminfos[perminfo_index].requiredPerms |= ACL_SELECT;
+        if sublevels_up == 0 {
+            pstate.p_rteperminfos[perminfo_index].requiredPerms |= ACL_SELECT;
+        }
     }
 
     let mut te_list: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
