@@ -141,6 +141,16 @@ fn fc_int8out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Da
     Ok(ret_cstring(fcinfo, crate::int8out(v)))
 }
 
+/// `int8send(int8) -> bytea` (pg_proc.dat oid 2409). C: `pq_begintypsend(&buf);
+/// pq_sendint64(&buf, arg1); PG_RETURN_BYTEA_P(pq_endtypsend(&buf))` — the value's
+/// 8 big-endian bytes. The `Varlena` payload is just the wire bytes; the libpq /
+/// fmgr boundary wraps the varlena framing.
+fn fc_int8send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = arg_i64(fcinfo, 0);
+    fcinfo.set_ref_result(RefPayload::Varlena(v.to_be_bytes().to_vec()));
+    Ok(Datum::from_usize(0))
+}
+
 // ---- comparison operators (int8 / int84 / int48 / int82 / int28) ----
 
 fn fc_int8eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
@@ -475,6 +485,7 @@ pub fn register_int8_builtins() {
         // ---- I/O ----
         builtin(460, "int8in", 1, true, false, fc_int8in),
         builtin(461, "int8out", 1, true, false, fc_int8out),
+        builtin(2409, "int8send", 1, true, false, fc_int8send),
         // ---- comparison operators ----
         builtin(467, "int8eq", 2, true, false, fc_int8eq),
         builtin(468, "int8ne", 2, true, false, fc_int8ne),

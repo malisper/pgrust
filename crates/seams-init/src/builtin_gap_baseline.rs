@@ -132,7 +132,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2331, "array_unnest", BuiltinGapKind::NotRegistered),
     (2402, "record_recv", BuiltinGapKind::NotRegistered),
     (2408, "int8recv", BuiltinGapKind::NotRegistered),
-    (2409, "int8send", BuiltinGapKind::NotRegistered),
     (2410, "int2vectorrecv", BuiltinGapKind::NotRegistered),
     (2411, "int2vectorsend", BuiltinGapKind::NotRegistered),
     (2416, "unknownrecv", BuiltinGapKind::NotRegistered),
