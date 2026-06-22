@@ -528,12 +528,29 @@ pub fn end_prepare(
 }
 
 // ---------------------------------------------------------------------------
-// GlobalTransactionData / TwoPhaseStateData — owned 2PC state model
+// GlobalTransactionData / TwoPhaseStateData — flat #[repr(C)] cross-process
+// shared-memory model
 // ---------------------------------------------------------------------------
+//
+// In C `TwoPhaseStateData *TwoPhaseState` lives in the main shared-memory
+// segment (`TwoPhaseShmemInit` → `ShmemInitStruct`) and every backend reaches
+// the SAME bytes. A prepared transaction created by one backend must therefore
+// be visible to any other backend (after a `\c -` reconnect the new backend
+// must still see `pg_prepared_xacts` rows and be able to `COMMIT PREPARED`).
+//
+// This port places the genuinely-shared state at the real `ShmemInitStruct`
+// address. Every `GlobalTransactionData` is `#[repr(C)]` (gid is a fixed
+// `[u8; GIDSIZE]` array, NOT a `String`, so it lives in shmem) and the
+// `prepXacts[]` active list + the freelist link through `gxact.next` mirror
+// twophase.c exactly. `TwoPhaseStateData` is a thin handle holding the raw
+// shared base pointer; its accessors index into the shared block.
 
 /// `GlobalTransactionData` — one prepared (or preparing) global transaction.
-/// The C struct's `next` freelist link is modelled by [`TwoPhaseStateData`]'s
-/// explicit `free_gxacts` index stack. `pgprocno` indexes the dummy PGPROC.
+/// `#[repr(C)]` so the array of these can live in genuine cross-process shared
+/// memory. `next` is the freelist link (a prepXacts/gxacts index, or
+/// `INVALID_GXACT_IDX` for the list tail), mirroring twophase.c's `next`
+/// pointer. `pgprocno` indexes the dummy PGPROC.
+#[repr(C)]
 #[derive(Clone, Debug)]
 pub struct GlobalTransactionData {
     pub pgprocno: ProcNumber,
@@ -546,8 +563,17 @@ pub struct GlobalTransactionData {
     pub valid: bool,
     pub ondisk: bool,
     pub inredo: bool,
-    pub gid: String,
+    /// Freelist link (gxact index) — `INVALID_GXACT_IDX` for the tail. Mirrors
+    /// the C `GlobalTransactionData.next` pointer.
+    next: i32,
+    /// `gid[GIDSIZE]` plus the live length. A fixed array (not a `String`) so
+    /// the struct is `#[repr(C)]` and shmem-placeable.
+    gid_len: u16,
+    gid_buf: [u8; GIDSIZE],
 }
+
+/// Freelist tail sentinel (the C `NULL` `next`).
+const INVALID_GXACT_IDX: i32 = -1;
 
 impl GlobalTransactionData {
     fn blank(pgprocno: ProcNumber) -> Self {
@@ -562,81 +588,168 @@ impl GlobalTransactionData {
             valid: false,
             ondisk: false,
             inredo: false,
-            gid: String::new(),
+            next: INVALID_GXACT_IDX,
+            gid_len: 0,
+            gid_buf: [0u8; GIDSIZE],
         }
+    }
+
+    /// The live GID as a `&str` (the bytes are always valid UTF-8 — GIDs are
+    /// ASCII identifiers written via [`Self::set_gid`]).
+    pub fn gid(&self) -> &str {
+        // SAFETY: gid_buf[..gid_len] was written from a `&str` in set_gid.
+        unsafe { core::str::from_utf8_unchecked(&self.gid_buf[..self.gid_len as usize]) }
+    }
+
+    /// Overwrite the GID (the C `strlcpy(gxact->gid, gid, GIDSIZE)`). Callers
+    /// have already bounded `gid.len() < GIDSIZE`.
+    pub fn set_gid(&mut self, gid: &str) {
+        let bytes = gid.as_bytes();
+        let n = bytes.len();
+        self.gid_buf[..n].copy_from_slice(bytes);
+        self.gid_len = n as u16;
     }
 }
 
-/// `TwoPhaseStateData` — the 2PC shared state, owned algorithmic model.
+/// `#[repr(C)]` flat header for the shared `TwoPhaseStateData`. The flexible
+/// `gxacts[]` array of [`GlobalTransactionData`] and the `prep_order[]` active
+/// index list follow immediately after this header in the same shmem block, so
+/// the whole structure is a single `ShmemInitStruct` allocation reachable by
+/// every backend. `free_head` is the freelist head index (C `freeGXacts`).
+#[repr(C)]
+struct SharedHeader {
+    free_head: i32,
+    num_prep_xacts: u32,
+    max_prepared_xacts: u32,
+}
+
+/// `TwoPhaseStateData` — a handle over the genuinely-shared 2PC state in main
+/// shared memory. Holds only the raw base pointer (the `ShmemInitStruct`
+/// address); all state lives in the shared block, so a fresh handle built in
+/// any backend reaches the same prepared transactions.
 pub struct TwoPhaseStateData {
-    gxacts: Vec<GlobalTransactionData>,
-    free_gxacts: Vec<usize>,
-    prep_xacts: ActiveArray,
+    /// Base of the shared block (start of [`SharedHeader`]).
+    base: *mut u8,
     pub max_prepared_xacts: usize,
 }
 
-struct ActiveArray {
-    order: Vec<usize>,
-}
+// SAFETY: the handle is a single shared-memory pointer; the C model guards all
+// access with TwoPhaseStateLock (an LWLock). Concurrency across backends is by
+// real processes, not threads.
+unsafe impl Send for TwoPhaseStateData {}
 
 impl TwoPhaseStateData {
-    /// `TwoPhaseShmemInit` (`IsUnderPostmaster=false` branch): build the
-    /// freelist of `max_prepared_xacts` gxact slots, each associated with its
-    /// preallocated dummy PGPROC via `prepared_xact_procno`.
-    pub fn new(max_prepared_xacts: usize) -> Self {
-        let mut gxacts = Vec::with_capacity(max_prepared_xacts);
-        let mut free_gxacts = Vec::with_capacity(max_prepared_xacts);
-        for i in 0..max_prepared_xacts {
-            let procno = proc::prepared_xact_procno::call(i as i32);
-            gxacts.push(GlobalTransactionData::blank(procno));
-            // C head-inserts the freelist (pop order i=max-1..0); we push 0..max
-            // and pop from the end to reproduce that order.
-            free_gxacts.push(i);
-        }
-        TwoPhaseStateData {
-            gxacts,
-            free_gxacts,
-            prep_xacts: ActiveArray { order: Vec::new() },
-            max_prepared_xacts,
+    /// Offset of the `prep_order[]` active-index array within the shared block
+    /// (immediately after the maxaligned header).
+    fn prep_order_off(&self) -> usize {
+        maxalign(core::mem::size_of::<SharedHeader>())
+    }
+
+    /// Offset of the `gxacts[]` array within the shared block (after the
+    /// maxaligned header + the maxaligned prep_order[] array).
+    fn gxacts_off(&self) -> usize {
+        let after_order =
+            self.prep_order_off() + self.max_prepared_xacts * core::mem::size_of::<i32>();
+        maxalign(after_order)
+    }
+
+    fn header(&self) -> &SharedHeader {
+        // SAFETY: base points at a SharedHeader-sized-and-aligned shmem block.
+        unsafe { &*(self.base as *const SharedHeader) }
+    }
+
+    fn header_mut(&mut self) -> &mut SharedHeader {
+        // SAFETY: as `header`, exclusive via the caller's `&mut self`.
+        unsafe { &mut *(self.base as *mut SharedHeader) }
+    }
+
+    fn gxact(&self, idx: usize) -> &GlobalTransactionData {
+        debug_assert!(idx < self.max_prepared_xacts);
+        // SAFETY: gxacts[] holds max_prepared_xacts GlobalTransactionData in the
+        // shared block starting at gxacts_off().
+        unsafe {
+            &*(self.base.add(self.gxacts_off()) as *const GlobalTransactionData).add(idx)
         }
     }
 
-    /// Test/standalone constructor that does not consult `prepared_xact_procno`.
-    pub fn new_standalone(max_prepared_xacts: usize) -> Self {
-        let mut gxacts = Vec::with_capacity(max_prepared_xacts);
-        let mut free_gxacts = Vec::with_capacity(max_prepared_xacts);
-        for i in 0..max_prepared_xacts {
-            gxacts.push(GlobalTransactionData::blank(i as ProcNumber));
-            free_gxacts.push(i);
+    fn gxact_mut(&mut self, idx: usize) -> &mut GlobalTransactionData {
+        debug_assert!(idx < self.max_prepared_xacts);
+        let off = self.gxacts_off();
+        // SAFETY: as `gxact`, exclusive via `&mut self`.
+        unsafe { &mut *(self.base.add(off) as *mut GlobalTransactionData).add(idx) }
+    }
+
+    /// `prep_order[i]` — the gxacts index of the i-th active prepared xact.
+    fn order(&self, i: usize) -> usize {
+        debug_assert!(i < self.num_prep_xacts());
+        // SAFETY: prep_order[] holds num_prep_xacts valid i32 indices.
+        unsafe { *(self.base.add(self.prep_order_off()) as *const i32).add(i) as usize }
+    }
+
+    fn set_order(&mut self, i: usize, idx: usize) {
+        debug_assert!(i < self.max_prepared_xacts);
+        let off = self.prep_order_off();
+        // SAFETY: i < max_prepared_xacts; the slot is within the prep_order[]
+        // array bounds.
+        unsafe { *(self.base.add(off) as *mut i32).add(i) = idx as i32 }
+    }
+
+    /// `TwoPhaseShmemInit` (`IsUnderPostmaster=false` branch): initialize the
+    /// shared block — build the freelist of `max_prepared_xacts` gxact slots,
+    /// each associated with its preallocated dummy PGPROC via
+    /// `prepared_xact_procno`, and zero the active list.
+    fn init_shared(&mut self) {
+        let max = self.max_prepared_xacts;
+        {
+            let h = self.header_mut();
+            h.num_prep_xacts = 0;
+            h.free_head = INVALID_GXACT_IDX;
         }
-        TwoPhaseStateData {
-            gxacts,
-            free_gxacts,
-            prep_xacts: ActiveArray { order: Vec::new() },
-            max_prepared_xacts,
+        // C head-inserts the freelist (pop order i=max-1..0). Build i=0..max,
+        // each linking to the previous head, so the head ends at max-1 and pops
+        // descend exactly as C does.
+        for i in 0..max {
+            let procno = proc::prepared_xact_procno::call(i as i32);
+            let prev_head = self.header().free_head;
+            let g = self.gxact_mut(i);
+            *g = GlobalTransactionData::blank(procno);
+            g.next = prev_head;
+            self.header_mut().free_head = i as i32;
         }
     }
 
     pub fn num_prep_xacts(&self) -> usize {
-        self.prep_xacts.order.len()
+        self.header().num_prep_xacts as usize
     }
 
     pub fn prep_xact(&self, i: usize) -> &GlobalTransactionData {
-        &self.gxacts[self.prep_xacts.order[i]]
+        self.gxact(self.order(i))
     }
 
     pub fn prep_xact_mut(&mut self, i: usize) -> &mut GlobalTransactionData {
-        let idx = self.prep_xacts.order[i];
-        &mut self.gxacts[idx]
+        let idx = self.order(i);
+        self.gxact_mut(idx)
     }
 
+    /// Pop the freelist head (the C `gxact = TwoPhaseState->freeGXacts;
+    /// TwoPhaseState->freeGXacts = gxact->next;`). Returns the gxacts index.
     fn pop_free(&mut self) -> Option<usize> {
-        self.free_gxacts.pop()
+        let head = self.header().free_head;
+        if head == INVALID_GXACT_IDX {
+            return None;
+        }
+        let idx = head as usize;
+        let next = self.gxact(idx).next;
+        self.header_mut().free_head = next;
+        Some(idx)
     }
 
+    /// Append `idx` to the active `prepXacts[]` list, returning its slot.
     fn push_active(&mut self, idx: usize) -> usize {
-        self.prep_xacts.order.push(idx);
-        self.prep_xacts.order.len() - 1
+        let slot = self.num_prep_xacts();
+        self.set_order(slot, idx);
+        self.header_mut().num_prep_xacts = (slot + 1) as u32;
+        slot
     }
 }
 
@@ -653,14 +766,13 @@ impl core::ops::IndexMut<usize> for TwoPhaseStateData {
 }
 
 /// `TwoPhaseShmemSize` — the shmem allocation size for `max_prepared_xacts`.
+/// Mirrors the flat shared layout: a [`SharedHeader`], then the `prep_order[]`
+/// active-index array, then the `gxacts[]` array of [`GlobalTransactionData`].
 pub fn two_phase_shmem_size(max_prepared_xacts: usize) -> usize {
-    const OFFSETOF_PREPXACTS: usize = 16;
-    const SIZEOF_PTR: usize = 8;
-    const SIZEOF_GTD: usize = 8 + 4 + 4 + 8 + 8 + 8 + 4 + 4 + 4 + 1 + 3 + GIDSIZE;
-    let mut size = OFFSETOF_PREPXACTS;
-    size += max_prepared_xacts * SIZEOF_PTR;
+    let mut size = maxalign(core::mem::size_of::<SharedHeader>());
+    size += max_prepared_xacts * core::mem::size_of::<i32>();
     size = maxalign(size);
-    size += max_prepared_xacts * maxalign(SIZEOF_GTD);
+    size += max_prepared_xacts * core::mem::size_of::<GlobalTransactionData>();
     size
 }
 
@@ -704,7 +816,7 @@ pub fn mark_as_preparing(
 
     let result = (|| -> PgResult<usize> {
         for i in 0..state.num_prep_xacts() {
-            if state.prep_xact(i).gid == gid {
+            if state.prep_xact(i).gid() == gid {
                 return raise(ereport(ERROR)
                     .errcode(types_error::ERRCODE_DUPLICATE_OBJECT)
                     .errmsg(alloc::format!(
@@ -768,8 +880,7 @@ fn mark_as_preparing_guts(
     g.locking_backend = my_proc_number;
     g.valid = false;
     g.inredo = false;
-    g.gid.clear();
-    g.gid.push_str(gid);
+    g.set_gid(gid);
 
     *my_locked_gxact = Some(slot);
     Ok(())
@@ -818,7 +929,7 @@ pub fn lock_gxact(
                 let g = state.prep_xact(i);
                 (
                     g.valid,
-                    g.gid.clone(),
+                    g.gid().to_string(),
                     g.locking_backend,
                     g.owner,
                     g.pgprocno,
@@ -883,8 +994,21 @@ pub fn remove_gxact(state: &mut TwoPhaseStateData, slot: usize) -> PgResult<()> 
             .errcode(types_error::ERRCODE_INTERNAL_ERROR)
             .errmsg("failed to find entry in GlobalTransaction array"));
     }
-    let backing = state.prep_xacts.order.swap_remove(slot);
-    state.free_gxacts.push(backing);
+    // Swap-remove from prepXacts[]: move the last active entry into `slot` and
+    // shrink the active count (the C `TwoPhaseState->prepXacts[i] =
+    // TwoPhaseState->prepXacts[--TwoPhaseState->numPrepXacts];`).
+    let backing = state.order(slot);
+    let last = state.num_prep_xacts() - 1;
+    if slot != last {
+        let last_backing = state.order(last);
+        state.set_order(slot, last_backing);
+    }
+    state.header_mut().num_prep_xacts = last as u32;
+    // Return the gxact to the freelist head (C `gxact->next =
+    // TwoPhaseState->freeGXacts; TwoPhaseState->freeGXacts = gxact;`).
+    let prev_head = state.header().free_head;
+    state.gxact_mut(backing).next = prev_head;
+    state.header_mut().free_head = backing as i32;
     Ok(())
 }
 
@@ -929,7 +1053,7 @@ pub fn pg_prepared_xact_rows(state: &TwoPhaseStateData) -> PgResult<Vec<Prepared
         }
         rows.push(PreparedXactRow {
             transaction: proc::proc_xid::call(g.pgprocno),
-            gid: g.gid.clone(),
+            gid: g.gid().to_string(),
             prepared: g.prepared_at,
             ownerid: g.owner,
             dbid: proc::proc_database_id::call(g.pgprocno),
@@ -1731,8 +1855,7 @@ pub fn prepare_redo_add(
         g.valid = false;
         g.ondisk = xlog_rec_ptr_is_invalid(start_lsn);
         g.inredo = true;
-        g.gid.clear();
-        g.gid.push_str(&gid);
+        g.set_gid(&gid);
     }
 
     if origin_id != INVALID_REP_ORIGIN_ID {
@@ -2102,7 +2225,7 @@ pub fn lookup_gxact(
         for i in 0..state.num_prep_xacts() {
             let (valid, gxact_gid, ondisk, xid, start_lsn) = {
                 let g = state.prep_xact(i);
-                (g.valid, g.gid.clone(), g.ondisk, g.xid, g.prepare_start_lsn)
+                (g.valid, g.gid().to_string(), g.ondisk, g.xid, g.prepare_start_lsn)
             };
             if valid && gxact_gid == gid {
                 let buf = if ondisk {
@@ -2186,7 +2309,7 @@ pub fn lookup_gxact_by_subid(state: &TwoPhaseStateData, subid: Oid) -> PgResult<
     lwlock::lock_twophase_state::call(false)?;
     for i in 0..state.num_prep_xacts() {
         let g = state.prep_xact(i);
-        if g.valid && is_two_phase_transaction_gid_for_subid(subid, &g.gid) {
+        if g.valid && is_two_phase_transaction_gid_for_subid(subid, g.gid()) {
             found = true;
             break;
         }
@@ -2488,16 +2611,25 @@ pub fn set_proc_exit_cleanup(f: alloc::boxed::Box<dyn Fn() -> PgResult<()>>) {
 // ---------------------------------------------------------------------------
 //
 // C keeps `TwoPhaseStateData *TwoPhaseState` in main shared memory, stood up by
-// `TwoPhaseShmemInit` and reached by every backend. This port models the
-// genuinely-shared state as a single process-global [`TwoPhaseStateData`]
-// behind a `Mutex` (`TwoPhaseStateLock` serializes access in C; the lock-guard
-// seams still bracket the algorithmic functions, and this `Mutex` is the owned
-// model of the shared allocation). `with_twophase_state` is the per-backend
-// accessor the prepare/abort/redo seams use to reach `&mut TwoPhaseStateData`.
+// `TwoPhaseShmemInit` (`ShmemInitStruct`) and reached by EVERY backend at the
+// same mapped address. This port places the genuinely-shared state at that real
+// `ShmemInitStruct` address: [`TWO_PHASE_STATE_BASE`] holds the shared base
+// pointer (set once by `TwoPhaseShmemInit` in the postmaster, before fork, so
+// every forked backend inherits the identical mapping at the same VA — exactly
+// like ProcSignal/MainLWLockArray). `with_twophase_state` builds a fresh
+// [`TwoPhaseStateData`] handle over that base on each call, so a prepared
+// transaction created by one backend is visible to any other backend (including
+// a fresh connection after `\c -`). `TwoPhaseStateLock` (a real cross-process
+// LWLock) still serializes mutation via the lock-guard seams.
 
-/// The process-global 2PC shared state, built by [`two_phase_shmem_init`].
-static TWO_PHASE_STATE: std::sync::OnceLock<std::sync::Mutex<TwoPhaseStateData>> =
-    std::sync::OnceLock::new();
+/// Base of the genuinely-shared `TwoPhaseStateData` block (the C
+/// `TwoPhaseState` pointer). Set by [`two_phase_shmem_init`] in the postmaster;
+/// inherited by every forked backend (same MAP_SHARED VA).
+static TWO_PHASE_STATE_BASE: std::sync::atomic::AtomicPtr<u8> =
+    std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Cached `max_prepared_transactions` (set alongside the base at shmem init).
+static TWO_PHASE_MAX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// `TwoPhaseShmemSize()` (seam-facing) — mirrors C's `TwoPhaseShmemSize(void)`,
 /// which reads the `max_prepared_xacts` GUC global itself. The zero-arg
@@ -2515,70 +2647,50 @@ fn two_phase_shmem_size_seam() -> usize {
 /// freelist. Idempotent per process (the `OnceLock` matches the C invariant
 /// that `TwoPhaseShmemInit` runs once at shmem creation).
 pub fn two_phase_shmem_init() -> PgResult<()> {
+    use std::sync::atomic::Ordering::Relaxed;
     let max_prepared_xacts = max_prepared_xacts_guc();
-    // Reserve/attach the shared allocation (mirrors C's ShmemInitStruct call;
-    // `found` is the C `*foundPtr`). The owned model below is the live state.
-    let _ = ipc_shmem::shmem_init_struct::call(
+    // Reserve/attach the shared allocation (the C `ShmemInitStruct`); `found`
+    // is the C `*foundPtr` — true when attaching to an already-created segment.
+    let (base, found) = ipc_shmem::shmem_init_struct::call(
         "Prepared Transaction Table",
         two_phase_shmem_size(max_prepared_xacts),
     )?;
-    // GetNumberFromPGProc(&PreparedXactProcs[i]) for each slot is consulted by
-    // `TwoPhaseStateData::new`. Build once; ignore the redundant-init case.
-    let _ = TWO_PHASE_STATE.set(std::sync::Mutex::new(TwoPhaseStateData::new(max_prepared_xacts)));
+    TWO_PHASE_STATE_BASE.store(base, Relaxed);
+    TWO_PHASE_MAX.store(max_prepared_xacts, Relaxed);
+    // Only the creator (C `!found` / `!IsUnderPostmaster`) initializes the
+    // freelist; an attaching backend leaves the shared bytes untouched.
+    if !found {
+        let mut state = TwoPhaseStateData { base, max_prepared_xacts };
+        state.init_shared();
+    }
     Ok(())
 }
 
-/// Run `f` with `&mut TwoPhaseStateData` over the process-global shared state.
+/// Run `f` with `&mut TwoPhaseStateData` over the genuinely-shared 2PC state.
+/// The handle is a thin wrapper over the `ShmemInitStruct` base, so every call
+/// (in any backend) reaches the SAME shared bytes — no per-process copy. C
+/// serializes mutation with the cross-process `TwoPhaseStateLock` LWLock, which
+/// the lock-guard seams inside the algorithmic functions still take; the
+/// `&mut TwoPhaseStateData` here is a per-call view, not the synchronization
+/// primitive. Reentrant 2PC paths (e.g. `FinishPreparedTransaction` holding the
+/// lock across callbacks that call `TwoPhaseGetDummyProc(lock_held=true)`) are
+/// fine: each builds its own handle over the same shmem, and the LWLock's
+/// `lock_held` parameter governs re-entry exactly as in C.
+///
 /// Panics if [`two_phase_shmem_init`] has not run (the C invariant: the shmem
 /// struct exists before any prepare/abort/redo path touches it).
 pub fn with_twophase_state<R>(f: impl FnOnce(&mut TwoPhaseStateData) -> R) -> R {
-    // Reentrancy: in C, `TwoPhaseStateLock` is an LWLock that a single backend
-    // may already hold when a nested 2PC path re-enters (e.g.
-    // `FinishPreparedTransaction` holds it across `ProcessRecords`, whose
-    // `lock_twophase_postcommit`/`postabort` callbacks call
-    // `TwoPhaseGetDummyProc(xid, lock_held=true)`). The owned model serializes
-    // the shared `TwoPhaseStateData` behind a process-local non-reentrant
-    // `Mutex`; re-locking it on the SAME thread would self-deadlock. Since each
-    // backend is its own process (real fork), the Mutex never actually contends
-    // across backends — it is purely the per-process guard — so when this thread
-    // already holds it we reuse the live `&mut` through a thread-local raw
-    // pointer instead of re-acquiring (the C `lock_held` fast path).
-    if let Some(ptr) = TWO_PHASE_STATE_HELD.with(|h| h.get()) {
-        // SAFETY: `ptr` was published below from a live `&mut TwoPhaseStateData`
-        // borrow held by an enclosing `with_twophase_state` frame on THIS
-        // thread, which is still on the stack (the published pointer is cleared
-        // before that frame returns). No other thread can observe it (the cell
-        // is thread-local), and the outer frame does not touch the state while
-        // `f` runs, so this re-borrow is exclusive for the nested call's span.
-        let state: &mut TwoPhaseStateData = unsafe { &mut *ptr };
-        return f(state);
-    }
-
-    let mtx = TWO_PHASE_STATE
-        .get()
-        .expect("TwoPhaseState accessed before TwoPhaseShmemInit");
-    let mut guard = mtx.lock().expect("TwoPhaseStateLock poisoned");
-    let ptr: *mut TwoPhaseStateData = &mut *guard;
-    TWO_PHASE_STATE_HELD.with(|h| h.set(Some(ptr)));
-    // Clear the published pointer on the way out (including on unwind) before
-    // the guard drops, so no nested frame can observe a dangling pointer.
-    struct ClearOnDrop;
-    impl Drop for ClearOnDrop {
-        fn drop(&mut self) {
-            TWO_PHASE_STATE_HELD.with(|h| h.set(None));
-        }
-    }
-    let _clear = ClearOnDrop;
-    f(&mut guard)
-}
-
-::std::thread_local! {
-    /// Raw pointer to the `TwoPhaseStateData` this thread currently holds the
-    /// guard for (`None` when not held). Enables the reentrant `lock_held` fast
-    /// path in [`with_twophase_state`]. Backend-local (per-process), matching
-    /// the C invariant that `TwoPhaseStateLock` is held by at most one backend.
-    static TWO_PHASE_STATE_HELD: core::cell::Cell<Option<*mut TwoPhaseStateData>> =
-        const { core::cell::Cell::new(None) };
+    use std::sync::atomic::Ordering::Relaxed;
+    let base = TWO_PHASE_STATE_BASE.load(Relaxed);
+    assert!(
+        !base.is_null(),
+        "TwoPhaseState accessed before TwoPhaseShmemInit"
+    );
+    let mut state = TwoPhaseStateData {
+        base,
+        max_prepared_xacts: TWO_PHASE_MAX.load(Relaxed),
+    };
+    f(&mut state)
 }
 
 // ---------------------------------------------------------------------------
