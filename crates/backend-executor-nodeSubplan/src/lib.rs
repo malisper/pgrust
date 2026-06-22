@@ -257,16 +257,32 @@ fn ExecScanSubPlan<'mcx>(
     // Initialize ArrayBuildStateAny in caller's context, if needed.
     //   astate = initArrayResultAny(subplan->firstColType,
     //                               CurrentMemoryContext, true);
-    // `CurrentMemoryContext` at entry to ExecScanSubPlan — which is invoked
-    // from expression evaluation — is `econtext->ecxt_per_tuple_memory`, the
-    // short-lived per-tuple eval context. The whole array (accumulator and the
-    // final `makeArrayResultAny`) is built there (C `oldcontext`), so the result
-    // lives only until the caller resets that context on the next outer tuple.
+    // C's `CurrentMemoryContext` here is `econtext->ecxt_per_tuple_memory`, the
+    // short-lived per-tuple eval context, and `initArrayResultAny(..., true)`
+    // gives the build state its OWN child subcontext that `makeArrayResultAny(...,
+    // release=true)` deletes outright when the final array is built — so the
+    // accumulator's storage is freed by that single MemoryContextDelete, never by
+    // the per-tuple reset.
+    //
+    // The owned model has no separate astate subcontext: the build state and its
+    // element copies are charged directly to the resolved arena and reclaimed when
+    // the `astate` box drops at the end of this call. That box MUST be built in a
+    // context that is still valid (non-reset, non-recycled) when it drops. Using
+    // the per-tuple context is unsafe across this call: when the subplan child is a
+    // grouping-sets / rescanned node (e.g. `ARRAY(SELECT ... GROUP BY GROUPING
+    // SETS ...)` over a correlated outer scan), the child's ExprContext lifecycle
+    // can recycle / null out the per-tuple-memory backing of THIS econtext slot, so
+    // the per-tuple `Mcx` captured here resolves to a dangling (NULL) context — and
+    // dropping the per-tuple-charged astate box then deallocates against context 0
+    // → SIGSEGV in `Mcx::deallocate`. Build the accumulator in the per-query
+    // context instead: it is valid for the whole query, matching the result array
+    // already built in `PerQuery` below (and observationally identical to C, whose
+    // astate subcontext is deleted at query end at the latest).
     if subLinkType == SubLinkType::Array {
         astate = arrayfuncs::init_array_result_any::call(
             estate,
             econtext,
-            arrayfuncs::ArrayBuildCtx::PerTuple,
+            arrayfuncs::ArrayBuildCtx::PerQuery,
             firstColType,
         )?;
     }
@@ -352,11 +368,15 @@ fn ExecScanSubPlan<'mcx>(
             let attr = exec_tuples::slot_getattr_by_id::call(estate, slot, 1)?;
             //   astate = accumArrayResultAny(astate, dvalue, disnull,
             //                                subplan->firstColType, oldcontext);
-            // `oldcontext` is the entry-time per-tuple eval context.
+            // Accumulate into the SAME per-query context the build state was
+            // initialized in above (C charges this to the astate's own subcontext,
+            // which the owned model folds into per-query so the box and its element
+            // copies stay valid until the box drops at the end of this call — see
+            // the init-site comment for the per-tuple dangling-context hazard).
             astate = arrayfuncs::accum_array_result_any::call(
                 estate,
                 econtext,
-                arrayfuncs::ArrayBuildCtx::PerTuple,
+                arrayfuncs::ArrayBuildCtx::PerQuery,
                 astate,
                 attr.value,
                 attr.isnull,
