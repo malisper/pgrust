@@ -2765,7 +2765,17 @@ pub fn preprocess_expression<'mcx>(
     // model expect a single (possibly AND) Expr, so the implicit-AND flattening
     // is applied by the caller; here we return the canonicalized Expr unchanged,
     // matching the value-model convention used by preprocess_qual_conditions.
+    //
+    // EXCEPT for the constant-TRUE case: `make_ands_implicit` (makefuncs.c:817)
+    // returns NIL (== an empty qual list == TRUE) when the input is a non-null
+    // `Const` whose Datum is boolean TRUE. In the value model an empty qual list
+    // is `None`, so a top-level const-TRUE qual must be dropped here — otherwise
+    // it survives into the plan as a useless `One-Time Filter: true` gating qual.
+    // (A const-FALSE Const is kept, becoming a `One-Time Filter: false`.)
     let _ = make_ands_implicit_noop;
+    if kind == EXPRKIND_QUAL && expr_is_const_true(&expr) {
+        return Ok(None);
+    }
 
     Ok(Some(expr))
 }
@@ -2774,6 +2784,18 @@ pub fn preprocess_expression<'mcx>(
 /// (nodes-core makefuncs.rs) is applied; see `preprocess_expression`.
 #[inline]
 fn make_ands_implicit_noop() {}
+
+/// The constant-TRUE arm of `make_ands_implicit` (makefuncs.c:821-824):
+/// `IsA(clause, Const) && !((Const *) clause)->constisnull &&
+/// DatumGetBool(((Const *) clause)->constvalue)`. A const-TRUE qual is dropped
+/// (treated as an empty implicit-AND list). `DatumGetBool(d)` is `(d & 1) != 0`.
+#[inline]
+fn expr_is_const_true(expr: &Expr<'_>) -> bool {
+    match expr.as_const() {
+        Some(c) => !c.constisnull && (c.constvalue.as_usize() & 1) != 0,
+        None => false,
+    }
+}
 
 /// Whether `root.parse`'s Query has SubLinks. The arena `PlannerInfo` does not
 /// carry the Query directly, so `preprocess_expression` cannot consult
