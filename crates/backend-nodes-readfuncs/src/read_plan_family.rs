@@ -329,7 +329,7 @@ fn read_expr_box_pgvec<'mcx>(
 /// `'mcx`-carrying `SubPlan<'mcx>` (the `Plan.initPlan` element type; distinct
 /// from the lifetime-free `Expr::SubPlan` carrier). The opening `{`/LABEL is
 /// consumed by the caller.
-fn read_subplan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubPlan<'mcx>> {
+pub(crate) fn read_subplan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubPlan<'mcx>> {
     let subLinkType = crate::read_expr_family::sublink_type_from(read_enum_field()?);
     let testexpr = read_expr_box_opt(mcx)?;
     let paramIds = read_int_list_pgvec(mcx)?;
@@ -403,6 +403,48 @@ fn read_initplan_list<'mcx>(
         }
     }
     Ok(Some(out))
+}
+
+/// `_readAlternativeSubPlan` (readfuncs.funcs.c) — reads the `{ALTERNATIVESUBPLAN
+/// ...}` body. `out_alternative_subplan` writes a single `:subplans (` list of
+/// framed `{SUBPLAN ...}` bodies `)`. The opening `{`/LABEL is consumed by the
+/// caller; this reads the `:subplans` field into a `Vec<PgBox<SubPlan>>`.
+pub(crate) fn read_alternative_subplan<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::primnodes::AlternativeSubPlan<'mcx>> {
+    let _label = next_tok()?; // :subplans
+    let open = next_tok()?;
+    let mut subplans: alloc::vec::Vec<PgBox<'mcx, types_nodes::primnodes::SubPlan<'mcx>>> =
+        alloc::vec::Vec::new();
+    if open.bytes.is_empty() {
+        // `<>` — C NIL (an empty AlternativeSubPlan is not expected, but mirror
+        // the NIL form defensively).
+        return Ok(types_nodes::primnodes::AlternativeSubPlan { subplans });
+    }
+    if open.bytes != b"(" {
+        return Err(elog_error("expected '(' for AlternativeSubPlan subplans list"));
+    }
+    loop {
+        let t = next_tok()?;
+        if t.bytes == b")" {
+            break;
+        }
+        // Each element is a framed `{SUBPLAN ...}`. `t` is the opening `{`.
+        if t.bytes.first() != Some(&b'{') {
+            return Err(elog_error("expected '{' opening a SubPlan in AlternativeSubPlan"));
+        }
+        let label = next_tok()?;
+        if label.bytes != b"SUBPLAN" {
+            return Err(elog_error("expected SUBPLAN label in AlternativeSubPlan list"));
+        }
+        let sp = read_subplan(mcx)?;
+        subplans.push(alloc_in(mcx, sp)?);
+        let close = next_tok()?;
+        if close.bytes.first() != Some(&b'}') {
+            return Err(elog_error("did not find '}' at end of SubPlan in AlternativeSubPlan"));
+        }
+    }
+    Ok(types_nodes::primnodes::AlternativeSubPlan { subplans })
 }
 
 /// `readXxxCols`: read the `:fldname` label, then a `( v0 v1 ...)` token run of
