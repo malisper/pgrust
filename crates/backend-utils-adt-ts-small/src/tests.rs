@@ -209,16 +209,16 @@ fn qtnsort_and_qtneq() {
 }
 
 #[test]
-fn qtnsort_orders_by_valcrc_ascending() {
+fn qtnsort_orders_by_valcrc_descending() {
     install_seams();
     let ctx = MemoryContext::new("test");
     let mcx = ctx.mcx();
 
-    // OR of three operands with distinct valcrc. The canonical sorted form must
-    // place the lowest valcrc at child[0] (which fillQT serializes to in+1, the
-    // right-printed operand) so that the highest valcrc prints leftmost — the
-    // order PostgreSQL 18.3 produces for ts_rewrite (verified against the
-    // tsearch regression oracle, e.g. 'moskva' | 'moscow').
+    // OR of three operands with distinct (signed) valcrc. C cmpQTN
+    // (tsquery_util.c:135) returns -1 when a.valcrc > b.valcrc, so qsort orders
+    // the child array by *descending* valcrc — child[0] holds the highest.
+    // Since child[0] (fillQT's in+1) is the right-printed operand, the highest
+    // valcrc prints rightmost, matching PostgreSQL 18.3 ts_rewrite exactly.
     let q = build(&Spec::Or(
         Box::new(Spec::Or(
             Box::new(Spec::Val(b"x1", 10)),
@@ -231,7 +231,7 @@ fn qtnsort_orders_by_valcrc_ascending() {
     QTNSort(&mut tree).unwrap();
     assert_eq!(tree.nchild(), 3);
     let crcs: alloc::vec::Vec<i32> = (0..3).map(|i| tree.child[i].valcrc()).collect();
-    assert_eq!(crcs, alloc::vec![10, 20, 30], "expected ascending valcrc order");
+    assert_eq!(crcs, alloc::vec![30, 20, 10], "expected descending valcrc order");
 }
 
 #[test]

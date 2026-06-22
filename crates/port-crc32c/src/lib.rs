@@ -13,7 +13,7 @@
 pub mod legacy;
 mod table;
 
-pub use legacy::legacy_crc32_lexeme;
+pub use legacy::{legacy_crc32_lexeme, traditional_crc32};
 
 use table::PG_CRC32C_TABLE;
 
@@ -100,13 +100,14 @@ mod tests {
     }
 
     /// `init_seams()` installs the legacy CRC-32 seam, and a `::call` through
-    /// the real seam (the path `gtsvector_compress` reaches) returns the
-    /// standard CRC-32 check vector — no "seam not installed" panic.
+    /// the real seam (the path `gtsvector_compress` reaches) returns the PG
+    /// *legacy* (bogus normal-table/reflected-code) check vector — no "seam not
+    /// installed" panic.
     #[test]
     fn legacy_seam_installed_and_returns_check_vector() {
         init_seams();
         let v = backend_utils_hash_small_seams::legacy_crc32_lexeme::call(b"123456789");
-        assert_eq!(v, 0xCBF4_3926);
+        assert_eq!(v, 0xC40E_D0B0);
     }
 
     /// Splitting the input across two COMP calls matches a single call,

@@ -17,9 +17,11 @@
 //!   (crc ^= 0xFFFFFFFF). `COMP_TRADITIONAL_CRC32` is `COMP_CRC32_NORMAL_TABLE`
 //!   over `pg_crc32_table[]` — `tab = (crc ^ byte) & 0xFF; crc = table[tab] ^
 //!   (crc >> 8)` — which over the reflected-0xEDB88320 `pg_crc32_table[]` is the
-//!   standard reflected CRC-32. That is exactly
-//!   [`port_crc32c::legacy::legacy_crc32_lexeme`] (same table, same normal-read
-//!   recurrence, same INIT/FIN), so this body delegates to it.
+//!   standard reflected CRC-32. That is
+//!   [`port_crc32c::legacy::traditional_crc32`] (same table, same normal-read
+//!   recurrence, same INIT/FIN), so this body delegates to it. Note this is
+//!   DISTINCT from `legacy_crc32_lexeme` (the bogus pre-9.5 reflected-code loop
+//!   used by tsquery/tsvector).
 //!
 //! * **`crc32c_bytea`** runs the input through the CRC-32C macros:
 //!   `INIT_CRC32C(crc)` (0xFFFFFFFF), `COMP_CRC32C` over `VARDATA_ANY`, then
@@ -35,7 +37,7 @@ pub mod fmgr_builtins;
 /// `crc32_bytea(PG_FUNCTION_ARGS)` value core: traditional CRC-32 of `in_bytes`
 /// (the detoasted `VARDATA_ANY` payload).
 pub fn crc32_bytea(in_bytes: &[u8]) -> u32 {
-    port_crc32c::legacy::legacy_crc32_lexeme(in_bytes)
+    port_crc32c::legacy::traditional_crc32(in_bytes)
 }
 
 /// `crc32c_bytea(PG_FUNCTION_ARGS)` value core: CRC-32C of `in_bytes` — the

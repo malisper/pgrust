@@ -424,15 +424,15 @@ pub fn QTNodeCompare(an: &QTNode<'_>, bn: &QTNode<'_>) -> PgResult<i32> {
         let acrc = operand_valcrc(&an.valnode);
         let bcrc = operand_valcrc(&bn.valnode);
 
-        // NOTE: PostgreSQL 18.3 canonicalizes a sorted tsquery so that the
-        // operand with the *highest* valcrc prints leftmost (verified against
-        // the tsearch regression oracle and a live PG 18.3 server, e.g.
-        // ts_rewrite normalizes 'moscow|moskva' -> 'moskva' | 'moscow'). Because
-        // QTN2QT serializes child[0] to in+1 (the right-printed operand), the
-        // child array must be ordered ascending by valcrc — the comparator
-        // returns a positive value when a.valcrc > b.valcrc.
+        // C tsquery_util.c:135 — `valcrc` is a *signed* int32 (ts_type.h notes
+        // it deliberately uses signed comparisons), and cmpQTN returns -1 when
+        // a.valcrc > b.valcrc, so qsort orders the child array by *descending*
+        // valcrc. QTN2QT serializes child[0] to in+1 (the right-printed
+        // operand), so the highest valcrc prints rightmost — matching PG's
+        // canonical ts_rewrite output exactly. (This relies on the LEGACY CRC
+        // being computed correctly; see port-crc32c::legacy.)
         if acrc != bcrc {
-            return Ok(if acrc > bcrc { 1 } else { -1 });
+            return Ok(if acrc > bcrc { -1 } else { 1 });
         }
 
         Ok(ts_compare_string(&an.word, &bn.word, false))

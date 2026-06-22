@@ -1541,12 +1541,13 @@ pub fn register_varlena_more_builtins() {
 /// `crc32_bytea(bytea) -> int8` (pg_crc.c). Traditional reflected CRC-32
 /// (zlib/Ethernet polynomial): `INIT_TRADITIONAL_CRC32` (0xFFFFFFFF) then
 /// `COMP_TRADITIONAL_CRC32` over the detoasted payload then
-/// `FIN_TRADITIONAL_CRC32` (^0xFFFFFFFF). `port_crc32c::legacy_crc32_lexeme`
-/// performs the whole INIT/COMP/FIN triple. C returns `PG_RETURN_INT64(crc)`
+/// `FIN_TRADITIONAL_CRC32` (^0xFFFFFFFF). `port_crc32c::traditional_crc32`
+/// performs the whole INIT/COMP/FIN triple — the *standard* reflected CRC-32,
+/// NOT the bogus `legacy_crc32_lexeme` variant. C returns `PG_RETURN_INT64(crc)`
 /// where `crc` is a `pg_crc32` (u32) — widened to a non-negative i64.
 fn fc_crc32_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    let crc = port_crc32c::legacy_crc32_lexeme(arg_bytes(fcinfo, 0));
+    let crc = port_crc32c::traditional_crc32(arg_bytes(fcinfo, 0));
     Ok(ret_i64(crc as u64 as i64))
 }
 
