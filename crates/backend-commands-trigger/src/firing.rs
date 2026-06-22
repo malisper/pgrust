@@ -630,8 +630,33 @@ pub fn after_trigger_execute<'mcx>(
     let tup_bits = event.ate_flags & AFTER_TRIGGER_TUP_BITS;
     let is_fdw = rel.relkind == RELKIND_FOREIGN_TABLE
         && (tup_bits == AFTER_TRIGGER_FDW_FETCH || tup_bits == AFTER_TRIGGER_FDW_REUSE);
+    let is_cp_update = (event.ate_flags & AFTER_TRIGGER_CP_UPDATE) != 0;
     if is_fdw {
         return Err(fdw_tuple_fetch_unported());
+    } else if is_cp_update {
+        // Cross-partition UPDATE (trigger.c:4426-4506): tuple1 comes from the
+        // source leaf partition (`ate_src_part`), tuple2 from the destination
+        // leaf (`ate_dst_part`), each converted into the root partitioned
+        // table's rowtype where the AFTER trigger fires.
+        let root_desc: types_tuple::heaptuple::TupleDescData<'_> = rel.relation.rd_att.clone_in(mcx)?;
+        if item_pointer_is_valid(&event.ate_ctid1) {
+            trig_formed = Some(fetch_trigger_tuple_cp(
+                mcx,
+                event.ate_src_part,
+                rel.relid,
+                &root_desc,
+                &event.ate_ctid1,
+            )?);
+        }
+        if item_pointer_is_valid(&event.ate_ctid2) {
+            new_formed = Some(fetch_trigger_tuple_cp(
+                mcx,
+                event.ate_dst_part,
+                rel.relid,
+                &root_desc,
+                &event.ate_ctid2,
+            )?);
+        }
     } else {
         // Regular-table path (the C `default` case): re-fetch by ItemPointer. An
         // invalid ctid1 (the AFTER-statement / no-row case) means no trigger
@@ -639,12 +664,8 @@ pub fn after_trigger_execute<'mcx>(
         if item_pointer_is_valid(&event.ate_ctid1) {
             trig_formed = Some(fetch_trigger_tuple(mcx, rel.relid, &event.ate_ctid1)?);
         }
-        let has_ctid2 =
-            tup_bits == AFTER_TRIGGER_2CTID || (event.ate_flags & AFTER_TRIGGER_CP_UPDATE) != 0;
+        let has_ctid2 = tup_bits == AFTER_TRIGGER_2CTID;
         if has_ctid2 && item_pointer_is_valid(&event.ate_ctid2) {
-            if (event.ate_flags & AFTER_TRIGGER_CP_UPDATE) != 0 {
-                return Err(cross_partition_update_unported());
-            }
             new_formed = Some(fetch_trigger_tuple(mcx, rel.relid, &event.ate_ctid2)?);
         }
     }
@@ -860,6 +881,69 @@ fn fetch_trigger_tuple<'mcx>(
     }
     rel.close(NoLock)?;
     result
+}
+
+/// Cross-partition AFTER-UPDATE tuple sourcing (`AfterTriggerExecute`'s
+/// CP_UPDATE arm, trigger.c:4426-4506).  The tuple was queued from a leaf
+/// partition (`leaf_relid` = `ate_src_part`/`ate_dst_part`); fetch it from that
+/// leaf by `ctid`, then — if the leaf is not the root partitioned table where
+/// the trigger fires — convert it into the root's rowtype via the by-name
+/// `TupleConversionMap` (`ExecGetChildToRootMap` + `execute_attr_map_slot`,
+/// modelled here at the tuple level with `convert_tuples_by_name` /
+/// `execute_attr_map_tuple`).  Returns a `FormedTuple` in the root's format
+/// (`mcx`-allocated, lifetime-extended for the slot side-channel, as in
+/// `fetch_trigger_tuple`).
+fn fetch_trigger_tuple_cp<'mcx>(
+    mcx: Mcx<'mcx>,
+    leaf_relid: Oid,
+    root_relid: Oid,
+    root_desc: &types_tuple::heaptuple::TupleDescData<'_>,
+    ctid: &ItemPointerData,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'static>> {
+    // Fetch the on-leaf tuple by ctid (SnapshotAny), exactly as the non-CP path.
+    let leaf_formed = fetch_trigger_tuple(mcx, leaf_relid, ctid)?;
+
+    // src_relInfo == relInfo: no conversion — the leaf is the root table itself.
+    if leaf_relid == root_relid {
+        return Ok(leaf_formed);
+    }
+
+    // map = ExecGetChildToRootMap(src_relInfo).  Build the by-name child→root
+    // conversion map from the leaf's descriptor to the root's descriptor.  When
+    // the rowtypes are physically compatible `convert_tuples_by_name` returns
+    // None (no conversion needed) and we keep the fetched tuple as-is, which is
+    // C's `ExecCopySlot` (the no-map branch).
+    let leaf_rel = backend_access_table_table_seams::table_open::call(mcx, leaf_relid, NoLock)?;
+    let map =
+        backend_access_common_next_seams::convert_tuples_by_name::call(mcx, &leaf_rel.rd_att, root_desc)?;
+    leaf_rel.close(NoLock)?;
+
+    let result = match map.as_ref() {
+        None => leaf_formed,
+        Some(map) => {
+            // execute_attr_map_slot(map->attrMap, src_slot, root_slot): rearrange
+            // the leaf tuple's columns into the root rowtype.
+            let converted = backend_access_common_next_seams::execute_attr_map_tuple::call(
+                mcx,
+                &leaf_formed.tuple,
+                leaf_formed.data.as_slice(),
+                map,
+            )?;
+            // Stamp the root relation OID on the converted tuple's header, mirroring
+            // the force-store into the root trigger slot (slot->tts_tableOid = root).
+            let mut converted = converted;
+            converted.tuple.t_tableOid = root_relid;
+            converted
+        }
+    };
+
+    // Lifetime-extend to 'static for the slot side-channel, same discipline as
+    // `fetch_trigger_tuple`: the FormedTuple is `mcx`-allocated (= es_query_cxt)
+    // and the borrowing slot payload is installed/dropped within
+    // `after_trigger_execute`.
+    let extended: types_tuple::backend_access_common_heaptuple::FormedTuple<'static> =
+        unsafe { core::mem::transmute(result) };
+    Ok(extended)
 }
 
 // ===========================================================================
@@ -2978,6 +3062,8 @@ fn exec_ar_insert_triggers_impl<'mcx>(
     after_trigger_save_event(
         estate,
         relinfo,
+        /* src_part_oid */ INVALID_OID,
+        /* dst_part_oid */ INVALID_OID,
         TRIGGER_EVENT_INSERT,
         /* row_trigger */ true,
         /* old_ctid */ None,
@@ -3540,9 +3626,12 @@ fn ri_fk_enforcement_skip<'mcx>(
 /// `transition_capture` are not threaded on this reachable INSERT-row leg (the
 /// caller guards transition capture). `recheck_indexes` is needed for the
 /// deferred-unique-constraint skip (`F_UNIQUE_KEY_RECHECK`).
+#[allow(clippy::too_many_arguments)]
 fn after_trigger_save_event<'mcx>(
     estate: &mut EStateData<'mcx>,
     relinfo: types_nodes::RriId,
+    src_part_oid: Oid,
+    dst_part_oid: Oid,
     event: u32,
     row_trigger: bool,
     old_ctid: Option<ItemPointerData>,
@@ -3605,12 +3694,13 @@ fn after_trigger_save_event<'mcx>(
     if relkind as i8 == RELKIND_FOREIGN_TABLE {
         return Err(fdw_tuple_fetch_unported());
     }
-    // The partitioned-table row event only arises on a cross-partition update
-    // (loud-guarded at the front-half); a plain row event on a non-partitioned
-    // table is the path here.
-    if relkind as i8 == RELKIND_PARTITIONED_TABLE {
-        return Err(cross_partition_update_unported());
-    }
+    // A row event on the root partitioned table arises only on a cross-partition
+    // UPDATE: the event is queued on the root, but the OLD/NEW tuples live in the
+    // source/destination leaf partitions (`src_part_oid`/`dst_part_oid`), to be
+    // re-fetched and converted to root format in AfterTriggerExecute.  The ctids
+    // recorded below are the leaf tuples' tids (captured in the caller's
+    // oldslot/newslot, which were fetched from the leaves).
+    let is_partitioned_root = relkind as i8 == RELKIND_PARTITIONED_TABLE;
 
     // If transition tables are the only reason we're here, return (trigger.c:6247).
     // The transition-capture head ran in the ExecAR* driver; if there is no AFTER
@@ -3657,16 +3747,19 @@ fn after_trigger_save_event<'mcx>(
         }
         TRIGGER_EVENT_UPDATE => {
             // ctid1 = oldslot->tts_tid (= the update's `tupleid`);
-            // ctid2 = newslot->tts_tid; 2CTID.
+            // ctid2 = newslot->tts_tid.  For a cross-partition UPDATE on the root
+            // partitioned table the flag is AFTER_TRIGGER_CP_UPDATE (not 2CTID),
+            // and the source/destination leaf OIDs are recorded so
+            // AfterTriggerExecute can re-fetch the leaf tuples.
             let oc =
                 old_ctid.expect("AfterTriggerSaveEvent: UPDATE row event needs the old ctid");
             let ns = newslot.expect("AfterTriggerSaveEvent: UPDATE row event needs a newslot");
-            (
-                TRIGGER_TYPE_UPDATE,
-                oc,
-                estate.slot(ns).tts_tid,
-                AFTER_TRIGGER_2CTID,
-            )
+            let upd_flag = if is_partitioned_root {
+                types_nodes::trigger::AFTER_TRIGGER_CP_UPDATE
+            } else {
+                AFTER_TRIGGER_2CTID
+            };
+            (TRIGGER_TYPE_UPDATE, oc, estate.slot(ns).tts_tid, upd_flag)
         }
         other => {
             return Err(PgError::error(format!(
@@ -3678,8 +3771,16 @@ fn after_trigger_save_event<'mcx>(
         ate_flags: tup_flag,
         ate_ctid1: ctid1,
         ate_ctid2: ctid2,
-        ate_src_part: INVALID_OID,
-        ate_dst_part: INVALID_OID,
+        ate_src_part: if is_partitioned_root {
+            src_part_oid
+        } else {
+            INVALID_OID
+        },
+        ate_dst_part: if is_partitioned_root {
+            dst_part_oid
+        } else {
+            INVALID_OID
+        },
     };
 
     let tgtype_level = TRIGGER_TYPE_ROW;
@@ -4243,6 +4344,8 @@ fn exec_ar_delete_triggers_impl<'mcx>(
     after_trigger_save_event(
         estate,
         relinfo,
+        /* src_part_oid */ INVALID_OID,
+        /* dst_part_oid */ INVALID_OID,
         TRIGGER_EVENT_DELETE,
         /* row_trigger */ true,
         /* old_ctid */ Some(old_ctid),
@@ -4847,17 +4950,34 @@ fn exec_ar_update_triggers_impl<'mcx>(
         return Ok(());
     }
 
-    // Cross-partition update routing where the ROOT partitioned table queues the
-    // event (`is_crosspart_update` with both src/dst partitions, and the
-    // partition→root format conversion in AfterTriggerSaveEvent) is still
-    // loud-guarded.
-    if is_crosspart_update || src_partinfo.is_some() {
-        return Err(cross_partition_update_unported());
-    }
     const TRIGGER_EVENT_UPDATE: u32 = 2;
 
-    // `tupsrc = src_partinfo ? src_partinfo : relinfo` (= relinfo here).
-    //
+    // `tupsrc = src_partinfo ? src_partinfo : relinfo`.  For a cross-partition
+    // UPDATE the OLD tuple lives in the source leaf partition, so the OLD slot is
+    // sourced from `tupsrc` (the leaf) and the ctid is fetched out of the leaf's
+    // relation; for the regular path `tupsrc == relinfo`.
+    let tupsrc = src_partinfo.unwrap_or(relinfo);
+    let dst_part_oid = _dst_partinfo
+        .map(|d| {
+            estate
+                .result_rel(d)
+                .ri_RelationDesc
+                .as_ref()
+                .map(|r| r.rd_id)
+                .expect("ExecARUpdateTriggers: dst partition has no relation")
+        })
+        .unwrap_or(INVALID_OID);
+    let src_part_oid = src_partinfo
+        .map(|s| {
+            estate
+                .result_rel(s)
+                .ri_RelationDesc
+                .as_ref()
+                .map(|r| r.rd_id)
+                .expect("ExecARUpdateTriggers: src partition has no relation")
+        })
+        .unwrap_or(INVALID_OID);
+
     // C: `oldslot = ExecGetTriggerOldSlot(estate, tupsrc)`, then
     //   if (fdw_trigtuple == NULL && ItemPointerIsValid(tupleid))
     //       GetTupleForTrigger(... oldslot ...);          // fetch OLD by ctid
@@ -4875,18 +4995,18 @@ fn exec_ar_update_triggers_impl<'mcx>(
     // stop. (The companion DELETE side, with tupleid/fdw_trigtuple set and
     // newslot NULL, captures the OLD tuple the same way.)
     let mcx = estate.es_query_cxt;
-    let rel_oid = estate
-        .result_rel(relinfo)
+    let tupsrc_oid = estate
+        .result_rel(tupsrc)
         .ri_RelationDesc
         .as_ref()
         .map(|r| r.rd_id)
-        .expect("ExecARUpdateTriggers: ResultRelInfo has no relation");
+        .expect("ExecARUpdateTriggers: tupsrc ResultRelInfo has no relation");
 
     // Source the OLD slot per the three C arms, or mark it empty.
     let have_old = tupleid.is_some() || fdw_trigtuple.is_some();
     let oldslot = if have_old {
         let slot =
-            backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
+            backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, tupsrc)?;
         if let Some(fdw) = fdw_trigtuple {
             // ExecForceStoreHeapTuple(fdw_trigtuple, oldslot, false);
             let formed_mcx = fdw.clone_in(mcx)?;
@@ -4895,9 +5015,10 @@ fn exec_ar_update_triggers_impl<'mcx>(
             )?;
         } else {
             // GetTupleForTrigger fetches OLD by ctid under the AFTER-trigger view
-            // and force-stores it into the OLD slot.
+            // and force-stores it into the OLD slot.  The fetch is from `tupsrc`
+            // (the source leaf for a cross-partition UPDATE, else the relation).
             let octid = tupleid.expect("have_old without fdw implies a valid tupleid");
-            let formed = fetch_trigger_tuple(mcx, rel_oid, octid)?;
+            let formed = fetch_trigger_tuple(mcx, tupsrc_oid, octid)?;
             let formed_mcx = formed.clone_in(mcx)?;
             backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
                 estate, slot, formed_mcx, false,
@@ -4909,7 +5030,7 @@ fn exec_ar_update_triggers_impl<'mcx>(
         // arm of ExecForceStoreHeapTuple, which (like C) does not stamp the
         // header's tts_tableOid — so set it here. A WHEN clause referencing
         // `old.tableoid` (e.g. `new.tableoid = old.tableoid`) reads it.
-        estate.slot_mut(slot).tts_tableOid = rel_oid;
+        estate.slot_mut(slot).tts_tableOid = tupsrc_oid;
         Some(slot)
     } else {
         // ExecClearTuple(oldslot): the OLD slot is empty for this event. We model
@@ -4944,8 +5065,52 @@ fn exec_ar_update_triggers_impl<'mcx>(
     // event: queue the AFTER ROW UPDATE trigger and/or capture both transition
     // tuples.
     let old_ctid = tupleid.copied();
-    let oldslot = oldslot.expect("regular UPDATE row event always has an OLD slot");
-    let ns = newslot.expect("regular UPDATE row event always has a NEW slot");
+    let mut oldslot = oldslot.expect("regular UPDATE row event always has an OLD slot");
+    let mut ns = newslot.expect("regular UPDATE row event always has a NEW slot");
+
+    // Cross-partition UPDATE: the OLD/NEW slots are in the leaf partitions'
+    // formats, but the AFTER trigger fires on the root partitioned table and its
+    // WHEN qual / column set are compiled against the root rowtype.  Convert both
+    // slots into the root's format (AfterTriggerSaveEvent's partitioned-root block,
+    // trigger.c:6388-6410), preserving the leaf tuple tids (ate_ctid1/ate_ctid2
+    // must keep pointing at the leaf tuples for AfterTriggerExecute to re-fetch).
+    let cp_ctid2 = estate.slot(ns).tts_tid;
+    if is_crosspart_update {
+        // rootslot = ExecGetTriggerOldSlot(estate, relinfo);
+        // map = ExecGetChildToRootMap(src_partinfo); convert OLD.
+        let root_old = backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
+        if let Some((attr_map, _outdesc)) =
+            backend_executor_execMain_seams::exec_get_child_to_root_map_full::call(mcx, estate, tupsrc)?
+        {
+            backend_executor_execTuples_seams::execute_attr_map_slot_explicit::call(
+                estate, &attr_map, oldslot, root_old,
+            )?;
+        } else {
+            backend_executor_execTuples_seams::exec_copy_slot::call(estate, root_old, oldslot)?;
+        }
+        // Preserve the leaf OLD tid + tableOid for the queued event / WHEN clause.
+        estate.slot_mut(root_old).tts_tableOid = tupsrc_oid;
+        oldslot = root_old;
+
+        // rootslot = ExecGetTriggerNewSlot(estate, relinfo); map = dst; convert NEW.
+        let root_new =
+            backend_commands_trigger_seams::exec_get_trigger_new_slot::call(estate, relinfo)?;
+        let dst_rri = _dst_partinfo.expect("cross-partition update has a dst partition");
+        if let Some((attr_map, _outdesc)) =
+            backend_executor_execMain_seams::exec_get_child_to_root_map_full::call(mcx, estate, dst_rri)?
+        {
+            backend_executor_execTuples_seams::execute_attr_map_slot_explicit::call(
+                estate, &attr_map, ns, root_new,
+            )?;
+        } else {
+            backend_executor_execTuples_seams::exec_copy_slot::call(estate, root_new, ns)?;
+        }
+        estate.slot_mut(root_new).tts_tableOid = dst_part_oid;
+        // AfterTriggerSaveEvent reads ctid2 off the newslot's tts_tid; the root
+        // (virtual) slot has none, so carry the leaf NEW tid across.
+        estate.slot_mut(root_new).tts_tid = cp_ctid2;
+        ns = root_new;
+    }
 
     // Capture the OLD/NEW transition tuples for an UPDATE.
     if cap_old || cap_new {
@@ -4973,6 +5138,8 @@ fn exec_ar_update_triggers_impl<'mcx>(
     after_trigger_save_event(
         estate,
         relinfo,
+        src_part_oid,
+        dst_part_oid,
         TRIGGER_EVENT_UPDATE,
         /* row_trigger */ true,
         /* old_ctid */ old_ctid,
@@ -5454,16 +5621,6 @@ fn fdw_tuple_fetch_unported() -> PgError {
     PgError::error(
         "AfterTriggerExecute: FDW / foreign-table after-trigger tuple sourcing \
          (AFTER_TRIGGER_FDW_*) is firing-substrate (per-query FDW tuplestore) not ported"
-            .to_string(),
-    )
-}
-
-#[cold]
-#[inline(never)]
-fn cross_partition_update_unported() -> PgError {
-    PgError::error(
-        "AfterTriggerExecute: cross-partition update after-trigger tuple sourcing \
-         (AFTER_TRIGGER_CP_UPDATE) is firing-substrate not ported"
             .to_string(),
     )
 }

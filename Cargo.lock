@@ -8500,6 +8500,7 @@ name = "backend-commands-trigger"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-next-seams",
  "backend-access-common-scankey",
  "backend-access-heap-heapam-seams",
  "backend-access-heap-heapam-visibility",

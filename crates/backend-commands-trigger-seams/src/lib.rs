@@ -149,6 +149,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecGetTriggerNewSlot(estate, relinfo)` (execUtils.c): the relInfo's
+    /// reusable slot for a trigger's NEW tuple (lazily created against the
+    /// relation's tuple descriptor). Returns its `SlotId`. Used by the
+    /// cross-partition AFTER-UPDATE root-conversion path.
+    pub fn exec_get_trigger_new_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+    ) -> PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
     /// `ExecUpdateLockMode(estate, relinfo)` (execMain.c): the row-lock mode
     /// (`LockTupleExclusive` / `LockTupleNoKeyExclusive`) for a BEFORE-ROW
     /// UPDATE, chosen by whether any key column is updated.

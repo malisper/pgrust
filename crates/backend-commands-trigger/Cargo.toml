@@ -98,6 +98,7 @@ backend-utils-misc-queryenvironment = { path = "../backend-utils-misc-queryenvir
 backend-utils-misc-queryenvironment-home = { path = "../backend-utils-misc-queryenvironment-home" }
 # ExecGetChildToRootMap (TransitionTableAddTuple child→root conversion gate).
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
+backend-access-common-next-seams = { path = "../backend-access-common-next-seams" }
 # tsvector_update_trigger carrier seams + make_tsvector / ParsedText for the
 # BEFORE-trigger rebuild-and-deposit of the tsvector column.
 backend-utils-adt-tsvector-ext-seams = { path = "../backend-utils-adt-tsvector-ext-seams" }

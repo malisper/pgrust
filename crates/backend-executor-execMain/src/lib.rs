@@ -1420,6 +1420,11 @@ fn install_get_tuple_for_trigger_seams() {
         execUtils::ExecGetTriggerOldSlot(estate, relinfo)
     });
 
+    // ExecGetTriggerNewSlot(estate, relinfo) — the relInfo's reusable NEW slot.
+    backend_commands_trigger_seams::exec_get_trigger_new_slot::set(|estate, relinfo| {
+        execUtils::ExecGetTriggerNewSlot(estate, relinfo)
+    });
+
     // ExecUpdateLockMode(estate, relinfo).
     backend_commands_trigger_seams::exec_update_lock_mode::set(|estate, relinfo| {
         ExecUpdateLockMode(estate, relinfo)
