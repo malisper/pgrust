@@ -21246,14 +21246,20 @@ dependencies = [
  "backend-utils-activity-pgstat-backend",
  "backend-utils-activity-pgstat-replslot",
  "backend-utils-activity-pgstat-slru",
+ "backend-utils-activity-pgstat-subscription",
  "backend-utils-activity-status",
+ "backend-utils-adt-varlena-seams",
  "backend-utils-fmgr-core",
+ "backend-utils-fmgr-funcapi-seams",
  "backend-utils-init-small-seams",
+ "mcx",
  "types-core",
  "types-datum",
  "types-error",
  "types-fmgr",
  "types-pgstat",
+ "types-replication",
+ "types-tuple",
 ]
 
 [[package]]

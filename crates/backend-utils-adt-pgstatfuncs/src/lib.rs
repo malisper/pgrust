@@ -37,6 +37,8 @@ use types_pgstat::activity_pgstat::{
 
 use backend_utils_activity_pgstat::pgstat_core;
 
+mod composite;
+
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
@@ -378,6 +380,22 @@ pub fn register_pgstatfuncs_builtins() {
             1,
             false,
             fc_pg_stat_reset_subscription_stats,
+        ),
+        // Single-composite-row (non-set-returning) accessors reachable through
+        // the scalar fmgr call path (target-list position). See `composite.rs`.
+        builtin(
+            6169,
+            "pg_stat_get_replication_slot",
+            1,
+            true,
+            crate::composite::fc_pg_stat_get_replication_slot,
+        ),
+        builtin(
+            6231,
+            "pg_stat_get_subscription_stats",
+            1,
+            true,
+            crate::composite::fc_pg_stat_get_subscription_stats,
         ),
     ]);
 }

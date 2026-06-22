@@ -23,3 +23,9 @@ backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-activity-status = { path = "../backend-utils-activity-status" }
 backend-utils-activity-pgstat-backend = { path = "../backend-utils-activity-pgstat-backend" }
+backend-utils-activity-pgstat-subscription = { path = "../backend-utils-activity-pgstat-subscription" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+types-replication = { path = "../types-replication" }
+types-tuple = { path = "../types-tuple" }
+mcx = { path = "../mcx" }
