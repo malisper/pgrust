@@ -1336,6 +1336,41 @@ pub fn ExplainNode<'es, 'p>(
             let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
             show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
         }
+        ntag::T_Gather => {
+            // explain.c:2022-2044: Filter + Workers Planned/Launched + Single Copy.
+            let gather = plan_node.expect_gather();
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.as_ref().map(|q| !q.is_empty()).unwrap_or(false) {
+                crate::details::show_instrumentation_count(es, "Rows Removed by Filter", 1, planstate.ps_head().instrument.as_deref())?;
+            }
+            fmt::ExplainPropertyInteger("Workers Planned", None, gather.num_workers as i64, es)?;
+            if es.analyze {
+                let nworkers = match planstate {
+                    PlanStateNode::Gather(g) => g.nworkers_launched,
+                    _ => 0,
+                };
+                fmt::ExplainPropertyInteger("Workers Launched", None, nworkers as i64, es)?;
+            }
+            if gather.single_copy || es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                fmt::ExplainPropertyBool("Single Copy", gather.single_copy, es)?;
+            }
+        }
+        ntag::T_GatherMerge => {
+            // explain.c:2046-2065: Filter + Workers Planned/Launched.
+            let gm = plan_node.expect_gathermerge();
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.as_ref().map(|q| !q.is_empty()).unwrap_or(false) {
+                crate::details::show_instrumentation_count(es, "Rows Removed by Filter", 1, planstate.ps_head().instrument.as_deref())?;
+            }
+            fmt::ExplainPropertyInteger("Workers Planned", None, gm.num_workers as i64, es)?;
+            if es.analyze {
+                let nworkers = match planstate {
+                    PlanStateNode::GatherMerge(g) => g.nworkers_launched,
+                    _ => 0,
+                };
+                fmt::ExplainPropertyInteger("Workers Launched", None, nworkers as i64, es)?;
+            }
+        }
         ntag::T_ModifyTable => {
             // explain.c:2242 / show_modifytable_info (explain.c:4520): the
             // Target Tables / FDW labeling (labeltargets) and EXPLAIN ANALYZE
