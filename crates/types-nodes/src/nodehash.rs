@@ -146,12 +146,39 @@ pub const fn PHJ_GROW_BUCKETS_PHASE(n: i32) -> i32 {
 //                    Owned-tree arena indices for chains
 // ===========================================================================
 
-/// Index of a [`HashJoinTupleData`] in [`HashJoinTableData::tuples`]. The
-/// owned model stores each tuple once and links chains by index, since the C
-/// `HashJoinTuple` pointers point into the dense-allocation chunk buffers and
-/// cannot be modeled as a self-referential graph of `Box`es.
+/// Index of a [`HashJoinTupleData`] in [`HashJoinTableData::tuples`] (the dense
+/// main-batch arena) — or, on the parallel probe path, a raw backend-local DSA
+/// address of an on-segment `HashJoinTupleData`. The owned model stores each
+/// tuple once and links chains by index, since the C `HashJoinTuple` pointers
+/// point into the dense-allocation chunk buffers and cannot be modeled as a
+/// self-referential graph of `Box`es.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct HashTupleIdx(pub usize);
+
+/// Index of a [`HashJoinTupleData`] in [`HashJoinTableData::skew_tuples`] — the
+/// SEPARATE skew-tuple arena. C allocates skew tuples in their own
+/// `MemoryContextAlloc(batchCxt)` storage, distinct from the dense-allocation
+/// chunks the main batch lives in; `ExecHashIncreaseNumBatches` renumbers ONLY
+/// the dense storage, so skew chains must index a separate arena to survive a
+/// rebatch's `mem::replace`. Keeping skew indices in their own newtype makes
+/// that separation type-enforced.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SkewTupleIdx(pub usize);
+
+/// A tagged locator distinguishing a tuple in the dense main-batch arena from
+/// one in the separate skew arena. The serial scan cursor (`hj_CurTuple`) and
+/// the scan loops walk both the dense bucket chains and the skew bucket chains,
+/// so the "current tuple" cursor must carry which arena it indexes. (In the
+/// parallel probe path the locator is always [`HashTupleRef::Dense`] carrying a
+/// raw DSA address — parallel hash joins never use the skew optimization.)
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum HashTupleRef {
+    /// A tuple in [`HashJoinTableData::tuples`] (or a raw DSA address in the
+    /// parallel path).
+    Dense(HashTupleIdx),
+    /// A tuple in [`HashJoinTableData::skew_tuples`].
+    Skew(SkewTupleIdx),
+}
 
 /// Index of a [`HashMemoryChunkData`] in [`HashJoinTableData::chunk_arena`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -161,9 +188,16 @@ pub struct HashChunkIdx(pub usize);
 /// bucket-chain link.
 #[derive(Clone, Copy, Debug)]
 pub enum HashJoinTupleLink {
-    /// `HashJoinTuple unshared` — next tuple in same bucket (serial mode);
-    /// `None` is the C `NULL`.
+    /// `HashJoinTuple unshared` — next tuple in same DENSE main-batch bucket
+    /// (serial mode); index into [`HashJoinTableData::tuples`]. `None` is the C
+    /// `NULL`.
     Unshared(Option<HashTupleIdx>),
+    /// `HashJoinTuple unshared` for a SKEW-arena tuple — next tuple in the same
+    /// skew bucket chain; index into [`HashJoinTableData::skew_tuples`]. `None`
+    /// is the C `NULL`. Distinct from [`Self::Unshared`] only by which arena it
+    /// indexes (C uses a single pointer; the owned two-arena model needs the
+    /// tag).
+    SkewUnshared(Option<SkewTupleIdx>),
     /// `dsa_pointer shared` — next tuple in same bucket (parallel mode).
     Shared(DsaPointer),
 }
@@ -207,8 +241,13 @@ pub struct HashSkewBucket {
     /// `uint32 hashvalue` — common hash value.
     pub hashvalue: uint32,
     /// `HashJoinTuple tuples` — linked list of inner-relation tuples (head
-    /// index into [`HashJoinTableData::tuples`]); `None` = empty.
-    pub tuples: Option<HashTupleIdx>,
+    /// index into the SEPARATE [`HashJoinTableData::skew_tuples`] arena);
+    /// `None` = empty. Skew tuples live apart from the dense main-batch arena
+    /// so a rebatch's `mem::replace`/renumber on `tuples` cannot invalidate
+    /// these chains. A skew tuple's own `next` link
+    /// ([`HashJoinTupleData::next`] = `Unshared(Some(SkewTupleIdx(i)))`) also
+    /// indexes `skew_tuples`.
+    pub tuples: Option<SkewTupleIdx>,
 }
 
 /// `HashMemoryChunkData` (hashjoin.h) — a dense-allocation chunk header. The C
@@ -432,6 +471,13 @@ pub struct HashJoinTableData<'mcx> {
     /// C carves these out of the dense-allocation chunk byte buffers; the owned
     /// model stores them here once and indexes them with [`HashTupleIdx`].
     pub tuples: PgVec<'mcx, HashJoinTupleData<'mcx>>,
+    /// OWNED-MODEL arena: every in-memory SKEW-bucket [`HashJoinTupleData`],
+    /// stored SEPARATELY from the dense `tuples` arena. C allocates skew tuples
+    /// in their own `batchCxt` storage, untouched by the dense rebatch; the
+    /// owned model mirrors that with a distinct Vec indexed by [`SkewTupleIdx`]
+    /// so `ExecHashIncreaseNumBatches`'s `mem::replace` on `tuples` never
+    /// renumbers (and thus never corrupts) the live skew chains.
+    pub skew_tuples: PgVec<'mcx, HashJoinTupleData<'mcx>>,
     /// OWNED-MODEL arena: the dense-allocation chunk headers, linked by
     /// [`HashChunkIdx`].
     pub chunk_arena: PgVec<'mcx, HashMemoryChunkData>,
@@ -643,9 +689,10 @@ pub struct HashJoinState<'mcx> {
     pub hj_CurBucketNo: i32,
     /// `int hj_CurSkewBucketNo`.
     pub hj_CurSkewBucketNo: i32,
-    /// `HashJoinTuple hj_CurTuple` — current tuple in the scan (index into the
-    /// hash table's tuple arena); `None` = NULL.
-    pub hj_CurTuple: Option<HashTupleIdx>,
+    /// `HashJoinTuple hj_CurTuple` — current tuple in the scan (a tagged
+    /// locator into either the dense `tuples` arena or the separate
+    /// `skew_tuples` arena); `None` = NULL.
+    pub hj_CurTuple: Option<HashTupleRef>,
     /// `TupleTableSlot *hj_OuterTupleSlot` — id into `es_tupleTable`.
     pub hj_OuterTupleSlot: Option<SlotId>,
     /// `TupleTableSlot *hj_HashTupleSlot` — id into `es_tupleTable`.

@@ -269,12 +269,13 @@ mod adapters {
     }
 
     pub fn cur_tuple_has_match<'mcx>(node: &HashJoinState<'mcx>) -> bool {
+        use types_nodes::nodehash::HashTupleRef;
         // HeapTupleHeaderHasMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple)).
         let table = ht_ref(node);
         match node.hj_CurTuple {
-            Some(idx) => {
+            Some(HashTupleRef::Dense(idx)) => {
                 if table.parallel_state.is_some() {
-                    // Parallel probe path: hj_CurTuple.0 is the raw on-DSA
+                    // Parallel probe path: the Dense ref carries the raw on-DSA
                     // HashJoinTuple address (set by ExecParallelScanHashBucket /
                     // ExecParallelScanHashTableForUnmatched), NOT a serial-arena
                     // index — read the match flag off the on-DSA flat image.
@@ -283,22 +284,33 @@ mod adapters {
                     table.tuples[idx.0].mintuple.tuple.t_infomask2 & HEAP_TUPLE_HAS_MATCH != 0
                 }
             }
+            // Serial skew-arena tuple (skew is serial-only).
+            Some(HashTupleRef::Skew(idx)) => {
+                table.skew_tuples[idx.0].mintuple.tuple.t_infomask2 & HEAP_TUPLE_HAS_MATCH != 0
+            }
             None => false,
         }
     }
 
     pub fn cur_tuple_set_match<'mcx>(node: &mut HashJoinState<'mcx>) -> PgResult<()> {
+        use types_nodes::nodehash::HashTupleRef;
         // HeapTupleHeaderSetMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple)).
         let cur = node.hj_CurTuple;
         let table = ht(node);
-        if let Some(idx) = cur {
-            if table.parallel_state.is_some() {
-                // Parallel probe path: idx.0 is the raw on-DSA HashJoinTuple
-                // address — set the match flag on the on-DSA flat image.
-                crate::parallel::cur_tuple_set_match_dsa(idx.0);
-            } else {
-                table.tuples[idx.0].mintuple.tuple.t_infomask2 |= HEAP_TUPLE_HAS_MATCH;
+        match cur {
+            Some(HashTupleRef::Dense(idx)) => {
+                if table.parallel_state.is_some() {
+                    // Parallel probe path: idx.0 is the raw on-DSA HashJoinTuple
+                    // address — set the match flag on the on-DSA flat image.
+                    crate::parallel::cur_tuple_set_match_dsa(idx.0);
+                } else {
+                    table.tuples[idx.0].mintuple.tuple.t_infomask2 |= HEAP_TUPLE_HAS_MATCH;
+                }
             }
+            Some(HashTupleRef::Skew(idx)) => {
+                table.skew_tuples[idx.0].mintuple.tuple.t_infomask2 |= HEAP_TUPLE_HAS_MATCH;
+            }
+            None => {}
         }
         Ok(())
     }

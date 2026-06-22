@@ -17,6 +17,7 @@ use types_error::PgResult;
 use types_nodes::nodehash::{
     BucketAndBatch, HashJoinBuckets, HashJoinTupleData, HashJoinTupleLink, HashMemoryChunkData,
     HashMemoryChunkLink, HashChunkIdx, HashJoinState, HashState, HashJoinTableData, HashTupleIdx,
+    HashTupleRef,
     INVALID_SKEW_BUCKET_NO, HASH_CHUNK_SIZE, HASH_CHUNK_THRESHOLD,
 };
 use types_nodes::nodehash::Hash as HashPlan;
@@ -300,6 +301,7 @@ pub fn ExecHashTableCreate<'mcx>(
             batches: PgVec::new_in(mcx),
             current_chunk_shared: types_execparallel::DsaPointer::default(),
             tuples: PgVec::new_in(mcx),
+            skew_tuples: PgVec::new_in(mcx),
             chunk_arena: PgVec::new_in(mcx),
             // spillCxt is a child of hashCxt in C; modelled by the per-query
             // context the batch spill files are charged to.
@@ -600,6 +602,7 @@ pub fn ExecHashTableDestroy<'mcx>(
     // too): drop the per-batch arenas and the bucket array. The control block
     // itself (`PgBox`) is dropped when `hashtable` goes out of scope here.
     hashtable.tuples.clear();
+    hashtable.skew_tuples.clear();
     hashtable.chunk_arena.clear();
     hashtable.chunks = None;
     hashtable.current_chunk = None;
@@ -1155,6 +1158,56 @@ pub fn ExecHashGetBucketAndBatch<'mcx>(
 }
 
 // ===========================================================================
+//          Serial scan-cursor accessors over the two-arena tuple model
+// ===========================================================================
+//
+// The serial scan loops walk both the dense main-batch bucket chains
+// (`tuples`) and the separate skew-bucket chains (`skew_tuples`). A
+// [`HashTupleRef`] tags which arena a cursor position lives in; these helpers
+// resolve a ref against the right arena so the scan code is arena-agnostic.
+
+/// The [`HashJoinTupleData`] a serial cursor points at (panics on a Shared
+/// link, which never occurs on the serial path).
+#[inline]
+fn ref_tuple<'a, 'mcx>(
+    ht: &'a HashJoinTableData<'mcx>,
+    r: HashTupleRef,
+) -> &'a HashJoinTupleData<'mcx> {
+    match r {
+        HashTupleRef::Dense(i) => &ht.tuples[i.0],
+        HashTupleRef::Skew(i) => &ht.skew_tuples[i.0],
+    }
+}
+
+/// The next cursor position in the same (dense or skew) chain.
+#[inline]
+fn ref_next(ht: &HashJoinTableData<'_>, r: HashTupleRef) -> Option<HashTupleRef> {
+    match r {
+        HashTupleRef::Dense(i) => match ht.tuples[i.0].next {
+            HashJoinTupleLink::Unshared(n) => n.map(HashTupleRef::Dense),
+            HashJoinTupleLink::SkewUnshared(_) | HashJoinTupleLink::Shared(_) => None,
+        },
+        HashTupleRef::Skew(i) => match ht.skew_tuples[i.0].next {
+            HashJoinTupleLink::SkewUnshared(n) => n.map(HashTupleRef::Skew),
+            HashJoinTupleLink::Unshared(_) | HashJoinTupleLink::Shared(_) => None,
+        },
+    }
+}
+
+/// Clear `HEAP_TUPLE_HAS_MATCH` on the tuple a serial cursor points at.
+#[inline]
+fn ref_clear_match(ht: &mut HashJoinTableData<'_>, r: HashTupleRef) {
+    match r {
+        HashTupleRef::Dense(i) => {
+            ht.tuples[i.0].mintuple.tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
+        }
+        HashTupleRef::Skew(i) => {
+            ht.skew_tuples[i.0].mintuple.tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
+        }
+    }
+}
+
+// ===========================================================================
 //                          ExecScanHashBucket
 // ===========================================================================
 
@@ -1184,14 +1237,6 @@ pub fn ExecScanHashBucket<'mcx>(
         .expect("ExecScanHashBucket: hashclauses must be compiled by init")
         as *mut types_nodes::execexpr::ExprState;
 
-    // Helper: next-link of an arena tuple (serial mode only follows Unshared).
-    fn tuple_next(ht: &HashJoinTableData<'_>, idx: HashTupleIdx) -> Option<HashTupleIdx> {
-        match ht.tuples[idx.0].next {
-            HashJoinTupleLink::Unshared(n) => n,
-            HashJoinTupleLink::Shared(_) => None,
-        }
-    }
-
     let ht_ref = hjstate
         .hj_HashTable
         .as_ref()
@@ -1199,16 +1244,18 @@ pub fn ExecScanHashBucket<'mcx>(
 
     // hj_CurTuple is the address of the tuple last returned from the current
     // bucket, or NULL if it's time to start scanning a new bucket. If the tuple
-    // hashed to a skew bucket scan that, otherwise the standard bucket.
-    let mut hash_tuple: Option<HashTupleIdx> = if let Some(cur) = hjstate.hj_CurTuple {
-        tuple_next(ht_ref, cur)
+    // hashed to a skew bucket scan that (skew arena), otherwise the standard
+    // bucket (dense arena).
+    let mut hash_tuple: Option<HashTupleRef> = if let Some(cur) = hjstate.hj_CurTuple {
+        ref_next(ht_ref, cur)
     } else if cur_skew != INVALID_SKEW_BUCKET_NO {
         ht_ref.skewBucket[cur_skew as usize]
             .as_ref()
             .and_then(|b| b.tuples)
+            .map(HashTupleRef::Skew)
     } else {
         match &ht_ref.buckets {
-            HashJoinBuckets::Unshared(b) => b[cur_bucket as usize],
+            HashJoinBuckets::Unshared(b) => b[cur_bucket as usize].map(HashTupleRef::Dense),
             HashJoinBuckets::Shared(_) => None,
         }
     };
@@ -1221,10 +1268,11 @@ pub fn ExecScanHashBucket<'mcx>(
                 .hj_HashTable
                 .as_ref()
                 .expect("ExecScanHashBucket: hj_HashTable is NULL");
-            let next = tuple_next(ht_ref, idx);
-            let is_match = ht_ref.tuples[idx.0].hashvalue == hashvalue;
+            let next = ref_next(ht_ref, idx);
+            let tup = ref_tuple(ht_ref, idx);
+            let is_match = tup.hashvalue == hashvalue;
             let mtup_copy = if is_match {
-                Some(ht_ref.tuples[idx.0].mintuple.clone_in(mcx)?)
+                Some(tup.mintuple.clone_in(mcx)?)
             } else {
                 None
             };
@@ -1302,7 +1350,7 @@ pub fn ExecScanHashTableForUnmatched<'mcx>(
         .expect("ExecScanHashTableForUnmatched: ps_ExprContext");
     // We mutate hjstate cursor fields while reading the (immutable) hashtable;
     // the chain walk is read-only; the match-flag test is pure owned-data logic.
-    let mut hash_tuple: Option<HashTupleIdx> = hjstate.hj_CurTuple;
+    let mut hash_tuple: Option<HashTupleRef> = hjstate.hj_CurTuple;
 
     loop {
         // hj_CurTuple is the address of the tuple last returned from the current
@@ -1314,14 +1362,13 @@ pub fn ExecScanHashTableForUnmatched<'mcx>(
                 .expect("ExecScanHashTableForUnmatched: hj_HashTable is NULL");
             if let Some(cur) = hash_tuple {
                 // hashTuple = hashTuple->next.unshared;
-                hash_tuple = match hashtable.tuples[cur.0].next {
-                    HashJoinTupleLink::Unshared(n) => n,
-                    HashJoinTupleLink::Shared(_) => None,
-                };
+                hash_tuple = ref_next(hashtable, cur);
             } else if hjstate.hj_CurBucketNo < hashtable.nbuckets {
                 // hashTuple = hashtable->buckets.unshared[hj_CurBucketNo];
                 hash_tuple = match &hashtable.buckets {
-                    HashJoinBuckets::Unshared(b) => b[hjstate.hj_CurBucketNo as usize],
+                    HashJoinBuckets::Unshared(b) => {
+                        b[hjstate.hj_CurBucketNo as usize].map(HashTupleRef::Dense)
+                    }
                     HashJoinBuckets::Shared(_) => None,
                 };
                 hjstate.hj_CurBucketNo += 1;
@@ -1329,7 +1376,10 @@ pub fn ExecScanHashTableForUnmatched<'mcx>(
                 // int j = hashtable->skewBucketNums[hj_CurSkewBucketNo];
                 // hashTuple = hashtable->skewBucket[j]->tuples;
                 let j = hashtable.skewBucketNums[hjstate.hj_CurSkewBucketNo as usize] as usize;
-                hash_tuple = hashtable.skewBucket[j].as_ref().and_then(|b| b.tuples);
+                hash_tuple = hashtable.skewBucket[j]
+                    .as_ref()
+                    .and_then(|b| b.tuples)
+                    .map(HashTupleRef::Skew);
                 hjstate.hj_CurSkewBucketNo += 1;
             } else {
                 break; // finished all buckets
@@ -1339,14 +1389,11 @@ pub fn ExecScanHashTableForUnmatched<'mcx>(
         while let Some(idx) = hash_tuple {
             let (has_match, next, mtup_copy) = {
                 let hashtable = hjstate.hj_HashTable.as_ref().unwrap();
-                let has_match =
-                    hashtable.tuples[idx.0].mintuple.tuple.t_infomask2 & HEAP_TUPLE_HAS_MATCH != 0;
-                let next = match hashtable.tuples[idx.0].next {
-                    HashJoinTupleLink::Unshared(n) => n,
-                    HashJoinTupleLink::Shared(_) => None,
-                };
+                let tup = ref_tuple(hashtable, idx);
+                let has_match = tup.mintuple.tuple.t_infomask2 & HEAP_TUPLE_HAS_MATCH != 0;
+                let next = ref_next(hashtable, idx);
                 let mtup_copy = if !has_match {
-                    Some(hashtable.tuples[idx.0].mintuple.clone_in(mcx)?)
+                    Some(tup.mintuple.clone_in(mcx)?)
                 } else {
                     None
                 };
@@ -1402,8 +1449,12 @@ pub fn ExecHashTableReset<'mcx>(
 
     // Release all the hash buckets and tuples acquired in the prior pass (the
     // batchCxt reset frees the dense chunks + tuples), and reinitialize for a
-    // new pass. The owned model clears the per-batch arenas.
+    // new pass. The owned model clears the per-batch arenas. (Skew is a
+    // batch-0-only structure already torn down by ExecHashRemoveNextSkewBucket,
+    // but its backing arena is reclaimed by the batchCxt reset in C, so clear
+    // the separate skew arena here too.)
     hashtable.tuples.clear();
+    hashtable.skew_tuples.clear();
 
     // Reallocate and reinitialize the hash bucket headers.
     //   hashtable->buckets.unshared = palloc0_array(HashJoinTuple, nbuckets);
@@ -1431,29 +1482,28 @@ pub fn ExecHashTableResetMatchFlags<'mcx>(hashtable: &mut HashJoinTableData<'mcx
     // Reset all flags in the main table ...
     for i in 0..hashtable.nbuckets as usize {
         let mut t = match &hashtable.buckets {
-            HashJoinBuckets::Unshared(b) => b[i],
+            HashJoinBuckets::Unshared(b) => b[i].map(HashTupleRef::Dense),
             HashJoinBuckets::Shared(_) => None,
         };
         while let Some(idx) = t {
             // HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(tuple));
-            hashtable.tuples[idx.0].mintuple.tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
-            t = match hashtable.tuples[idx.0].next {
-                HashJoinTupleLink::Unshared(n) => n,
-                HashJoinTupleLink::Shared(_) => None,
-            };
+            let next = ref_next(hashtable, idx);
+            ref_clear_match(hashtable, idx);
+            t = next;
         }
     }
 
-    // ... and the same for the skew buckets, if any.
+    // ... and the same for the skew buckets, if any (separate skew arena).
     for i in 0..hashtable.nSkewBuckets as usize {
         let j = hashtable.skewBucketNums[i] as usize;
-        let mut t = hashtable.skewBucket[j].as_ref().and_then(|b| b.tuples);
+        let mut t = hashtable.skewBucket[j]
+            .as_ref()
+            .and_then(|b| b.tuples)
+            .map(HashTupleRef::Skew);
         while let Some(idx) = t {
-            hashtable.tuples[idx.0].mintuple.tuple.t_infomask2 &= !HEAP_TUPLE_HAS_MATCH;
-            t = match hashtable.tuples[idx.0].next {
-                HashJoinTupleLink::Unshared(n) => n,
-                HashJoinTupleLink::Shared(_) => None,
-            };
+            let next = ref_next(hashtable, idx);
+            ref_clear_match(hashtable, idx);
+            t = next;
         }
     }
 }

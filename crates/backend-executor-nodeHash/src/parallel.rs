@@ -20,12 +20,25 @@ use types_core::{Size, uint32};
 use types_error::PgResult;
 use types_execparallel::{dsa_pointer_is_valid, DsaPointer, INVALID_DSA_POINTER};
 use types_nodes::nodehash::{
-    HashChunkIdx, HashJoinState, HashJoinTableData, HashTupleIdx, ParallelHashGrowth,
+    HashChunkIdx, HashJoinState, HashJoinTableData, HashTupleIdx, HashTupleRef, ParallelHashGrowth,
     ParallelHashJoinBatch, ParallelHashJoinState, PHJ_BUILD_HASH_INNER, PHJ_GROW_BATCHES_DECIDE,
     PHJ_GROW_BATCHES_ELECT, PHJ_GROW_BATCHES_FINISH, PHJ_GROW_BATCHES_PHASE,
     PHJ_GROW_BATCHES_REALLOCATE, PHJ_GROW_BATCHES_REPARTITION, PHJ_GROW_BUCKETS_ELECT,
     PHJ_GROW_BUCKETS_PHASE, PHJ_GROW_BUCKETS_REALLOCATE,
 };
+
+/// Unwrap a serial scan cursor to its raw parallel locator. Parallel hash joins
+/// never use the skew optimization, so `hj_CurTuple` is always a Dense ref
+/// carrying a raw backend-local DSA address.
+#[inline]
+fn cur_dense(r: HashTupleRef) -> HashTupleIdx {
+    match r {
+        HashTupleRef::Dense(i) => i,
+        HashTupleRef::Skew(_) => {
+            unreachable!("parallel hash join cursor is never a skew tuple")
+        }
+    }
+}
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -975,7 +988,9 @@ pub fn ExecParallelScanHashBucket<'mcx>(
         .expect("ExecParallelScanHashBucket: hj_HashTable is None")
         .as_ref();
 
-    let mut hash_tuple = match hjstate.hj_CurTuple {
+    // Parallel hash joins never use the skew optimization, so the cursor is
+    // always a Dense ref carrying a raw DSA address.
+    let mut hash_tuple = match hjstate.hj_CurTuple.map(cur_dense) {
         Some(t) => ExecParallelHashNextTuple(hashtable, t),
         None => ExecParallelHashFirstTuple(hashtable, cur_bucket),
     };
@@ -1004,7 +1019,7 @@ pub fn ExecParallelScanHashBucket<'mcx>(
                 estate,
             )?;
             if pass {
-                hjstate.hj_CurTuple = Some(ht);
+                hjstate.hj_CurTuple = Some(HashTupleRef::Dense(ht));
                 return Ok(true);
             }
         }
@@ -1117,7 +1132,9 @@ pub fn ExecParallelScanHashTableForUnmatched<'mcx>(
         .ps
         .ps_ExprContext
         .expect("ExecParallelScanHashTableForUnmatched: ps_ExprContext");
-    let mut hash_tuple = hjstate.hj_CurTuple;
+    // Parallel hash joins never use the skew optimization, so the cursor is
+    // always a Dense ref carrying a raw DSA address.
+    let mut hash_tuple = hjstate.hj_CurTuple.map(cur_dense);
 
     loop {
         // pick the next tuple / next bucket
@@ -1155,7 +1172,7 @@ pub fn ExecParallelScanHashTableForUnmatched<'mcx>(
                     estate,
                     &hjstate.js.ps,
                 )?;
-                hjstate.hj_CurTuple = Some(ht);
+                hjstate.hj_CurTuple = Some(HashTupleRef::Dense(ht));
                 return Ok(true);
             }
             let hashtable = hjstate.hj_HashTable.as_ref().unwrap().as_ref();
