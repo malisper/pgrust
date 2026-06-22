@@ -214,6 +214,25 @@ fn add_compile_error_context(e: PgError) -> PgError {
     e
 }
 
+/// Run a compile body under the `plpgsql_compile_error_callback` error-context
+/// scope. Catches both the `Err(PgError)` channel (parse-phase faults) and the
+/// `panic_any(PgError)` channel (`ereport_error` semantic faults — the trigtype
+/// and return-type checks) so either way the "compilation of … near line N"
+/// fallback is attached before the error propagates to the handler's
+/// `catch_unwind`. A non-`PgError` panic is resumed unchanged.
+fn with_compile_error_context<F>(f: F) -> PgResult<PLpgSQL_function>
+where
+    F: FnOnce() -> PgResult<PLpgSQL_function>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r.map_err(add_compile_error_context),
+        Err(payload) => match payload.downcast::<PgError>() {
+            Ok(e) => std::panic::panic_any(add_compile_error_context(*e)),
+            Err(other) => std::panic::resume_unwind(other),
+        },
+    }
+}
+
 /// `ereport(ERROR, (errcode(code), errmsg(msg)))` — raise a structured error
 /// from a compiler path that has a `()` return.  The SQLSTATE rides the
 /// `PgError.sqlstate` field (shown only at verbose verbosity), exactly as the C
@@ -1728,7 +1747,7 @@ pub struct ProcCompileFacts {
 /// block (`DO`).  Generally parallel to the non-trigger compile.
 pub fn plpgsql_compile_inline(proc_source: String) -> PgResult<PLpgSQL_function> {
     set_latest_lineno(1);
-    plpgsql_compile_inline_inner(proc_source).map_err(add_compile_error_context)
+    with_compile_error_context(|| plpgsql_compile_inline_inner(proc_source))
 }
 
 fn plpgsql_compile_inline_inner(proc_source: String) -> PgResult<PLpgSQL_function> {
@@ -1809,7 +1828,7 @@ pub fn plpgsql_compile_from_source(facts: &ProcCompileFacts) -> PgResult<PLpgSQL
     // and the parse; mirror that so an early semantic compile error reports
     // "near line 1". The error-context callback wraps the whole compile.
     set_latest_lineno(1);
-    plpgsql_compile_from_source_inner(facts).map_err(add_compile_error_context)
+    with_compile_error_context(|| plpgsql_compile_from_source_inner(facts))
 }
 
 fn plpgsql_compile_from_source_inner(facts: &ProcCompileFacts) -> PgResult<PLpgSQL_function> {
