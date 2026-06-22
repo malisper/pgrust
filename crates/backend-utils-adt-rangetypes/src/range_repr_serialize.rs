@@ -580,14 +580,24 @@ pub fn range_deserialize(
         let typbyval = elem.typbyval;
         let typalign = elem.typalign as u8;
 
-        // initialize data pointer just after the range OID
-        let mut ptr = base.add(size_of::<RangeType>()) as usize;
+        // Initialize data offset just after the range OID. We track the bound
+        // positions as offsets *relative to `base`*, not as absolute machine
+        // addresses. In C this code aligns the absolute pointer, which is only
+        // correct because a serialized RangeType always lives in MAXALIGN'd
+        // (palloc'd) memory, so absolute-address alignment and base-relative
+        // alignment coincide. Here the image may instead be borrowed from a
+        // merely byte-aligned `Datum::ByRef` buffer (e.g. an SP-GiST leaf/prefix
+        // image reconstructed into a `Vec<u8>`); aligning the *absolute* address
+        // would then add bogus padding and read the upper bound from the wrong
+        // offset. Base-relative alignment reproduces the C result exactly while
+        // being independent of the image's actual allocation alignment.
+        let mut off = size_of::<RangeType>();
 
         // fetch lower bound, if any
         let lbound = if range_has_lbound(flags) {
             // att_align_pointer cannot be necessary here
-            let v = fetch_att(ptr as *const u8, typbyval, typlen);
-            ptr = att_addlength_pointer(ptr, typlen, ptr as *const u8);
+            let v = fetch_att(base.add(off), typbyval, typlen);
+            off = att_addlength_pointer(off, typlen, base.add(off));
             v
         } else {
             Datum::null()
@@ -595,8 +605,8 @@ pub fn range_deserialize(
 
         // fetch upper bound, if any
         let ubound = if range_has_ubound(flags) {
-            ptr = att_align_pointer(ptr, typalign, typlen, ptr as *const u8);
-            fetch_att(ptr as *const u8, typbyval, typlen)
+            off = att_align_pointer(off, typalign, typlen, base.add(off));
+            fetch_att(base.add(off), typbyval, typlen)
             // no need for att_addlength_pointer
         } else {
             Datum::null()
