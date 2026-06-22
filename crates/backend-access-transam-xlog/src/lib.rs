@@ -38,6 +38,7 @@
 #![allow(non_upper_case_globals)]
 
 extern crate alloc;
+extern crate std;
 
 use alloc::format;
 use alloc::string::String;
@@ -61,6 +62,18 @@ pub use checkpoint::{
     CreateCheckPoint as DoCreateCheckPoint, CreateRestartPoint as DoCreateRestartPoint,
     SIZE_OF_CHECK_POINT,
 };
+
+/// `CheckpointStats` post-sync metrics (xlog.c file-scope global), the three
+/// fields `ProcessSyncRequests` reports up through `checkpoint_stats_set`:
+/// `(ckpt_sync_rels, ckpt_longest_sync, ckpt_agg_sync_time)`. In C these are
+/// fields of the `CheckpointStats` file-scope global, written by sync.c and read
+/// only by `LogCheckpointEnd`. We hold them in a process-local cell so the seam
+/// is a faithful store (not a panic) even while the durable checkpoint-record /
+/// `LogCheckpointEnd` leg remains deferred.
+std::thread_local! {
+    static CHECKPOINT_SYNC_STATS: core::cell::Cell<(i32, u64, u64)> =
+        const { core::cell::Cell::new((0, 0, 0)) };
+}
 
 pub mod redo;
 pub use redo::xlog_redo;
@@ -962,31 +975,64 @@ pub fn init_seams() {
     // the WAL checkpoint record is the only thing skipped, and it is skipped
     // loudly, not faked. Replace these with `create_checkpoint::set(...)` over
     // the owned `CheckpointState` once the XLogCtl shmem driver is ported.
+    // `CheckpointStats` post-sync metric store (xlog.c file-scope global),
+    // written by `ProcessSyncRequests` via sync.c. Pure bookkeeping consumed by
+    // `LogCheckpointEnd`; store it process-locally so the checkpoint buffer
+    // sweep's `ProcessSyncRequests` does not hit an uninstalled-seam panic.
+    s::checkpoint_stats_set::set(|ckpt_sync_rels, ckpt_longest_sync, ckpt_agg_sync_time| {
+        CHECKPOINT_SYNC_STATS.with(|c| {
+            c.set((ckpt_sync_rels, ckpt_longest_sync, ckpt_agg_sync_time))
+        });
+    });
     s::create_checkpoint::set(|flags| {
-        let _ = flags;
         // The WAL-record / XLogCtl-shmem half of a real checkpoint is still
         // deferred (the #157 WAL-redo keystone), so the durable checkpoint
-        // record is NOT written here. But the storage-sync half of
-        // `CheckPointGuts` — `SyncPreCheckpoint()` / `SyncPostCheckpoint()` —
-        // is fully ported and is independent of the WAL driver. It is the leg
-        // that physically unlinks the lingering 0-length files left behind by
+        // *record* is NOT written here and we still return `false` ("no
+        // checkpoint performed"). But the data-flushing half of a checkpoint —
+        // `SyncPreCheckpoint()`, the `CheckPointGuts` buffer sweep
+        // (`CheckPointBuffers(flags)` → `ProcessSyncRequests()`), and
+        // `SyncPostCheckpoint()` — is fully ported and is independent of the
+        // WAL driver. The buffer pool lives in real anonymous-mmap shared
+        // memory (cross-process), so `BufferSync` scanning it for `BM_DIRTY`
+        // buffers and writing them through `FlushBuffer`/`smgrwrite` is
+        // well-defined here.
+        //
+        // C order (xlog.c:6951 `CreateCheckPoint` → xlog.c:7574
+        // `CheckPointGuts`):
+        //   SyncPreCheckpoint();                     // before CheckPointGuts
+        //   CheckPointGuts(redo, flags):
+        //       CheckPointBuffers(flags);            // BufferSync write pass
+        //       ProcessSyncRequests();               // fsync the writes
+        //   SyncPostCheckpoint();                    // unlink lingering files
+        //
+        // `SyncPreCheckpoint` absorbs the fsync/unlink requests backends
+        // forwarded over shmem; `CheckPointBuffers` writes every dirty shared
+        // buffer (firing the IOOP_WRITE pg_stat_io accounting from the flush
+        // path); `ProcessSyncRequests` fsyncs the segments that were written;
+        // `SyncPostCheckpoint` physically unlinks the 0-length files left by
         // `mdunlink()` (DROP TABLE / ALTER ... SET TABLESPACE / REINDEX
         // TABLESPACE register an `SYNC_UNLINK_REQUEST` deferred to "next
-        // checkpoint"; see md.c `mdunlinkfork`/sync.c). When this body runs in
-        // the checkpointer, `SyncPreCheckpoint` first absorbs the requests
-        // backends forwarded over shmem, then `SyncPostCheckpoint` removes the
-        // files. Running it here lets `DROP TABLESPACE`'s
-        // `RequestCheckpoint(CHECKPOINT_IMMEDIATE|FORCE|WAIT)` actually clean
-        // out the tablespace directory (tablespace.c `DropTableSpace`), instead
-        // of failing "tablespace is not empty". Faithful to the sync portion of
-        // `CheckPointGuts` (xlog.c:7574); the WAL-record durability remains
-        // honestly skipped (logged below), not faked.
+        // checkpoint"). This makes `DROP TABLESPACE`'s
+        // `RequestCheckpoint(CHECKPOINT_IMMEDIATE|FORCE|WAIT)` clean out the
+        // tablespace dir, and makes `CHECKPOINT;` durably write the buffer pool.
+        // Faithful to the data-flushing portion of `CheckPointGuts`; only the
+        // WAL checkpoint-record durability remains honestly skipped (logged
+        // below), not faked.
         backend_storage_sync_seams::sync_pre_checkpoint::call()?;
+
+        // CheckPointGuts: the buffer-pool write pass, then fsync the writes.
+        backend_storage_buffer_bufmgr_seams::check_point_buffers::call(flags)?;
+        backend_storage_sync_seams::process_sync_requests::call(
+            backend_utils_misc_guc_tables::vars::enableFsync.read(),
+            backend_utils_misc_guc_tables::vars::log_checkpoints.read(),
+        )?;
+
         backend_storage_sync_seams::sync_post_checkpoint::call()?;
         backend_utils_error::ereport(types_error::LOG)
             .errmsg(
-                "skipping checkpoint: the WAL checkpoint-record driver (XLogCtl shmem) \
-                 is not yet ported; no checkpoint was performed (pending unlinks flushed)",
+                "checkpoint flushed dirty buffers + pending fsync/unlinks, but the \
+                 WAL checkpoint-record driver (XLogCtl shmem) is not yet ported, so \
+                 no durable checkpoint record was written",
             )
             .finish(types_error::ErrorLocation::new(
                 "xlog.c",
