@@ -4847,47 +4847,62 @@ fn exec_ar_update_triggers_impl<'mcx>(
         return Ok(());
     }
 
-    // Cross-partition update routing (UPDATE row movement across partitions)
-    // queues the root event with src/dst partitions + the partition-format
-    // conversion — that leg is still loud-guarded.
+    // Cross-partition update routing where the ROOT partitioned table queues the
+    // event (`is_crosspart_update` with both src/dst partitions, and the
+    // partition→root format conversion in AfterTriggerSaveEvent) is still
+    // loud-guarded.
     if is_crosspart_update || src_partinfo.is_some() {
         return Err(cross_partition_update_unported());
     }
-    if fdw_trigtuple.is_some() {
-        return Err(fdw_tuple_fetch_unported());
-    }
-    // tupsrc = src_partinfo ? src_partinfo : relinfo (= relinfo here). The OLD
-    // slot's tid is the update's `tupleid`; the NEW slot is `newslot`.
     const TRIGGER_EVENT_UPDATE: u32 = 2;
-    let old_ctid = match tupleid {
-        Some(t) => Some(*t),
-        // C `ExecClearTuple(oldslot)` (oldslot empty) only on the transition-only
-        // routing leg, excluded above; a real UPDATE always has a tupleid.
-        None => return Err(cross_partition_update_unported()),
-    };
-    let ns = newslot.expect("ExecARUpdateTriggers: a non-FDW update needs a newslot");
 
-    // C always fetches the OLD slot via GetTupleForTrigger when an AFTER-ROW
-    // UPDATE trigger exists (or either update transition table is wanted):
-    // AfterTriggerSaveEvent needs the OLD row to evaluate a WHEN (OLD...) clause,
-    // and the update-old transition table needs it spooled. We fetch by ctid under
-    // SnapshotAny (the AFTER-trigger view) and force-store it into the OLD slot.
-    let oldslot = {
-        let mcx = estate.es_query_cxt;
-        let rel_oid = estate
-            .result_rel(relinfo)
-            .ri_RelationDesc
-            .as_ref()
-            .map(|r| r.rd_id)
-            .expect("ExecARUpdateTriggers: ResultRelInfo has no relation");
-        let octid = old_ctid.expect("ExecARUpdateTriggers UPDATE needs the old ctid");
+    // `tupsrc = src_partinfo ? src_partinfo : relinfo` (= relinfo here).
+    //
+    // C: `oldslot = ExecGetTriggerOldSlot(estate, tupsrc)`, then
+    //   if (fdw_trigtuple == NULL && ItemPointerIsValid(tupleid))
+    //       GetTupleForTrigger(... oldslot ...);          // fetch OLD by ctid
+    //   else if (fdw_trigtuple != NULL)
+    //       ExecForceStoreHeapTuple(fdw_trigtuple, oldslot, false);
+    //   else
+    //       ExecClearTuple(oldslot);                      // OLD is empty
+    //
+    // The third (clear) arm is reached on the INSERT side of a cross-partition
+    // UPDATE that is captured only for the NEW transition table (tupleid and
+    // fdw_trigtuple both NULL, newslot set). When the OLD slot is empty (or the
+    // NEW slot absent), AfterTriggerSaveEvent captures the one present tuple and
+    // returns via its `TupIsNull(oldslot) ^ TupIsNull(newslot)` early return —
+    // no row event is queued. We mirror that here: capture the present side and
+    // stop. (The companion DELETE side, with tupleid/fdw_trigtuple set and
+    // newslot NULL, captures the OLD tuple the same way.)
+    let mcx = estate.es_query_cxt;
+    let rel_oid = estate
+        .result_rel(relinfo)
+        .ri_RelationDesc
+        .as_ref()
+        .map(|r| r.rd_id)
+        .expect("ExecARUpdateTriggers: ResultRelInfo has no relation");
+
+    // Source the OLD slot per the three C arms, or mark it empty.
+    let have_old = tupleid.is_some() || fdw_trigtuple.is_some();
+    let oldslot = if have_old {
         let slot =
             backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
-        let formed = fetch_trigger_tuple(mcx, rel_oid, &octid)?;
-        let formed_mcx = formed.clone_in(mcx)?;
-        backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
-            estate, slot, formed_mcx, false,
-        )?;
+        if let Some(fdw) = fdw_trigtuple {
+            // ExecForceStoreHeapTuple(fdw_trigtuple, oldslot, false);
+            let formed_mcx = fdw.clone_in(mcx)?;
+            backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+                estate, slot, formed_mcx, false,
+            )?;
+        } else {
+            // GetTupleForTrigger fetches OLD by ctid under the AFTER-trigger view
+            // and force-stores it into the OLD slot.
+            let octid = tupleid.expect("have_old without fdw implies a valid tupleid");
+            let formed = fetch_trigger_tuple(mcx, rel_oid, octid)?;
+            let formed_mcx = formed.clone_in(mcx)?;
+            backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+                estate, slot, formed_mcx, false,
+            )?;
+        }
         // In C the OLD slot is filled by table_tuple_fetch_row_version, whose
         // ExecStoreBufferHeapTuple sets slot->tts_tableOid = the relation OID.
         // Our fetch-then-force-store dance lands the tuple via the BufferTuple
@@ -4895,8 +4910,42 @@ fn exec_ar_update_triggers_impl<'mcx>(
         // header's tts_tableOid — so set it here. A WHEN clause referencing
         // `old.tableoid` (e.g. `new.tableoid = old.tableoid`) reads it.
         estate.slot_mut(slot).tts_tableOid = rel_oid;
-        slot
+        Some(slot)
+    } else {
+        // ExecClearTuple(oldslot): the OLD slot is empty for this event. We model
+        // an empty OLD as `None` (no slot sourced), which the capture/queue legs
+        // below treat as TupIsNull(oldslot).
+        None
     };
+
+    // Cross-partition transition-only split leg: exactly one of OLD/NEW is
+    // present. C captures the present side then returns at the XOR early return
+    // (`TupIsNull(oldslot) ^ TupIsNull(newslot)`) without queueing a row event.
+    if have_old != newslot.is_some() {
+        if cap_old || cap_new {
+            let oldslot_cap = if cap_old { oldslot } else { None };
+            let newslot_cap = if cap_new { newslot } else { None };
+            let tcs = tc
+                .as_deref()
+                .expect("cap_old/cap_new implies transition_capture present");
+            capture_transition_tuples(
+                estate,
+                relinfo,
+                TRIGGER_EVENT_UPDATE,
+                oldslot_cap,
+                newslot_cap,
+                tcs,
+            )?;
+        }
+        return Ok(());
+    }
+
+    // From here both OLD and NEW are present — a regular in-place UPDATE row
+    // event: queue the AFTER ROW UPDATE trigger and/or capture both transition
+    // tuples.
+    let old_ctid = tupleid.copied();
+    let oldslot = oldslot.expect("regular UPDATE row event always has an OLD slot");
+    let ns = newslot.expect("regular UPDATE row event always has a NEW slot");
 
     // Capture the OLD/NEW transition tuples for an UPDATE.
     if cap_old || cap_new {
