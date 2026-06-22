@@ -81,6 +81,7 @@ mod ts_stat;
 mod pg_get_keywords;
 mod pg_tablespace_databases;
 mod pg_ls_dir;
+mod pg_walfile;
 mod pg_listening_channels;
 mod pg_get_multixact_members;
 mod pg_get_catalog_foreign_keys;
@@ -221,6 +222,10 @@ pub fn init_seams() {
     // whose `AllocateDir`/`ReadDir`/`stat` walk cores are
     // `backend-utils-adt-misc2::admin`.
     pg_ls_dir::register_pg_ls_dir();
+    // `pg_walfile_name_offset(pg_lsn)` (OID 2850) and `pg_split_walfile_name(text)`
+    // (OID 6213) — record-returning WAL filename functions (cores in
+    // `backend-access-transam-xlogfuncs`).
+    pg_walfile::register_pg_walfile();
     // `pg_listening_channels()` (OID 3035) — the materialize-mode SRF emitting one
     // `text` per LISTENed channel (its collector core is
     // `backend-commands-async::pg_listening_channels_rows`).

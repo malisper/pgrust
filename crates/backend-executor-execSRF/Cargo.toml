@@ -55,6 +55,10 @@ backend-utils-adt-mcxtfuncs-seams = { path = "../backend-utils-adt-mcxtfuncs-sea
 backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+# pg_walfile_name_offset / pg_split_walfile_name (xlogfuncs.c) record-returning
+# functions: their value cores live here; this crate only marshals the
+# executor-frame args + builds the composite result against expectedDesc.
+backend-access-transam-xlogfuncs = { path = "../backend-access-transam-xlogfuncs" }
 
 # ts_token_type(*) / ts_parse(*) (wparser.c) materialize-mode SRFs: the
 # data-producing cores (default-parser token-type list + tokenizer), the parser
