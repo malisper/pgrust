@@ -101,6 +101,8 @@ pub fn preprocess_targetlist<'mcx>(
     // C 80-94: if there is a result relation, open it (INSERT/UPDATE/DELETE/
     // MERGE) so we can look for missing columns; else Assert(SELECT). Previous
     // code already acquired at least AccessShareLock, so we pass NoLock.
+    // C 119-121: `!target_rte->inh` gates the non-inherited row-identity path.
+    let mut target_rte_inh = false;
     let target_relation: Option<Relation<'mcx>> = if result_relation != 0 {
         let result_relation = result_relation as usize;
         // C: target_rte = rt_fetch(result_relation, range_table). Sanity-check
@@ -115,6 +117,7 @@ pub fn preprocess_targetlist<'mcx>(
                 "result relation must be a regular relation",
             )));
         }
+        target_rte_inh = target_rte.inh;
         let relid = target_rte.relid;
         Some(backend_access_table_table::table_open(mcx, relid, 0 /* NoLock */)?)
     } else {
@@ -151,10 +154,13 @@ pub fn preprocess_targetlist<'mcx>(
     // C 119-132: non-inherited UPDATE/DELETE/MERGE junk row-identity columns.
     // add_row_identity_columns reads root->processed_tlist, so it must be the
     // current tlist; stash it onto root, call, and take it back. (For the
-    // non-inherited target the new ctid junk TLE is appended directly.)
-    if command_type == CmdType::CMD_UPDATE
+    // non-inherited target the new ctid junk TLE is appended directly.) In the
+    // inheritance case (target_rte->inh) we do nothing now, leaving it to
+    // expand_inherited_rtentry()/distribute_row_identity_vars().
+    if (command_type == CmdType::CMD_UPDATE
         || command_type == CmdType::CMD_DELETE
-        || command_type == CmdType::CMD_MERGE
+        || command_type == CmdType::CMD_MERGE)
+        && !target_rte_inh
     {
         let rel = target_relation
             .as_ref()
