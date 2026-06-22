@@ -1160,9 +1160,12 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     // — the disconnect-log callback; registration is process-exit plumbing,
     // skipped (the body, logging::log_disconnections, is landed).
 
-    // pgstat_report_connect(MyDatabaseId): the connection-establishment stat.
-    // The pgstat_report_connect entry is a separate pgstat unit (no seam);
-    // skipped-with-note (cumulative-stats only).
+    // pgstat_report_connect(MyDatabaseId): the connection-establishment stat
+    // (bumps pg_stat_database.sessions). Routed through the pgstat-database
+    // seam, installed from that crate's init_seams.
+    backend_utils_activity_pgstat_seams::pgstat_report_connect::call(
+        backend_utils_init_small_seams::my_database_id::call(),
+    )?;
 
     // if (am_walsender) InitWalSender(); — replication-only setup; the
     // simple-Query target is not a WAL sender. Not reached.

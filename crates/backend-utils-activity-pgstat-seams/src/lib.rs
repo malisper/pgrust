@@ -423,3 +423,14 @@ seam_core::seam!(
         src_relisshared: bool,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `pgstat_report_connect(MyDatabaseId)` (pgstat_database.c): notify the
+    /// cumulative stats system that a new session has connected, bumping the
+    /// per-database `sessions` counter in the pending stats. Called once at
+    /// backend startup in `PostgresMain` (postgres.c:4319), right after the
+    /// log-disconnections proc-exit callback is registered. `dboid` is
+    /// `MyDatabaseId`. `Err` propagates an `ereport(ERROR)` from the pending
+    /// prep path.
+    pub fn pgstat_report_connect(dboid: types_core::primitive::Oid) -> types_error::PgResult<()>
+);

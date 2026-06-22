@@ -665,6 +665,7 @@ pub fn init_seams() {
     backend_utils_activity_pgstat_seams::pgstat_report_checksum_failures_in_db::set(
         pgstat_report_checksum_failures_in_db,
     );
+    backend_utils_activity_pgstat_seams::pgstat_report_connect::set(pgstat_report_connect);
 
     // `bool pgstat_track_counts` (pgstat.c) — the live `track_counts` GUC value
     // `AutoVacuumingActive()` gates on. The single true backing is the GUC slot
