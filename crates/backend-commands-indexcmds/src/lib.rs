@@ -123,12 +123,14 @@ use types_tuple::access::{
 use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 use types_pgstat::backend_progress::ProgressCommandType;
 
+pub mod check_compat;
 pub mod choosers;
 pub mod compute;
 pub mod opclass;
 pub mod reindex_concurrently;
 pub mod reindex_multi;
 
+pub use check_compat::{check_index_compatible_stmt, CheckIndexCompatible};
 pub use choosers::{
     makeObjectName, ChooseIndexColumnNames, ChooseIndexName, ChooseRelationName,
 };
@@ -1961,6 +1963,10 @@ pub fn init_seams() {
             args.skip_build,
             args.quiet,
         )
+    });
+
+    backend_commands_indexcmds_seams::check_index_compatible::set(|mcx, old_id, stmt| {
+        check_index_compatible_stmt(mcx, old_id, stmt)
     });
 
     // --- ProcessUtilitySlow CREATE INDEX arm (utility.c:1455-1560) ---

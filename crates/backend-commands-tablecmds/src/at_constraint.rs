@@ -526,13 +526,21 @@ pub fn ATExecAddIndex<'mcx>(
     };
     let address = backend_commands_indexcmds_seams::define_index_full::call(mcx, args)?;
 
-    // The TryReuseIndex() relfilenumber-restore branch fires only when
-    // RelFileNumberIsValid(stmt->oldNumber), i.e. only for the index-rebuild
-    // path of a table-rewriting ALTER (ALTER COLUMN TYPE). That path is not yet
-    // reachable here (the rewriting families seam-panic), and the supporting
-    // index_open/RelationPreserveStorage substrate is not wired into this crate.
+    // If TryReuseIndex() stashed a relfilenumber for us, we used it for the new
+    // index instead of building from scratch.  Restore associated fields. This
+    // may store InvalidSubTransactionId in both fields, in which case relcache.c
+    // will assume it can rebuild the relcache entry.  Hence, do this after the
+    // CCI that made catalog rows visible to any rebuild.  The DROP of the old
+    // edition of this index will have scheduled the storage for deletion at
+    // commit, so cancel that pending deletion.
     if OidIsValid(stmt.oldNumber) {
-        unported("ATExecAddIndex TryReuseIndex relfilenumber restore (index rebuild)");
+        let irel = relation_open(mcx, address.objectId, NoLock)?;
+        // C also restores irel->rd_createSubid / rd_firstRelfilelocatorSubid
+        // from the stmt; those relcache subid fields are not carried on the
+        // trimmed RelationData, and for the reachable path both are
+        // InvalidSubTransactionId (the default), so the restore is a no-op.
+        backend_catalog_storage_seams::relation_preserve_storage::call(irel.rd_locator, true)?;
+        irel.close(NoLock)?;
     }
 
     Ok(address)

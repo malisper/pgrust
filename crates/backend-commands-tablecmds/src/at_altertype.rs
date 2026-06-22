@@ -1318,15 +1318,16 @@ fn ATPostAlterTypeParse<'mcx>(
         let tab_idx = crate::at_phase::ATGetQueueEntry(mcx, wqueue, &rel)?;
 
         if stm_tag == ntag::T_IndexStmt {
-            // if (!rewrite) TryReuseIndex(oldId, stmt) — for a rewriting ALTER
-            // (our reach), rewrite != 0, so TryReuseIndex is skipped and
-            // stmt->oldNumber stays Invalid; the index is rebuilt fresh.
+            // if (!rewrite) TryReuseIndex(oldId, stmt) — for a non-rewriting
+            // ALTER (rewrite == 0) we may be able to reuse the existing index's
+            // physical storage (and so preserve its relfilenode/tablespace);
+            // a rewriting ALTER (rewrite != 0) rebuilds the index fresh.
             let mut istmt = stm
                 .clone_in(mcx)?
                 .into_indexstmt()
                 .expect("ATPostAlterTypeParse: T_IndexStmt node");
             if rewrite == 0 {
-                unported("ATPostAlterTypeParse TryReuseIndex (non-rewriting ALTER COLUMN TYPE index reuse)");
+                TryReuseIndex(mcx, old_id, &mut istmt)?;
             }
             istmt.reset_default_tblspc = true;
             // keep the index's comment: idxcomment = GetComment(oldId, ...).
@@ -1365,9 +1366,14 @@ fn ATPostAlterTypeParse<'mcx>(
                             .clone_in(mcx)?
                             .into_indexstmt()
                             .expect("AT_AddIndex: def is IndexStmt");
-                        let indoid = pg_depend_seam::get_index_constraint::call(old_id)?;
+                        // indoid = get_constraint_index(oldId): the index OID
+                        // backing the constraint being rebuilt.
+                        let indoid =
+                            backend_utils_cache_lsyscache::collation_constraint_language_cast::get_constraint_index(
+                                old_id,
+                            )?;
                         if rewrite == 0 {
-                            unported("ATPostAlterTypeParse TryReuseIndex (non-rewriting ALTER COLUMN TYPE constraint index reuse)");
+                            TryReuseIndex(mcx, indoid, &mut indstmt)?;
                         }
                         check_no_comment(indoid, RelationRelationId)?;
                         indstmt.reset_default_tblspc = true;
@@ -1470,6 +1476,40 @@ fn ATPostAlterTypeParse<'mcx>(
     }
 
     rel.close(NoLock)?;
+    Ok(())
+}
+
+/// `TryReuseIndex(oldId, stmt)` (tablecmds.c:15886) — subroutine for
+/// `ATPostAlterTypeParse`. If the existing index `old_id` is compatible enough
+/// with the rebuilt definition `stmt` (`CheckIndexCompatible`), stash the old
+/// index's relfilenumber (and the subtransaction-id tracking fields) into the
+/// `IndexStmt` so `ATExecAddIndex`/`DefineIndex` reuse the existing storage
+/// instead of building from scratch — preserving the index's relfilenode and
+/// tablespace across a no-rewrite `ALTER COLUMN TYPE`.
+fn TryReuseIndex<'mcx>(
+    mcx: Mcx<'mcx>,
+    old_id: Oid,
+    stmt: &mut types_nodes::ddlnodes::IndexStmt<'mcx>,
+) -> PgResult<()> {
+    let compatible =
+        backend_commands_indexcmds_seams::check_index_compatible::call(mcx, old_id, stmt)?;
+    if compatible {
+        // irel = index_open(oldId, NoLock); caller holds a lock already.
+        let irel = relation_open(mcx, old_id, NoLock)?;
+
+        // If it's a partitioned index, there is no storage to share.
+        if irel.rd_rel.relkind != RELKIND_PARTITIONED_INDEX {
+            stmt.oldNumber = irel.rd_locator.relNumber;
+            // C reads irel->rd_createSubid / rd_firstRelfilelocatorSubid off the
+            // live relcache entry (not carried on the trimmed RelationData). For
+            // the reachable ALTER-COLUMN-TYPE path the index was created in a
+            // prior (sub)transaction, so both are InvalidSubTransactionId; the
+            // downstream restore (ATExecAddIndex) then lets relcache.c rebuild.
+            stmt.oldCreateSubid = types_core::xact::InvalidSubTransactionId;
+            stmt.oldFirstRelfilelocatorSubid = types_core::xact::InvalidSubTransactionId;
+        }
+        irel.close(NoLock)?;
+    }
     Ok(())
 }
 
