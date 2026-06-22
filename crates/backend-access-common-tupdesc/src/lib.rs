@@ -906,6 +906,7 @@ pub fn init_seams() {
     );
     backend_access_common_tupdesc_seams::tuple_desc_copy_entry::set(TupleDescCopyEntry);
     backend_access_common_tupdesc_seams::tuple_desc_init_entry::set(TupleDescInitEntry);
+    backend_access_common_tupdesc_seams::create_tuple_desc::set(CreateTupleDesc);
 
     // The `tupdesc.c` constructor surface other crates reach across the cycle
     // through `toastdesc-seams` (value-typed `TupleDescData`).

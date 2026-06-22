@@ -10,7 +10,21 @@ use mcx::{Mcx, PgBox};
 use types_core::primitive::AttrNumber;
 use types_core::Oid;
 use types_error::PgResult;
-use types_tuple::heaptuple::TupleDescData;
+use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData};
+
+seam_core::seam!(
+    /// `CreateTupleDesc(natts, attrs)` (tupdesc.c): allocate a new `TupleDesc`
+    /// in `mcx` by copying the given `Form_pg_attribute` array, re-deriving each
+    /// compact attribute. The tuple type id is left anonymous (`RECORDOID`,
+    /// typmod `-1`) for the caller to overwrite; the result is non-refcounted
+    /// (`tdrefcount = -1`). Used by the blessed-record DSA read-back path to
+    /// reconstruct an owned descriptor from the flat DSA-resident attribute
+    /// array. `Err` carries OOM / an invalid `attalign`.
+    pub fn create_tuple_desc<'mcx>(
+        mcx: Mcx<'mcx>,
+        attrs: &[FormData_pg_attribute],
+    ) -> PgResult<TupleDescData<'mcx>>
+);
 
 seam_core::seam!(
     /// `hashRowType(tupdesc)` (tupdesc.c): the structural row-type hash used

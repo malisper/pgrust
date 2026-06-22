@@ -51,7 +51,9 @@ use types_error::{
     ERRCODE_NOT_NULL_VIOLATION, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
 };
-use types_tuple::heaptuple::{TupleDescData, RECORDOID};
+use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData, RECORDOID};
+use types_execparallel::DsaPointer;
+use types_storage::DsaArea;
 
 // Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
 // Kept only at the cache-callback registration ABI edge: the syscache/relcache
@@ -62,6 +64,7 @@ use types_datum::Datum as ScalarWord;
 
 use backend_access_common_session_seams as session_seams;
 use backend_access_common_tupdesc_seams as tupdesc_seams;
+use backend_utils_mmgr_dsa_seams as dsa_seams;
 use backend_catalog_pg_enum_seams as pg_enum_seams;
 use backend_utils_adt_domains_seams as domains_seams;
 use backend_utils_adt_format_type_seams as format_type_seams;
@@ -2180,12 +2183,195 @@ pub fn shared_record_typmod_registry_attach() -> PgResult<()> {
  * keystone unblocks; they panic loudly, never silently stub.
  * ======================================================================== */
 
+/* --------------------------------------------------------------------------
+ * Blessed-record DSA serialization.
+ *
+ * `share_tupledesc` (typcache.c:2862) copies a `TupleDesc` into DSA-resident
+ * memory as a flat block sized by `TupleDescSize` and addressed by a
+ * `dsa_pointer`. In the owned Rust port a `TupleDescData` is not itself a flat
+ * `#[repr(C)]` block (it carries `PgVec`/`PgBox`), so the DSA-resident form is
+ * an explicit flat record: a fixed `FlatSharedTupleDescHeader` followed inline
+ * by `natts` `FormData_pg_attribute` records. Because the leader and its
+ * `fork(2)` workers run the *same* Rust binary, `FormData_pg_attribute`'s
+ * in-process layout is identical across processes, so a worker reads back the
+ * exact bytes the leader wrote. Constraints/defaults are not serialized
+ * (matching C `TupleDescCopy`, which sets `dst->constr = NULL` and clears the
+ * per-attr constraint flags); the read-back descriptor is non-refcounted
+ * (`tdrefcount == -1`).
+ * ------------------------------------------------------------------------ */
+
+/// Flat header preceding the inline `FormData_pg_attribute[natts]` array in the
+/// DSA-resident shared descriptor (`share_tupledesc`'s `TupleDescData` header).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FlatSharedTupleDescHeader {
+    natts: i32,
+    tdtypeid: Oid,
+    tdtypmod: i32,
+    tdrefcount: i32,
+}
+
+/// `struct SharedRecordTableKey` (typcache.c:196): a record-table key holding
+/// either a backend-local `*const TupleDescData` (`shared == false`) or a
+/// DSA pointer to the shared flat descriptor (`shared == true`). Layout mirrors
+/// the session's `SharedRecordTableKey` exactly (raw dshash key/entry bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SharedRecordTableKey {
+    /// `union { TupleDesc local_tupdesc; dsa_pointer shared_tupdesc; }`.
+    u: u64,
+    /// `bool shared`.
+    shared: bool,
+}
+
+/// `struct SharedRecordTableEntry` (typcache.c:211).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SharedRecordTableEntry {
+    key: SharedRecordTableKey,
+}
+
+/// `struct SharedTypmodTableEntry` (typcache.c:220).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SharedTypmodTableEntry {
+    typmod: u32,
+    shared_tupdesc: u64,
+}
+
+/// `share_tupledesc(area, tupdesc, typmod)` (typcache.c:2862): copy `tupdesc`
+/// into newly allocated shared memory in `area` as the flat header + inline
+/// `FormData_pg_attribute[]` form, set its typmod, and return the dsa_pointer.
+fn share_tupledesc(
+    area: *mut DsaArea,
+    tupdesc: &TupleDescData<'_>,
+    typmod: u32,
+) -> PgResult<DsaPointer> {
+    let natts = tupdesc.natts as usize;
+    let hdr_size = core::mem::size_of::<FlatSharedTupleDescHeader>();
+    let attr_size = core::mem::size_of::<FormData_pg_attribute>();
+    let total = hdr_size + natts * attr_size;
+
+    let shared_dp = dsa_seams::dsa_allocate_extended::call(area, total, 0)?;
+    let addr = dsa_seams::dsa_get_address_ptr::call(area, shared_dp)?;
+    // SAFETY: `addr` resolves the freshly allocated `total`-byte DSA block in
+    // this backend's mapping; we write exactly `total` bytes.
+    unsafe {
+        let hdr = addr as *mut FlatSharedTupleDescHeader;
+        hdr.write(FlatSharedTupleDescHeader {
+            natts: tupdesc.natts,
+            tdtypeid: tupdesc.tdtypeid,
+            // share_tupledesc overwrites tdtypmod with the assigned `typmod`.
+            tdtypmod: typmod as i32,
+            // TupleDescCopy marks the destination non-refcounted.
+            tdrefcount: -1,
+        });
+        let attrs = (addr as usize + hdr_size) as *mut FormData_pg_attribute;
+        for i in 0..natts {
+            // TupleDescCopy drops constraints/defaults: clear the per-attr
+            // constraint flags on the shared copy.
+            let mut a = tupdesc.attrs[i];
+            a.attnotnull = false;
+            a.atthasdef = false;
+            a.atthasmissing = false;
+            a.attidentity = 0;
+            a.attgenerated = 0;
+            attrs.add(i).write(a);
+        }
+    }
+    Ok(shared_dp)
+}
+
+/// Read back a DSA-resident flat shared descriptor (written by
+/// [`share_tupledesc`]) into an owned `TupleDescData` in `mcx`. The result is a
+/// non-refcounted descriptor (`tdrefcount == -1`) with `tdtypeid`/`tdtypmod`
+/// restored, mirroring the C `(TupleDesc) dsa_get_address(...)` whose
+/// `tdrefcount` is asserted `-1`.
+fn read_shared_tupledesc<'mcx>(
+    mcx: Mcx<'mcx>,
+    area: *mut DsaArea,
+    shared_dp: DsaPointer,
+) -> PgResult<PgBox<'mcx, TupleDescData<'mcx>>> {
+    let addr = dsa_seams::dsa_get_address_ptr::call(area, shared_dp)?;
+    // SAFETY: `addr` resolves a flat descriptor block written by
+    // `share_tupledesc`; the header + `natts` attributes are in bounds.
+    let desc = unsafe { read_flat_tupledesc(mcx, addr) }?;
+    mcx::alloc_in(mcx, desc)
+}
+
+/// Read the `SharedRecordTableKey` at the start of a dshash key/entry byte
+/// image (the leading `key_size` bytes).
+fn read_record_table_key(bytes: &[u8]) -> SharedRecordTableKey {
+    debug_assert!(bytes.len() >= core::mem::size_of::<SharedRecordTableKey>());
+    // SAFETY: `bytes` covers at least a `SharedRecordTableKey`; the key is
+    // `Copy` and was written by a matching `#[repr(C)]` layout on both sides.
+    unsafe { (bytes.as_ptr() as *const SharedRecordTableKey).read_unaligned() }
+}
+
+/// Run `f` with a borrowed `&TupleDescData` resolved from a
+/// `SharedRecordTableKey`, dispatching on local-pointer vs DSA-pointer. For a
+/// shared key the DSA-resident flat descriptor is materialized into a transient
+/// scratch context that lives only for the duration of `f` (the dshash callback
+/// frame); only structural fields are read.
+///
+/// # Safety
+/// `area` is a live DSA area; for a local key, `key.u` is a valid
+/// `*const TupleDescData` (the caller's stack-pinned lookup key).
+unsafe fn with_resolved_record_key<R>(
+    area: *mut DsaArea,
+    key: &SharedRecordTableKey,
+    f: impl FnOnce(&TupleDescData<'_>) -> R,
+) -> R {
+    if key.shared {
+        let addr = dsa_seams::dsa_get_address_ptr::call(area, key.u)
+            .expect("dsa_get_address on shared record key");
+        let scratch = MemoryContext::new("record key scratch");
+        // SAFETY: caller guarantees the flat form at `addr`.
+        let desc = unsafe { read_flat_tupledesc(scratch.mcx(), addr) }
+            .expect("materialize scratch shared tupledesc");
+        f(&desc)
+    } else {
+        // SAFETY: caller guarantees `key.u` is a live `*const TupleDescData`.
+        let t = unsafe { &*(key.u as *const TupleDescData<'_>) };
+        f(t)
+    }
+}
+
+/// Read a DSA-resident flat descriptor (written by [`share_tupledesc`]) at
+/// backend-local address `addr` into an owned `TupleDescData` in `mcx`.
+///
+/// # Safety
+/// `addr` addresses a flat descriptor written by [`share_tupledesc`].
+unsafe fn read_flat_tupledesc<'mcx>(
+    mcx: Mcx<'mcx>,
+    addr: u64,
+) -> PgResult<TupleDescData<'mcx>> {
+    let hdr_size = core::mem::size_of::<FlatSharedTupleDescHeader>();
+    // SAFETY: caller guarantees the flat form at `addr`.
+    let (header, attrs): (FlatSharedTupleDescHeader, Vec<FormData_pg_attribute>) = unsafe {
+        let header = (addr as *const FlatSharedTupleDescHeader).read();
+        let natts = header.natts.max(0) as usize;
+        let attr_ptr = (addr as usize + hdr_size) as *const FormData_pg_attribute;
+        let mut v = Vec::with_capacity(natts);
+        for i in 0..natts {
+            v.push(attr_ptr.add(i).read());
+        }
+        (header, v)
+    };
+    let mut desc = tupdesc_seams::create_tuple_desc::call(mcx, &attrs)?;
+    desc.tdtypeid = header.tdtypeid;
+    desc.tdtypmod = header.tdtypmod;
+    desc.tdrefcount = -1;
+    Ok(desc)
+}
+
 /// Import leg of `SharedRecordTypmodRegistryInit` (typcache.c:2230): seed
-/// `*next_typmod` from `NextRecordTypmod` and import each present descriptor.
+/// `*next_typmod` from `NextRecordTypmod` and import each present descriptor
+/// into the record + typmod dshash tables (`share_tupledesc` per descriptor).
 fn shared_registry_import_seam(
-    _record_table: usize,
-    _typmod_table: usize,
-    _area: usize,
+    record_table: usize,
+    typmod_table: usize,
+    area: usize,
     next_typmod: usize,
 ) -> PgResult<()> {
     let next = with_state(|st| st.next_record_typmod);
@@ -2196,11 +2382,94 @@ fn shared_registry_import_seam(
     if next == 0 {
         return Ok(());
     }
-    panic!(
-        "shared_registry_import: blessed-record import leg (share_tupledesc over \
-         DSA-resident TupleDesc) not yet ported; reached only by a parallel query \
-         with {next} registered RECORD typmods"
-    );
+
+    let area = area as *mut DsaArea;
+    let record_table = record_table as *mut types_storage::DshashTable;
+    let typmod_table = typmod_table as *mut types_storage::DshashTable;
+
+    // Snapshot each present descriptor's structural content (typmod, type id,
+    // attribute array) as plain owned data outside the cache borrow, so the
+    // share_tupledesc / dshash insert calls below run without holding it.
+    let entries: Vec<(i32, Oid, Vec<FormData_pg_attribute>)> = with_state(|st| {
+        let mut v = Vec::new();
+        for typmod in 0..next {
+            if let Some(td) = &st.record_cache_array[typmod as usize].tupdesc {
+                let attrs: Vec<FormData_pg_attribute> =
+                    (0..td.natts as usize).map(|i| td.attrs[i]).collect();
+                v.push((typmod, td.tdtypeid, attrs));
+            }
+        }
+        v
+    });
+
+    let scratch = MemoryContext::new("shared registry import");
+    for (typmod, tdtypeid, attrs) in &entries {
+        // Reconstruct an owned descriptor to copy into shared memory.
+        let mut owned = tupdesc_seams::create_tuple_desc::call(scratch.mcx(), attrs)?;
+        owned.tdtypeid = *tdtypeid;
+        owned.tdtypmod = *typmod;
+        let tupdesc = &owned;
+        // Copy the TupleDesc into shared memory.
+        let shared_dp = share_tupledesc(area, tupdesc, *typmod as u32)?;
+
+        // Insert into the typmod table.
+        {
+            let key = (*typmod as u32).to_ne_bytes();
+            let guard =
+                backend_lib_dshash_seams::dshash_find_or_insert::call(typmod_table, &key)?;
+            if guard.found {
+                return elog_error("cannot create duplicate shared record typmod".to_string());
+            }
+            // SAFETY: the guard's entry is a `SharedTypmodTableEntry`-sized slot
+            // in DSA-shared memory, held under the partition lock.
+            unsafe {
+                (guard.entry_ptr() as *mut SharedTypmodTableEntry).write(SharedTypmodTableEntry {
+                    typmod: *typmod as u32,
+                    shared_tupdesc: shared_dp,
+                });
+            }
+            guard.release();
+        }
+
+        // Insert into the record table (keyed by the local descriptor; resolved
+        // structurally by the Record callbacks).
+        {
+            let key = SharedRecordTableKey {
+                u: tupdesc as *const TupleDescData<'_> as u64,
+                shared: false,
+            };
+            let key_bytes = record_table_key_bytes(&key);
+            let guard =
+                backend_lib_dshash_seams::dshash_find_or_insert::call(record_table, &key_bytes)?;
+            if !guard.found {
+                // SAFETY: the entry is a `SharedRecordTableEntry`-sized slot in
+                // DSA-shared memory, held under the partition lock.
+                unsafe {
+                    (guard.entry_ptr() as *mut SharedRecordTableEntry).write(SharedRecordTableEntry {
+                        key: SharedRecordTableKey { u: shared_dp, shared: true },
+                    });
+                }
+            }
+            guard.release();
+        }
+    }
+
+    Ok(())
+}
+
+/// The `key_size` byte image of a `SharedRecordTableKey` for the dshash key arg.
+fn record_table_key_bytes(key: &SharedRecordTableKey) -> Vec<u8> {
+    let size = core::mem::size_of::<SharedRecordTableKey>();
+    let mut v = vec![0u8; size];
+    // SAFETY: copy the key's `Copy`/`#[repr(C)]` bytes verbatim.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            key as *const SharedRecordTableKey as *const u8,
+            v.as_mut_ptr(),
+            size,
+        );
+    }
+    v
 }
 
 /// Precondition check of `SharedRecordTypmodRegistryAttach` (typcache.c:2322).
@@ -2211,51 +2480,155 @@ fn shared_registry_attach_check_seam() -> PgResult<()> {
 
 /// `find_or_make_matching_shared_tupledesc` (typcache.c:2943), attached path.
 fn find_or_make_matching_shared_tupledesc_seam<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _tupdesc: &TupleDescData<'_>,
-    _record_table: usize,
-    _typmod_table: usize,
-    _area: usize,
-    _next_typmod: usize,
+    mcx: Mcx<'mcx>,
+    tupdesc: &TupleDescData<'_>,
+    record_table: usize,
+    typmod_table: usize,
+    area: usize,
+    next_typmod: usize,
 ) -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
-    panic!(
-        "find_or_make_matching_shared_tupledesc: blessed-record shared path \
-         (share_tupledesc over DSA-resident TupleDesc) not yet ported"
-    );
+    let area = area as *mut DsaArea;
+    let record_table = record_table as *mut types_storage::DshashTable;
+    let typmod_table = typmod_table as *mut types_storage::DshashTable;
+    let np = next_typmod as *mut core::sync::atomic::AtomicU32;
+
+    // Try to find a matching tuple descriptor in the record table.
+    let local_key = SharedRecordTableKey {
+        u: tupdesc as *const TupleDescData<'_> as u64,
+        shared: false,
+    };
+    let local_key_bytes = record_table_key_bytes(&local_key);
+    if let Some(guard) =
+        backend_lib_dshash_seams::dshash_find::call(record_table, &local_key_bytes, false)?
+    {
+        // SAFETY: entry is a `SharedRecordTableEntry` under the partition lock.
+        let entry = unsafe { (guard.entry_ptr() as *const SharedRecordTableEntry).read() };
+        guard.release();
+        debug_assert!(entry.key.shared);
+        let result = read_shared_tupledesc(mcx, area, entry.key.u)?;
+        debug_assert_eq!(result.tdrefcount, -1);
+        return Ok(Some(result));
+    }
+
+    // Allocate a new typmod number. Wasted if we error out.
+    // SAFETY: `np` addresses the registry's next_typmod atomic in the segment.
+    let typmod = unsafe { (*np).fetch_add(1, core::sync::atomic::Ordering::Relaxed) };
+
+    // Copy the TupleDesc into shared memory.
+    let shared_dp = share_tupledesc(area, tupdesc, typmod)?;
+
+    // Create an entry in the typmod table so others understand this typmod.
+    let typmod_key = typmod.to_ne_bytes();
+    let dup = {
+        let guard =
+            match backend_lib_dshash_seams::dshash_find_or_insert::call(typmod_table, &typmod_key) {
+                Ok(g) => g,
+                Err(e) => {
+                    let _ = dsa_seams::dsa_free_ptr::call(area, shared_dp);
+                    return Err(e);
+                }
+            };
+        let found = guard.found;
+        if !found {
+            // SAFETY: entry is a `SharedTypmodTableEntry` under the partition lock.
+            unsafe {
+                (guard.entry_ptr() as *mut SharedTypmodTableEntry).write(SharedTypmodTableEntry {
+                    typmod,
+                    shared_tupdesc: shared_dp,
+                });
+            }
+        }
+        guard.release();
+        found
+    };
+    if dup {
+        let _ = dsa_seams::dsa_free_ptr::call(area, shared_dp);
+        return elog_error("cannot create duplicate shared record typmod".to_string());
+    }
+
+    // Finally create an entry in the record table so others with matching tuple
+    // descriptors can reuse the typmod.
+    let guard =
+        backend_lib_dshash_seams::dshash_find_or_insert::call(record_table, &local_key_bytes)?;
+    if guard.found {
+        // Someone concurrently inserted a matching descriptor. Use that one and
+        // free the space we created (plus its typmod-table entry).
+        // SAFETY: entry is a `SharedRecordTableEntry` under the partition lock.
+        let entry = unsafe { (guard.entry_ptr() as *const SharedRecordTableEntry).read() };
+        guard.release();
+        let _ = backend_lib_dshash_seams::dshash_delete_key::call(typmod_table, &typmod_key)?;
+        let _ = dsa_seams::dsa_free_ptr::call(area, shared_dp);
+        debug_assert!(entry.key.shared);
+        let result = read_shared_tupledesc(mcx, area, entry.key.u)?;
+        debug_assert_eq!(result.tdrefcount, -1);
+        return Ok(Some(result));
+    }
+    // Store it and return it.
+    // SAFETY: entry is a `SharedRecordTableEntry` under the partition lock.
+    unsafe {
+        (guard.entry_ptr() as *mut SharedRecordTableEntry).write(SharedRecordTableEntry {
+            key: SharedRecordTableKey { u: shared_dp, shared: true },
+        });
+    }
+    guard.release();
+    let result = read_shared_tupledesc(mcx, area, shared_dp)?;
+    debug_assert_eq!(result.tdrefcount, -1);
+    Ok(Some(result))
 }
 
 /// Shared-typmod-table read of `lookup_rowtype_tupdesc_internal`
 /// (typcache.c:1855), attached path.
 fn shared_typmod_table_find_seam<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _typmod: i32,
-    _typmod_table: usize,
-    _area: usize,
+    mcx: Mcx<'mcx>,
+    typmod: i32,
+    typmod_table: usize,
+    area: usize,
 ) -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
-    panic!(
-        "shared_typmod_table_find: blessed-record shared path (DSA-resident \
-         TupleDesc read) not yet ported"
-    );
+    let area = area as *mut DsaArea;
+    let typmod_table = typmod_table as *mut types_storage::DshashTable;
+
+    let key = (typmod as u32).to_ne_bytes();
+    let guard = backend_lib_dshash_seams::dshash_find::call(typmod_table, &key, false)?;
+    let Some(guard) = guard else {
+        return Ok(None);
+    };
+    // SAFETY: entry is a `SharedTypmodTableEntry` under the partition lock.
+    let entry = unsafe { (guard.entry_ptr() as *const SharedTypmodTableEntry).read() };
+    guard.release();
+    let result = read_shared_tupledesc(mcx, area, entry.shared_tupdesc)?;
+    debug_assert_eq!(typmod, result.tdtypmod);
+    debug_assert_eq!(result.tdrefcount, -1);
+    Ok(Some(result))
 }
 
 /// `shared_record_table_hash` (typcache.c:259) — DshashKeyKind::Record hash.
-fn shared_record_key_hash_seam(_area: *mut types_storage::DsaArea, _key: &[u8]) -> u32 {
-    panic!(
-        "shared_record_key_hash: blessed-record key resolution (DSA-resident \
-         TupleDesc) not yet ported"
-    );
+/// Resolve the `SharedRecordTableKey` to a TupleDesc and run `hashRowType`.
+fn shared_record_key_hash_seam(area: *mut types_storage::DsaArea, key: &[u8]) -> u32 {
+    let k = read_record_table_key(key);
+    // SAFETY: `area` is the record table's live DSA area; a local key's `u` is a
+    // valid `*const TupleDescData` (the caller's stack-pinned lookup key).
+    unsafe { with_resolved_record_key(area, &k, |t| tupdesc_seams::hash_row_type::call(t)) }
 }
 
 /// `shared_record_table_compare` (typcache.c:234) — DshashKeyKind::Record cmp.
+/// Resolve both keys to TupleDescs and run `equalRowTypes` (C returns 0 on
+/// equal; the dshash Rust port compares the bool directly).
 fn shared_record_key_compare_seam(
-    _area: *mut types_storage::DsaArea,
-    _a: &[u8],
-    _b: &[u8],
+    area: *mut types_storage::DsaArea,
+    a: &[u8],
+    b: &[u8],
 ) -> bool {
-    panic!(
-        "shared_record_key_compare: blessed-record key resolution (DSA-resident \
-         TupleDesc) not yet ported"
-    );
+    let ka = read_record_table_key(a);
+    let kb = read_record_table_key(b);
+    // SAFETY: as in `shared_record_key_hash_seam`. Each resolved descriptor's
+    // scratch context lives for the duration of the inner closure.
+    unsafe {
+        with_resolved_record_key(area, &ka, |ta| {
+            with_resolved_record_key(area, &kb, |tb| {
+                tupdesc_seams::equal_row_types::call(ta, tb)
+            })
+        })
+    }
 }
 
 /* ==========================================================================

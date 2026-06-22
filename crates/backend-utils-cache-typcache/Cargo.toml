@@ -20,6 +20,7 @@ types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-statistics = { path = "../types-statistics" }
 types-storage = { path = "../types-storage" }
+types-execparallel = { path = "../types-execparallel" }
 
 # inward seams installed by this crate
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
@@ -35,4 +36,6 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 backend-utils-adt-domains-seams = { path = "../backend-utils-adt-domains-seams" }
 backend-access-common-tupdesc-seams = { path = "../backend-access-common-tupdesc-seams" }
 backend-access-common-session-seams = { path = "../backend-access-common-session-seams" }
+backend-utils-mmgr-dsa-seams = { path = "../backend-utils-mmgr-dsa-seams" }
+backend-lib-dshash-seams = { path = "../backend-lib-dshash-seams" }
 backend-catalog-pg-enum-seams = { path = "../backend-catalog-pg-enum-seams" }
