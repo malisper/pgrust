@@ -350,19 +350,23 @@ fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     // correct 10000 with two real fork(2) workers, promptly. The plan shape is
     // the exact PG18.3 Finalize/Gather/Partial/ParallelSeqScan.
     //
-    // Three downstream walls remain (so the revert stays for now — they are NOT
-    // the LWLock keystone, which is cleared):
-    //   1. Worker procarray-slot cleanup leak: after a few parallel queries the
-    //      workers' PGPROC slots are not released, so new workers hit
-    //      `FATAL: sorry, too many clients already` → `parallel worker failed
-    //      to initialize`. (worker shmem-exit / ProcArrayRemove detach gap.)
+    // Downstream walls (so the revert stays for now — they are NOT the LWLock
+    // keystone, which is cleared):
+    //   1. CLEARED — worker PGPROC-slot cleanup leak fixed: `lockGroupMembers` /
+    //      `lockGroupLink` now live in genuine cross-process shmem (proc_shmem
+    //      `init_shared_lock_group`), so an exiting parallel worker's ProcKill
+    //      sees the leader's real (non-empty) member list, takes the member-detach
+    //      branch, clears its own `lockGroupLeader`, and returns its PGPROC to the
+    //      freelist. Verified: repeated `count(*)` over tenk1 no longer hits
+    //      `sorry, too many clients already` / `OwnLatch already owned by PID …`.
     //   2. EXPLAIN ANALYZE only: the worker-side per-PlanState instrumentation
     //      accumulation into the DSM `SharedExecutorInstrumentation` is not yet
     //      modeled (execParallel.rs:1283 honest panic — pre-existing residual,
     //      not on the plain count(*) path).
     //   3. An intermittent `RefCell already borrowed` in the parallel-context
     //      teardown (parallel/lib.rs:321 `with_globals`) under some teardown
-    //      timing (re-entrant `with_globals`).
+    //      timing (re-entrant `with_globals`) — now the NEXT wall (surfaces at
+    //      ~5 repeated parallel queries once the slot leak is gone).
     return Ok(DSM_HANDLE_INVALID);
 
     // If we already created a session-scope segment, return its handle.

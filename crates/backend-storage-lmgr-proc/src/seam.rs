@@ -206,7 +206,7 @@ pub(crate) fn set_proc_lock_group_leader(procno: ProcNumber, leader: Option<Proc
 
 /// `dlist_is_empty(&GetPGProcByNumber(procno)->lockGroupMembers)`.
 pub(crate) fn proc_lock_group_members_is_empty(procno: ProcNumber) -> bool {
-    crate::proc_shmem::with_proc_by_number(procno, |p| p.lockGroupMembers.members.is_empty())
+    crate::proc_shmem::lock_group_members_is_empty(procno)
 }
 
 /// `dlist_delete(&GetPGProcByNumber(procno)->lockGroupLink)` — remove `procno`

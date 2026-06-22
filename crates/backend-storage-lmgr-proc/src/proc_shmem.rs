@@ -661,6 +661,39 @@ static SHARED_FREE_HEADS: AtomicPtr<ListHead> = AtomicPtr::new(core::ptr::null_m
 /// Number of freelist heads (= variants of [`FreeListId`]).
 const NUM_FREELISTS: usize = 4;
 
+// ---- genuinely-shared `lockGroupMembers` intrusive list ----
+//
+// C keeps each PGPROC's `lockGroupLink` (a `dlist_node`) and the leader's
+// `lockGroupMembers` (a `dlist_head`) in the shared PGPROC / PROC_HDR block, so
+// every group process — the leader and each fork(2) worker, all forked from the
+// *postmaster*, not from each other — sees the SAME membership list. With these
+// fork-COW-private (in the per-process `allProcs` Vec), `BecomeLockGroupLeader`'s
+// self-add and each `BecomeLockGroupMember`'s push are invisible to the sibling
+// workers: an exiting worker reads its own private image of the leader's list
+// (just itself), `dlist_delete`s, sees it "empty", takes ProcKill's leader-exited
+// branch, and so NEVER clears its own `lockGroupLeader` — so the final
+// `proc->lockGroupLeader == NULL` push-to-freelist is skipped and the worker's
+// PGPROC slot leaks (→ `sorry, too many clients already` after a few queries).
+// So the membership list lives in genuine shmem, the same intrusive idiom as the
+// freelists above, guarded by the leader's `LockHashPartitionLockByProc` LWLock
+// (itself in genuine shmem) exactly as C guards `lockGroupMembers` mutation.
+
+/// Base of the genuinely-shared `[FreeLink; total_procs]` array — each PGPROC's
+/// `lockGroupLink` node (distinct from `links`, which the freelists use). Set by
+/// [`InitProcGlobal`], NULL until then.
+static SHARED_LGM_LINKS: AtomicPtr<FreeLink> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_LGM_LINKS`] (== total_procs), for bounds checks.
+static SHARED_LGM_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared `[ListHead; total_procs]` array — each PGPROC's
+/// `lockGroupMembers` head (used when that proc is a lock-group leader). Set by
+/// [`InitProcGlobal`], NULL until then.
+static SHARED_LGM_HEADS: AtomicPtr<ListHead> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_LGM_HEADS`] (== total_procs), for bounds checks.
+static SHARED_LGM_HEAD_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 #[inline]
 fn freelist_index(list: FreeListId) -> usize {
     match list {
@@ -828,6 +861,154 @@ fn shared_freelist_snapshot(list: FreeListId) -> Vec<ProcNumber> {
     while cur != FREE_LINK_NIL {
         out.push(cur);
         cur = shared_link(cur).next;
+    }
+    out
+}
+
+// ---- genuinely-shared `lockGroupMembers` operations ----
+//
+// These mirror the freelist primitives above but over the SEPARATE
+// `lockGroupLink` (`SHARED_LGM_LINKS`) / per-leader `lockGroupMembers`
+// (`SHARED_LGM_HEADS`) arrays. The caller holds the leader's
+// `LockHashPartitionLockByProc` LWLock (BecomeLockGroup*/ProcKill), the same
+// interlock C uses for `lockGroupMembers` mutation.
+
+/// `&proc->lockGroupLink` over the shared `lockGroupLink` array.
+fn shared_lgm_link(procno: ProcNumber) -> &'static mut FreeLink {
+    let base = SHARED_LGM_LINKS.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC lockGroupLink array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_LGM_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC lockGroupLink index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `FreeLink`s of genuine shared memory and
+    // `idx < count`. `&mut` is sound under the leader's lock-group LWLock
+    // (single writer), mirroring C's plain pointer write to `proc->lockGroupLink`.
+    unsafe { &mut *base.add(idx) }
+}
+
+/// `&GetPGProcByNumber(leader)->lockGroupMembers` over the shared heads array.
+fn shared_lgm_head(leader: ProcNumber) -> &'static mut ListHead {
+    let base = SHARED_LGM_HEADS.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC lockGroupMembers heads uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_LGM_HEAD_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = leader as usize;
+    assert!(idx < count, "PGPROC lockGroupMembers head index {idx} out of range (count {count})");
+    // SAFETY: as above; `&mut` sound under the leader's lock-group LWLock.
+    unsafe { &mut *base.add(idx) }
+}
+
+/// Place the shared `lockGroupLink` / `lockGroupMembers` arrays into real shared
+/// memory, zero-initialized to "all detached / all empty". Idempotent across
+/// `found` (EXEC_BACKEND re-attach).
+fn init_shared_lock_group(total_procs: usize) -> PgResult<()> {
+    let links_size = mul_size(total_procs, size_of::<FreeLink>());
+    let (links_ptr, links_found) =
+        shmem::shmem_init_struct::call("PGPROC lockGroupLink", links_size)?;
+    let links_ptr = links_ptr as *mut FreeLink;
+    if !links_found {
+        for i in 0..total_procs {
+            // SAFETY: `links_ptr` addresses `total_procs` writable `FreeLink`s.
+            unsafe { *links_ptr.add(i) = FreeLink { next: FREE_LINK_NIL, prev: FREE_LINK_NIL } };
+        }
+    }
+    SHARED_LGM_LINKS.store(links_ptr, AtomicOrdering::Relaxed);
+    SHARED_LGM_LINK_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    let heads_size = mul_size(total_procs, size_of::<ListHead>());
+    let (heads_ptr, heads_found) =
+        shmem::shmem_init_struct::call("PGPROC lockGroupMembers heads", heads_size)?;
+    let heads_ptr = heads_ptr as *mut ListHead;
+    if !heads_found {
+        for i in 0..total_procs {
+            // SAFETY: `heads_ptr` addresses `total_procs` writable `ListHead`s.
+            unsafe { *heads_ptr.add(i) = ListHead { head: FREE_LINK_NIL, tail: FREE_LINK_NIL } };
+        }
+    }
+    SHARED_LGM_HEADS.store(heads_ptr, AtomicOrdering::Relaxed);
+    SHARED_LGM_HEAD_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    Ok(())
+}
+
+/// `dlist_is_empty(&GetPGProcByNumber(leader)->lockGroupMembers)`.
+fn shared_lgm_is_empty(leader: ProcNumber) -> bool {
+    shared_lgm_head(leader).head == FREE_LINK_NIL
+}
+
+/// `dlist_push_head(&leader->lockGroupMembers, &member->lockGroupLink)`.
+fn shared_lgm_push_head(leader: ProcNumber, member: ProcNumber) {
+    let old_head = shared_lgm_head(leader).head;
+    {
+        let l = shared_lgm_link(member);
+        l.prev = FREE_LINK_NIL;
+        l.next = old_head;
+    }
+    if old_head != FREE_LINK_NIL {
+        shared_lgm_link(old_head).prev = member;
+    }
+    let h = shared_lgm_head(leader);
+    h.head = member;
+    if h.tail == FREE_LINK_NIL {
+        h.tail = member;
+    }
+}
+
+/// `dlist_push_tail(&leader->lockGroupMembers, &member->lockGroupLink)`.
+fn shared_lgm_push_tail(leader: ProcNumber, member: ProcNumber) {
+    let old_tail = shared_lgm_head(leader).tail;
+    {
+        let l = shared_lgm_link(member);
+        l.next = FREE_LINK_NIL;
+        l.prev = old_tail;
+    }
+    if old_tail != FREE_LINK_NIL {
+        shared_lgm_link(old_tail).next = member;
+    }
+    let h = shared_lgm_head(leader);
+    h.tail = member;
+    if h.head == FREE_LINK_NIL {
+        h.head = member;
+    }
+}
+
+/// `dlist_delete(&member->lockGroupLink)` — unlink `member` from `leader`'s
+/// `lockGroupMembers` list (general doubly-linked-list delete).
+fn shared_lgm_remove(leader: ProcNumber, member: ProcNumber) {
+    let (prev, next) = {
+        let l = shared_lgm_link(member);
+        (l.prev, l.next)
+    };
+    if prev != FREE_LINK_NIL {
+        shared_lgm_link(prev).next = next;
+    } else {
+        // member was the head
+        shared_lgm_head(leader).head = next;
+    }
+    if next != FREE_LINK_NIL {
+        shared_lgm_link(next).prev = prev;
+    } else {
+        // member was the tail
+        shared_lgm_head(leader).tail = prev;
+    }
+    // dlist_node_init(&member->lockGroupLink): leave detached.
+    let l = shared_lgm_link(member);
+    l.next = FREE_LINK_NIL;
+    l.prev = FREE_LINK_NIL;
+}
+
+/// Snapshot of `leader`'s `lockGroupMembers` in head→tail order.
+fn shared_lgm_snapshot(leader: ProcNumber) -> Vec<ProcNumber> {
+    let mut out = Vec::new();
+    let mut cur = shared_lgm_head(leader).head;
+    while cur != FREE_LINK_NIL {
+        out.push(cur);
+        cur = shared_lgm_link(cur).next;
     }
     out
 }
@@ -1730,27 +1911,36 @@ pub(crate) fn set_shared_pid(procno: ProcNumber, pid: i32) {
 /// `dlist_push_head(&GetPGProcByNumber(leader)->lockGroupMembers,
 /// &GetPGProcByNumber(member)->lockGroupLink)`.
 pub(crate) fn lock_group_members_push_head(leader: ProcNumber, member: ProcNumber) {
-    with_proc_by_number(leader, |p| p.lockGroupMembers.push_head(member));
+    shared_lgm_push_head(leader, member);
 }
 
 /// `dlist_push_tail(&GetPGProcByNumber(leader)->lockGroupMembers,
 /// &GetPGProcByNumber(member)->lockGroupLink)`.
 pub(crate) fn lock_group_members_push_tail(leader: ProcNumber, member: ProcNumber) {
-    with_proc_by_number(leader, |p| p.lockGroupMembers.push_tail(member));
+    shared_lgm_push_tail(leader, member);
 }
 
 /// A snapshot of `GetPGProcByNumber(leader)->lockGroupMembers` in list order.
 pub(crate) fn lock_group_members_snapshot(leader: ProcNumber) -> Vec<ProcNumber> {
-    with_proc_by_number(leader, |p| p.lockGroupMembers.members.iter().copied().collect())
+    shared_lgm_snapshot(leader)
+}
+
+/// `dlist_is_empty(&GetPGProcByNumber(leader)->lockGroupMembers)` over the shared
+/// membership list.
+pub(crate) fn lock_group_members_is_empty(leader: ProcNumber) -> bool {
+    shared_lgm_is_empty(leader)
 }
 
 /// `dlist_delete(&GetPGProcByNumber(member)->lockGroupLink)` — unlink `member`
 /// from its leader's `lockGroupMembers` list. The leader is `member`'s own
 /// `lockGroupLeader` (every member, including the leader itself, records it).
 pub(crate) fn dlist_delete_lock_group_link(member: ProcNumber) {
-    let leader = proc_lock_group_leader_shared(member);
-    if let Some(leader) = leader {
-        with_proc_by_number(leader, |p| p.lockGroupMembers.remove(member));
+    // C: `dlist_delete(&MyProc->lockGroupLink)` — a self-contained
+    // doubly-linked-list unlink. The leader (still the member's recorded
+    // `lockGroupLeader` at this point — it is cleared later in ProcKill) owns the
+    // `head`/`tail` words this delete may need to fix up.
+    if let Some(leader) = proc_lock_group_leader_shared(member) {
+        shared_lgm_remove(leader, member);
     }
 }
 
@@ -1790,6 +1980,14 @@ pub fn InitProcGlobal() -> PgResult<()> {
     // visible to the postmaster and all sibling backends, so it cannot be
     // COW-inherited). Zeroed to "all empty / all detached"; threaded below.
     init_shared_freelists(total_procs)?;
+
+    // Place the genuinely-shared `lockGroupLink` / per-leader `lockGroupMembers`
+    // lists in real shared memory: a parallel group's leader and its fork(2)
+    // workers (all forked from the postmaster) must observe ONE membership list,
+    // or ProcKill's last-member detection misfires and leaks the worker PGPROC
+    // slots (`sorry, too many clients already`). Same intrusive idiom as the
+    // freelists, guarded by the leader's lock-group LWLock.
+    init_shared_lock_group(total_procs)?;
 
     let mut proc_global = PROC_HDR::new_zeroed();
 
