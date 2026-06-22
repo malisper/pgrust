@@ -1411,17 +1411,37 @@ fn multirange_from_datum<'mcx>(
 
 /// Build the [`range_gist::GistQuery`] for a range/multirange consistent call
 /// from the GiST core's by-reference query [`Datum`] and the operator's
-/// right-hand-side `subtype` (`PG_GETARG_OID(3)`):
-///   * invalid / `ANYRANGEOID` => `DatumGetRangeTypeP(query)`,
-///   * `ANYMULTIRANGEOID`      => `DatumGetMultirangeTypeP(query)`,
-///   * any other subtype       => the bare element value `Datum`.
-/// (Matches the `if/else` in `range_gist_consistent` / `multirange_gist_consistent`.)
+/// right-hand-side `subtype` (`PG_GETARG_OID(3)`).
+///
+/// In C, the decode lives *inside* each consistent function, so an **invalid
+/// subtype means the query type matches the index key type** (rangetypes_gist.c
+/// "Note that invalid subtype means that query type matches key type"):
+///   * `range_gist_consistent`:      invalid/`ANYRANGEOID` => `DatumGetRangeTypeP`,
+///                                   `ANYMULTIRANGEOID`     => `DatumGetMultirangeTypeP`,
+///                                   else                   => bare element.
+///   * `multirange_gist_consistent`: invalid/`ANYMULTIRANGEOID` => `DatumGetMultirangeTypeP`,
+///                                   `ANYRANGEOID`              => `DatumGetRangeTypeP`,
+///                                   else                       => bare element.
+///
+/// `key_is_multirange` selects which of those two dispatch tables to use (true
+/// for `multirange_gist_consistent`, where the indexed key — and the default
+/// query — is a multirange).
 fn gist_range_query<'mcx>(
     mcx: Mcx<'mcx>,
     query: &Datum<'mcx>,
     subtype: Oid,
+    key_is_multirange: bool,
 ) -> PgResult<range_gist::GistQuery<'mcx>> {
-    if !types_core::primitive::OidIsValid(subtype) || subtype == range_gist::ANYRANGEOID {
+    let invalid = !types_core::primitive::OidIsValid(subtype);
+    if key_is_multirange {
+        if invalid || subtype == range_gist::ANYMULTIRANGEOID {
+            Ok(range_gist::GistQuery::Multirange(multirange_from_datum(mcx, query)?))
+        } else if subtype == range_gist::ANYRANGEOID {
+            Ok(range_gist::GistQuery::Range(range_key_from_entry(mcx, query)?))
+        } else {
+            Ok(range_gist::GistQuery::Elem(elem_word(query)))
+        }
+    } else if invalid || subtype == range_gist::ANYRANGEOID {
         Ok(range_gist::GistQuery::Range(range_key_from_entry(mcx, query)?))
     } else if subtype == range_gist::ANYMULTIRANGEOID {
         Ok(range_gist::GistQuery::Multirange(multirange_from_datum(mcx, query)?))
@@ -1534,14 +1554,14 @@ fn dispatch_consistent<'mcx>(
         }
         F_RANGE_GIST_CONSISTENT => {
             let key = range_key_from_entry(_mcx, &entry.key)?;
-            let q = gist_range_query(_mcx, query, _subtype)?;
+            let q = gist_range_query(_mcx, query, _subtype, false)?;
             let (matched, recheck) =
                 range_gist::range_gist_consistent(_mcx, is_leaf, key, &q, strategy, _subtype)?;
             Ok(GistConsistentResult { matched, recheck })
         }
         F_MULTIRANGE_GIST_CONSISTENT => {
             let key = range_key_from_entry(_mcx, &entry.key)?;
-            let q = gist_range_query(_mcx, query, _subtype)?;
+            let q = gist_range_query(_mcx, query, _subtype, true)?;
             let (matched, recheck) =
                 range_gist::multirange_gist_consistent(_mcx, is_leaf, key, &q, strategy, _subtype)?;
             Ok(GistConsistentResult { matched, recheck })
