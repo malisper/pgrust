@@ -92,6 +92,9 @@ mod pg_snapshot_xip;
 mod aclexplode;
 mod pg_stat_get_io;
 mod pg_stat_get_slru;
+mod pg_stat_get_recovery_prefetch;
+mod pg_stat_get_activity;
+mod pg_stat_get_backend_idset;
 mod pgstat_composite_srf;
 mod pg_mcv_list_items;
 mod shmem_numa_srf;
@@ -259,6 +262,15 @@ pub fn init_seams() {
     // substrate (pgstat_fetch_stat_io/slru/wal/archiver/replslot/subscription).
     pg_stat_get_io::register_pg_stat_get_io();
     pg_stat_get_slru::register_pg_stat_get_slru();
+    // `pg_stat_get_recovery_prefetch()` (OID 6248) — the single-row
+    // `pg_stat_recovery_prefetch` view over the XLogPrefetchStats shmem counters.
+    pg_stat_get_recovery_prefetch::register_pg_stat_get_recovery_prefetch();
+    // `pg_stat_get_activity(int4)` (OID 2022) — the `pg_stat_activity` view's
+    // 31-column backing SRF over the localBackendStatusTable snapshot.
+    pg_stat_get_activity::register_pg_stat_get_activity();
+    // `pg_stat_get_backend_idset()` (OID 1936) — the value-per-call SRF emitting
+    // each backend's proc_number.
+    pg_stat_get_backend_idset::register_pg_stat_get_backend_idset();
     pgstat_composite_srf::register_pgstat_composite_srfs();
     // `pg_options_to_table(text[])` (OID 2289) and `pg_prepared_statement()` (OID
     // 2510) — the materialize-mode system SRFs whose `(mcx, fcinfo)` bodies drive

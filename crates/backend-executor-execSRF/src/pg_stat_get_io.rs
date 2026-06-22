@@ -42,6 +42,8 @@ use crate::register_srf;
 
 /// `pg_stat_get_io()` (OID 6214).
 const PG_STAT_GET_IO: Oid = 6214;
+/// `pg_stat_get_backend_io(int4)` (OID 6386).
+const PG_STAT_GET_BACKEND_IO: Oid = 6386;
 
 // ---------------------------------------------------------------------------
 // The `io_stat_col` enum (pgstatfuncs.c:1320) — positional column indices into
@@ -158,6 +160,7 @@ fn io_op_from_index(i: usize) -> IOOp {
 /// Register `pg_stat_get_io` in the executor-frame SRF table.
 pub(crate) fn register_pg_stat_get_io() {
     register_srf(PG_STAT_GET_IO, pg_stat_get_io);
+    register_srf(PG_STAT_GET_BACKEND_IO, pg_stat_get_backend_io);
 }
 
 /// Build a `NUMERIC` `Datum` from a `u64` byte count. C does
@@ -304,6 +307,71 @@ fn pg_stat_get_io<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult
     }
 
     // C: return (Datum) 0 — the whole set is in the materialize tuplestore.
+    fcinfo.isnull = true;
+    Ok(Datum::null())
+}
+
+/// `pg_stat_get_backend_io(PG_FUNCTION_ARGS)` (pgstatfuncs.c:1589) — the IO
+/// stats of one backend identified by pid, projected through the same
+/// `pg_stat_io_build_tuples` body as `pg_stat_get_io`. An empty set (C
+/// `return (Datum) 0` with no rows) when the pid is not a tracked backend.
+fn pg_stat_get_backend_io<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
+    let mcx: Mcx<'mcx> = fcinfo
+        .fn_mcxt
+        .expect("pg_stat_get_backend_io: fn_mcxt set by ExecMakeTableFunctionResult");
+
+    // C: InitMaterializedSRF(fcinfo, 0); rsinfo = fcinfo->resultinfo;
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
+
+    // C: pid = PG_GETARG_INT32(0);
+    //    backend_stats = pgstat_fetch_stat_backend_by_pid(pid, &bktype);
+    let pid = fcinfo
+        .args
+        .first()
+        .expect("pg_stat_get_backend_io: missing int4 arg")
+        .value
+        .as_i32();
+
+    let mut bktype = BackendType::Invalid;
+    let backend_stats =
+        backend_utils_activity_pgstat_backend::pgstat_fetch_stat_backend_by_pid(
+            pid,
+            Some(&mut bktype),
+        )?;
+
+    // C: if (!backend_stats) return (Datum) 0;
+    let Some(backend_stats) = backend_stats else {
+        fcinfo.isnull = true;
+        return Ok(Datum::null());
+    };
+
+    // C: bktype_stats = &backend_stats->io_stats;
+    //    Assert(pgstat_bktype_io_stats_valid(bktype_stats, bktype));
+    let bktype_stats = &backend_stats.io_stats;
+    debug_assert!(io::pgstat_bktype_io_stats_valid(bktype_stats, bktype));
+
+    // C: pg_stat_io_build_tuples(rsinfo, bktype_stats, bktype,
+    //                            backend_stats->stat_reset_timestamp);
+    let mut rows: Vec<([Datum<'mcx>; IO_NUM_COLUMNS], [bool; IO_NUM_COLUMNS])> = Vec::new();
+    pg_stat_io_build_tuples(
+        mcx,
+        &mut rows,
+        bktype_stats,
+        bktype,
+        backend_stats.stat_reset_timestamp,
+    )?;
+
+    let rsinfo = fcinfo
+        .resultinfo
+        .as_mut()
+        .expect("pg_stat_get_backend_io: InitMaterializedSRF establishes fcinfo->resultinfo");
+    for (values, nulls) in &rows {
+        materialized_srf_putvalues(rsinfo, &values[..], &nulls[..])?;
+    }
+
+    // C: return (Datum) 0.
     fcinfo.isnull = true;
     Ok(Datum::null())
 }

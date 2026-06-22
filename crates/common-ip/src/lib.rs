@@ -315,10 +315,18 @@ fn getnameinfo_system(
 /// `ss_family` (offset 0) with an unaligned read rather than forming a
 /// reference to a misaligned `sockaddr_storage` (which is UB and aborts under
 /// Rust's misaligned-pointer-dereference check).
-fn sockaddr_family(addr: &SockAddr) -> i32 {
+pub fn sockaddr_family(addr: &SockAddr) -> i32 {
     let p = addr.addr.as_ptr().cast::<libc::sockaddr_storage>();
     let fam = unsafe { ptr::addr_of!((*p).ss_family).read_unaligned() };
     fam as i32
+}
+
+/// `pg_memory_is_all_zeros(&addr, sizeof(addr))` over a `SockAddr` — true when
+/// both the `sockaddr_storage` bytes and the `salen` are zero (C compares the
+/// whole struct). Used by `pg_stat_get_activity` to detect "we don't know" the
+/// client address.
+pub fn sockaddr_is_all_zeros(addr: &SockAddr) -> bool {
+    addr.salen == 0 && addr.addr.iter().all(|&b| b == 0)
 }
 
 /// Build a `struct addrinfo` hint from the lookup-relevant fields C passes.

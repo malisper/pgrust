@@ -57,6 +57,16 @@ fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> types_core::Oid {
         .as_oid()
 }
 
+/// `PG_GETARG_INT32(i)` → low 32 bits of arg `i`'s word.
+#[inline]
+fn arg_i32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
+    fcinfo
+        .arg(i)
+        .expect("pgstatfuncs fn: missing int4 arg")
+        .value
+        .as_i32()
+}
+
 /// `text_to_cstring(PG_GETARG_TEXT_PP(i))` — read a `text` arg's payload off the
 /// by-ref lane (header-ful varlena image, strip the 4-byte header) as a String.
 #[inline]
@@ -238,6 +248,33 @@ fn fc_pg_stat_reset_subscription_stats(fc: &mut FunctionCallInfoBaseData) -> PgR
     Ok(ret_void())
 }
 
+/// `pg_stat_get_backend_pid(procNumber int4)` (pgstatfuncs.c:696) →
+/// `pgstat_get_beentry_by_proc_number(procNumber)->st_procpid`, or NULL when the
+/// proc number has no live beentry.
+fn fc_pg_stat_get_backend_pid(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // int32 procNumber = PG_GETARG_INT32(0);
+    let proc_number = arg_i32(fc, 0);
+
+    // if ((beentry = pgstat_get_beentry_by_proc_number(procNumber)) == NULL)
+    //     PG_RETURN_NULL();
+    match backend_utils_activity_status::pgstat_get_beentry_by_proc_number(proc_number) {
+        Some(beentry) => Ok(ret_i32(beentry.st_procpid)),
+        None => {
+            fc.set_result_null(true);
+            Ok(ret_void())
+        }
+    }
+}
+
+/// `pg_stat_reset_backend_stats(backend_pid int4)` (pgstatfuncs.c:1956) → reset
+/// one backend's cumulative `PGSTAT_KIND_BACKEND` statistics, identified by pid.
+/// `PG_RETURN_VOID`.
+fn fc_pg_stat_reset_backend_stats(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let backend_pid = arg_i32(fc, 0);
+    backend_utils_activity_pgstat_backend::pgstat_reset_backend_stats(backend_pid)?;
+    Ok(ret_void())
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -269,6 +306,20 @@ fn builtin(
 pub fn register_pgstatfuncs_builtins() {
     backend_utils_fmgr_core::register_builtins_native([
         builtin(2026, "pg_backend_pid", 0, true, fc_pg_backend_pid),
+        builtin(
+            1937,
+            "pg_stat_get_backend_pid",
+            1,
+            true,
+            fc_pg_stat_get_backend_pid,
+        ),
+        builtin(
+            6387,
+            "pg_stat_reset_backend_stats",
+            1,
+            true,
+            fc_pg_stat_reset_backend_stats,
+        ),
         builtin(
             3788,
             "pg_stat_get_snapshot_timestamp",

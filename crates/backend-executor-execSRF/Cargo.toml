@@ -160,6 +160,25 @@ backend-utils-activity-pgstat-replslot = { path = "../backend-utils-activity-pgs
 backend-utils-activity-pgstat-subscription = { path = "../backend-utils-activity-pgstat-subscription" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+# pg_stat_get_backend_io / pg_stat_get_backend_wal: the per-backend cumulative
+# stats fetch (pgstat_fetch_stat_backend_by_pid).
+backend-utils-activity-pgstat-backend = { path = "../backend-utils-activity-pgstat-backend" }
+# pg_stat_get_recovery_prefetch: the XLogPrefetchStats shmem counters.
+backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }
+# pg_stat_get_activity: the BackendStatusArray local snapshot + clip_activity.
+backend-utils-activity-status = { path = "../backend-utils-activity-status" }
+# pg_stat_get_activity: wait-event decoders, HAS_PGSTAT_PERMISSIONS (acl), the
+# proc lookups (procarray/lmgr-proc) projecting wait_event_info + leader pid,
+# bgworker type / apply-leader pid, inet_in + clean_ipv6_addr, client-addr ip.
+backend-utils-activity-waitevent = { path = "../backend-utils-activity-waitevent" }
+backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
+backend-utils-adt-network = { path = "../backend-utils-adt-network" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-postmaster-bgworker = { path = "../backend-postmaster-bgworker" }
+backend-replication-logical-launcher-seams = { path = "../backend-replication-logical-launcher-seams" }
+common-ip = { path = "../common-ip" }
+libc = "0.2"
 # record_from_values: the BlessTupleDesc + heap_form_tuple + HeapTupleGetDatum
 # composite-Datum builder the single-row pg_stat_get_* functions return through.
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }

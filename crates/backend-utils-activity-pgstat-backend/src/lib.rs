@@ -277,6 +277,41 @@ pub fn pgstat_fetch_stat_backend_by_pid(
     Ok(backend_stats)
 }
 
+/// Port of the `pg_stat_reset_backend_stats(PG_FUNCTION_ARGS)` body
+/// (pgstatfuncs.c:1956): reset one backend's cumulative `PGSTAT_KIND_BACKEND`
+/// statistics, identified by its pid. A no-op (C `PG_RETURN_VOID`) when the pid
+/// does not name a live backend with a beentry, or when the backend type does
+/// not track statistics.
+///
+/// The `BackendPidGetProc` / `AuxiliaryPidGetProc` / `GetNumberFromPGProc` /
+/// `pgstat_get_beentry_by_proc_number` prefix is resolved by the in-crate
+/// [`pgstat_backend_pid_lookup`] (each piece reached through its owner's seam),
+/// exactly as in [`pgstat_fetch_stat_backend_by_pid`].
+pub fn pgstat_reset_backend_stats(backend_pid: i32) -> PgResult<()> {
+    // proc = BackendPidGetProc(backend_pid); if (!proc) proc =
+    // AuxiliaryPidGetProc(backend_pid); if (!proc) PG_RETURN_VOID();
+    // procNumber = GetNumberFromPGProc(proc);
+    // beentry = pgstat_get_beentry_by_proc_number(procNumber); if (!beentry)
+    // PG_RETURN_VOID();
+    let (proc_number, st_backend_type, _st_procpid) = match pgstat_backend_pid_lookup(backend_pid) {
+        None => return Ok(()),
+        Some(t) => t,
+    };
+
+    // Check if the backend type tracks statistics.
+    //   if (!pgstat_tracks_backend_bktype(beentry->st_backendType)) PG_RETURN_VOID();
+    if !pgstat_tracks_backend_bktype(st_backend_type) {
+        return Ok(());
+    }
+
+    // pgstat_reset(PGSTAT_KIND_BACKEND, InvalidOid, procNumber);
+    backend_utils_activity_pgstat::pgstat_core::pgstat_reset(
+        PGSTAT_KIND_BACKEND,
+        InvalidOid,
+        proc_number as u64,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // flush helpers (locking managed by the caller).
 // ---------------------------------------------------------------------------
