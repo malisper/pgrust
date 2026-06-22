@@ -1460,12 +1460,26 @@ fn ATPostAlterTypeParse<'mcx>(
                             .into_constraint()
                             .expect("AT_AddConstraint: def is Constraint");
                         con.old_pktable_oid = ref_rel_id;
-                        // rewriting neither side of a FK → TryReuseForeignKey.
+                        // rewriting neither side of a FK → TryReuseForeignKey:
+                        // stash the old constraint's conpfeqop operator OIDs (as
+                        // an Integer-node list) so the FK re-add can skip
+                        // revalidation when the equality operators are unchanged.
                         if con.contype == types_nodes::ddlnodes::ConstrType::CONSTR_FOREIGN
                             && rewrite == 0
                             && wqueue[tab_idx].rewrite == 0
                         {
-                            unported("ATPostAlterTypeParse TryReuseForeignKey (FK skip-revalidation)");
+                            let pfeqops =
+                                backend_catalog_pg_constraint::TryReuseForeignKey(mcx, old_id)?;
+                            for op in pfeqops {
+                                let node = mcx::alloc_in(
+                                    mcx,
+                                    Node::mk_integer(
+                                        mcx,
+                                        types_nodes::value::Integer { ival: op as i32 },
+                                    )?,
+                                )?;
+                                con.old_conpfeqop.push(node);
+                            }
                         }
                         con.reset_default_tblspc = true;
                         let conname = con.conname.as_ref().map(|s| s.to_string());

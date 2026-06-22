@@ -2579,6 +2579,23 @@ fn get_ri_constraint_root(constr_oid: Oid) -> PgResult<Oid> {
     }
 }
 
+/// `TryReuseForeignKey(oldId, con)` (tablecmds.c:15915) — read the existing FK
+/// constraint's `conpfeqop` operator OIDs. The caller stashes these into the
+/// rebuilt `Constraint` node's `old_conpfeqop` list so the FK re-add can skip
+/// revalidation when the equality operators are unchanged. The test on the
+/// array follows `ri_FetchConstraintInfo` (1-D, no nulls, OID element type),
+/// which `DeconstructFkConstraintRow(want_pf=true)` enforces.
+pub fn TryReuseForeignKey(mcx: Mcx<'_>, old_id: Oid) -> PgResult<Vec<Oid>> {
+    let Some(tuple) = syscache_seams::search_constraint_tuple_by_oid::call(mcx, old_id)? else {
+        /* should not happen */
+        return Err(PgError::error(format!(
+            "cache lookup failed for constraint {old_id}"
+        )));
+    };
+    let fk = DeconstructFkConstraintRow(mcx, &tuple, true, false, false, false)?;
+    Ok(fk.pf_eq_oprs.unwrap_or_default())
+}
+
 /// `load_fk_constraint(mcx, constraint_oid)` — `SearchSysCache1(CONSTROID)` +
 /// the FK-row projection `ri_LoadConstraintInfo` performs (lines 2294-2331).
 fn load_fk_constraint<'mcx>(
