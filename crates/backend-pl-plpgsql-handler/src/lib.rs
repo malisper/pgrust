@@ -1168,7 +1168,8 @@ pub fn init_seams() {
          parse_mode,
          parse_state,
          datum_snapshot: Vec<Option<backend_pl_plpgsql_exec_seams::EvalParamValue>>,
-         read_only| {
+         read_only,
+         must_return_tuples| {
             let mut resolve = |dno: i32| -> PgResult<backend_executor_spi::EvalParamValue> {
                 match datum_snapshot.get(dno as usize).and_then(|o| o.as_ref()) {
                     Some(v) => Ok(backend_executor_spi::EvalParamValue {
@@ -1187,6 +1188,7 @@ pub fn init_seams() {
                 parse_mode,
                 parse_state,
                 read_only,
+                must_return_tuples,
                 &mut resolve,
             )?;
             Ok(backend_pl_plpgsql_exec_seams::RunSelectResult {
@@ -1223,7 +1225,8 @@ pub fn init_seams() {
          read_only,
          into,
          collect_all,
-         tcount| {
+         tcount,
+         must_return_tuples| {
             let using: Vec<backend_executor_spi::EvalParamValue> = params
                 .into_iter()
                 .map(|p| backend_executor_spi::EvalParamValue {
@@ -1234,7 +1237,7 @@ pub fn init_seams() {
                 })
                 .collect();
             let r = backend_executor_spi::spi_execsql_dynamic(
-                &query, &using, read_only, into, collect_all, tcount,
+                &query, &using, read_only, into, collect_all, tcount, must_return_tuples,
             )?;
             let map_col = |c: backend_executor_spi::ExecsqlColumn| {
                 backend_pl_plpgsql_exec_seams::ExecsqlColumn {

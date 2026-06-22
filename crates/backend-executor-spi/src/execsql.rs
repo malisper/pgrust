@@ -102,7 +102,9 @@ pub fn spi_execsql(
     tcount: i64,
     resolve: &mut dyn FnMut(i32) -> PgResult<EvalParamValue>,
 ) -> PgResult<ExecsqlResult> {
-    spi_execsql_inner(query, parsemode, parse_state, _read_only, into, false, tcount, resolve)
+    spi_execsql_inner(
+        query, parsemode, parse_state, _read_only, into, false, tcount, false, resolve,
+    )
 }
 
 /// `exec_run_select` materialize-all path (`pl_exec.c`): run `query`, collecting
@@ -114,9 +116,20 @@ pub fn spi_execsql_collect(
     parsemode: RawParseMode,
     parse_state: PlpgsqlExprParseState,
     read_only: bool,
+    must_return_tuples: bool,
     resolve: &mut dyn FnMut(i32) -> PgResult<EvalParamValue>,
 ) -> PgResult<ExecsqlResult> {
-    spi_execsql_inner(query, parsemode, parse_state, read_only, false, true, 0, resolve)
+    spi_execsql_inner(
+        query,
+        parsemode,
+        parse_state,
+        read_only,
+        false,
+        true,
+        0,
+        must_return_tuples,
+        resolve,
+    )
 }
 
 /// `exec_stmt_dynexecute` / `exec_dynquery_with_params` core (`pl_exec.c`): run a
@@ -140,6 +153,7 @@ pub fn spi_execsql_dynamic(
     into: bool,
     collect_all: bool,
     tcount: i64,
+    must_return_tuples: bool,
 ) -> PgResult<ExecsqlResult> {
     let cxt = MemoryContext::new("SPI Dynexecute");
     let mcx = cxt.mcx();
@@ -150,6 +164,21 @@ pub fn spi_execsql_dynamic(
     // analyzes with `parse_analyze_fixedparams`.
     let param_types: Vec<Oid> = params.iter().map(|p| p.typeid).collect();
     let source = prepare_dynexecute_plan(mcx, interned, &param_types)?;
+
+    // must_return_tuples (spi.c): RETURN QUERY EXECUTE rejects a query that
+    // produces no result descriptor. The dynamic-execute error-context callback
+    // (below, attached via the inner `run_execsql` error map) decorates this with
+    // `SQL statement "..."`; raise it here, before execution, as C does.
+    if must_return_tuples {
+        if let Err(mut e) = check_must_return_tuples(source) {
+            let _ = plancache::DropCachedPlan(source);
+            // Match the `_SPI_error_callback` decoration applied to execution
+            // errors on this dynamic statement (a complete top-level statement).
+            e = e.add_context(format!("SQL statement \"{query}\""));
+            e.plpgsql_context_attached = false;
+            return Err(e);
+        }
+    }
 
     // Build the value ParamListInfo directly from the evaluated USING values
     // (C `exec_eval_using_params` -> the paramLI fed to SPI_execute_extended).
@@ -290,6 +319,7 @@ fn spi_execsql_inner(
     into: bool,
     collect_all: bool,
     tcount: i64,
+    must_return_tuples: bool,
     resolve: &mut dyn FnMut(i32) -> PgResult<EvalParamValue>,
 ) -> PgResult<ExecsqlResult> {
     let cxt = MemoryContext::new("SPI Execsql");
@@ -339,6 +369,18 @@ fn spi_execsql_inner(
     let source = prepare_execsql_plan(mcx, interned, parsemode, parse_state.clone())
         .map_err(&spi_error_decorate)?;
 
+    // must_return_tuples (spi.c): complain when the query produces no result
+    // descriptor (RETURN QUERY). A SELECT without a resultDesc is a SELECT INTO.
+    // Checked here — inside the `_SPI_error_callback` boundary — so the error
+    // carries the `SQL statement "..."` context line, exactly as C raises it from
+    // within _SPI_execute_plan.
+    if must_return_tuples {
+        if let Err(e) = check_must_return_tuples(source) {
+            let _ = plancache::DropCachedPlan(source);
+            return Err(spi_error_decorate(e));
+        }
+    }
+
     // setup_param_list: build the value ParamListInfo from the referenced datums.
     let param_li = build_param_list(&parse_state, resolve)?;
 
@@ -365,6 +407,26 @@ fn spi_execsql_inner(
     let result = result?;
     set_spi_processed(result.processed);
     Ok(result)
+}
+
+/// `must_return_tuples` (spi.c 2557): error if the prepared `source` produces no
+/// result tuple descriptor. The command-tag display name gives a good message —
+/// a SELECT without a resultDesc is a `SELECT INTO`.
+fn check_must_return_tuples(source: SourceHandle) -> PgResult<()> {
+    let handle = types_nodes::parsestmt::CachedPlanSourceHandle(source);
+    if plancache_seams::plansource_has_result_desc::call(handle)? {
+        return Ok(());
+    }
+    let tag = plancache_seams::plansource_command_tag::call(handle)?.0;
+    let cmdtag = if tag == types_portal::CMDTAG_SELECT {
+        "SELECT INTO"
+    } else {
+        backend_tcop_cmdtag::get_command_tag_name(tag)
+    };
+    Err(backend_utils_error::ereport(ERROR)
+        .errcode(ERRCODE_SYNTAX_ERROR)
+        .errmsg(format!("{cmdtag} query does not return tuples"))
+        .into_error())
 }
 
 /// `_SPI_prepare_plan` for an embedded SQL statement: raw_parser(parsemode) ->

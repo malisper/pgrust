@@ -2423,6 +2423,7 @@ fn exec_run_select_rows(
         parse_state,
         snapshot,
         estate.readonly_func,
+        false, // must_return_tuples (FOR-IN-SELECT does not require tuples)
     )?;
     estate.eval_processed = result.processed;
     Ok(result.all_rows)
@@ -3024,10 +3025,10 @@ fn exec_stmt_return_query(
     // dynamic RETURN QUERY EXECUTE → exec_dynquery_with_params). C sets
     // `options.must_return_tuples = true`, so a query that produces no result
     // descriptor (e.g. `SELECT ... INTO`, or a DML/utility command) raises
-    // "<cmd> query does not return tuples" (spi.c). The owned model surfaces the
-    // SPI result code; a non-tuple-returning command has `returned_tuptable ==
-    // false`, which we reject below with the same message.
-    let (rows, code, returned_tuptable) = if let Some(query) = stmt.query.as_deref() {
+    // "<cmd> query does not return tuples" (spi.c) BEFORE running — the seam
+    // performs that check at plan time (giving the correct command-tag name and
+    // the `SQL statement "..."` error context).
+    let rows = if let Some(query) = stmt.query.as_deref() {
         let input_collation = INVALID_OID;
         let parse_state = build_plpgsql_parse_state(estate, query, input_collation)?;
         let snapshot = build_datum_snapshot(estate)?;
@@ -3037,9 +3038,10 @@ fn exec_stmt_return_query(
             parse_state,
             snapshot,
             estate.readonly_func,
+            true, // must_return_tuples
         )?;
         estate.eval_processed = result.processed;
-        (result.all_rows, result.code, result.returned_tuptable)
+        result.all_rows
     } else {
         let dynquery = stmt
             .dynquery
@@ -3063,25 +3065,11 @@ fn exec_stmt_return_query(
             false, // into
             true,  // collect_all
             0,     // run to completion
+            true,  // must_return_tuples
         )?;
         estate.eval_processed = result.processed;
-        (result.all_rows, result.code, result.returned_tuptable)
+        result.all_rows
     };
-
-    // must_return_tuples: a command that did not return a tuple table is rejected
-    // (spi.c "<cmd> query does not return tuples"). A SELECT without a result
-    // descriptor is a SELECT INTO.
-    if !returned_tuptable {
-        let cmdtag = if code == exec_seams::SPI_OK_SELINTO || code == exec_seams::SPI_OK_SELECT {
-            "SELECT INTO"
-        } else {
-            command_tag_name_for_spi_code(code)
-        };
-        return Err(types_error::PgError::error(format!(
-            "{cmdtag} query does not return tuples"
-        ))
-        .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR));
-    }
 
     // Count how many tuples we got; set eval_processed + FOUND.
     let processed = rows.len() as u64;
@@ -4005,20 +3993,6 @@ fn format_preparedparamsdata(
     Ok(Some(out))
 }
 
-/// A command-tag display name for a non-tuple-returning SPI result code, used in
-/// the `must_return_tuples` error (`GetCommandTagName` in spi.c). Only the codes
-/// reachable from RETURN QUERY are mapped; an unmapped code falls back to the SPI
-/// success-tag table's generic name.
-fn command_tag_name_for_spi_code(code: int32) -> &'static str {
-    match code {
-        c if c == exec_seams::SPI_OK_INSERT => "INSERT",
-        c if c == exec_seams::SPI_OK_UPDATE => "UPDATE",
-        c if c == exec_seams::SPI_OK_DELETE => "DELETE",
-        c if c == exec_seams::SPI_OK_UTILITY => "UTILITY",
-        _ => "???",
-    }
-}
-
 /// `exec_stmt_dynexecute(estate, stmt)` (pl_exec.c 4440) — execute a dynamic SQL
 /// query string built at runtime (`EXECUTE '<sql>' [INTO target] [USING ...]`).
 /// Evaluate the query-string expression to text, evaluate the USING params, run
@@ -4065,6 +4039,7 @@ fn exec_stmt_dynexecute(
         stmt.into, // collect first row when INTO
         false,     // collect_all
         0,         // run to completion
+        false,     // must_return_tuples (plain EXECUTE allows any command)
     )?;
 
     let exec_res = result.code;
@@ -4225,6 +4200,7 @@ fn exec_dynquery_with_params(
         false, // into
         true,  // collect_all
         0,     // run to completion
+        false, // must_return_tuples (FOR-IN-EXECUTE does not require tuples)
     )?;
 
     estate.eval_processed = result.processed;

@@ -276,6 +276,7 @@ seam_core::seam!(
         parse_state: types_nodes::parsestmt::PlpgsqlExprParseState,
         datum_snapshot: std::vec::Vec<Option<EvalParamValue>>,
         read_only: bool,
+        must_return_tuples: bool,
     ) -> PgResult<RunSelectResult>
 );
 
@@ -330,6 +331,7 @@ seam_core::seam!(
         into: bool,
         collect_all: bool,
         tcount: i64,
+        must_return_tuples: bool,
     ) -> PgResult<DynExecResult>
 );
 

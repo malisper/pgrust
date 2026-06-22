@@ -43,7 +43,7 @@ pub fn SPI_execute(src: &str, read_only: bool, tcount: i64) -> PgResult<i32> {
 
     // `into = true` collects the first result row (for `SPI_getvalue`'s
     // `SPI_tuptable->vals[0]`); `collect_all = false` (we only need the first).
-    let result = spi_execsql_dynamic(src, &[], read_only, true, false, tcount)?;
+    let result = spi_execsql_dynamic(src, &[], read_only, true, false, tcount, false)?;
 
     // Render and stash the first row's first column for `SPI_getvalue_first`,
     // mirroring `SPI_tuptable->vals[0]` after a row-returning command. A
