@@ -1615,8 +1615,8 @@ pub(crate) fn get_agg_catalog_info<'mcx>(
 
     // textInitVal = SysCacheGetAttr(.., agginitval, &initValueIsNull);
     // initValue = initValueIsNull ? 0 : GetAggInitVal(textInitVal, aggtranstype);
-    let (agginitval, agginitval_isnull) = match &form.agginitval {
-        None => (KeyDatum::null(), true),
+    let (agginitval, agginitval_isnull, agginitval_image) = match &form.agginitval {
+        None => (KeyDatum::null(), true, None),
         Some(text) => {
             // GetAggInitVal: getTypeInputInfo(transtype, &typinput, &typioparam);
             // OidInputFunctionCall(typinput, strInitVal, typioparam, -1).
@@ -1630,19 +1630,25 @@ pub(crate) fn get_agg_catalog_info<'mcx>(
             // `datumIsEqual` transition-state-sharing dedup (the executor
             // re-fetches the real value through `GetAggInitVal` at apply time).
             // A by-value init value rides the word verbatim; a by-reference one
-            // (e.g. avg(int4)'s `{0,0}` int8[] array, sum/avg(numeric)) has no
-            // bare-word representation at this layer, so we carry a `0`
-            // placeholder and `find_compatible_*` declines to dedup by-ref init
-            // values (conservative: it never wrongly merges two transition
-            // states). Mirrors the C `Datum initValue` carrier, where the by-ref
-            // word is a pointer the planner only feeds to `datumIsEqual`.
-            let word = match &init {
-                types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => {
-                    KeyDatum::from_usize(*w)
+            // (e.g. avg(int4)'s `{0,0}` int8[] array, sum/avg(numeric), or a
+            // composite `stype`) has no bare-word representation at this layer,
+            // so we additionally carry its flat varlena byte image
+            // (`agginitval_image`) — the bytes C's `datumIsEqual` would
+            // dereference through the `Datum` pointer — so `find_compatible_*`
+            // can dedup by-ref init values too. Mirrors the C `Datum initValue`
+            // carrier, where the by-ref word is a pointer the planner only feeds
+            // to `datumIsEqual`.
+            use types_tuple::backend_access_common_heaptuple::Datum as TupleDatum;
+            match &init {
+                TupleDatum::ByVal(w) => (KeyDatum::from_usize(*w), false, None),
+                _ => {
+                    // Flatten the by-reference / composite value to its verbatim
+                    // varlena byte image (header included), owned, so it outlives
+                    // the borrow of `init`.
+                    let image: Vec<u8> = init.as_varlena_bytes().into_owned();
+                    (KeyDatum::null(), false, Some(image))
                 }
-                _ => KeyDatum::null(),
-            };
-            (word, false)
+            }
         }
     };
 
@@ -1657,6 +1663,7 @@ pub(crate) fn get_agg_catalog_info<'mcx>(
         aggfinalmodify: form.aggfinalmodify,
         agginitval,
         agginitval_isnull,
+        agginitval_image,
     })
 }
 

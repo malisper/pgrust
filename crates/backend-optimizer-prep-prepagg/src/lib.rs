@@ -537,6 +537,13 @@ fn preprocess_aggref<'mcx>(
     } else {
         aggform.agginitval
     };
+    // Flat byte image of a by-reference init value (None for by-value or NULL);
+    // carries the bytes C's `datumIsEqual` dereferences (see `AggCatalogInfo`).
+    let initValueImage: Option<Vec<u8>> = if initValueIsNull {
+        None
+    } else {
+        aggform.agginitval_image.clone()
+    };
 
     /*
      * 1. See if this is identical to another aggregate function call that we've
@@ -602,6 +609,7 @@ fn preprocess_aggref<'mcx>(
             aggdeserialfn,
             initValue,
             initValueIsNull,
+            initValueImage.as_deref(),
             &same_input_transnos,
         )?;
         if transno_found == -1 {
@@ -644,6 +652,7 @@ fn preprocess_aggref<'mcx>(
                 aggtransspace,
                 initValue,
                 initValueIsNull,
+                initValueImage,
             };
 
             transno_found = root.aggtransinfos.len() as i32;
@@ -862,6 +871,7 @@ fn find_compatible_trans(
     aggdeserialfn: Oid,
     initValue: Datum,
     initValueIsNull: bool,
+    initValueImage: Option<&[u8]>,
     transnos: &[i32],
 ) -> PgResult<i32> {
     /* If this aggregate can't share transition states, give up */
@@ -903,23 +913,34 @@ fn find_compatible_trans(
             return Ok(transno);
         }
 
-        // C compares the two init values with `datumIsEqual`. For a by-reference
-        // transtype the planner's bare-word `initValue` is a `0` placeholder (the
-        // lifetime-free `AggTransInfo` cannot carry the by-ref image; see
-        // `get_agg_catalog_info`), so we cannot run `datumIsEqual` — decline to
-        // share, which is always safe (it never merges two distinct transition
-        // states; the worst case is a missed sharing optimization).
-        if !initValueIsNull
-            && !pertrans.initValueIsNull
-            && transtypeByVal
-            && seam::datum_is_equal::call(
-                initValue,
-                pertrans.initValue,
-                transtypeByVal,
-                transtypeLen,
-            )?
-        {
-            return Ok(transno);
+        // C compares the two init values with `datumIsEqual(v1, v2, byVal,
+        // len)`. For a by-value transtype we compare the bare `Datum` words
+        // through the datum-layer seam. For a by-reference transtype the bare
+        // word is a `0` placeholder (the lifetime-free `AggTransInfo` cannot
+        // carry the by-ref word), but we carry the flat varlena byte image
+        // (`initValueImage`) instead — and `datumIsEqual` for a by-ref value is
+        // a memcmp of the VARSIZE bytes, i.e. exactly a byte-equality of those
+        // flat images. So compare the images directly here.
+        if !initValueIsNull && !pertrans.initValueIsNull {
+            let equal = if transtypeByVal {
+                seam::datum_is_equal::call(
+                    initValue,
+                    pertrans.initValue,
+                    transtypeByVal,
+                    transtypeLen,
+                )?
+            } else {
+                match (initValueImage, pertrans.initValueImage.as_deref()) {
+                    (Some(a), Some(b)) => a == b,
+                    // If either image is missing we cannot prove equality;
+                    // decline to share (conservative — never merges distinct
+                    // transition states).
+                    _ => false,
+                }
+            };
+            if equal {
+                return Ok(transno);
+            }
         }
     }
     Ok(-1)

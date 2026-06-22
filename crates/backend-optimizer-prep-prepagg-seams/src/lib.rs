@@ -43,7 +43,7 @@
 /// tuple pinned across all of these reads, and `resolve_aggregate_transtype`
 /// (parse_agg.c) is folded in so the polymorphic transition type is resolved by
 /// the catalog owner from the already-extracted argument types.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 #[allow(non_snake_case)]
 pub struct AggCatalogInfo {
     /// `aggform->aggtransfn`.
@@ -73,6 +73,15 @@ pub struct AggCatalogInfo {
     pub agginitval: types_datum::datum::Datum,
     /// Whether `agginitval` was SQL NULL.
     pub agginitval_isnull: bool,
+    /// The flat varlena/by-reference byte image of the resolved initial
+    /// transition value, when `aggtranstype` is pass-by-reference (and the init
+    /// value is not NULL). `None` for a by-value transtype (the word in
+    /// `agginitval` is the value) or a NULL init value. This carries the bytes
+    /// that C's `datumIsEqual` would dereference through the `Datum` pointer, so
+    /// `find_compatible_trans` can dedup transition states for by-reference
+    /// transtypes (e.g. a composite `stype`), which the bare `Datum` word cannot
+    /// represent at this lifetime-free layer.
+    pub agginitval_image: Option<Vec<u8>>,
 }
 
 seam_core::seam!(

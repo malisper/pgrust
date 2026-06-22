@@ -2854,6 +2854,15 @@ pub struct AggTransInfo {
     /// `bool initValueIsNull` — is the initial transition value NULL?
     #[allow(non_snake_case)]
     pub initValueIsNull: bool,
+    /// The flat varlena/by-reference byte image of `initValue` when
+    /// `transtypeByVal` is false (and the init value is not NULL); `None`
+    /// otherwise. The bare `initValue` word cannot represent a by-reference
+    /// value at this lifetime-free layer, so this image carries the bytes that
+    /// C's `datumIsEqual` dereferences through the `Datum` pointer, letting
+    /// `find_compatible_trans` dedup by-reference transition states (e.g. a
+    /// composite `stype`).
+    #[allow(non_snake_case)]
+    pub initValueImage: Option<Vec<u8>>,
 }
 
 /// `AggClauseCosts` (nodes/pathnodes.h) — accumulated execution-cost estimates
@@ -3590,6 +3599,7 @@ mod agginfo_carrier_tests {
             aggtransspace: 0,
             initValue: types_datum::datum::Datum::default(),
             initValueIsNull: true,
+            initValueImage: None,
         };
         let trans_id = root.alloc_agg_trans_info(trans);
         root.aggtransinfos.push(trans_id);
