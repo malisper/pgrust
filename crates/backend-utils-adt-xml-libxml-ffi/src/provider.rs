@@ -356,18 +356,27 @@ const XML_FROM_MEMORY: c_int = 15;
 const XML_ERR_WARNING: c_int = 1;
 const XML_ERR_ERROR: c_int = 2;
 
-// `xmlParserErrors` codes the handler special-cases.
+// `xmlParserErrors` codes the handler special-cases. These are the *ordinal*
+// values of the `xmlParserErrors` enum in libxml2's `xmlerror.h` — which is
+// what libxml actually stores in `xmlError.code` at runtime, and what C's
+// `xml_errorHandler` compares against via the enum names. They are NOT the
+// numbers shown in some online libxml docs (those are a different, scrambled
+// numbering). `XML_WAR_UNDECLARED_ENTITY` in particular is 27, not 98: getting
+// this wrong made the DocBook `&nbsp;`/unloaded-external-DTD undeclared-entity
+// error (which C suppresses to keep the parse non-fatal) escalate to a hard
+// "invalid XML document" error. Verified against
+// SDKs/MacOSX.sdk/usr/include/libxml2/libxml/xmlerror.h (libxml2 2.9.x).
 const XML_ERR_NOT_WELL_BALANCED: c_int = 85;
-const XML_WAR_UNDECLARED_ENTITY: c_int = 98;
-const XML_WAR_NS_URI: c_int = 202;
-const XML_WAR_NS_URI_RELATIVE: c_int = 203;
+const XML_WAR_UNDECLARED_ENTITY: c_int = 27;
+const XML_WAR_NS_URI: c_int = 99;
+const XML_WAR_NS_URI_RELATIVE: c_int = 100;
 const XML_ERR_NS_DECL_ERROR: c_int = 35;
-const XML_WAR_NS_COLUMN: c_int = 204;
+const XML_WAR_NS_COLUMN: c_int = 106;
 const XML_NS_ERR_XML_NAMESPACE: c_int = 200;
 const XML_NS_ERR_UNDEFINED_NAMESPACE: c_int = 201;
-const XML_NS_ERR_QNAME: c_int = 205;
-const XML_NS_ERR_ATTRIBUTE_REDEFINED: c_int = 206;
-const XML_NS_ERR_EMPTY: c_int = 207;
+const XML_NS_ERR_QNAME: c_int = 202;
+const XML_NS_ERR_ATTRIBUTE_REDEFINED: c_int = 203;
+const XML_NS_ERR_EMPTY: c_int = 204;
 
 // `XML_ELEMENT_NODE` (tree.h) — the only node type whose `name` we read.
 const XML_ELEMENT_NODE: c_int = 1;
