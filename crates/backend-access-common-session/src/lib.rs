@@ -363,10 +363,23 @@ fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     //      accumulation into the DSM `SharedExecutorInstrumentation` is not yet
     //      modeled (execParallel.rs:1283 honest panic — pre-existing residual,
     //      not on the plain count(*) path).
-    //   3. An intermittent `RefCell already borrowed` in the parallel-context
-    //      teardown (parallel/lib.rs:321 `with_globals`) under some teardown
-    //      timing (re-entrant `with_globals`) — now the NEXT wall (surfaces at
-    //      ~5 repeated parallel queries once the slot leak is gone).
+    //   3. CLEARED — the intermittent `RefCell already borrowed` in parallel
+    //      teardown is fixed: `ParallelMessagePending` was lumped into the
+    //      `RefCell`-guarded `ParallelGlobals`, so the SIGUSR1 handler
+    //      (`HandleParallelMessageInterrupt`) re-entered `with_globals` while
+    //      mainline teardown already held the borrow → `BorrowMutError`. It now
+    //      lives in a standalone thread-local `Cell<bool>` (C's
+    //      `volatile sig_atomic_t ParallelMessagePending` — a signal-safe flag,
+    //      never part of the locked state). Verified: 25+ repeated parallel
+    //      `count(*)` runs past the old ~run-5 failure point with zero borrow
+    //      errors.
+    //   4. NEXT wall — intermittent hang in `WaitForParallelWorkersToExit`
+    //      (`wait_for_background_worker_shutdown` → `WaitLatch`): the leader
+    //      blocks for `BGWH_STOPPED` that never arrives because a pooled
+    //      parallel worker does not genuinely `exit()` / get reaped by the
+    //      postmaster (so its bgworker slot is never cleared and the leader is
+    //      never SIGUSR1'd). statement_timeout cannot interrupt this
+    //      non-interruptible latch wait.
     return Ok(DSM_HANDLE_INVALID);
 
     // If we already created a session-scope segment, return its handle.

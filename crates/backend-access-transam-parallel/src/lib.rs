@@ -43,6 +43,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::alloc::Layout;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::ptr::NonNull;
 
@@ -236,8 +237,6 @@ struct ParallelGlobals {
     list: Vec<ParallelContextHandle>,
     /// `int ParallelWorkerNumber = -1;`
     parallel_worker_number: i32,
-    /// `volatile sig_atomic_t ParallelMessagePending = false;`
-    parallel_message_pending: bool,
     /// `bool InitializingParallelWorker = false;`
     initializing_parallel_worker: bool,
     /// `static FixedParallelState *MyFixedParallelState;` — base handle (0=NULL).
@@ -256,7 +255,6 @@ impl ParallelGlobals {
             slots: Vec::new(),
             list: Vec::new(),
             parallel_worker_number: -1,
-            parallel_message_pending: false,
             initializing_parallel_worker: false,
             my_fixed_parallel_state: 0,
             parallel_leader_pid: 0,
@@ -315,6 +313,20 @@ impl ParallelGlobals {
 
 thread_local! {
     static G: RefCell<ParallelGlobals> = const { RefCell::new(ParallelGlobals::new()) };
+
+    /// `volatile sig_atomic_t ParallelMessagePending = false;` (parallel.c).
+    ///
+    /// In C this is a standalone process-global atomic flag, NOT part of any
+    /// struct guarded by a lock — `HandleParallelMessageInterrupt()` runs in a
+    /// signal handler and sets it directly. It is deliberately kept OUT of the
+    /// `RefCell`-guarded [`ParallelGlobals`]: the signal handler can fire while
+    /// mainline code (e.g. parallel teardown in
+    /// `wait_for_parallel_workers_to_finish` / `ExecParallelFinish`, or any
+    /// `with_globals` block that crosses a `CHECK_FOR_INTERRUPTS`) already holds
+    /// a `G.borrow_mut()`. Re-entering that borrow from the handler would panic
+    /// `already borrowed: BorrowMutError`. A plain [`Cell`] is reentrancy-safe
+    /// (no borrow tracking), matching C's `volatile sig_atomic_t` semantics.
+    static PARALLEL_MESSAGE_PENDING: Cell<bool> = const { Cell::new(false) };
 }
 
 fn with_globals<R>(f: impl FnOnce(&mut ParallelGlobals) -> R) -> R {
@@ -869,14 +881,14 @@ fn set_parallel_worker_number(value: i32) {
 }
 
 fn set_parallel_message_pending(value: bool) {
-    with_globals(|g| g.parallel_message_pending = value);
+    PARALLEL_MESSAGE_PENDING.with(|f| f.set(value));
 }
 
 /// Read `ParallelMessagePending` (parallel.c) — set in
 /// `HandleParallelMessageInterrupt` and read by `ProcessInterrupts`
 /// (tcop/postgres.c) to gate the `ProcessParallelMessages()` call.
 pub fn parallel_message_pending() -> bool {
-    with_globals(|g| g.parallel_message_pending)
+    PARALLEL_MESSAGE_PENDING.with(|f| f.get())
 }
 
 /// `HandleParallelMessageInterrupt()` (parallel.c:1043-1049). In C this runs in
