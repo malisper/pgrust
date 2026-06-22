@@ -119,6 +119,13 @@ pub struct PlannerRun<'mcx> {
     /// `RTEPermissionInfo<'mcx>` (with its `Bitmapset` columns) shares the run's
     /// context lifetime.
     rteperminfos: PgVec<'mcx, RTEPermissionInfo<'mcx>>,
+    /// Backing store for each MIN/MAX aggregate's cloned-and-planned `subroot`
+    /// `PlannerInfo` (planagg.c `build_minmax_path`). C keeps the subroot alive on
+    /// `mminfo->subroot` from preprocess time until `create_minmaxagg_plan` calls
+    /// `create_plan(subroot, mminfo->path)`. [`PlannerInfo`] is lifetime-free but
+    /// not `Clone`, so the subroot value lives here and
+    /// [`crate::MinMaxAggInfo::subroot_idx`] carries the index.
+    minmax_subroots: PgVec<'mcx, PlannerInfo>,
 }
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -144,7 +151,32 @@ impl<'mcx> PlannerRun<'mcx> {
             subpaths: PgVec::new_in(mcx),
             rowmarks: PgVec::new_in(mcx),
             rteperminfos: PgVec::new_in(mcx),
+            minmax_subroots: PgVec::new_in(mcx),
         }
+    }
+
+    /// Intern a MIN/MAX aggregate's planned `subroot`, returning the index
+    /// [`crate::MinMaxAggInfo::subroot_idx`] carries. Producer: planagg's
+    /// `build_minmax_path`.
+    #[inline]
+    pub fn intern_minmax_subroot(&mut self, subroot: PlannerInfo) -> usize {
+        let idx = self.minmax_subroots.len();
+        self.minmax_subroots.push(subroot);
+        idx
+    }
+
+    /// Move a MIN/MAX subroot out of the store (replacing it with a default), so
+    /// `create_minmaxagg_plan` can hold it `&mut` to run `create_plan(subroot, …)`
+    /// while also passing `&PlannerRun`. Pair with [`Self::put_minmax_subroot`].
+    #[inline]
+    pub fn take_minmax_subroot(&mut self, idx: usize) -> PlannerInfo {
+        core::mem::take(&mut self.minmax_subroots[idx])
+    }
+
+    /// Restore a MIN/MAX subroot taken via [`Self::take_minmax_subroot`].
+    #[inline]
+    pub fn put_minmax_subroot(&mut self, idx: usize, subroot: PlannerInfo) {
+        self.minmax_subroots[idx] = subroot;
     }
 
     /// Intern a [`Query`] into the store, returning the [`QueryId`] handle that

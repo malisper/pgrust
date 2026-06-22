@@ -1190,9 +1190,7 @@ pub fn create_plan_recurse<'mcx>(
                     create_projection_plan(mcx, root, run, best_path, flags)
                 }
                 PathNode::MinMaxAggPath(_) => {
-                    // create_minmaxagg_plan is not yet ported (MinMaxAggInfo
-                    // subplan carrier); stays a forward seam-panic.
-                    cp_seam::create_minmaxagg_plan::call(mcx, root, run, best_path)
+                    create_minmaxagg_plan_impl(mcx, root, run, best_path)
                 }
                 PathNode::GroupResultPath(_) => {
                     create_group_result_plan(mcx, root, run, best_path)
@@ -4533,6 +4531,110 @@ fn create_limit_plan<'mcx>(
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
     Ok(Node::mk_limit(mcx, plan)?)
+}
+
+// ===========================================================================
+// planagg.c — create_minmaxagg_plan (the T_Result / MinMaxAggPath arm).
+// ===========================================================================
+
+/// `make_limit(plan, …LIMIT 1…)` + the cost/width fixup from `mminfo->path`
+/// (planagg.c create_minmaxagg_plan:lines building each InitPlan's Limit). Wraps
+/// a freshly created subquery `Plan` in a `Limit` node, applying the correct
+/// cost/width data from the source path.
+///
+/// Called from the planner crate's `build_minmax_agg_paths` (which holds
+/// `&mut PlannerRun` and the stashed subroot) to build the per-aggregate InitPlan
+/// plan tree before interning it as a `SubPlan`. `limit_count` is the
+/// subquery's `parse->limitCount` (the `LIMIT 1` Const), already cloned into
+/// `mcx`. The cost fields come from the source path: `disabled_nodes`/
+/// `startup_cost`/`parallel_safe` from the path, `total_cost` from `pathcost`,
+/// `plan_rows = 1`, `plan_width` from the path target width.
+pub fn make_minmax_subplan_limit<'mcx>(
+    mcx: Mcx<'mcx>,
+    subplan: Node<'mcx>,
+    limit_count: Option<PgBox<'mcx, Expr<'mcx>>>,
+    path_disabled_nodes: i32,
+    path_startup_cost: f64,
+    pathcost: f64,
+    path_parallel_safe: bool,
+    path_width: i32,
+) -> PgResult<Node<'mcx>> {
+    let mut plan = make_limit(
+        mcx,
+        subplan,
+        None, // limitOffset
+        limit_count,
+        types_nodes::nodelimit::LimitOption::LIMIT_OPTION_COUNT,
+        0,
+        None,
+        None,
+        None,
+    )?;
+    // Apply correct cost/width data to the Limit node (planagg.c).
+    let p: &mut Plan = &mut plan.plan;
+    p.disabled_nodes = path_disabled_nodes;
+    p.startup_cost = path_startup_cost;
+    p.total_cost = pathcost;
+    p.plan_rows = 1.0;
+    p.plan_width = path_width;
+    p.parallel_aware = false;
+    p.parallel_safe = path_parallel_safe;
+    Ok(Node::mk_limit(mcx, plan)?)
+}
+
+/// `create_minmaxagg_plan(root, (MinMaxAggPath *) best_path)` (createplan.c) —
+/// build the topmost `Result` plan whose tlist references each aggregate's
+/// InitPlan output Param.
+///
+/// The per-aggregate InitPlan `SubPlan` trees were pre-built at preprocess time
+/// (`build_minmax_agg_paths`, which holds `&mut PlannerRun`); each
+/// `MinMaxAggInfo.subplan_node` is the `SubPlan` NodeId. Here — running iff the
+/// MinMaxAggPath won — we (1) append those SubPlans to `root.init_plans` (so
+/// `SS_attach_initplans` in `create_plan` hangs them on the topmost node), (2)
+/// build the `Result` from the path tlist + quals, and (3) record
+/// `root.minmax_aggs` so setrefs.c swaps the residual Aggrefs for the Params.
+fn create_minmaxagg_plan_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+) -> PgResult<Node<'mcx>> {
+    let _ = run;
+    // Pull the MinMaxAggInfo list (+ quals) out of the path.
+    let (mmaggregates, quals) = match root.path(best_path) {
+        PathNode::MinMaxAggPath(p) => (p.mmaggregates.clone(), p.quals.clone()),
+        _ => unreachable!("create_minmaxagg_plan on non-MinMaxAggPath"),
+    };
+
+    // Attach each aggregate's pre-built InitPlan SubPlan to the outer query level.
+    // (planagg.c: SS_make_initplan_from_plan appended these to root->init_plans.)
+    for mminfo in &mmaggregates {
+        if let Some(nid) = mminfo.subplan_node {
+            root.init_plans.push(nid);
+        }
+    }
+
+    // tlist = build_path_tlist(root, &best_path->path).
+    let tlist = build_path_tlist(mcx, root, best_path)?;
+
+    // plan = make_result(tlist, (Node *) best_path->quals, NULL).
+    let quals = order_qual_clauses(root, &quals);
+    let resconstantqual = nodes_to_expr_qual(mcx, root, &quals)?;
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let mut plan = make_result(mcx, tlist, resconstantqual, None)?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    // During setrefs.c we'll replace references to the Agg nodes with InitPlan
+    // output params; save the mmaggregates list to tell setrefs.c to do that.
+    debug_assert!(root.minmax_aggs.is_empty());
+    let mut minmax_handles: Vec<types_pathnodes::NodeId> = Vec::with_capacity(mmaggregates.len());
+    for mminfo in mmaggregates {
+        minmax_handles.push(root.alloc_minmax_agg_info(mminfo));
+    }
+    root.minmax_aggs = minmax_handles;
+
+    Ok(Node::mk_result(mcx, plan)?)
 }
 
 // ===========================================================================
@@ -8524,10 +8626,43 @@ fn exprs_to_node_list<'mcx>(
     Ok(Some(out))
 }
 
+/// `find_minmax_agg_replacement_param`'s per-`minmax_aggs` test+pick
+/// (setrefs.c:3520), the owner side of the `minmax_replacement_param` seam.
+/// The caller (setrefs) has already checked `aggref->args` length and the
+/// `minmax_aggs != NIL` guard; here we resolve the `MinMaxAggInfo` at `idx` and,
+/// if `aggfnoid` matches and `equal(mminfo->target, cur_target_expr)`, return a
+/// copy of `mminfo->param`.
+fn minmax_replacement_param_impl(
+    root: &PlannerInfo,
+    idx: usize,
+    aggfnoid: Oid,
+    cur_target_expr: &Expr,
+) -> PgResult<Option<types_nodes::primnodes::Param>> {
+    let mminfo = root.minmax_agg_info(root.minmax_aggs[idx]);
+    if mminfo.aggfnoid != aggfnoid {
+        return Ok(None);
+    }
+    let target = root.node(mminfo.target);
+    if !equal_expr_seam::call(target, cur_target_expr) {
+        return Ok(None);
+    }
+    // mminfo->param is a Param node in the node_arena.
+    match root.node(mminfo.param) {
+        Expr::Param(p) => Ok(Some(p.clone())),
+        _ => Ok(None),
+    }
+}
+
 pub fn init_seams() {
     // `is_projection_capable_path` is owned here but consumed by pathnode/other
     // optimizer crates, so it stays a real (cross-crate) seam install.
     pathnode::is_projection_capable_path::set(is_projection_capable_path);
+
+    // `minmax_replacement_param` (setrefs.c) — consumed by setrefs, owned here
+    // because create_minmaxagg_plan is what populates root.minmax_aggs.
+    backend_optimizer_plan_setrefs_seams::minmax_replacement_param::set(
+        minmax_replacement_param_impl,
+    );
 
     // `materialize_finished_plan` is owned here (createplan.c) but consumed by
     // the subselect cohort (`build_subplan` wraps an uncorrelated non-init

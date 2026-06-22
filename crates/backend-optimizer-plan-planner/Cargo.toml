@@ -65,6 +65,8 @@ backend-optimizer-prep-preptlist = { path = "../backend-optimizer-prep-preptlist
 # preprocess_aggrefs.
 backend-optimizer-prep-prepagg = { path = "../backend-optimizer-prep-prepagg" }
 backend-optimizer-plan-planagg = { path = "../backend-optimizer-plan-planagg" }
+# IncrementVarSublevelsUp — build_minmax_path's subquery Var-level bump (planagg.c).
+backend-rewrite-core = { path = "../backend-rewrite-core" }
 # canonicalize_qual / make_ands_implicit live in prepqual / nodes-core.
 backend-optimizer-prep-prepqual = { path = "../backend-optimizer-prep-prepqual" }
 # fetch_upper_rel.

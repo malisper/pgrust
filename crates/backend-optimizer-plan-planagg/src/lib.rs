@@ -8,32 +8,27 @@
 //! succeeds it adds a `MinMaxAggPath` to the `UPPERREL_GROUP_AGG` upperrel,
 //! where it competes with (and usually beats) the regular aggregate plan.
 //!
-//! ## Bounded port
+//! ## Crate split
 //!
 //! The reject/early-out logic and `can_minmax_aggs` (which examines the
-//! `AggInfo` list `preprocess_aggrefs` built and decides whether every
-//! aggregate is MIN/MAX) are ported faithfully. For a query whose aggregates
-//! are NOT all MIN/MAX — e.g. `count(*)`, `sum(x)` — `can_minmax_aggs` returns
-//! `false` and `preprocess_minmax_aggregates` returns having done nothing: the
-//! regular aggregate plan is used. This is the common path and is fully
-//! supported here.
+//! `AggInfo` list `preprocess_aggrefs` built, decides whether every aggregate
+//! is MIN/MAX, and builds the `MinMaxAggInfo` candidate list) live HERE.
+//! `preprocess_minmax_aggregates` returns `Some(candidates)` when the query is
+//! all-MIN/MAX and optimizable, else `None` (the common `count`/`sum`/`avg`
+//! path: the regular aggregate plan is used).
 //!
-//! The *index-path* construction (`build_minmax_path`, the `MinMaxAggInfo`
-//! arena/`MinMaxAggPath` machinery, the per-aggregate subroot) is the
-//! cross-root subquery-planner / path-arena keystone (the #6 planagg subroot
-//! keystone, the same one `prepunion`'s subroot logic bottoms out on):
-//! `MinMaxAggInfo` is not yet an arena node here, and there is no per-aggregate
-//! `subquery_planner` path subroot. So no `MinMaxAggPath` can be built.
-//!
-//! This is *not* a wall: in C, when no suitable index path can be formed,
-//! `preprocess_minmax_aggregates` returns having added no `MinMaxAggPath`, and
-//! the query simply falls through to the regular Agg plan. We mirror that
-//! contract exactly — once a genuine all-MIN/MAX query reaches the path-build
-//! step we return early (no optimization), and `grouping_planner` plans it as a
-//! regular Agg over the scan (executed via the `EEOP_AGG_PLAIN_TRANS` opcodes).
-//! The result is identical; only the index-scan optimization is skipped. So
-//! `MIN(x)`/`MAX(x)` now return correct values. The indexscan shortcut is
-//! deferred to the #6 planagg subroot keystone.
+//! The *index-path* construction — `build_minmax_path` per aggregate (clone the
+//! root into a subroot, `query_planner` a `SELECT col … ORDER BY col LIMIT 1`,
+//! keep the cheapest IndexScan-backed presorted path), the per-agg
+//! `SS_make_initplan_output_param`, and `create_minmaxagg_path` /
+//! `add_path(UPPERREL_GROUP_AGG)` — lives in the planner crate
+//! (`backend-optimizer-plan-planner`), which owns `grouping_planner` and already
+//! depends on `query_planner`/pathnode/init-subselect. Routing it there avoids
+//! pulling those (and a dependency cycle) into this leaf unit while staying
+//! faithful to C, where every planagg.c function is reachable from
+//! `grouping_planner`'s translation-unit neighbourhood. `create_minmaxagg_plan`
+//! (the createplan leg that turns the `MinMaxAggPath` into a `Result` with one
+//! InitPlan per aggregate) lives in the createplan crate.
 
 #![allow(non_snake_case)]
 
@@ -45,7 +40,7 @@ use types_error::PgResult;
 use types_nodes::copy_query::Query;
 use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::{Aggref, Expr};
-use types_pathnodes::PlannerInfo;
+use types_pathnodes::{MinMaxAggInfo, PlannerInfo};
 
 /// `preprocess_minmax_aggregates(root)` (planagg.c:73).
 ///
@@ -56,13 +51,13 @@ pub fn preprocess_minmax_aggregates<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     parse: &Query<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<Option<alloc::vec::Vec<MinMaxAggInfo>>> {
     /* minmax_aggs list should be empty at this point */
     debug_assert!(root.minmax_aggs.is_empty());
 
     /* Nothing to do if query has no aggregates */
     if !parse.hasAggs {
-        return Ok(());
+        return Ok(None);
     }
 
     debug_assert!(parse.setOperations.is_none()); /* shouldn't get here if a setop */
@@ -79,7 +74,7 @@ pub fn preprocess_minmax_aggregates<'mcx>(
         || parse.groupingSets.len() > 1
         || parse.hasWindowFuncs
     {
-        return Ok(());
+        return Ok(None);
     }
 
     /*
@@ -87,7 +82,7 @@ pub fn preprocess_minmax_aggregates<'mcx>(
      * on one so we couldn't succeed here.
      */
     if !parse.cteList.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     /*
@@ -101,11 +96,11 @@ pub fn preprocess_minmax_aggregates<'mcx>(
      * over the inner Node-typed subtrees.)
      */
     let Some(top) = parse.jointree.as_deref() else {
-        return Ok(());
+        return Ok(None);
     };
     // while (IsA(jtnode, FromExpr)) { if list_length(fromlist) != 1 return; jtnode = linitial; }
     if top.fromlist.len() != 1 {
-        return Ok(());
+        return Ok(None);
     }
     let mut cur: &Node<'mcx> = top.fromlist[0].as_ref();
     loop {
@@ -113,7 +108,7 @@ pub fn preprocess_minmax_aggregates<'mcx>(
             ntag::T_FromExpr => {
                 let f = cur.expect_fromexpr();
                 if f.fromlist.len() != 1 {
-                    return Ok(());
+                    return Ok(None);
                 }
                 cur = f.fromlist[0].as_ref();
             }
@@ -124,7 +119,7 @@ pub fn preprocess_minmax_aggregates<'mcx>(
     // if (!IsA(jtnode, RangeTblRef)) return;
     let rtindex = match cur.node_tag() {
         ntag::T_RangeTblRef => cur.expect_rangetblref().rtindex,
-        _ => return Ok(()),
+        _ => return Ok(None),
     };
 
     // rte = planner_rt_fetch(rtr->rtindex, root); (1-based RT index)
@@ -133,50 +128,44 @@ pub fn preprocess_minmax_aggregates<'mcx>(
     match rte.rtekind {
         RTEKind::RTE_RELATION => { /* ordinary relation, ok */ }
         RTEKind::RTE_SUBQUERY if rte.inh => { /* flattened UNION ALL subquery, ok */ }
-        _ => return Ok(()),
+        _ => return Ok(None),
     }
 
     /*
      * Examine all the aggregates and verify all are MIN/MAX aggregates. Stop
-     * as soon as we find one that isn't.
-     */
-    if !can_minmax_aggs(mcx, root)? {
-        return Ok(());
-    }
-
-    /*
-     * OK, there is at least the possibility of performing the optimization.
-     * In C we would now build an access path for each aggregate
-     * (build_minmax_path) and, if all aggregates prove indexable, construct a
-     * MinMaxAggPath that competes with the regular Agg plan. That path
-     * construction is the cross-root subquery-planner / path-arena keystone
-     * (the #6 planagg subroot keystone): MinMaxAggInfo is not yet an arena node
-     * here and there is no per-aggregate subquery_planner subroot, so no
-     * MinMaxAggPath can be built.
+     * as soon as we find one that isn't. On success this returns the
+     * `MinMaxAggInfo` candidate list (`aggfnoid`/`aggsortop`/`target` filled,
+     * paths still unbuilt); on failure (any non-MIN/MAX aggregate) `None`.
      *
-     * C's own contract for this case is a plain early return: when no suitable
-     * index path can be formed (build_minmax_path returns false for some
-     * aggregate), preprocess_minmax_aggregates returns having added no
-     * MinMaxAggPath, and grouping_planner falls through to the regular Agg plan
-     * (which now executes via the EEOP_AGG_PLAIN_TRANS opcodes). The result is
-     * identical; only the index-scan MIN/MAX optimization is skipped. We mirror
-     * that fall-through here. When the #6 planagg subroot keystone lands, the
-     * build_minmax_path / MinMaxAggPath optimization can be added at this point.
+     * The remaining planagg.c steps — `build_minmax_path` per aggregate, the
+     * `SS_make_initplan_output_param` per-agg output Param, and the
+     * `create_minmaxagg_path` / `add_path(UPPERREL_GROUP_AGG)` — need
+     * `query_planner` on a cloned subroot, which would pull a planner-crate
+     * dependency cycle into this unit. Those run in the planner crate (which owns
+     * `grouping_planner` and already depends on `query_planner`), keyed off this
+     * candidate list. This split mirrors C: planagg.c's functions all live in the
+     * planner's translation-unit neighbourhood; only `can_minmax_aggs` (pure
+     * classification over `root->agginfos`) lives here.
      */
-    Ok(())
+    can_minmax_aggs(mcx, root)
 }
 
 /// `can_minmax_aggs(root, &context)` (planagg.c:237) — examine the `AggInfo`
 /// list `preprocess_aggrefs` built and check whether every aggregate is a
-/// MIN/MAX aggregate. Returns `false` as soon as a non-MIN/MAX aggregate is
-/// found (the common case for `count`/`sum`/`avg`).
+/// MIN/MAX aggregate, building the `MinMaxAggInfo` candidate list as it goes.
+/// Returns `None` as soon as a non-MIN/MAX aggregate is found (the common case
+/// for `count`/`sum`/`avg`), else `Some(list)`.
 ///
-/// In C this also builds the `MinMaxAggInfo` `*context` list as it goes; here,
-/// because the `MinMaxAggInfo` arena node and the path machinery are the
-/// unported keystone, we only perform the *classification* (which is what
-/// decides the return value) and let `preprocess_minmax_aggregates` panic at the
-/// path-build step if every aggregate qualifies.
-fn can_minmax_aggs<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo) -> PgResult<bool> {
+/// Each built `MinMaxAggInfo` has `aggfnoid` / `aggsortop` set and `target` =
+/// the [`types_pathnodes::NodeId`] of the aggregate argument expression, interned
+/// into the OUTER `root`'s `node_arena` (so `build_minmax_path` and the setrefs
+/// Aggref→Param replacement can both read it). `path` / `param` / `subroot_idx`
+/// are left at their `Default` (the planner-crate path-build step fills them).
+fn can_minmax_aggs<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+) -> PgResult<Option<alloc::vec::Vec<MinMaxAggInfo>>> {
+    let mut context: alloc::vec::Vec<MinMaxAggInfo> = alloc::vec::Vec::new();
     // foreach(lc, root->agginfos)
     let agginfo_ids: alloc::vec::Vec<types_pathnodes::NodeId> = root.agginfos.clone();
     for agginfo_id in agginfo_ids {
@@ -190,24 +179,24 @@ fn can_minmax_aggs<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo) -> PgResult<boo
 
         // if (list_length(aggref->args) != 1) return false; /* not MIN/MAX */
         if aggref.args.len() != 1 {
-            return Ok(false);
+            return Ok(None);
         }
 
         // ORDER BY makes it an ordered-set agg or changes MIN/MAX semantics: punt.
         if !aggref.aggorder.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
 
         // FILTER: punt for now.
         if aggref.aggfilter.is_some() {
-            return Ok(false);
+            return Ok(None);
         }
 
         // aggsortop = fetch_agg_sort_op(aggref->aggfnoid);
         let aggfnoid = aggref.aggfnoid;
         let aggsortop = fetch_agg_sort_op(mcx, aggfnoid)?;
         if !OidIsValid(aggsortop) {
-            return Ok(false); /* not a MIN/MAX aggregate */
+            return Ok(None); /* not a MIN/MAX aggregate */
         }
 
         // curTarget = (TargetEntry *) linitial(aggref->args);
@@ -221,27 +210,45 @@ fn can_minmax_aggs<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo) -> PgResult<boo
             // TargetEntry.expr is Option<Box<Expr>>.
             match aggref.args[0].expr.as_deref() {
                 Some(e) => e.clone_in(mcx)?,
-                None => return Ok(false),
+                None => return Ok(None),
             }
         };
 
         // if (contain_mutable_functions(curTarget->expr)) return false;
         if backend_optimizer_util_clauses::contain_mutable_functions(Some(&cur_expr))? {
-            return Ok(false); /* not potentially indexable */
+            return Ok(None); /* not potentially indexable */
         }
 
         // if (type_is_rowtype(exprType(curTarget->expr))) return false;
         let exprtype = backend_nodes_core::nodefuncs::expr_type(Some(&cur_expr))?;
         if backend_utils_cache_lsyscache_seams::type_is_rowtype::call(exprtype)? {
-            return Ok(false); /* IS NOT NULL would have weird semantics */
+            return Ok(None); /* IS NOT NULL would have weird semantics */
         }
 
-        // This aggregate is a genuine MIN/MAX candidate. In C we would build a
-        // MinMaxAggInfo and continue; the caller's path-build step is the
-        // keystone, so we keep going (other aggs might still disqualify the
-        // query) but the caller will panic if *all* aggs qualify.
+        // A target carrying a SubPlan (e.g. `max((SELECT ...))`) can never be
+        // satisfied by an index scan, so the C path-build would abandon the
+        // optimization for it. C reaches that abandonment by *trying*
+        // build_minmax_path and getting no indexed path; we short-circuit the
+        // same outcome here — and avoid building a subquery whose ORDER BY /
+        // tlist embeds a SubPlan (the owned model can't re-plan that into a
+        // presorted index path). Bounded restriction with identical net result:
+        // the regular Agg plan is used.
+        if backend_optimizer_util_clauses::contain_subplans(Some(&cur_expr))? {
+            return Ok(None);
+        }
+
+        // mminfo = makeNode(MinMaxAggInfo); fill aggfnoid/aggsortop/target. Intern
+        // the target expr into the OUTER root's node_arena and keep its NodeId.
+        let target_id = root.alloc_node(cur_expr);
+        let mut mminfo = MinMaxAggInfo::default();
+        mminfo.aggfnoid = aggfnoid;
+        mminfo.aggsortop = aggsortop;
+        mminfo.target = target_id;
+        // path = NULL; pathcost = 0; param = NULL (left at Default).
+
+        context.push(mminfo);
     }
-    Ok(true)
+    Ok(Some(context))
 }
 
 /// `fetch_agg_sort_op(aggfnoid)` (planagg.c:499) — `SearchSysCache1(AGGFNOID)` +

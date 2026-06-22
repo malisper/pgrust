@@ -2919,6 +2919,522 @@ fn preprocess_jointree_quals<'mcx>(
 }
 
 // ===========================================================================
+// planagg.c — MIN/MAX aggregate index-scan optimization (planner-crate legs).
+//
+// `preprocess_minmax_aggregates` (planagg.c) lives partly in the planagg crate
+// (the reject/classification + `can_minmax_aggs` candidate list) and partly
+// here (the `build_minmax_path` per-aggregate subroot planning + the
+// `create_minmaxagg_path` / `add_path(UPPERREL_GROUP_AGG)`), because the latter
+// needs `query_planner` on a cloned subroot — a planner-crate dependency. See
+// the planagg crate's module doc for the split rationale.
+// ===========================================================================
+
+/// The planner-crate half of `preprocess_minmax_aggregates`: given the
+/// candidate `MinMaxAggInfo` list from `can_minmax_aggs`, try to build an
+/// indexscan path for each aggregate (`build_minmax_path`); if all succeed,
+/// create the per-agg output Params, build a `MinMaxAggPath`, and add it to the
+/// `UPPERREL_GROUP_AGG` upperrel so it competes with the regular Agg plan.
+///
+/// On any aggregate failing to get an indexable path, this returns having added
+/// no path (C's `return;`): `grouping_planner` then falls through to the regular
+/// aggregate plan. The created `root.minmax_aggs` list (used by setrefs to swap
+/// Aggrefs for Params) is only populated by `create_minmaxagg_plan` when the
+/// MinMaxAggPath actually wins, so a failed/never-chosen optimization leaves it
+/// empty — matching C.
+fn build_minmax_agg_paths<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    mut aggs_list: Vec<types_pathnodes::MinMaxAggInfo>,
+) -> PgResult<()> {
+    use types_core::primitive::OidIsValid;
+
+    // For each aggregate, build_minmax_path; if any can't get an indexed path,
+    // give up entirely (planagg.c:153-183).
+    for i in 0..aggs_list.len() {
+        // eqop = get_equality_op_for_ordering_op(mminfo->aggsortop, &reverse).
+        let aggsortop = aggs_list[i].aggsortop;
+        let (eqop, reverse) =
+            match backend_utils_cache_lsyscache::opfamily_operator::get_equality_op_for_ordering_op(aggsortop)? {
+                Some((eqop, reverse)) if OidIsValid(eqop) => (eqop, reverse),
+                _ => {
+                    return Err(PgError::error(alloc::format!(
+                        "could not find equality operator for ordering operator {}",
+                        aggsortop
+                    )))
+                }
+            };
+
+        // Try NULLS FIRST/LAST per the reverse heuristic (planagg.c:176-182).
+        if build_minmax_path(mcx, run, root, i, &mut aggs_list, eqop, aggsortop, reverse, reverse)? {
+            continue;
+        }
+        if build_minmax_path(mcx, run, root, i, &mut aggs_list, eqop, aggsortop, reverse, !reverse)? {
+            continue;
+        }
+        // No indexable path for this aggregate → abandon the optimization.
+        return Ok(());
+    }
+
+    // OK, we can do the query this way. Create an output Param for each agg
+    // (planagg.c:194-203), and pre-build its InitPlan SubPlan (the plan-building +
+    // run-intern that C does in create_minmaxagg_plan, lifted here where we hold
+    // `&mut run`).
+    for i in 0..aggs_list.len() {
+        // target = root.node(mminfo->target); param = SS_make_initplan_output_param(
+        //     root, exprType(target), -1, exprCollation(target)).
+        let target_expr = root.node(aggs_list[i].target).clone_in(mcx)?;
+        let restype = backend_nodes_core::nodefuncs::expr_type(Some(&target_expr))?;
+        let rescoll = backend_nodes_core::nodefuncs::expr_collation(Some(&target_expr))?;
+        let param = backend_optimizer_plan_init_subselect::subplan::SS_make_initplan_output_param(
+            root, restype, -1, rescoll,
+        )?;
+        // Stash the Param as an arena node; mminfo->param is its handle.
+        aggs_list[i].param = root.alloc_node(Expr::Param(param.clone()));
+
+        // Build the InitPlan SubPlan for this aggregate (create_minmaxagg_plan's
+        // per-agg leg, lifted to preprocess time for the `&mut run` it needs).
+        let subroot_idx = aggs_list[i]
+            .subroot_idx
+            .expect("build_minmax_agg_paths: agg has no subroot");
+        let subroot_path = aggs_list[i]
+            .subroot_path
+            .expect("build_minmax_agg_paths: agg has no subroot_path");
+        let mut subroot = run.take_minmax_subroot(subroot_idx);
+
+        // create_plan(subroot, mminfo->path): the subquery's plan. Lend the shared
+        // glob to the subroot for the duration (create_plan reads root->glob for
+        // subplan resolution), then return it to the outer root.
+        let glob = *root
+            .glob
+            .take()
+            .expect("build_minmax_agg_paths: root->glob is NULL");
+        subroot.glob = Some(Box::new(glob));
+        let sub_plan =
+            backend_optimizer_plan_createplan::create_plan(mcx, &mut subroot, run, subroot_path)?;
+        root.glob = subroot.glob.take();
+
+        // Wrap the plan in LIMIT 1, applying cost/width from mminfo->path.
+        let limit_count: Option<mcx::PgBox<'mcx, Expr<'mcx>>> = run
+            .resolve(subroot.parse)
+            .limitCount
+            .as_ref()
+            .map(|c| -> PgResult<_> { Ok(mcx::alloc_in(mcx, (**c).clone_in(mcx)?)?) })
+            .transpose()?;
+        let (pdis, pstartup, pwidth, psafe) = {
+            let pp = root.path(aggs_list[i].path.expect("agg has no imported path"));
+            let b = pp.base();
+            (
+                b.disabled_nodes,
+                b.startup_cost,
+                b.pathtarget.as_ref().map_or(0, |t| t.width),
+                b.parallel_safe,
+            )
+        };
+        let pathcost = aggs_list[i].pathcost;
+        let limit_plan = backend_optimizer_plan_createplan::make_minmax_subplan_limit(
+            mcx, sub_plan, limit_count, pdis, pstartup, pathcost, psafe, pwidth,
+        )?;
+
+        // SS_make_initplan_from_plan core (build + intern + SubPlan node), but
+        // WITHOUT appending to init_plans yet — create_minmaxagg_plan does that
+        // once the MinMaxAggPath has won. Consumes the subroot into the run's
+        // subplan store.
+        let subplan_nid =
+            backend_optimizer_plan_init_subselect::subplan::build_initplan_subplan_node(
+                mcx, root, run, subroot, limit_plan, &param,
+            )?;
+        aggs_list[i].subplan_node = Some(subplan_nid);
+    }
+
+    // create_minmaxagg_path(root, grouped_rel, create_pathtarget(root,
+    // processed_tlist), aggs_list, parse->havingQual) + add_path (planagg.c:219-225).
+    let grouped_rel = backend_optimizer_util_relnode::fetch_upper_rel(
+        root,
+        UPPERREL_GROUP_AGG,
+        &None,
+    );
+
+    // create_pathtarget(root, root->processed_tlist).
+    let mut target =
+        backend_optimizer_util_vars::tlist::make_pathtarget_from_tlist(root, &root.processed_tlist);
+    backend_optimizer_path_costsize::sizeest::set_pathtarget_cost_width(root, &mut target);
+
+    // (List *) parse->havingQual — the regular Agg's HAVING quals, carried onto
+    // the MinMaxAggPath. The processed havingQual is an implicit-AND list on the
+    // root; resolve it to bare clause handles. For the common no-HAVING minmax
+    // query this is empty.
+    let quals: Vec<types_pathnodes::NodeId> = minmax_having_quals(mcx, run, root)?;
+
+    let path_id = backend_optimizer_util_pathnode::create::create_minmaxagg_path(
+        root,
+        grouped_rel,
+        Box::new(target),
+        aggs_list,
+        quals,
+    )?;
+    backend_optimizer_util_pathnode::add_path(root, grouped_rel, path_id)?;
+
+    Ok(())
+}
+
+/// `build_minmax_path(root, mminfo, eqop, sortop, reverse_sort, nulls_first)`
+/// (planagg.c:316). Build a `SELECT col FROM tab WHERE col IS NOT NULL AND quals
+/// ORDER BY col LIMIT 1` subquery, plan it, and keep the cheapest presorted path
+/// if there is one. On success, fills `aggs_list[i]`'s `path`/`pathcost`/
+/// `subroot_idx`/`subroot_path` and returns `true`.
+#[allow(clippy::too_many_arguments)]
+fn build_minmax_path<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    i: usize,
+    aggs_list: &mut [types_pathnodes::MinMaxAggInfo],
+    eqop: Oid,
+    sortop: Oid,
+    reverse_sort: bool,
+    nulls_first: bool,
+) -> PgResult<bool> {
+    use types_nodes::primnodes::NullTest;
+
+    // The aggregate target expression (in the OUTER root's node_arena).
+    let target_expr: Expr<'mcx> = root.node(aggs_list[i].target).clone_in(mcx)?;
+    let target_type = backend_nodes_core::nodefuncs::expr_type(Some(&target_expr))?;
+
+    // --- Build the modified sub-Query (planagg.c:349-413) -------------------
+    // subroot->parse = parse = copyObject(root->parse);
+    // IncrementVarSublevelsUp((Node *) parse, 1, 1);
+    let mut subparse: Query<'mcx> = run.resolve(root.parse).clone_in(mcx)?;
+    {
+        let mut as_node = Node::mk_query(mcx, subparse)?;
+        backend_rewrite_core::increment::IncrementVarSublevelsUp(&mut as_node, 1, 1, mcx)?;
+        subparse = as_node
+            .into_query()
+            .ok_or_else(|| PgError::error("build_minmax_path: node is not a Query"))?;
+    }
+
+    // Single tlist entry = the aggregate target (`copyObject(mminfo->target)`,
+    // planagg.c:371). The target's Vars are level-0 columns of the single table;
+    // they STAY level 0 in the generated subquery (the `IncrementVarSublevelsUp`
+    // above had `min_sublevels_up = 1`, so it bumped only the parse's pre-existing
+    // outer references, never these level-0 table Vars). So do NOT bump the
+    // target.
+    let bumped_target = target_expr.clone_in(mcx)?;
+
+    let mut tle = backend_nodes_core::makefuncs::make_target_entry(
+        mcx,
+        bumped_target.clone_in(mcx)?,
+        1,
+        Some("agg_target"),
+        false,
+    )?;
+    // subroot->processed_tlist = parse->targetList = list_make1(tle); set below.
+
+    // No HAVING / DISTINCT / aggregates anymore.
+    subparse.havingQual = None;
+    subparse.distinctClause = mcx::PgVec::new_in(mcx);
+    subparse.hasDistinctOn = false;
+    subparse.hasAggs = false;
+
+    // Build "target IS NOT NULL" and prepend to the WHERE quals.
+    let ntest = backend_nodes_core::makefuncs::make_is_not_null(bumped_target.clone_in(mcx)?);
+    // parse->jointree->quals = lcons(ntest, quals). The jointree quals are a
+    // (possibly-NULL) single Node holding an implicit-AND list; build
+    // `ntest AND existing` as a fresh BoolExpr/AND list. We render it as a
+    // 2-element implicit-AND list Node (make_ands_implicit shape) when there is an
+    // existing qual, else just the ntest.
+    {
+        let existing_quals: Option<Expr<'mcx>> = match subparse
+            .jointree
+            .as_deref()
+            .and_then(|f| f.quals.as_deref())
+        {
+            Some(n) => Some(
+                n.as_expr()
+                    .map(|e| e.clone_in(mcx))
+                    .transpose()?
+                    .ok_or_else(|| PgError::error("build_minmax_path: jointree quals not an Expr"))?,
+            ),
+            None => None,
+        };
+        let new_quals: Expr<'mcx> = match existing_quals {
+            None => ntest,
+            Some(existing) => {
+                // make_andclause(list_make2(ntest, existing)) — an AND BoolExpr.
+                backend_nodes_core::makefuncs::make_andclause(alloc::vec![ntest, existing])
+            }
+        };
+        let quals_node = mcx::alloc_in(mcx, Node::mk_expr(mcx, new_quals)?)?;
+        if let Some(jt) = subparse.jointree.as_deref_mut() {
+            jt.quals = Some(quals_node);
+        }
+    }
+
+    // ORDER BY clause: assignSortGroupRef(tle, tlist) then SortGroupClause.
+    let sgref = {
+        // tle is the only tlist entry; ressortgroupref starts 0 → assign 1.
+        if tle.ressortgroupref == 0 {
+            tle.ressortgroupref = 1;
+        }
+        tle.ressortgroupref
+    };
+    let sortcl = types_nodes::rawnodes::SortGroupClause {
+        tleSortGroupRef: sgref,
+        eqop,
+        sortop,
+        reverse_sort,
+        nulls_first,
+        hashable: false,
+    };
+    // parse->targetList = list_make1(tle); parse->sortClause = list_make1(sortcl).
+    subparse.targetList = {
+        let mut v = mcx::PgVec::new_in(mcx);
+        v.push(tle);
+        v
+    };
+    subparse.sortClause = {
+        let mut v = mcx::PgVec::new_in(mcx);
+        v.push(mcx::alloc_in(mcx, Node::mk_sort_group_clause(mcx, sortcl)?)?);
+        v
+    };
+
+    // LIMIT 1: makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(1), false, true).
+    subparse.limitOffset = None;
+    subparse.limitCount = Some(mcx::alloc_in(
+        mcx,
+        Expr::Const(backend_nodes_core::makefuncs::make_const(
+            mcx,
+            types_core::catalog::INT8OID,
+            -1,
+            types_core::primitive::InvalidOid,
+            8,
+            types_tuple::backend_access_common_heaptuple::Datum::ByVal(1),
+            false,
+            true,
+        )?),
+    )?);
+    subparse.limitOption = types_nodes::nodelimit::LimitOption::LIMIT_OPTION_COUNT;
+
+    let _ = target_type;
+
+    // --- Build the subroot + plan it (planagg.c:338-422) --------------------
+    let subparse_id = run.intern(subparse);
+
+    // append_rel_list: copyObject(root->append_rel_list) + IncrementVarSublevelsUp.
+    // The minmax-restricted single-table case has none in the common path; we copy
+    // it as-is (AppendRelInfo carries no level-1 Vars for a plain relation).
+    let parent_append_rel = root.append_rel_list.clone();
+
+    let mut subroot = root.make_minmax_subroot();
+    subroot.parse = subparse_id;
+    subroot.processed_tlist = Vec::new(); // query_planner doesn't use this directly
+    subroot.append_rel_list = parent_append_rel;
+    // tuple_fraction = 1.0; limit_tuples = 1.0 (planagg.c:419-420).
+    subroot.tuple_fraction = 1.0;
+    subroot.limit_tuples = 1.0;
+
+    // Move the shared glob into the subroot for the recursion, and move the parent
+    // root in as parent_root (the plan_sublink_subquery pattern). Restored after.
+    let glob = *root
+        .glob
+        .take()
+        .expect("build_minmax_path: parent root->glob is NULL");
+    let parent_root = core::mem::take(root);
+    subroot.glob = Some(Box::new(glob));
+    subroot.parent_root = Some(Box::new(parent_root));
+
+    // Pre-build the subroot's processed_tlist (the single agg_target tle) and
+    // intern the sortClause SortGroupClause, so the qp_callback (which can't reach
+    // `run`) can compute sort_pathkeys DURING query_planner — exactly as
+    // minmax_qp_callback does in C. This is essential: query_planner must see
+    // query_pathkeys while it builds paths, so it generates+keeps the presorted
+    // (ordered index-only-scan) path the optimization relies on. Computing the
+    // pathkeys only AFTER query_planner would leave query_pathkeys empty during
+    // planning and the presorted path would never be kept.
+    let tlist_ids = build_minmax_subroot_tlist(mcx, run, &mut subroot)?;
+    let sgc_id = {
+        let sortcl_val = {
+            let sc = &run.resolve(subroot.parse).sortClause;
+            let np = &*sc[0];
+            match np.node_tag() {
+                ntag::T_SortGroupClause => *np.expect_sortgroupclause(),
+                _ => {
+                    restore_parent_from_subroot(root, &mut subroot);
+                    return Err(PgError::error("build_minmax_path: sortClause not SGC"));
+                }
+            }
+        };
+        subroot.alloc_sortgroupclause(sortcl_val)
+    };
+
+    // minmax_qp_callback: group/window/distinct pathkeys = NIL; sort_pathkeys =
+    // make_pathkeys_for_sortclauses(sortClause, targetList); query_pathkeys =
+    // sort_pathkeys (planagg.c:480-491).
+    let mut qp_callback = move |sr: &mut PlannerInfo| -> PgResult<()> {
+        sr.group_pathkeys = Vec::new();
+        sr.window_pathkeys = Vec::new();
+        sr.distinct_pathkeys = Vec::new();
+        let pk = backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses(
+            sr,
+            mcx,
+            &[sgc_id],
+            &tlist_ids,
+        );
+        sr.sort_pathkeys = pk.clone();
+        sr.query_pathkeys = pk;
+        Ok(())
+    };
+
+    let final_rel =
+        match backend_optimizer_plan_small::query_planner(mcx, run, &mut subroot, &mut qp_callback) {
+            Ok(rel) => rel,
+            Err(e) => {
+                // Restore parent before propagating.
+                restore_parent_from_subroot(root, &mut subroot);
+                return Err(e);
+            }
+        };
+
+    let query_pathkeys = subroot.query_pathkeys.clone();
+
+    // SS_identify_outer_params(subroot); SS_charge_for_initplans(subroot, final_rel).
+    backend_optimizer_plan_init_subselect::correlation::SS_identify_outer_params(&mut subroot);
+    backend_optimizer_plan_init_subselect::finalize::SS_charge_for_initplans(&mut subroot, final_rel);
+
+    // path_fraction = (final_rel->rows > 1) ? 1/rows : 1.
+    let final_rows = subroot.rel(final_rel).rows;
+    let path_fraction = if final_rows > 1.0 { 1.0 / final_rows } else { 1.0 };
+
+    // sorted_path = get_cheapest_fractional_path_for_pathkeys(pathlist,
+    //     query_pathkeys, NULL, path_fraction).
+    let pathlist = subroot.rel(final_rel).pathlist.clone();
+    let sorted_path = backend_optimizer_path_pathkeys::get_cheapest_fractional_path_for_pathkeys(
+        &subroot,
+        &pathlist,
+        &query_pathkeys,
+        &None,
+        path_fraction,
+    );
+    let Some(sorted_path) = sorted_path else {
+        // No presorted path → fail; restore parent and return false.
+        restore_parent_from_subroot(root, &mut subroot);
+        return Ok(false);
+    };
+
+    // Keep the cheapest presorted path (planagg.c:442-448), exactly as C does:
+    // any path that satisfies query_pathkeys for fetching one row. In practice
+    // this is the ordered Index(-Only) Scan; were it instead an explicit Sort
+    // over a seqscan, the resulting MinMaxAggPath would simply lose on cost to
+    // the regular Agg plan (the cost competition in create_grouping_paths /
+    // set_cheapest), so no extra index-backed-only guard is needed here.
+
+    // apply_projection_to_path to make it return exactly processed_tlist.
+    // subroot->processed_tlist = list_make1(tle). Build it first (mut borrow),
+    // then make the PathTarget (shared borrow).
+    let proj_tlist = build_minmax_subroot_tlist(mcx, run, &mut subroot)?;
+    let mut proj_target =
+        backend_optimizer_util_vars::tlist::make_pathtarget_from_tlist(&subroot, &proj_tlist);
+    backend_optimizer_path_costsize::sizeest::set_pathtarget_cost_width(&mut subroot, &mut proj_target);
+    let sorted_path = backend_optimizer_util_pathnode::create::apply_projection_to_path(
+        &mut subroot,
+        final_rel,
+        sorted_path,
+        Box::new(proj_target),
+    )?;
+
+    // path_cost = startup + path_fraction * (total - startup) (planagg.c:465).
+    let (startup, total, _disabled) = {
+        let p = subroot.path(sorted_path).base();
+        (p.startup_cost, p.total_cost, p.disabled_nodes)
+    };
+    let path_cost = startup + path_fraction * (total - startup);
+
+    // Import the path into the OUTER root for create_minmaxagg_path's cost read,
+    // then restore the parent root and stash the subroot for create_minmaxagg_plan.
+    restore_parent_from_subroot(root, &mut subroot);
+    let imported = backend_optimizer_util_pathnode::import::import_path_from_subroot(
+        mcx,
+        root,
+        &subroot,
+        sorted_path,
+    );
+    let subroot_idx = run.intern_minmax_subroot(subroot);
+
+    aggs_list[i].path = Some(imported);
+    aggs_list[i].pathcost = path_cost;
+    aggs_list[i].subroot_idx = Some(subroot_idx);
+    aggs_list[i].subroot_path = Some(sorted_path);
+
+    Ok(true)
+}
+
+/// Move the parent `PlannerInfo` back out of `subroot.parent_root` onto `*root`
+/// and return the shared `glob` to it (the inverse of the move-in done before
+/// `query_planner`). Mirrors the restore in `plan_sublink_subquery`.
+fn restore_parent_from_subroot(root: &mut PlannerInfo, subroot: &mut PlannerInfo) {
+    let glob = subroot.glob.take();
+    *root = *subroot
+        .parent_root
+        .take()
+        .expect("build_minmax_path: subroot lost its parent_root");
+    root.glob = glob;
+}
+
+/// Build the subroot's `processed_tlist` (`list_make1(tle)` — the single
+/// `agg_target` entry) and return the interned `TargetEntry` `NodeId` list. Used
+/// both for `apply_projection_to_path`'s PathTarget and the pathkeys.
+fn build_minmax_subroot_tlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    subroot: &mut PlannerInfo,
+) -> PgResult<Vec<types_pathnodes::NodeId>> {
+    if !subroot.processed_tlist.is_empty() {
+        return Ok(subroot.processed_tlist.clone());
+    }
+    // The parse's single targetList entry (the agg_target tle).
+    let tle = run.resolve(subroot.parse).targetList[0].clone_in(mcx)?;
+    let te_node = types_pathnodes::TargetEntryNode {
+        expr: subroot.alloc_node(
+            tle.expr
+                .as_deref()
+                .ok_or_else(|| PgError::error("build_minmax_subroot_tlist: tle has no expr"))?
+                .clone_in(mcx)?,
+        ),
+        resno: tle.resno,
+        resname: None,
+        ressortgroupref: tle.ressortgroupref,
+        resorigtbl: tle.resorigtbl,
+        resorigcol: tle.resorigcol,
+        resjunk: tle.resjunk,
+    };
+    let te_id = subroot.alloc_targetentry(te_node);
+    subroot.processed_tlist = alloc::vec![te_id];
+    Ok(subroot.processed_tlist.clone())
+}
+
+/// Resolve `parse->havingQual` (the regular-Agg HAVING) to bare clause handles
+/// for the MinMaxAggPath. The common all-MIN/MAX query has no HAVING → empty.
+fn minmax_having_quals<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+) -> PgResult<Vec<types_pathnodes::NodeId>> {
+    let having = run.resolve(root.parse).havingQual.as_deref().cloned();
+    match having {
+        None => Ok(Vec::new()),
+        Some(hq) => {
+            // make_ands_implicit(havingQual) → list of clauses; intern each.
+            let clauses = backend_nodes_core::makefuncs::make_ands_implicit(Some(hq));
+            let mut out = Vec::with_capacity(clauses.len());
+            for c in clauses {
+                out.push(root.alloc_node(c));
+            }
+            Ok(out)
+        }
+    }
+}
+
+// ===========================================================================
 // grouping_planner()  (planner.c:1433) — spine up to create_pathtarget.
 // ===========================================================================
 
@@ -3149,18 +3665,23 @@ fn grouping_planner<'mcx>(
         }
     }
 
-    // preprocess_minmax_aggregates if hasAggs (C:1617-1618).
+    // preprocess_minmax_aggregates if hasAggs (C:1617-1618). The planagg crate
+    // does the reject/classification + can_minmax_aggs candidate list; the
+    // build_minmax_path / create_minmaxagg_path legs run here (they need
+    // query_planner on a cloned subroot — a planner-crate dependency).
     {
         let has_aggs = run.resolve(root.parse).hasAggs;
         if has_aggs {
             // Clone the parse Query out of the arena to release the run borrow
             // while planagg mutably borrows root.
             let parse_owned = run.resolve(root.parse).clone_in(mcx)?;
-            backend_optimizer_plan_planagg::preprocess_minmax_aggregates(
+            if let Some(aggs_list) = backend_optimizer_plan_planagg::preprocess_minmax_aggregates(
                 mcx,
                 root,
                 &parse_owned,
-            )?;
+            )? {
+                build_minmax_agg_paths(mcx, run, root, aggs_list)?;
+            }
         }
     }
 

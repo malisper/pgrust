@@ -37,6 +37,9 @@ backend-optimizer-util-plancat = { path = "../backend-optimizer-util-plancat" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 # equal_expr (equalfuncs.c) — list_difference over the OR-clause in tidscan.
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
+# minmax_replacement_param (setrefs.c find_minmax_agg_replacement_param) — owned
+# here (create_minmaxagg_plan fills root.minmax_aggs); installed for setrefs.
+backend-optimizer-plan-setrefs-seams = { path = "../backend-optimizer-plan-setrefs-seams" }
 # is_redundant_derived_clause (equivclass.c) — tidscan single-tidqual dedup.
 backend-optimizer-path-equivclass-seams = { path = "../backend-optimizer-path-equivclass-seams" }
 # adjust_appendrel_attrs_multilevel (appendinfo.c) — ADJUST_CHILD_ATTRS of a

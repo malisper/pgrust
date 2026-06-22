@@ -1432,12 +1432,39 @@ pub struct MinMaxAggInfo {
     pub aggsortop: Oid,
     /// `Expr *target` — expression we are aggregating on (expr handle).
     pub target: NodeId,
-    /// `Path *path` — access path for the subquery (handle into `path_arena`).
+    /// `Path *path` — access path for the subquery, IMPORTED into the OUTER
+    /// `root`'s `path_arena` (so `create_minmaxagg_path` can read its cost/parallel
+    /// fields). In C this is the subroot's own `Path *` (pointers are arena-free);
+    /// here we import it via `import_path_from_subroot` for the outer-root costing
+    /// read, and keep the original subroot-arena id in [`Self::subroot_path`] for
+    /// `create_plan(subroot, …)` at `create_minmaxagg_plan` time.
     pub path: Option<PathId>,
     /// `Cost pathcost` — estimated cost to fetch the first row.
     pub pathcost: Cost,
-    /// `Param *param` — param for the subplan's output (expr handle).
+    /// `Param *param` — param for the subplan's output. The owned [`Param`] lives
+    /// in the OUTER `root`'s `node_arena`; this is its [`NodeId`] handle (set by
+    /// `preprocess_minmax_aggregates` via `SS_make_initplan_output_param`).
     pub param: NodeId,
+    /// `PlannerInfo *subroot` (C `read_write_ignore`) — index into the planner
+    /// run's minmax-subroot store ([`planner_run::PlannerRun`]). `None` until
+    /// `build_minmax_path` stashes the cloned-and-planned subroot. At
+    /// `create_minmaxagg_plan` time the subroot is taken back out to call
+    /// `create_plan(subroot, subroot_path)`.
+    pub subroot_idx: Option<usize>,
+    /// The subroot-arena [`PathId`] the subquery plan is created from (the C
+    /// `mminfo->path` used directly by `create_plan(subroot, mminfo->path)`).
+    /// Distinct from [`Self::path`], which is the outer-root IMPORT used only for
+    /// the `MinMaxAggPath` cost read.
+    pub subroot_path: Option<PathId>,
+    /// The pre-built InitPlan `SubPlan` [`NodeId`] (an outer-`root` `node_arena`
+    /// handle). C builds this inside `create_minmaxagg_plan` via
+    /// `SS_make_initplan_from_plan`, but that step needs `&mut PlannerRun` to
+    /// intern the subplan `Plan` tree — which `create_plan` (where
+    /// `create_minmaxagg_plan` runs) does not have. So the build+intern happens at
+    /// preprocess time (`build_minmax_agg_paths`, which holds `&mut run`) and the
+    /// resulting `SubPlan` node is stashed here; `create_minmaxagg_plan` (run iff
+    /// the MinMaxAggPath wins) appends it to `root.init_plans`. `None` until built.
+    pub subplan_node: Option<NodeId>,
 }
 
 /// `MinMaxAggPath` — computation of MIN/MAX aggregates from indexes.
@@ -2576,6 +2603,11 @@ pub enum ArenaNode {
     /// these as `Node *` handles in the same id-space (appendinfo.c
     /// `add_row_identity_var`).
     RowIdentityVar(RowIdentityVarInfo),
+    /// A `MinMaxAggInfo` node — `PlannerInfo::minmax_aggs` stores these as
+    /// `Node *` handles in the same id-space (planagg.c). The setrefs leg
+    /// (`find_minmax_agg_replacement_param`) resolves each to read its
+    /// `aggfnoid`/`target`/`param` for the Aggref→Param replacement.
+    MinMaxAggInfo(MinMaxAggInfo),
     /// A `WindowClause` node — `WindowAggPath::winclause` carries one as a
     /// `Node *` handle in the same id-space. The lifetime-bearing parse-tree
     /// [`types_nodes::rawnodes::WindowClause`] cannot live in the arena, so the
@@ -2871,6 +2903,51 @@ pub struct TargetEntryNode {
 }
 
 impl PlannerInfo {
+    /// `build_minmax_path`'s `memcpy(subroot, root)` + the field resets that
+    /// follow (planagg.c:338-360), rendered for the owned model where
+    /// `PlannerInfo` is not `Clone`.
+    ///
+    /// C copies the *entire* parent `PlannerInfo` then resets the subplan-related
+    /// state. In this model the rel/path/eq-class/placeholder arenas are rebuilt
+    /// from scratch by `query_planner(subroot, …)` (it clears
+    /// `join_rel_list`/`canon_pathkeys`/`initial_rels`/… and re-runs
+    /// `setup_simple_rel_arrays` + `make_one_rel`), so they need not be copied —
+    /// a fresh subroot with the parent's *config scalars* + `glob`/`parent_root`/
+    /// `parse`/`append_rel_list` (set by the caller) reaches `query_planner` in
+    /// the same state C's memcpy-then-reset leaves it. Mirrors the field resets
+    /// at planagg.c:340-360: `query_level++`, `parent_root = root`, and
+    /// `plan_params`/`outer_params`/`init_plans`/`agginfos`/`aggtransinfos`
+    /// emptied.
+    ///
+    /// The caller must still set: `subroot.parse` (the copied+`IncrementVar`'d
+    /// Query interned in the run), `subroot.glob` (moved from the parent for the
+    /// duration), `subroot.parent_root` (the parent, by value), and
+    /// `subroot.append_rel_list` (parent's, copied + Var-bumped).
+    pub fn make_minmax_subroot(&self) -> PlannerInfo {
+        let mut sub = PlannerInfo::default();
+        // query_level = root.query_level + 1 (subroot->query_level++).
+        sub.query_level = self.query_level + 1;
+        // Config scalars query_planner / costing read (memcpy-preserved). The
+        // per-agg subroot overrides tuple_fraction/limit_tuples to 1.0 right
+        // after this call, but copy the rest of the planner's config state.
+        sub.tuple_fraction = self.tuple_fraction;
+        sub.limit_tuples = self.limit_tuples;
+        sub.total_table_pages = self.total_table_pages;
+        sub.qual_security_level = self.qual_security_level;
+        sub.hasJoinRTEs = self.hasJoinRTEs;
+        sub.hasLateralRTEs = self.hasLateralRTEs;
+        sub.hasPseudoConstantQuals = self.hasPseudoConstantQuals;
+        sub.placeholdersFrozen = self.placeholdersFrozen;
+        sub.group_rtindex = self.group_rtindex;
+        sub.wt_param_id = self.wt_param_id;
+        // hasHavingQual is reset to false by the caller's query rewrite (no HAVING
+        // in the generated subquery); leave default false.
+        // join_domains: query_planner expects at least the top JoinDomain. C's
+        // memcpy carries the parent's; seed one like subquery_planner does.
+        sub.join_domains = alloc::vec![JoinDomain::default()];
+        sub
+    }
+
     /// Resolve a [`RelId`] to its [`RelOptInfo`].
     #[inline]
     pub fn rel(&self, id: RelId) -> &RelOptInfo {
@@ -3396,6 +3473,27 @@ impl PlannerInfo {
     pub fn alloc_agg_info(&mut self, a: AggInfo) -> NodeId {
         let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::AggInfo(a));
+        id
+    }
+    /// Resolve a [`NodeId`] to its [`MinMaxAggInfo`] (a `root->minmax_aggs`
+    /// element).
+    #[inline]
+    pub fn minmax_agg_info(&self, id: NodeId) -> &MinMaxAggInfo {
+        match &self.node_arena[id.index()] {
+            ArenaNode::MinMaxAggInfo(m) => m,
+            _ => panic!(
+                "PlannerInfo::minmax_agg_info: NodeId {} does not resolve to a MinMaxAggInfo",
+                id.0
+            ),
+        }
+    }
+    /// Intern a [`MinMaxAggInfo`] into the node store, returning its [`NodeId`]
+    /// handle (`root->minmax_aggs` elements). Producer: planagg's
+    /// `preprocess_minmax_aggregates`.
+    #[inline]
+    pub fn alloc_minmax_agg_info(&mut self, m: MinMaxAggInfo) -> NodeId {
+        let id = self.reserve_node_id();
+        self.node_arena.push(ArenaNode::MinMaxAggInfo(m));
         id
     }
     /// Intern an [`AggTransInfo`] into the node store, returning its [`NodeId`]

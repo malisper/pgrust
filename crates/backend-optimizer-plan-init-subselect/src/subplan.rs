@@ -1698,16 +1698,25 @@ pub fn SS_make_initplan_output_param(
     )
 }
 
-/// `SS_make_initplan_from_plan(root, subroot, plan, prm)` (subselect.c): given a
-/// plan tree, make it an InitPlan.
-pub fn SS_make_initplan_from_plan<'mcx>(
+/// Shared core of `SS_make_initplan_from_plan`: build the `SubPlan` node from a
+/// finished plan tree, intern the plan/subroot/subpath into the run + glob, and
+/// return the `SubPlan` [`types_pathnodes::NodeId`] in `root`'s node_arena
+/// (WITHOUT appending it to `root.init_plans`).
+///
+/// Public so planagg's `build_minmax_agg_paths` (planner crate) can pre-build the
+/// per-aggregate InitPlan `SubPlan` at preprocess time, where it holds the
+/// `&mut PlannerRun` the intern needs (`create_minmaxagg_plan` runs under
+/// `create_plan`, which only has `&PlannerRun`). The caller stashes the returned
+/// NodeId on the `MinMaxAggInfo` and `create_minmaxagg_plan` appends it to
+/// `root.init_plans` once the MinMaxAggPath has won.
+pub fn build_initplan_subplan_node<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
     subroot: PlannerInfo,
     plan: Node<'mcx>,
     prm: &Param,
-) -> PgResult<()> {
+) -> PgResult<types_pathnodes::NodeId> {
     // Build the SubPlan node and fill in costs.
     let (first_col_type, first_col_typmod, first_col_collation) = get_first_col_type(&plan)?;
     let plan_parallel_safe = plan.plan_head().parallel_safe;
@@ -1742,7 +1751,7 @@ pub fn SS_make_initplan_from_plan<'mcx>(
         let glob = root
             .glob
             .as_mut()
-            .expect("SS_make_initplan_from_plan: root->glob is NULL");
+            .expect("build_initplan_subplan_node: root->glob is NULL");
         glob.subplans.push(interned);
         glob.subpaths.push(interned);
         glob.subroots.push(interned);
@@ -1754,9 +1763,22 @@ pub fn SS_make_initplan_from_plan<'mcx>(
         mcx,
     )?);
 
-    let nid = root.alloc_node(Expr::SubPlan(SubPlanExpr(alloc::boxed::Box::new(
+    Ok(root.alloc_node(Expr::SubPlan(SubPlanExpr(alloc::boxed::Box::new(
         subplan_into_static(node),
-    ))));
+    )))))
+}
+
+/// `SS_make_initplan_from_plan(root, subroot, plan, prm)` (subselect.c): given a
+/// plan tree, make it an InitPlan.
+pub fn SS_make_initplan_from_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &mut PlannerRun<'mcx>,
+    subroot: PlannerInfo,
+    plan: Node<'mcx>,
+    prm: &Param,
+) -> PgResult<()> {
+    let nid = build_initplan_subplan_node(mcx, root, run, subroot, plan, prm)?;
     root.init_plans.push(nid);
     Ok(())
 }
