@@ -1015,8 +1015,29 @@ pub fn init_seams() {
         |value: usize, value_byref, isnull, valtype, _valtypmod, reqtype, reqtypmod| {
             use backend_pl_plpgsql_exec_seams::CastValueResult;
             if isnull {
-                // A NULL stays NULL across any cast (the cast expression is
-                // strict for I/O coercion; exec_cast_value returns the input).
+                // A NULL normally stays NULL across an I/O coercion (the cast is
+                // strict). But when the target is a DOMAIN, C's do_cast_value
+                // still runs the cast expression (which contains a CoerceToDomain
+                // node) so the domain's NOT NULL / CHECK constraints get a chance
+                // to reject the NULL. Mirror that by running the target type's
+                // input function on a NULL cstring: a domain's typinput is
+                // domain_in, which enforces the constraints; a base type's input
+                // is strict and returns NULL unchanged.
+                const TYPTYPE_DOMAIN: u8 = b'd';
+                if backend_utils_cache_lsyscache_seams::get_typtype::call(reqtype)?
+                    == TYPTYPE_DOMAIN
+                {
+                    let cxt = mcx::MemoryContext::new("PL/pgSQL exec_cast_value (null domain)");
+                    let mcx = cxt.mcx();
+                    let (typinput, typioparam) =
+                        backend_utils_cache_lsyscache_seams::get_type_input_info::call(reqtype)?;
+                    // domain_in(NULL) returns NULL when the domain permits it; if a
+                    // NOT NULL / CHECK rejects it, the call below already raises.
+                    let _ = backend_utils_fmgr_fmgr_seams::input_function_call::call(
+                        mcx, typinput, None, typioparam, reqtypmod, None,
+                    )?;
+                    return Ok(CastValueResult { value: 0, isnull: true, byref: None });
+                }
                 return Ok(CastValueResult { value, isnull: true, byref: None });
             }
             let cxt = mcx::MemoryContext::new("PL/pgSQL exec_cast_value");
