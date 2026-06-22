@@ -127,6 +127,25 @@ pub(crate) fn errpos(pstate: &ParseState<'_>, location: i32) -> i32 {
     parse_node::parser_errposition::call(pstate, location).unwrap_or(0)
 }
 
+/// Emulate C's `setup_parser_errposition_callback`/`cancel_parser_errposition_callback`
+/// pair: run `f`, and if it raises an error that does not already carry a parse
+/// cursor position, attach `parser_errposition(pstate, location)`. The C callback
+/// only injects the position when the error has none (`geterrposition() == 0`),
+/// so callees that set their own position win.
+fn with_errposition_callback<T>(
+    pstate: &ParseState<'_>,
+    location: i32,
+    f: impl FnOnce() -> PgResult<T>,
+) -> PgResult<T> {
+    f().map_err(|err| {
+        if err.cursor_position().is_none() {
+            err.with_cursor_position(errpos(pstate, location))
+        } else {
+            err
+        }
+    })
+}
+
 /// `(Node *) tle->expr` — the C reads the `TargetEntry.expr` subtree as a
 /// `Node *` at the var/agg/windowfunc walk sites. In the split model that is an
 /// owned [`Expr`] wrapped as [`Node::Expr`]. An absent expr is an internal error
@@ -1137,6 +1156,21 @@ pub fn addTargetToSortList<'mcx>(
         restype = TEXTOID;
     }
 
+    /*
+     * Rather than clutter the API of get_sort_group_operators and the other
+     * functions, use an error-context callback to mark any error reports with a
+     * parse position. Point to the operator location if present, else to the
+     * expression being sorted. (Use the original untransformed expression here.)
+     */
+    let location = if sortby.location < 0 {
+        match sortby.node.as_deref() {
+            Some(n) => node_expr_location(n)?,
+            None => -1,
+        }
+    } else {
+        sortby.location
+    };
+
     /* determine the sortop, eqop, and directionality */
     let sortop: Oid;
     let eqop: Oid;
@@ -1145,14 +1179,18 @@ pub fn addTargetToSortList<'mcx>(
 
     match sortby.sortby_dir {
         SortByDir::SORTBY_DEFAULT | SortByDir::SORTBY_ASC => {
-            let ops = get_sort_group_operators(restype, true, true, false, true)?;
+            let ops = with_errposition_callback(pstate, location, || {
+                get_sort_group_operators(restype, true, true, false, true)
+            })?;
             sortop = ops.lt_opr;
             eqop = ops.eq_opr;
             hashable = ops.is_hashable;
             reverse = false;
         }
         SortByDir::SORTBY_DESC => {
-            let ops = get_sort_group_operators(restype, false, true, true, true)?;
+            let ops = with_errposition_callback(pstate, location, || {
+                get_sort_group_operators(restype, false, true, true, true)
+            })?;
             sortop = ops.gt_opr;
             eqop = ops.eq_opr;
             hashable = ops.is_hashable;
