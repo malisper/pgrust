@@ -149,6 +149,24 @@ const INITIAL_MEMTUPSIZE: i32 = {
     }
 };
 
+/// The C `sizeof(SortTuple)` used by the `USEMEM`/`grow_memtuples` memory
+/// budget math: `void *tuple` (8) + `Datum datum1` (8) + `bool isnull1` (1) +
+/// `int srctape` (4), padded to 24 bytes on a 64-bit platform.
+///
+/// CRITICAL — this is a *behavioural* constant, NOT `size_of::<SortTuple>()`.
+/// The pgrust `SortTuple` carries an owned `Option<TupleBody>` enum and is far
+/// wider than C's 24-byte struct. Charging the engine's `availMem` budget with
+/// the Rust width makes the `INITIAL_MEMTUPSIZE` (1024-slot) array reservation
+/// alone exceed a small `work_mem` (e.g. 64kB), so `LACKMEM` trips immediately
+/// and `dumptuples` writes a *single-tuple run per tuple*. With one tuple per
+/// run, equal-key tuples that C keeps adjacent in one big run land on different
+/// merge tapes, and the merge heap resolves their exact tie by tape index
+/// rather than input order — reversing equal-key output relative to the
+/// in-memory qsort (the aggregates.sql `agg_group_N EXCEPT agg_hash_N` failure).
+/// Accounting the array at C's 24-byte element size reproduces C's run sizes
+/// (and hence its merge tie-order) exactly.
+const SIZEOF_SORTTUPLE: i64 = 24;
+
 /// `MINORDER` (tuplesort.c) — minimum merge order.
 const MINORDER: i32 = 6;
 /// `MAXORDER` (tuplesort.c) — maximum merge order.
@@ -700,8 +718,9 @@ fn tuplesort_begin_batch<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult
     state.tuplecontext = Some(tuplecxt);
 
     // USEMEM(state, GetMemoryChunkSpace(state->memtuples)): account for the
-    // memtuples array. We charge the byte size of the reserved array.
-    let chunk = (state.memtupsize as i64) * (core::mem::size_of::<SortTuple<'mcx>>() as i64);
+    // memtuples array. Charge at the C `sizeof(SortTuple)` (24 bytes), NOT the
+    // wider Rust struct, so the run-size budget matches C (see SIZEOF_SORTTUPLE).
+    let chunk = (state.memtupsize as i64) * SIZEOF_SORTTUPLE;
     state.usemem(chunk);
 
     state.currentRun = 0;
@@ -766,7 +785,9 @@ pub fn tuplesort_used_bound(state: &TuplesortStateImpl<'_>) -> bool {
 fn grow_memtuples<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<bool> {
     let memtupsize = state.memtupsize;
     let mem_now_used = state.allowedMem - state.availMem;
-    let elem_size = core::mem::size_of::<SortTuple<'mcx>>() as i64;
+    // C `sizeof(SortTuple)` for the budget math (see SIZEOF_SORTTUPLE) — NOT the
+    // Rust struct width. The actual Vec reservation still uses the real layout.
+    let elem_size = SIZEOF_SORTTUPLE;
 
     // Forget it if we've already maxed out memtuples.
     if !state.growmemtuples {
@@ -3290,8 +3311,8 @@ fn inittapestate<'mcx>(state: &mut TuplesortStateImpl<'mcx>, max_tapes: i32) -> 
     let tape_space = max_tapes as i64 * TAPE_BUFFER_OVERHEAD;
 
     // if (tapeSpace + GetMemoryChunkSpace(memtuples) < allowedMem) USEMEM(tapeSpace);
-    let memtuples_space =
-        state.memtupsize as i64 * core::mem::size_of::<SortTuple<'mcx>>() as i64;
+    // Account memtuples at C `sizeof(SortTuple)` (see SIZEOF_SORTTUPLE).
+    let memtuples_space = state.memtupsize as i64 * SIZEOF_SORTTUPLE;
     if tape_space + memtuples_space < state.allowedMem {
         state.usemem(tape_space);
     }
@@ -3436,9 +3457,9 @@ fn mergeruns<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
     let mcx = state.mcx();
 
     // FREEMEM(GetMemoryChunkSpace(memtuples)); pfree(memtuples): we no longer
-    // need the large memtuples array. Account the freed bytes, then drop it.
-    let old_memtuples_space =
-        state.memtupsize as i64 * core::mem::size_of::<SortTuple<'mcx>>() as i64;
+    // need the large memtuples array. Account the freed bytes (at the same C
+    // `sizeof(SortTuple)` charged in USEMEM, so the budget balances), then drop.
+    let old_memtuples_space = state.memtupsize as i64 * SIZEOF_SORTTUPLE;
     state.freemem(old_memtuples_space);
     state.memtuples = PgVec::new_in(mcx);
 
@@ -3453,7 +3474,7 @@ fn mergeruns<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgResult<()> {
     // Allocate the heap memtuples array (one tuple per input tape).
     state.memtupsize = state.nOutputTapes;
     state.memtuples = vec_with_capacity_in(mcx, state.nOutputTapes as usize)?;
-    state.usemem(state.nOutputTapes as i64 * core::mem::size_of::<SortTuple<'mcx>>() as i64);
+    state.usemem(state.nOutputTapes as i64 * SIZEOF_SORTTUPLE);
 
     // Use all remaining memory for tape buffers; redistributed each pass.
     state.tape_buffer_mem = state.availMem as usize;

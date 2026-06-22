@@ -13,6 +13,11 @@ const TUPLESORT_NONE: i32 = 0;
 fn install_test_comparator() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
+        // The spilling engine sources its sort/slab context from the
+        // `top_memory_context` seam; every test that calls `begin_state` needs
+        // it installed. Install it here (the lowest common setup) so the tests
+        // do not depend on `cargo test` execution order.
+        install_top_mcx_once();
         backend_utils_sort_sortsupport_seams::apply_sort_comparator::set(
             |a: Datum<'_>, b: Datum<'_>, _ssup: &SortSupportData<'_>| {
                 let xx = a.as_usize() as i64;
@@ -229,6 +234,26 @@ thread_local! {
 }
 
 const FAKE_BLCKSZ: usize = types_core::BLCKSZ as usize;
+
+/// Install the `top_memory_context` seam once for the whole test binary. The
+/// spilling engine sources its slab/sort context from `TopMemoryContext`; the
+/// tests stand in a leaked (process-lifetime) `MemoryContext`.
+fn install_top_mcx_once() {
+    static ONCE: Once = Once::new();
+    fn make() -> Mcx<'static> {
+        thread_local! {
+            static TOP: Mcx<'static> = {
+                let leaked: &'static mcx::MemoryContext =
+                    Box::leak(Box::new(mcx::MemoryContext::new("test-top")));
+                leaked.mcx()
+            };
+        }
+        TOP.with(|m| *m)
+    }
+    ONCE.call_once(|| {
+        backend_utils_mmgr_mcxt_seams::top_memory_context::set(make);
+    });
+}
 
 fn install_fake_buffile() {
     static ONCE: Once = Once::new();
@@ -747,4 +772,98 @@ fn heap_singlekey_tie_order_matches_pg_quicksort() {
             (3, 7),
         ]
     );
+}
+
+#[test]
+fn external_merge_singlekey_tie_order_is_stable() {
+    // Spilling external-merge stability regression (aggregates.sql agg_group_4 /
+    // agg_hash_4 EXCEPT must be empty). A single-key heap sort over rows whose
+    // leading key has duplicates and whose payload is the input-arrival index.
+    // The input is pre-sorted by the leading key (mirrors `ORDER BY g/2` over
+    // `generate_series` — each initial run is "presorted", so the per-run qsort
+    // returns immediately preserving arrival order). With work_mem forced to the
+    // 64KB floor the sort spills, exercising inittapes/dumptuples/mergeruns and
+    // the on-the-fly FINALMERGE gettuple path. For equal leading keys the output
+    // MUST preserve the per-run arrival order (payload ascending within a key),
+    // exactly as the in-memory qsort does — the merge heap must drain the
+    // oldest (lowest source-tape) tuple first on an exact tie.
+    install_test_comparator();
+    install_fake_buffile();
+    install_begin_seams();
+
+    let n: i64 = 6000;
+    let mut owned = begin_state(64, TUPLESORT_NONE, SortVariantKind::Heap).unwrap();
+    owned.with_mut(|state| {
+        let mcx = state.mcx();
+        state.base.nKeys = 1;
+        state.base.haveDatum1 = true;
+        state.base.tuples = true;
+        state.base.arg = SortVariantArg::Heap {
+            tupDesc: two_int4_tupdesc(mcx),
+        };
+        let mut k0 = SortSupportData::new(mcx);
+        k0.comparator = Some(SortComparatorId(0));
+        k0.ssup_attno = 1;
+        state.base.sortKeys.push(k0);
+        state.base.onlyKey = Some(0);
+    });
+
+    // Rows (key, payload) = (i/2, i) for i in 0..n, in ascending i (== arrival)
+    // order. Each key value k appears twice: payloads 2k and 2k+1.
+    for i in 0..n {
+        let key = i / 2;
+        owned.with_mut(|state| {
+            let mcx = state.mcx();
+            let tupdesc = match &state.base.arg {
+                SortVariantArg::Heap { tupDesc } => tupDesc.clone_in(mcx).unwrap(),
+                _ => unreachable!(),
+            };
+            let values = [Datum::ByVal(key as usize), Datum::ByVal(i as usize)];
+            let isnull = [false, false];
+            let mtup = backend_access_common_heaptuple::heap_form_minimal_tuple(
+                mcx, &tupdesc, &values, &isnull, 0,
+            )
+            .unwrap();
+            let stup = SortTuple {
+                tuple: Some(TupleBody::Minimal(mtup)),
+                datum1: Datum::ByVal(key as usize),
+                isnull1: false,
+                srctape: 0,
+            };
+            tuplesort_puttuple_common(state, stup, false, 0).unwrap();
+        });
+    }
+
+    owned.with_mut(|state| tuplesort_performsort(state).unwrap());
+
+    // Confirm we actually spilled (otherwise the test is vacuous).
+    let stats = owned.with_mut(|state| tuplesort_get_stats(state));
+    assert_eq!(
+        stats.spaceType,
+        TuplesortSpaceType::SORT_SPACE_TYPE_DISK,
+        "test must force an external (spilling) sort"
+    );
+
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    loop {
+        let got: Option<(i64, i64)> = owned.with_mut(|state| {
+            let mcx = state.mcx();
+            let st = tuplesort_gettuple_common(state, true).unwrap()?;
+            let tupdesc = match &state.base.arg {
+                SortVariantArg::Heap { tupDesc } => tupDesc,
+                _ => unreachable!(),
+            };
+            let cols = heap_deform_sort_minimal(mcx, &st, tupdesc).unwrap();
+            Some((cols[0].0.as_usize() as i64, cols[1].0.as_usize() as i64))
+        });
+        match got {
+            None => break,
+            Some(p) => out.push(p),
+        }
+    }
+
+    // The full output must be (key ascending, payload ascending) = exactly the
+    // input order, since input was already globally sorted that way.
+    let expected: Vec<(i64, i64)> = (0..n).map(|i| (i / 2, i)).collect();
+    assert_eq!(out, expected);
 }
