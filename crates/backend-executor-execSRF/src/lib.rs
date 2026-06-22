@@ -96,6 +96,7 @@ mod pg_stat_get_io;
 mod pg_stat_get_slru;
 mod pg_stat_get_recovery_prefetch;
 mod pg_stat_get_activity;
+mod pg_stat_get_progress_info;
 mod pg_stat_get_backend_idset;
 mod pgstat_composite_srf;
 mod pg_mcv_list_items;
@@ -283,6 +284,9 @@ pub fn init_seams() {
     // `pg_stat_get_activity(int4)` (OID 2022) — the `pg_stat_activity` view's
     // 31-column backing SRF over the localBackendStatusTable snapshot.
     pg_stat_get_activity::register_pg_stat_get_activity();
+    // `pg_stat_get_progress_info(text)` (OID 3318) — the `pg_stat_progress_*`
+    // views' backing SRF over the localBackendStatusTable progress snapshot.
+    pg_stat_get_progress_info::register_pg_stat_get_progress_info();
     // `pg_stat_get_backend_idset()` (OID 1936) — the value-per-call SRF emitting
     // each backend's proc_number.
     pg_stat_get_backend_idset::register_pg_stat_get_backend_idset();
