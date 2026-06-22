@@ -2805,17 +2805,18 @@ pub(crate) fn get_func_sql_body<'mcx>(
 /// `pg_proc.proargdefaults` `pg_node_tree` column of `funcid` and parse it into
 /// the default-argument expression list (`castNode(List, stringToNode(str))`).
 ///
-/// The clauses seam threads no `MemoryContext`, so we deserialize into a private
-/// scratch context and move the (lifetime-free) `Expr` nodes out into an owned
-/// `Vec`. Each list element is an `Expr`-deriving node; a non-`Expr` element is
-/// an error (the column is only ever a list of expressions). The C call site
-/// only reaches this with a non-null column (`SysCacheGetAttrNotNull`), so a
-/// SQL-null column or a cache miss is an `Err`.
-pub(crate) fn fetch_function_defaults(funcid: Oid) -> PgResult<std::vec::Vec<Expr>> {
-    let scratch = MemoryContext::new("syscache fetch_function_defaults projection");
-    let mcx = scratch.mcx();
+/// The `Expr` nodes are deserialized into the caller's `mcx` (C parses the
+/// `proargdefaults` `pg_node_tree` into `CurrentMemoryContext`), so the returned
+/// `Vec<Expr<'mcx>>` is tied to that arena. Each list element is an `Expr`-deriving
+/// node; a non-`Expr` element is an error (the column is only ever a list of
+/// expressions). The C call site only reaches this with a non-null column
+/// (`SysCacheGetAttrNotNull`), so a SQL-null column or a cache miss is an `Err`.
+pub(crate) fn fetch_function_defaults<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<std::vec::Vec<Expr<'mcx>>> {
     let nodes = proc_argdefaults(mcx, funcid)?;
-    let mut out: std::vec::Vec<Expr> = std::vec::Vec::with_capacity(nodes.len());
+    let mut out: std::vec::Vec<Expr<'mcx>> = std::vec::Vec::with_capacity(nodes.len());
     for node in nodes {
         let expr = mcx::PgBox::into_inner(node).into_expr().ok_or_else(|| {
             PgError::error("fetch_function_defaults: proargdefaults element is not an expression")
@@ -4904,6 +4905,149 @@ pub(crate) fn release_stats_tuple(stats_tuple: types_selfuncs::StatsTuple) {
         return;
     }
     // Reconstruct and drop the box: frees the FormedTuple and its arena.
+    let holder = unsafe { Box::from_raw(stats_tuple.ptr as *mut StatsTupleHolder) };
+    drop(holder);
+}
+
+/// `statext_expressions_load(stxoid, inh, idx)` (extended_stats.c:2401): load the
+/// `idx`-th per-expression `pg_statistic` row of an extended-statistics object.
+///
+/// C: `SearchSysCache2(STATEXTDATASTXOID, stxoid, inh)`; read the `stxdexpr`
+/// column (a `pg_statistic[]` array `serialize_expr_stats` wrote, where each
+/// element is a `heap_copy_tuple_as_datum` composite); `DatumGetExpandedArray` +
+/// `deconstruct_expanded_array`; `DatumGetHeapTupleHeader(eah->dvalues[idx])`
+/// gives the `idx`-th element's tuple header; then build a temporary `HeapTuple`
+/// (`t_len = HeapTupleHeaderGetDatumLength(td)`, invalid t_self/t_tableOid) and
+/// `heap_copytuple(&tmptup)`. The expanded-array deconstruction is modeled here
+/// by the on-disk `deconstruct_array_values` value lane (each by-reference
+/// composite element is copied out as a `Datum::ByRef` varlena image), and
+/// `DatumGetHeapTupleHeader` rebuilds the standalone `FormedTuple` (== C
+/// `heap_copytuple`'s result). The copied tuple is stashed in its own arena (the
+/// same [`StatsTupleHolder`] carrier as the pinned-syscache path) so the
+/// selectivity code can read it repeatedly; it is reclaimed by
+/// [`release_dummy_stats_tuple`] (C `ReleaseDummy` = `pfree`).
+pub(crate) fn statext_expressions_load<'mcx>(
+    _mcx: Mcx<'mcx>,
+    stxoid: Oid,
+    inh: bool,
+    idx: usize,
+) -> PgResult<Option<types_selfuncs::StatsTuple>> {
+    // The rebuilt tuple must outlive the search's transient mcx, so it lives in
+    // its own arena (held by the leaked holder, freed in release_dummy_stats_tuple).
+    // Box the MemoryContext FIRST for a stable heap address (see StatsTupleHolder).
+    let ctx: Box<MemoryContext> = Box::new(MemoryContext::new("pg_statistic expr-stats copy"));
+
+    let tuple: FormedTuple<'static> = {
+        let mcx: Mcx<'static> =
+            unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
+
+        // htup = SearchSysCache2(STATEXTDATASTXOID, stxoid, inh);
+        let Some(tup) = SearchSysCache2(
+            mcx,
+            STATEXTDATASTXOID,
+            SysCacheKey::Value(KeyDatum::from_oid(stxoid)),
+            SysCacheKey::Value(KeyDatum::from_bool(inh)),
+        )?
+        else {
+            // elog(ERROR, "cache lookup failed for statistics object %u", stxoid);
+            return Err(PgError::error(format!(
+                "cache lookup failed for statistics object {stxoid}"
+            )));
+        };
+
+        // value = SysCacheGetAttr(STATEXTDATASTXOID, htup, stxdexpr, &isnull);
+        let (value, is_null) =
+            SysCacheGetAttr(mcx, STATEXTDATASTXOID, &tup, Anum_pg_statistic_ext_data_stxdexpr_b2)?;
+        if is_null {
+            ReleaseSysCache(tup);
+            // elog(ERROR, "requested statistics kind \"%c\" is not yet built for
+            //      statistics object %u", STATS_EXT_EXPRESSIONS, stxoid);
+            return Err(PgError::error(format!(
+                "requested statistics kind \"e\" is not yet built for statistics object {stxoid}"
+            )));
+        }
+
+        // eah = DatumGetExpandedArray(value); deconstruct_expanded_array(eah);
+        // td = DatumGetHeapTupleHeader(eah->dvalues[idx]);
+        //
+        // The owned model has no expanded-array; deconstruct the flat on-disk
+        // `pg_statistic[]` array directly. The element type is the array's own
+        // ARR_ELEMTYPE (the pg_statistic composite rowtype), read off the
+        // detoasted image; each element is a varlena composite (typlen -1,
+        // by-reference, 'd'-aligned), exactly as serialize_expr_stats wrote it.
+        let arr_bytes: PgVec<'_, u8> = match &value {
+            Datum::ByRef(b) => detoast_seams::detoast_attr::call(mcx, &b[..])?,
+            other => {
+                ReleaseSysCache(tup);
+                return Err(PgError::error(format!(
+                    "statext_expressions_load: stxdexpr is not a by-reference array Datum: {other:?}"
+                )));
+            }
+        };
+        // ARR_ELEMTYPE(a): the `elemtype` field at byte offset 12 of the
+        // (detoasted) ArrayType header.
+        let ab = &arr_bytes[..];
+        if ab.len() < 16 {
+            ReleaseSysCache(tup);
+            return Err(PgError::error(
+                "statext_expressions_load: stxdexpr array image shorter than ArrayType header",
+            ));
+        }
+        let elemtype: Oid = u32::from_ne_bytes([ab[12], ab[13], ab[14], ab[15]]);
+        let elems = arrayfuncs_seams::deconstruct_array_values_bytes::call(
+            mcx,
+            &arr_bytes[..],
+            elemtype,
+            -1,    // pg_statistic composite rowtype: varlena, typlen -1
+            false, // by-reference
+            b'd' as core::ffi::c_char,
+        )?;
+
+        let Some((elem_datum, elem_isnull)) = elems.as_slice().get(idx) else {
+            ReleaseSysCache(tup);
+            return Err(PgError::error(format!(
+                "statext_expressions_load: expression index {idx} out of range \
+                 ({} elements) for statistics object {stxoid}",
+                elems.len()
+            )));
+        };
+        if *elem_isnull {
+            // A NULL element corresponds to a !stats_valid expression
+            // (serialize_expr_stats wrote an SQL NULL). C dereferences td
+            // unconditionally, but a NULL here would be a HeapTupleHeader of 0;
+            // surface it loudly rather than UB.
+            ReleaseSysCache(tup);
+            return Err(PgError::error(format!(
+                "statext_expressions_load: expression statistics index {idx} is null \
+                 for statistics object {stxoid}"
+            )));
+        }
+
+        // Build the temporary HeapTuple control struct from td and copy it
+        // (heap_copytuple): DatumGetHeapTupleHeader yields a standalone owned
+        // FormedTuple living in `mcx` (== ctx's arena), so it survives the pin
+        // release below and is freed when the holder is reclaimed.
+        let formed =
+            backend_access_common_heaptuple::DatumGetHeapTupleHeader(mcx, elem_datum)?;
+
+        // ReleaseSysCache(htup);
+        ReleaseSysCache(tup);
+        formed
+    };
+
+    let holder = Box::new(StatsTupleHolder { tuple, _ctx: ctx });
+    let ptr = Box::into_raw(holder) as *mut core::ffi::c_void;
+    Ok(Some(types_selfuncs::StatsTuple { ptr }))
+}
+
+/// `ReleaseDummy(tuple)` = `pfree(tuple)` for a [`StatsTuple`] from
+/// [`statext_expressions_load`]: reclaim the leaked holder (dropping the copied
+/// tuple and its arena). Same carrier as [`release_stats_tuple`]; kept distinct
+/// to mirror the two C free functions (`ReleaseSysCache` vs `ReleaseDummy`).
+pub(crate) fn release_dummy_stats_tuple(stats_tuple: types_selfuncs::StatsTuple) {
+    if stats_tuple.ptr.is_null() {
+        return;
+    }
     let holder = unsafe { Box::from_raw(stats_tuple.ptr as *mut StatsTupleHolder) };
     drop(holder);
 }

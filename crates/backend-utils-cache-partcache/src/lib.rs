@@ -278,7 +278,7 @@ fn RelationBuildPartitionKey<'mcx>(mcx: Mcx<'mcx>, relation: &RelationData<'_>) 
     // the projected rows by value.
 
     // partexprs come from the (already-processed) PARTRELID tuple, copied here.
-    let partexprs: PgVec<Expr> = slice_in(mcx, &tuple.partexprs)?;
+    let partexprs: PgVec<Expr<'mcx>> = slice_in(mcx, &tuple.partexprs)?;
 
     let key = PartitionKeyData {
         strategy,

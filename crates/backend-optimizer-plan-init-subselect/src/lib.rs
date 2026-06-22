@@ -88,9 +88,9 @@ pub type JtId = usize;
 
 /// `JoinTreeItem` (initsplan.c) — transient per-jointree-node working struct.
 #[derive(Clone, Debug, Default)]
-pub struct JoinTreeItem {
+pub struct JoinTreeItem<'mcx> {
     /// kind of the jointree node this item describes
-    pub kind: JtNodeKind,
+    pub kind: JtNodeKind<'mcx>,
     /// depth-first post-order rank (the order C appends to `item_list` and the
     /// order the distribute passes run, bottom-up)
     pub post_order: usize,
@@ -111,33 +111,33 @@ pub struct JoinTreeItem {
     /// `SpecialJoinInfo *sjinfo` (outer joins) — filled during distribute
     pub sjinfo: Option<alloc::boxed::Box<SpecialJoinInfo>>,
     /// `List *oj_joinclauses` — postponed outer-join quals (owned `Expr`s)
-    pub oj_joinclauses: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+    pub oj_joinclauses: alloc::vec::Vec<types_nodes::primnodes::Expr<'mcx>>,
     /// `List *lateral_clauses` — quals postponed from children (owned `Expr`s)
-    pub lateral_clauses: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+    pub lateral_clauses: alloc::vec::Vec<types_nodes::primnodes::Expr<'mcx>>,
 }
 
 /// Which jointree node a [`JoinTreeItem`] describes, plus the scalars the
 /// distribute passes read off it.
 #[derive(Clone, Debug)]
-pub enum JtNodeKind {
+pub enum JtNodeKind<'mcx> {
     /// `RangeTblRef` — carries the RT index.
     RangeTblRef {
         rtindex: i32,
     },
     /// `FromExpr` — carries an owned clone of its `quals` (implicit-AND list).
     FromExpr {
-        quals: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+        quals: alloc::vec::Vec<types_nodes::primnodes::Expr<'mcx>>,
     },
     /// `JoinExpr` — carries its `jointype`, `rtindex`, and an owned clone of its
     /// `quals` (implicit-AND list).
     JoinExpr {
         jointype: types_pathnodes::JoinType,
         rtindex: i32,
-        quals: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+        quals: alloc::vec::Vec<types_nodes::primnodes::Expr<'mcx>>,
     },
 }
 
-impl Default for JtNodeKind {
+impl Default for JtNodeKind<'_> {
     fn default() -> Self {
         JtNodeKind::RangeTblRef { rtindex: 0 }
     }

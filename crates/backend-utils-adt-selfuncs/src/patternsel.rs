@@ -1198,13 +1198,13 @@ const F_TEXT_STARTS_WITH_SUPPORT: Oid = 6242;
 #[allow(clippy::too_many_arguments)]
 fn match_pattern_prefix<'mcx>(
     mcx: Mcx<'mcx>,
-    leftop: &Expr,
-    rightop: &Expr,
+    leftop: &Expr<'_>,
+    rightop: &Expr<'_>,
     ptype: PatternType,
     expr_coll: Oid,
     opfamily: Oid,
     indexcollation: Oid,
-) -> PgResult<alloc::vec::Vec<Expr>> {
+) -> PgResult<alloc::vec::Vec<Expr<'mcx>>> {
     // Can't do anything with a non-constant or NULL pattern argument.
     let patt = match rightop {
         Expr::Const(c) if !c.constisnull => c,
@@ -1385,7 +1385,7 @@ fn match_pattern_prefix<'mcx>(
 /// `make_const` owner so the by-reference payload is `datumCopy`'d into the node
 /// arena). `constcollid`/`constlen` follow `string_to_const`'s hard-wired
 /// per-type properties.
-fn prefix_to_const_expr<'mcx>(mcx: Mcx<'mcx>, pfx: &PrefixConst<'_>) -> PgResult<Expr> {
+fn prefix_to_const_expr<'mcx>(mcx: Mcx<'mcx>, pfx: &PrefixConst<'_>) -> PgResult<Expr<'mcx>> {
     // string_to_const property table (like_support.c): text/varchar/bpchar use
     // the default collation and constlen -1; name uses C collation, length
     // NAMEDATALEN; bytea uses InvalidOid, constlen -1.
@@ -1422,7 +1422,7 @@ fn index_condition_support(
     indexarg: i32,
     index: &types_pathnodes::IndexOptInfo,
     indexcol: i32,
-) -> (alloc::vec::Vec<Expr>, bool) {
+) -> (alloc::vec::Vec<Expr<'static>>, bool) {
     // Map the support function (shared by the text/name/bpchar variants of each
     // pattern operator) to its pattern type — the `ptype` C bakes into each
     // `*_support` entry point.
@@ -1483,6 +1483,11 @@ fn index_condition_support(
         // index-support boundaries.
         Err(e) => panic!("match_pattern_prefix failed: {}", e.message()),
     };
+    // The derived prefix quals are built in the transient `cx`; the seam contract
+    // hands them back at the planner-arena `'static` lifetime (the caller
+    // re-allocates each into `root`), so erase at this seam-handoff boundary.
+    let result: alloc::vec::Vec<Expr<'static>> =
+        result.into_iter().map(Expr::erase_lifetime).collect();
 
     // C `get_index_clause_from_support` sets `req.lossy = true` as the default
     // assumption (indxpath.c), and `like_regex_support` NEVER overrides it — so a

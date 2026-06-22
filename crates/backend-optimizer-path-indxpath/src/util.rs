@@ -226,7 +226,7 @@ pub fn is_andclause(clause: &Expr) -> bool {
 /// `get_notclausearg(notclause)` (nodeFuncs.h) — the single argument of a `NOT`
 /// `BoolExpr`.
 #[inline]
-pub fn get_notclausearg(notclause: &Expr) -> &Expr {
+pub fn get_notclausearg<'a, 'mcx>(notclause: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     notclause
         .as_boolexpr()
         .expect("get_notclausearg: not a BoolExpr")

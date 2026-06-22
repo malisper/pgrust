@@ -18,9 +18,9 @@
 //!
 //! The `Expr` tree is the read-only parse/plan tree the executor walks at
 //! `ExecInit` time; in C it lives in a memory context and is never mutated
-//! during evaluation. Child expressions are owned `Box<Expr>` and child lists
+//! during evaluation. Child expressions are owned `Box<Expr<'mcx>>` and child lists
 //! are `Vec<…>` on the global allocator — matching the precedent already set
-//! by `OpExpr`/`ScalarArrayOpExpr` (which carry `Vec<Expr>`) and keeping `Expr`
+//! by `OpExpr`/`ScalarArrayOpExpr` (which carry `Vec<Expr<'mcx>>`) and keeping `Expr`
 //! free of a lifetime parameter so the (non-exhaustive) enum stays additive:
 //! existing consumers' wildcard arms keep compiling.
 
@@ -65,7 +65,7 @@ pub struct SubPlan<'mcx> {
     /// `SubLinkType subLinkType`.
     pub subLinkType: SubLinkType,
     /// `Node *testexpr` — OpExpr or RowCompareExpr expression tree.
-    pub testexpr: Option<PgBox<'mcx, Expr>>,
+    pub testexpr: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `List *paramIds` — IDs of Params embedded in `testexpr`.
     pub paramIds: PgVec<'mcx, i32>,
     /// `int plan_id` — index (from 1) in `PlannedStmt.subplans`.
@@ -90,7 +90,7 @@ pub struct SubPlan<'mcx> {
     /// `List *parParam` — indices of input Params from the parent plan.
     pub parParam: PgVec<'mcx, i32>,
     /// `List *args` — exprs to pass as parParam values.
-    pub args: PgVec<'mcx, PgBox<'mcx, Expr>>,
+    pub args: PgVec<'mcx, PgBox<'mcx, Expr<'mcx>>>,
     /// `Cost startup_cost` — one-time setup cost.
     pub startup_cost: f64,
     /// `Cost per_call_cost` — cost for each subplan evaluation.
@@ -197,14 +197,14 @@ pub struct TableFunc<'mcx> {
     /// `TableFuncType functype` — XMLTABLE or JSON_TABLE.
     pub functype: TableFuncType,
     /// `List *ns_uris` — namespace URI expressions.
-    pub ns_uris: Option<PgVec<'mcx, PgBox<'mcx, Expr>>>,
+    pub ns_uris: Option<PgVec<'mcx, PgBox<'mcx, Expr<'mcx>>>>,
     /// `List *ns_names` — namespace names, or `None` entries for the DEFAULT
     /// namespace (the C `String *` element being NULL).
     pub ns_names: Option<PgVec<'mcx, Option<PgString<'mcx>>>>,
     /// `Node *docexpr` — input document expression.
-    pub docexpr: Option<PgBox<'mcx, Expr>>,
+    pub docexpr: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `Node *rowexpr` — row filter expression.
-    pub rowexpr: Option<PgBox<'mcx, Expr>>,
+    pub rowexpr: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `List *colnames` — column names (list of String).
     pub colnames: Option<PgVec<'mcx, PgString<'mcx>>>,
     /// `List *coltypes` — OID list of column type OIDs.
@@ -214,14 +214,14 @@ pub struct TableFunc<'mcx> {
     /// `List *colcollations` — OID list of column collation OIDs.
     pub colcollations: Option<PgVec<'mcx, Oid>>,
     /// `List *colexprs` — column filter expressions (NULL elements allowed).
-    pub colexprs: Option<PgVec<'mcx, Option<PgBox<'mcx, Expr>>>>,
+    pub colexprs: Option<PgVec<'mcx, Option<PgBox<'mcx, Expr<'mcx>>>>>,
     /// `List *coldefexprs` — column default expressions (NULL elements
     /// allowed).
-    pub coldefexprs: Option<PgVec<'mcx, Option<PgBox<'mcx, Expr>>>>,
+    pub coldefexprs: Option<PgVec<'mcx, Option<PgBox<'mcx, Expr<'mcx>>>>>,
     /// `List *colvalexprs` — JSON_TABLE column value expressions.
-    pub colvalexprs: Option<PgVec<'mcx, Option<PgBox<'mcx, Expr>>>>,
+    pub colvalexprs: Option<PgVec<'mcx, Option<PgBox<'mcx, Expr<'mcx>>>>>,
     /// `List *passingvalexprs` — JSON_TABLE PASSING argument expressions.
-    pub passingvalexprs: Option<PgVec<'mcx, PgBox<'mcx, Expr>>>,
+    pub passingvalexprs: Option<PgVec<'mcx, PgBox<'mcx, Expr<'mcx>>>>,
     /// `Bitmapset *notnulls` — nullability flag for each output column.
     pub notnulls: Option<PgBox<'mcx, crate::bitmapset::Bitmapset<'mcx>>>,
     /// `Node *plan` — planner-internal field; usually `NULL` (only set during
@@ -289,7 +289,7 @@ impl TableFunc<'_> {
 fn clone_opt_expr<'b>(
     e: &Option<PgBox<'_, Expr>>,
     mcx: Mcx<'b>,
-) -> PgResult<Option<PgBox<'b, Expr>>> {
+) -> PgResult<Option<PgBox<'b, Expr<'b>>>> {
     match e {
         // Deep copy via `Expr::clone_in` (a shallow `.clone()` panics on
         // `Aggref`/`SubLink`/`SubPlan` children).
@@ -301,7 +301,7 @@ fn clone_opt_expr<'b>(
 fn clone_expr_list<'b>(
     list: &Option<PgVec<'_, PgBox<'_, Expr>>>,
     mcx: Mcx<'b>,
-) -> PgResult<Option<PgVec<'b, PgBox<'b, Expr>>>> {
+) -> PgResult<Option<PgVec<'b, PgBox<'b, Expr<'b>>>>> {
     match list {
         Some(v) => {
             let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
@@ -317,7 +317,7 @@ fn clone_expr_list<'b>(
 fn clone_opt_expr_list<'b>(
     list: &Option<PgVec<'_, Option<PgBox<'_, Expr>>>>,
     mcx: Mcx<'b>,
-) -> PgResult<Option<PgVec<'b, Option<PgBox<'b, Expr>>>>> {
+) -> PgResult<Option<PgVec<'b, Option<PgBox<'b, Expr<'b>>>>>> {
     match list {
         Some(v) => {
             let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
@@ -485,7 +485,7 @@ pub struct Var {
 
 /// `Const` (nodes/primnodes.h), trimmed to the fields ports consume.
 #[derive(Clone, Debug)]
-pub struct Const {
+pub struct Const<'mcx> {
     /// `Oid consttype` — pg_type OID of the constant's type.
     pub consttype: Oid,
     /// `int32 consttypmod` — typmod value, or -1.
@@ -509,7 +509,7 @@ pub struct Const {
     /// per-tuple working state), so its value carries the `'static` lifetime —
     /// matching the `Box<SubPlan<'static>>` convention used elsewhere in the
     /// lifetime-free [`Expr`] enum.
-    pub constvalue: Datum<'static>,
+    pub constvalue: Datum<'mcx>,
     /// `bool constisnull` — whether the constant is null.
     pub constisnull: bool,
     /// `bool constbyval` — whether the type is pass-by-value. Copied from
@@ -522,7 +522,7 @@ pub struct Const {
     pub location: ParseLoc,
 }
 
-impl Default for Const {
+impl<'mcx> Default for Const<'mcx> {
     fn default() -> Self {
         Const {
             consttype: Default::default(),
@@ -539,7 +539,7 @@ impl Default for Const {
 
 /// `OpExpr` (nodes/primnodes.h) — expression node for an operator invocation.
 #[derive(Clone, Debug, Default)]
-pub struct OpExpr {
+pub struct OpExpr<'mcx> {
     /// `Oid opno` — PG_OPERATOR OID of the operator.
     pub opno: Oid,
     /// `Oid opfuncid` — PG_PROC OID of underlying function.
@@ -553,17 +553,17 @@ pub struct OpExpr {
     /// `Oid inputcollid` — OID of collation that operator should use.
     pub inputcollid: Oid,
     /// `List *args` — arguments to the operator (1 or 2).
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `ParseLoc location` — token location, or -1 if unknown.
     pub location: i32,
 }
 
-impl OpExpr {
+impl<'mcx> OpExpr<'mcx> {
     /// Deep copy into `mcx` (C: `copyObject` shape). The derived `.clone()` is
     /// unsafe for an OpExpr whose `args` carry an owned-subtree `Expr` (a
     /// SubLink/SubPlan/Aggref), which panics; this routes each arg through
     /// [`Expr::clone_in`].
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<OpExpr> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<OpExpr<'b>> {
         clone_opexpr(self, mcx)
     }
 }
@@ -572,7 +572,7 @@ impl OpExpr {
 /// trimmed to the fields ports consume (the TID-scan node reads only `args`,
 /// via `linitial`/`lsecond`).
 #[derive(Clone, Debug, Default)]
-pub struct ScalarArrayOpExpr {
+pub struct ScalarArrayOpExpr<'mcx> {
     /// `Oid opno` — PG_OPERATOR OID of the operator.
     pub opno: Oid,
     /// `Oid opfuncid` — PG_PROC OID of comparison function.
@@ -598,7 +598,7 @@ pub struct ScalarArrayOpExpr {
     /// (nodeFuncs.c). Added field-for-field vs primnodes.h.
     pub inputcollid: Oid,
     /// `List *args` — the scalar and array operands.
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `ParseLoc location` — token location, or -1 if unknown. Set by
     /// `make_scalar_array_op` (parse_oper.c) and read by `exprLocation`
     /// (nodeFuncs.c). Added field-for-field vs primnodes.h.
@@ -681,11 +681,11 @@ pub use BoolExprType::{AND_EXPR, NOT_EXPR, OR_EXPR};
 
 /// `BoolExpr` (nodes/primnodes.h) — the basic Boolean operators AND/OR/NOT.
 #[derive(Clone, Debug)]
-pub struct BoolExpr {
+pub struct BoolExpr<'mcx> {
     /// `BoolExprType boolop`.
     pub boolop: BoolExprType,
     /// `List *args` — arguments (exactly one for NOT, two-or-more for AND/OR).
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `ParseLoc location` — token location, or -1 if unknown.
     pub location: ParseLoc,
 }
@@ -875,7 +875,7 @@ pub struct Param {
 /// is unused for Aggref in the executor (aggregates are compiled by
 /// `ExecBuildAggTrans`, which never round-trips through a plain `.clone()`).
 #[derive(Debug)]
-pub struct Aggref {
+pub struct Aggref<'mcx> {
     /// `Oid aggfnoid`.
     pub aggfnoid: Oid,
     /// `Oid aggtype`.
@@ -889,9 +889,9 @@ pub struct Aggref {
     /// `List *aggargtypes` — OID list of direct + aggregated arg types.
     pub aggargtypes: Vec<Oid>,
     /// `List *aggdirectargs` — direct args (plain exprs) for ordered-set aggs.
-    pub aggdirectargs: Vec<Expr>,
+    pub aggdirectargs: Vec<Expr<'mcx>>,
     /// `List *args` — aggregated args + sort exprs (list of TargetEntry).
-    pub args: Vec<TargetEntry<'static>>,
+    pub args: Vec<TargetEntry<'mcx>>,
     /// `List *aggorder` — ORDER BY (list of SortGroupClause). Set by the parser
     /// (`transformAggregateCall`, parse_agg.c). Added field-for-field vs
     /// primnodes.h.
@@ -901,7 +901,7 @@ pub struct Aggref {
     /// primnodes.h.
     pub aggdistinct: Vec<crate::rawnodes::SortGroupClause>,
     /// `Expr *aggfilter` — FILTER expression, if any.
-    pub aggfilter: Option<Box<Expr>>,
+    pub aggfilter: Option<Box<Expr<'mcx>>>,
     /// `bool aggstar` — true if argument list was really `*`.
     pub aggstar: bool,
     /// `bool aggvariadic`.
@@ -926,7 +926,7 @@ pub struct Aggref {
     pub location: ParseLoc,
 }
 
-impl Clone for Aggref {
+impl<'mcx> Clone for Aggref<'mcx> {
     fn clone(&self) -> Self {
         panic!(
             "Aggref::clone: aggregate args are a TargetEntry list with \
@@ -937,9 +937,9 @@ impl Clone for Aggref {
 
 /// `GroupingFunc` (nodes/primnodes.h) — a `GROUPING(...)` expression.
 #[derive(Clone, Debug)]
-pub struct GroupingFunc {
+pub struct GroupingFunc<'mcx> {
     /// `List *args` — kept for EXPLAIN; not evaluated.
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `List *refs` — ressortgrouprefs of arguments (integer list).
     pub refs: Vec<i32>,
     /// `List *cols` — actual column positions set by planner (integer list).
@@ -952,7 +952,7 @@ pub struct GroupingFunc {
 
 /// `WindowFunc` (nodes/primnodes.h).
 #[derive(Clone, Debug)]
-pub struct WindowFunc {
+pub struct WindowFunc<'mcx> {
     /// `Oid winfnoid`.
     pub winfnoid: Oid,
     /// `Oid wintype`.
@@ -962,11 +962,11 @@ pub struct WindowFunc {
     /// `Oid inputcollid`.
     pub inputcollid: Oid,
     /// `List *args`.
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `Expr *aggfilter` — FILTER expression, if any.
-    pub aggfilter: Option<Box<Expr>>,
+    pub aggfilter: Option<Box<Expr<'mcx>>>,
     /// `List *runCondition` — WindowFuncRunConditions to short-circuit.
-    pub runCondition: Vec<Expr>,
+    pub runCondition: Vec<Expr<'mcx>>,
     /// `Index winref` — index of associated WindowClause.
     pub winref: Index,
     /// `bool winstar`.
@@ -979,7 +979,7 @@ pub struct WindowFunc {
     pub location: ParseLoc,
 }
 
-impl WindowFunc {
+impl<'mcx> WindowFunc<'mcx> {
     /// Deep-copy this `WindowFunc` into `mcx` (C: `copyObject` over a
     /// `WindowFunc *`). The derived `.clone()` would shallow-clone the `args` /
     /// `aggfilter` / `runCondition` child `Expr`s, panicking the moment one of
@@ -987,7 +987,7 @@ impl WindowFunc {
     /// `SubPlanExpr::clone` is a deliberate trap. This routes every child
     /// through the sanctioned [`Expr::clone_in`] path instead. Mirrors the
     /// `Expr::WindowFunc` arm of `Expr::clone_in`.
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<WindowFunc> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<WindowFunc<'b>> {
         Ok(WindowFunc {
             winfnoid: self.winfnoid,
             wintype: self.wintype,
@@ -1018,7 +1018,7 @@ pub struct MergeSupportFunc {
 /// `SubscriptingRef` (nodes/primnodes.h) — a subscripting operation over a
 /// container (array, etc).
 #[derive(Clone, Debug)]
-pub struct SubscriptingRef {
+pub struct SubscriptingRef<'mcx> {
     /// `Oid refcontainertype`.
     pub refcontainertype: Oid,
     /// `Oid refelemtype`.
@@ -1031,19 +1031,19 @@ pub struct SubscriptingRef {
     pub refcollid: Oid,
     /// `List *refupperindexpr` — upper container index exprs (may contain
     /// NULL elements in the slice case).
-    pub refupperindexpr: Vec<Option<Expr>>,
+    pub refupperindexpr: Vec<Option<Expr<'mcx>>>,
     /// `List *reflowerindexpr` — lower container index exprs, or empty for a
     /// single element (may contain NULL elements).
-    pub reflowerindexpr: Vec<Option<Expr>>,
+    pub reflowerindexpr: Vec<Option<Expr<'mcx>>>,
     /// `Expr *refexpr` — expression yielding the container value.
-    pub refexpr: Option<Box<Expr>>,
+    pub refexpr: Option<Box<Expr<'mcx>>>,
     /// `Expr *refassgnexpr` — source value for a store, or `None` for a fetch.
-    pub refassgnexpr: Option<Box<Expr>>,
+    pub refassgnexpr: Option<Box<Expr<'mcx>>>,
 }
 
 /// `FuncExpr` (nodes/primnodes.h) — a function call.
 #[derive(Clone, Debug)]
-pub struct FuncExpr {
+pub struct FuncExpr<'mcx> {
     /// `Oid funcid`.
     pub funcid: Oid,
     /// `Oid funcresulttype`.
@@ -1059,7 +1059,7 @@ pub struct FuncExpr {
     /// `Oid inputcollid`.
     pub inputcollid: Oid,
     /// `List *args`.
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `ParseLoc location` — token location, or -1 if unknown. Set by the
     /// parser; read by `exprLocation` (nodeFuncs.c). Added field-for-field vs
     /// primnodes.h.
@@ -1069,9 +1069,9 @@ pub struct FuncExpr {
 /// `NamedArgExpr` (nodes/primnodes.h) — a named function argument. The planner
 /// removes these before execution.
 #[derive(Clone, Debug)]
-pub struct NamedArgExpr {
+pub struct NamedArgExpr<'mcx> {
     /// `Expr *arg`.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `char *name`.
     pub name: Option<String>,
     /// `int argnumber`.
@@ -1088,13 +1088,13 @@ pub struct NamedArgExpr {
 /// `SubLink::clone_in`). This mirrors the [`Aggref`]/[`SubPlanExpr`] convention
 /// for embedded owned sub-trees inside the lifetime-free [`Expr`] enum.
 #[derive(Debug)]
-pub struct SubLink {
+pub struct SubLink<'mcx> {
     /// `SubLinkType subLinkType`.
     pub subLinkType: SubLinkType,
     /// `int subLinkId`.
     pub subLinkId: i32,
     /// `Node *testexpr`.
-    pub testexpr: Option<Box<Expr>>,
+    pub testexpr: Option<Box<Expr<'mcx>>>,
     /// `List *operName` — the (possibly qualified) operator name for an
     /// `ALL`/`ANY`/`ROWCOMPARE_SUBLINK`, e.g. `("=")`. Unlike most parse-time
     /// fields it SURVIVES parse-analysis (C `_outSubLink`/`_readSubLink` write/read
@@ -1110,12 +1110,12 @@ pub struct SubLink {
     /// notional lifetime, matching the `Box<SubPlan<'static>>` convention used by
     /// [`SubPlanExpr`]. `None` is the C `NULL` (and the value produced until
     /// `transformSubLink` is ported).
-    pub subselect: Option<PgBox<'static, crate::copy_query::Query<'static>>>,
+    pub subselect: Option<PgBox<'mcx, crate::copy_query::Query<'mcx>>>,
     /// `ParseLoc location` — token location, or -1 if unknown.
     pub location: ParseLoc,
 }
 
-impl Clone for SubLink {
+impl<'mcx> Clone for SubLink<'mcx> {
     fn clone(&self) -> Self {
         panic!(
             "SubLink::clone: subselect is an embedded owned Query whose children \
@@ -1126,14 +1126,14 @@ impl Clone for SubLink {
     }
 }
 
-impl SubLink {
+impl<'mcx> SubLink<'mcx> {
     /// Deep copy into `mcx` (C: `copyObject` shape). This is the sanctioned,
     /// non-panicking deep-copy path used by the [`Expr::SubLink`]
     /// [`Expr::clone_in`] arm (never the panicking derived `.clone()`). The
     /// embedded owned `subselect` `Query` is deep-cloned via
     /// [`crate::copy_query::Query::clone_in`] and `testexpr` recurses through
     /// [`Expr::clone_in`] (mirrors [`Aggref::clone_in`]).
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<SubLink> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<SubLink<'b>> {
         clone_sublink(self, mcx)
     }
 }
@@ -1157,9 +1157,9 @@ impl Clone for AlternativeSubPlan<'_> {
 
 /// `FieldSelect` (nodes/primnodes.h) — extract one field from a rowtype value.
 #[derive(Clone, Debug)]
-pub struct FieldSelect {
+pub struct FieldSelect<'mcx> {
     /// `Expr *arg`.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `AttrNumber fieldnum`.
     pub fieldnum: AttrNumber,
     /// `Oid resulttype`.
@@ -1173,11 +1173,11 @@ pub struct FieldSelect {
 /// `FieldStore` (nodes/primnodes.h) — modify one or more fields in a rowtype
 /// value, yielding a new value.
 #[derive(Clone, Debug)]
-pub struct FieldStore {
+pub struct FieldStore<'mcx> {
     /// `Expr *arg` — input tuple value.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `List *newvals` — new value(s) for field(s).
-    pub newvals: Vec<Expr>,
+    pub newvals: Vec<Expr<'mcx>>,
     /// `List *fieldnums` — integer list of field attnums.
     pub fieldnums: Vec<AttrNumber>,
     /// `Oid resulttype`.
@@ -1186,9 +1186,9 @@ pub struct FieldStore {
 
 /// `RelabelType` (nodes/primnodes.h) — a no-op binary-compatible coercion.
 #[derive(Clone, Debug)]
-pub struct RelabelType {
+pub struct RelabelType<'mcx> {
     /// `Expr *arg`.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `Oid resulttype`.
     pub resulttype: Oid,
     /// `int32 resulttypmod`.
@@ -1204,9 +1204,9 @@ pub struct RelabelType {
 /// `CoerceViaIO` (nodes/primnodes.h) — coercion via the source typoutput then
 /// destination typinput.
 #[derive(Clone, Debug)]
-pub struct CoerceViaIO {
+pub struct CoerceViaIO<'mcx> {
     /// `Expr *arg`.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `Oid resulttype`.
     pub resulttype: Oid,
     /// `Oid resultcollid`.
@@ -1220,11 +1220,11 @@ pub struct CoerceViaIO {
 /// `ArrayCoerceExpr` (nodes/primnodes.h) — array-type coercion applying a
 /// per-element coercion `elemexpr`.
 #[derive(Clone, Debug)]
-pub struct ArrayCoerceExpr {
+pub struct ArrayCoerceExpr<'mcx> {
     /// `Expr *arg` — input expression (yields an array).
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `Expr *elemexpr` — per-element coercion work.
-    pub elemexpr: Option<Box<Expr>>,
+    pub elemexpr: Option<Box<Expr<'mcx>>>,
     /// `Oid resulttype`.
     pub resulttype: Oid,
     /// `int32 resulttypmod`.
@@ -1239,9 +1239,9 @@ pub struct ArrayCoerceExpr {
 
 /// `ConvertRowtypeExpr` (nodes/primnodes.h) — composite-to-composite coercion.
 #[derive(Clone, Debug)]
-pub struct ConvertRowtypeExpr {
+pub struct ConvertRowtypeExpr<'mcx> {
     /// `Expr *arg`.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `Oid resulttype` — always a composite type.
     pub resulttype: Oid,
     /// `CoercionForm convertformat`.
@@ -1253,9 +1253,9 @@ pub struct ConvertRowtypeExpr {
 /// `CollateExpr` (nodes/primnodes.h) — COLLATE; planner replaces with
 /// RelabelType, so never executed.
 #[derive(Clone, Debug)]
-pub struct CollateExpr {
+pub struct CollateExpr<'mcx> {
     /// `Expr *arg`.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `Oid collOid`.
     pub collOid: Oid,
     /// `ParseLoc location` — token location, or -1 if unknown.
@@ -1264,17 +1264,17 @@ pub struct CollateExpr {
 
 /// `CaseExpr` (nodes/primnodes.h) — a CASE expression.
 #[derive(Clone, Debug)]
-pub struct CaseExpr {
+pub struct CaseExpr<'mcx> {
     /// `Oid casetype`.
     pub casetype: Oid,
     /// `Oid casecollid`.
     pub casecollid: Oid,
     /// `Expr *arg` — implicit equality comparison argument (form 2), or `None`.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `List *args` — the WHEN clauses (list of [`CaseWhen`]).
-    pub args: Vec<CaseWhen>,
+    pub args: Vec<CaseWhen<'mcx>>,
     /// `Expr *defresult` — the ELSE result.
-    pub defresult: Option<Box<Expr>>,
+    pub defresult: Option<Box<Expr<'mcx>>>,
     /// `ParseLoc location` — token location, or -1 if unknown.
     pub location: ParseLoc,
 }
@@ -1282,11 +1282,11 @@ pub struct CaseExpr {
 /// `CaseWhen` (nodes/primnodes.h) — one arm of a CASE expression. (Not itself
 /// `Expr`-derived in the dispatch sense, but carried inline in [`CaseExpr`].)
 #[derive(Clone, Debug)]
-pub struct CaseWhen {
+pub struct CaseWhen<'mcx> {
     /// `Expr *expr` — condition expression.
-    pub expr: Option<Box<Expr>>,
+    pub expr: Option<Box<Expr<'mcx>>>,
     /// `Expr *result` — substitution result.
-    pub result: Option<Box<Expr>>,
+    pub result: Option<Box<Expr<'mcx>>>,
     /// `ParseLoc location` — token location, or -1 if unknown.
     pub location: ParseLoc,
 }
@@ -1304,7 +1304,7 @@ pub struct CaseTestExpr {
 
 /// `ArrayExpr` (nodes/primnodes.h) — an `ARRAY[]` expression.
 #[derive(Clone, Debug)]
-pub struct ArrayExpr {
+pub struct ArrayExpr<'mcx> {
     /// `Oid array_typeid`.
     pub array_typeid: Oid,
     /// `Oid array_collid`.
@@ -1312,7 +1312,7 @@ pub struct ArrayExpr {
     /// `Oid element_typeid`.
     pub element_typeid: Oid,
     /// `List *elements` — the array elements or sub-arrays.
-    pub elements: Vec<Expr>,
+    pub elements: Vec<Expr<'mcx>>,
     /// `bool multidims` — true if elements are sub-arrays.
     pub multidims: bool,
     /// `ParseLoc location` — token location, or -1 if unknown.
@@ -1321,9 +1321,9 @@ pub struct ArrayExpr {
 
 /// `RowExpr` (nodes/primnodes.h) — a `ROW()` expression.
 #[derive(Clone, Debug)]
-pub struct RowExpr {
+pub struct RowExpr<'mcx> {
     /// `List *args` — the fields.
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `Oid row_typeid` — RECORDOID or a composite type's ID.
     pub row_typeid: Oid,
     /// `CoercionForm row_format`.
@@ -1336,7 +1336,7 @@ pub struct RowExpr {
 
 /// `RowCompareExpr` (nodes/primnodes.h) — a row-wise comparison.
 #[derive(Clone, Debug)]
-pub struct RowCompareExpr {
+pub struct RowCompareExpr<'mcx> {
     /// `CompareType cmptype` — LT/LE/GE/GT (never EQ/NE).
     pub cmptype: CompareType,
     /// `List *opnos` — OID list of pairwise comparison ops.
@@ -1346,27 +1346,27 @@ pub struct RowCompareExpr {
     /// `List *inputcollids` — OID list of comparison collations.
     pub inputcollids: Vec<Oid>,
     /// `List *largs` — left-hand input arguments.
-    pub largs: Vec<Expr>,
+    pub largs: Vec<Expr<'mcx>>,
     /// `List *rargs` — right-hand input arguments.
-    pub rargs: Vec<Expr>,
+    pub rargs: Vec<Expr<'mcx>>,
 }
 
 /// `CoalesceExpr` (nodes/primnodes.h) — a COALESCE expression.
 #[derive(Clone, Debug)]
-pub struct CoalesceExpr {
+pub struct CoalesceExpr<'mcx> {
     /// `Oid coalescetype`.
     pub coalescetype: Oid,
     /// `Oid coalescecollid`.
     pub coalescecollid: Oid,
     /// `List *args`.
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `ParseLoc location` — token location, or -1 if unknown.
     pub location: ParseLoc,
 }
 
 /// `MinMaxExpr` (nodes/primnodes.h) — a GREATEST or LEAST function.
 #[derive(Clone, Debug)]
-pub struct MinMaxExpr {
+pub struct MinMaxExpr<'mcx> {
     /// `Oid minmaxtype`.
     pub minmaxtype: Oid,
     /// `Oid minmaxcollid`.
@@ -1376,7 +1376,7 @@ pub struct MinMaxExpr {
     /// `MinMaxOp op`.
     pub op: MinMaxOp,
     /// `List *args`.
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `ParseLoc location` — token location, or -1 if unknown.
     pub location: ParseLoc,
 }
@@ -1396,17 +1396,17 @@ pub struct SQLValueFunction {
 
 /// `XmlExpr` (nodes/primnodes.h) — a SQL/XML function.
 #[derive(Clone, Debug)]
-pub struct XmlExpr {
+pub struct XmlExpr<'mcx> {
     /// `XmlExprOp op`.
     pub op: XmlExprOp,
     /// `char *name`.
     pub name: Option<String>,
     /// `List *named_args` — non-XML expressions for xml_attributes.
-    pub named_args: Vec<Expr>,
+    pub named_args: Vec<Expr<'mcx>>,
     /// `List *arg_names` — parallel list of String values.
     pub arg_names: Vec<String>,
     /// `List *args`.
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `XmlOptionType xmloption`.
     pub xmloption: XmlOptionType,
     /// `bool indent` — INDENT option for XMLSERIALIZE.
@@ -1464,11 +1464,11 @@ pub struct JsonReturning {
 /// (`expr [FORMAT ...]`). Not itself dispatched as an `Expr` opcode, but
 /// carried by JSON nodes.
 #[derive(Clone, Debug)]
-pub struct JsonValueExpr {
+pub struct JsonValueExpr<'mcx> {
     /// `Expr *raw_expr` — user-specified expression.
-    pub raw_expr: Option<Box<Expr>>,
+    pub raw_expr: Option<Box<Expr<'mcx>>>,
     /// `Expr *formatted_expr` — coerced formatted expression.
-    pub formatted_expr: Option<Box<Expr>>,
+    pub formatted_expr: Option<Box<Expr<'mcx>>>,
     /// `JsonFormat *format`.
     pub format: Option<JsonFormat>,
 }
@@ -1476,15 +1476,15 @@ pub struct JsonValueExpr {
 /// `JsonConstructorExpr` (nodes/primnodes.h) — wrapper over FuncExpr/Aggref/
 /// WindowFunc for SQL/JSON constructors.
 #[derive(Clone, Debug)]
-pub struct JsonConstructorExpr {
+pub struct JsonConstructorExpr<'mcx> {
     /// `JsonConstructorType type`.
     pub r#type: JsonConstructorType,
     /// `List *args`.
-    pub args: Vec<Expr>,
+    pub args: Vec<Expr<'mcx>>,
     /// `Expr *func` — underlying json[b]_xxx() function call.
-    pub func: Option<Box<Expr>>,
+    pub func: Option<Box<Expr<'mcx>>>,
     /// `Expr *coercion` — coercion to RETURNING type.
-    pub coercion: Option<Box<Expr>>,
+    pub coercion: Option<Box<Expr<'mcx>>>,
     /// `JsonReturning *returning`.
     pub returning: Option<JsonReturning>,
     /// `bool absent_on_null`.
@@ -1497,9 +1497,9 @@ pub struct JsonConstructorExpr {
 
 /// `JsonIsPredicate` (nodes/primnodes.h) — an IS JSON predicate.
 #[derive(Clone, Debug)]
-pub struct JsonIsPredicate {
+pub struct JsonIsPredicate<'mcx> {
     /// `Node *expr` — subject expression.
-    pub expr: Option<Box<Expr>>,
+    pub expr: Option<Box<Expr<'mcx>>>,
     /// `JsonFormat *format`.
     pub format: Option<JsonFormat>,
     /// `JsonValueType item_type`.
@@ -1527,11 +1527,11 @@ pub enum JsonBehaviorType {
 
 /// `JsonBehavior` (nodes/primnodes.h) — ON ERROR / ON EMPTY specification.
 #[derive(Clone, Debug)]
-pub struct JsonBehavior {
+pub struct JsonBehavior<'mcx> {
     /// `JsonBehaviorType btype`.
     pub btype: JsonBehaviorType,
     /// `Node *expr`.
-    pub expr: Option<Box<Expr>>,
+    pub expr: Option<Box<Expr<'mcx>>>,
     /// `bool coerce`.
     pub coerce: bool,
     /// `ParseLoc location` — token location, or -1 if unknown.
@@ -1541,27 +1541,27 @@ pub struct JsonBehavior {
 /// `JsonExpr` (nodes/primnodes.h) — transformed JSON_VALUE/JSON_QUERY/
 /// JSON_EXISTS.
 #[derive(Clone, Debug)]
-pub struct JsonExpr {
+pub struct JsonExpr<'mcx> {
     /// `JsonExprOp op`.
     pub op: JsonExprOp,
     /// `char *column_name` — JSON_TABLE() column name, or `None`.
     pub column_name: Option<String>,
     /// `Node *formatted_expr` — jsonb-valued expression to query.
-    pub formatted_expr: Option<Box<Expr>>,
+    pub formatted_expr: Option<Box<Expr<'mcx>>>,
     /// `JsonFormat *format`.
     pub format: Option<JsonFormat>,
     /// `Node *path_spec` — jsonpath-valued query pattern.
-    pub path_spec: Option<Box<Expr>>,
+    pub path_spec: Option<Box<Expr<'mcx>>>,
     /// `JsonReturning *returning` — expected output type/format.
     pub returning: Option<JsonReturning>,
     /// `List *passing_names` — PASSING argument names (list of String).
     pub passing_names: Vec<String>,
     /// `List *passing_values` — PASSING argument value expressions.
-    pub passing_values: Vec<Expr>,
+    pub passing_values: Vec<Expr<'mcx>>,
     /// `JsonBehavior *on_empty`.
-    pub on_empty: Option<Box<JsonBehavior>>,
+    pub on_empty: Option<Box<JsonBehavior<'mcx>>>,
     /// `JsonBehavior *on_error`.
-    pub on_error: Option<Box<JsonBehavior>>,
+    pub on_error: Option<Box<JsonBehavior<'mcx>>>,
     /// `bool use_io_coercion`.
     pub use_io_coercion: bool,
     /// `bool use_json_coercion`.
@@ -1578,9 +1578,9 @@ pub struct JsonExpr {
 
 /// `NullTest` (nodes/primnodes.h) — IS [NOT] NULL test.
 #[derive(Clone, Debug)]
-pub struct NullTest {
+pub struct NullTest<'mcx> {
     /// `Expr *arg`.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `NullTestType nulltesttype`.
     pub nulltesttype: NullTestType,
     /// `bool argisrow` — true to perform field-by-field null checks.
@@ -1591,9 +1591,9 @@ pub struct NullTest {
 
 /// `BooleanTest` (nodes/primnodes.h) — IS [NOT] TRUE/FALSE/UNKNOWN.
 #[derive(Clone, Debug)]
-pub struct BooleanTest {
+pub struct BooleanTest<'mcx> {
     /// `Expr *arg`.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `BoolTestType booltesttype`.
     pub booltesttype: BoolTestType,
     /// `ParseLoc location` — token location, or -1 if unknown.
@@ -1602,9 +1602,9 @@ pub struct BooleanTest {
 
 /// `CoerceToDomain` (nodes/primnodes.h) — coerce a value to a domain type.
 #[derive(Clone, Debug)]
-pub struct CoerceToDomain {
+pub struct CoerceToDomain<'mcx> {
     /// `Expr *arg`.
-    pub arg: Option<Box<Expr>>,
+    pub arg: Option<Box<Expr<'mcx>>>,
     /// `Oid resulttype` — domain type ID.
     pub resulttype: Oid,
     /// `int32 resulttypmod`.
@@ -1657,9 +1657,9 @@ pub struct NextValueExpr {
 /// `InferenceElem` (nodes/primnodes.h) — element of a unique-index inference
 /// spec.
 #[derive(Clone, Debug)]
-pub struct InferenceElem {
+pub struct InferenceElem<'mcx> {
     /// `Node *expr`.
-    pub expr: Option<Box<Expr>>,
+    pub expr: Option<Box<Expr<'mcx>>>,
     /// `Oid infercollid`.
     pub infercollid: Oid,
     /// `Oid inferopclass`.
@@ -1669,13 +1669,13 @@ pub struct InferenceElem {
 /// `ReturningExpr` (nodes/primnodes.h) — return OLD/NEW.(expression) in a
 /// RETURNING list. Inserted by the rewriter/planner only.
 #[derive(Clone, Debug)]
-pub struct ReturningExpr {
+pub struct ReturningExpr<'mcx> {
     /// `int retlevelsup`.
     pub retlevelsup: i32,
     /// `bool retold` — true for OLD, false for NEW.
     pub retold: bool,
     /// `Expr *retexpr`.
-    pub retexpr: Option<Box<Expr>>,
+    pub retexpr: Option<Box<Expr<'mcx>>>,
 }
 
 /// `PlaceHolderVar` (nodes/pathnodes.h) — a placeholder for a subexpression that
@@ -1683,13 +1683,13 @@ pub struct ReturningExpr {
 /// optimizer dispatches `IsA(node, PlaceHolderVar)` and reads
 /// `phid`/`phrels`/`phnullingrels`/`phexpr`.
 ///
-/// `phexpr` is an owned `Box<Expr>` (matching the rest of the lifetime-free
+/// `phexpr` is an owned `Box<Expr<'mcx>>` (matching the rest of the lifetime-free
 /// tree); `phrels`/`phnullingrels` are the lifetime-free [`ExprRelids`].
 #[derive(Clone, Debug, Default)]
-pub struct PlaceHolderVar {
+pub struct PlaceHolderVar<'mcx> {
     /// `Expr *phexpr` — the represented expression. `None` only during
     /// construction; a built PHV always wraps an expression.
-    pub phexpr: Option<Box<Expr>>,
+    pub phexpr: Option<Box<Expr<'mcx>>>,
     /// `Relids phrels` — base+OJ relids syntactically within `phexpr`.
     pub phrels: ExprRelids,
     /// `Relids phnullingrels` — RT indexes of outer joins that can null the
@@ -1701,12 +1701,12 @@ pub struct PlaceHolderVar {
     pub phlevelsup: u32,
 }
 
-impl PlaceHolderVar {
+impl<'mcx> PlaceHolderVar<'mcx> {
     /// Deep copy into `mcx` (C: `copyObject` shape), recursing into `phexpr`
     /// through the non-panicking arena clone (never a shallow `.clone()` on an
     /// `Aggref`/`SubLink`/… child). Mirrors the `Expr::PlaceHolderVar`
     /// [`Expr::clone_in`] arm.
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PlaceHolderVar> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PlaceHolderVar<'b>> {
         Ok(PlaceHolderVar {
             phexpr: clone_opt_box_expr(&self.phexpr, mcx)?,
             phrels: self.phrels.clone(),
@@ -1717,21 +1717,21 @@ impl PlaceHolderVar {
     }
 }
 
-impl Aggref {
+impl<'mcx> Aggref<'mcx> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Delegates to the
     /// non-panicking `args`-deep-copying path used by the [`Expr::Aggref`]
     /// [`Expr::clone_in`] arm (never the panicking derived `.clone()`).
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Aggref> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Aggref<'b>> {
         clone_aggref(self, mcx)
     }
 }
 
-impl XmlExpr {
+impl<'mcx> XmlExpr<'mcx> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Mirrors the
     /// [`Expr::XmlExpr`] [`Expr::clone_in`] arm — the derived `.clone()` recurses
-    /// into the `Vec<Expr>` children (which may carry a panicking `Aggref`), so
+    /// into the `Vec<Expr<'mcx>>` children (which may carry a panicking `Aggref`), so
     /// callers that deep-copy an `XmlExpr` must route through here.
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<XmlExpr> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<XmlExpr<'b>> {
         Ok(XmlExpr {
             op: self.op,
             name: self.name.clone(),
@@ -1747,10 +1747,10 @@ impl XmlExpr {
     }
 }
 
-impl GroupingFunc {
+impl<'mcx> GroupingFunc<'mcx> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Mirrors the
     /// [`Expr::GroupingFunc`] [`Expr::clone_in`] arm.
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<GroupingFunc> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<GroupingFunc<'b>> {
         Ok(GroupingFunc {
             args: clone_vec_expr(&self.args, mcx)?,
             refs: self.refs.clone(),
@@ -1770,10 +1770,10 @@ impl MergeSupportFunc {
     }
 }
 
-impl ReturningExpr {
+impl<'mcx> ReturningExpr<'mcx> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Mirrors the
     /// [`Expr::ReturningExpr`] [`Expr::clone_in`] arm.
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ReturningExpr> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ReturningExpr<'b>> {
         Ok(ReturningExpr {
             retlevelsup: self.retlevelsup,
             retold: self.retold,
@@ -1798,93 +1798,93 @@ pub struct RinfoRef(pub u32);
 ///
 /// One variant per C node type deriving from `Expr` (the node having
 /// `Expr xpr;` as its first field). Lifetime-free: child expressions are owned
-/// `Box<Expr>` and lists are `Vec<…>`, matching `OpExpr`/`ScalarArrayOpExpr`
+/// `Box<Expr<'mcx>>` and lists are `Vec<…>`, matching `OpExpr`/`ScalarArrayOpExpr`
 /// and keeping the non-exhaustive enum additive for existing consumers.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub enum Expr {
+pub enum Expr<'mcx> {
     /// `T_Var`.
     Var(Var),
     /// `T_Const`.
-    Const(Const),
+    Const(Const<'mcx>),
     /// `T_Param`.
     Param(Param),
     /// `T_Aggref`.
-    Aggref(Aggref),
+    Aggref(Aggref<'mcx>),
     /// `T_GroupingFunc`.
-    GroupingFunc(GroupingFunc),
+    GroupingFunc(GroupingFunc<'mcx>),
     /// `T_WindowFunc`.
-    WindowFunc(WindowFunc),
+    WindowFunc(WindowFunc<'mcx>),
     /// `T_SubscriptingRef`.
-    SubscriptingRef(SubscriptingRef),
+    SubscriptingRef(SubscriptingRef<'mcx>),
     /// `T_FuncExpr`.
-    FuncExpr(FuncExpr),
+    FuncExpr(FuncExpr<'mcx>),
     /// `T_NamedArgExpr`.
-    NamedArgExpr(NamedArgExpr),
+    NamedArgExpr(NamedArgExpr<'mcx>),
     /// `T_OpExpr`.
-    OpExpr(OpExpr),
+    OpExpr(OpExpr<'mcx>),
     /// `T_DistinctExpr` — same payload as [`OpExpr`] (C: `typedef OpExpr`).
-    DistinctExpr(OpExpr),
+    DistinctExpr(OpExpr<'mcx>),
     /// `T_NullIfExpr` — same payload as [`OpExpr`] (C: `typedef OpExpr`).
-    NullIfExpr(OpExpr),
+    NullIfExpr(OpExpr<'mcx>),
     /// `T_ScalarArrayOpExpr`.
-    ScalarArrayOpExpr(ScalarArrayOpExpr),
+    ScalarArrayOpExpr(ScalarArrayOpExpr<'mcx>),
     /// `T_BoolExpr`.
-    BoolExpr(BoolExpr),
+    BoolExpr(BoolExpr<'mcx>),
     /// `T_SubLink`.
-    SubLink(SubLink),
+    SubLink(SubLink<'mcx>),
     /// `T_SubPlan`.
-    SubPlan(SubPlanExpr),
+    SubPlan(SubPlanExpr<'mcx>),
     /// `T_AlternativeSubPlan`.
-    AlternativeSubPlan(AlternativeSubPlanExpr),
+    AlternativeSubPlan(AlternativeSubPlanExpr<'mcx>),
     /// `T_FieldSelect`.
-    FieldSelect(FieldSelect),
+    FieldSelect(FieldSelect<'mcx>),
     /// `T_FieldStore`.
-    FieldStore(FieldStore),
+    FieldStore(FieldStore<'mcx>),
     /// `T_RelabelType`.
-    RelabelType(RelabelType),
+    RelabelType(RelabelType<'mcx>),
     /// `T_CoerceViaIO`.
-    CoerceViaIO(CoerceViaIO),
+    CoerceViaIO(CoerceViaIO<'mcx>),
     /// `T_ArrayCoerceExpr`.
-    ArrayCoerceExpr(ArrayCoerceExpr),
+    ArrayCoerceExpr(ArrayCoerceExpr<'mcx>),
     /// `T_ConvertRowtypeExpr`.
-    ConvertRowtypeExpr(ConvertRowtypeExpr),
+    ConvertRowtypeExpr(ConvertRowtypeExpr<'mcx>),
     /// `T_CollateExpr`.
-    CollateExpr(CollateExpr),
+    CollateExpr(CollateExpr<'mcx>),
     /// `T_CaseExpr`.
-    CaseExpr(CaseExpr),
+    CaseExpr(CaseExpr<'mcx>),
     /// `T_CaseTestExpr`.
     CaseTestExpr(CaseTestExpr),
     /// `T_ArrayExpr`.
-    ArrayExpr(ArrayExpr),
+    ArrayExpr(ArrayExpr<'mcx>),
     /// `T_RowExpr`.
-    RowExpr(RowExpr),
+    RowExpr(RowExpr<'mcx>),
     /// `T_RowCompareExpr`.
-    RowCompareExpr(RowCompareExpr),
+    RowCompareExpr(RowCompareExpr<'mcx>),
     /// `T_CoalesceExpr`.
-    CoalesceExpr(CoalesceExpr),
+    CoalesceExpr(CoalesceExpr<'mcx>),
     /// `T_MinMaxExpr`.
-    MinMaxExpr(MinMaxExpr),
+    MinMaxExpr(MinMaxExpr<'mcx>),
     /// `T_SQLValueFunction`.
     SQLValueFunction(SQLValueFunction),
     /// `T_XmlExpr`.
-    XmlExpr(XmlExpr),
+    XmlExpr(XmlExpr<'mcx>),
     /// `T_JsonValueExpr`.
-    JsonValueExpr(JsonValueExpr),
+    JsonValueExpr(JsonValueExpr<'mcx>),
     /// `T_JsonConstructorExpr`.
-    JsonConstructorExpr(JsonConstructorExpr),
+    JsonConstructorExpr(JsonConstructorExpr<'mcx>),
     /// `T_JsonIsPredicate`.
-    JsonIsPredicate(JsonIsPredicate),
+    JsonIsPredicate(JsonIsPredicate<'mcx>),
     /// `T_JsonExpr`.
-    JsonExpr(JsonExpr),
+    JsonExpr(JsonExpr<'mcx>),
     /// `T_NullTest`.
-    NullTest(NullTest),
+    NullTest(NullTest<'mcx>),
     /// `T_BooleanTest`.
-    BooleanTest(BooleanTest),
+    BooleanTest(BooleanTest<'mcx>),
     /// `T_MergeSupportFunc`.
     MergeSupportFunc(MergeSupportFunc),
     /// `T_CoerceToDomain`.
-    CoerceToDomain(CoerceToDomain),
+    CoerceToDomain(CoerceToDomain<'mcx>),
     /// `T_CoerceToDomainValue`.
     CoerceToDomainValue(CoerceToDomainValue),
     /// `T_SetToDefault`.
@@ -1894,13 +1894,13 @@ pub enum Expr {
     /// `T_NextValueExpr`.
     NextValueExpr(NextValueExpr),
     /// `T_InferenceElem`.
-    InferenceElem(InferenceElem),
+    InferenceElem(InferenceElem<'mcx>),
     /// `T_ReturningExpr`.
-    ReturningExpr(ReturningExpr),
+    ReturningExpr(ReturningExpr<'mcx>),
     /// `T_PlaceHolderVar` (nodes/pathnodes.h) — a planner placeholder node. Not
     /// in the contiguous executor `Expr` run, but it derives from `Expr` in C
     /// and the optimizer dispatches it via `IsA`/`match`.
-    PlaceHolderVar(PlaceHolderVar),
+    PlaceHolderVar(PlaceHolderVar<'mcx>),
     /// `T_RestrictInfo` (nodes/pathnodes.h) — a planner RestrictInfo embedded in
     /// an expression tree. C casts `RestrictInfo *` to `Expr *` to place it
     /// inside the `orclause` BoolExpr built by `make_sub_restrictinfos`; carried
@@ -1913,7 +1913,7 @@ pub enum Expr {
 // File-scoped: contains both `pub mod etag` and an `impl Expr` block.
 include!(concat!(env!("OUT_DIR"), "/expr_tag.rs"));
 
-impl Expr {
+impl<'mcx> Expr<'mcx> {
     /// `castNode(Var, node)` — borrow the [`Var`] payload, or `None` if this is
     /// not an `Expr::Var`. The optimizer uses this where C writes
     /// `(Var *) node` after an `IsA(node, Var)` test.
@@ -1937,7 +1937,7 @@ impl Expr {
 
     /// `castNode(OpExpr, node)` — borrow the [`OpExpr`] payload, or `None`.
     #[inline]
-    pub fn expect_opexpr(&self) -> Option<&OpExpr> {
+    pub fn expect_opexpr(&self) -> Option<&OpExpr<'mcx>> {
         match self {
             Expr::OpExpr(o) => Some(o),
             _ => None,
@@ -1947,7 +1947,7 @@ impl Expr {
     /// `castNode(PlaceHolderVar, node)` — borrow the [`PlaceHolderVar`] payload,
     /// or `None` if this is not an `Expr::PlaceHolderVar`.
     #[inline]
-    pub fn expect_placeholdervar(&self) -> Option<&PlaceHolderVar> {
+    pub fn expect_placeholdervar(&self) -> Option<&PlaceHolderVar<'mcx>> {
         match self {
             Expr::PlaceHolderVar(p) => Some(p),
             _ => None,
@@ -1956,7 +1956,7 @@ impl Expr {
 
     /// Mutable variant of [`Expr::expect_placeholdervar`].
     #[inline]
-    pub fn expect_placeholdervar_mut(&mut self) -> Option<&mut PlaceHolderVar> {
+    pub fn expect_placeholdervar_mut(&mut self) -> Option<&mut PlaceHolderVar<'mcx>> {
         match self {
             Expr::PlaceHolderVar(p) => Some(p),
             _ => None,
@@ -1982,7 +1982,7 @@ impl Expr {
 // supersedes the old hand-rolled `expr_accessors!` macro and per-variant impls.
 include!(concat!(env!("OUT_DIR"), "/expr_accessors.rs"));
 
-impl Expr {
+impl<'mcx> Expr<'mcx> {
     /// `castNode(Var, node)` borrow (mirrors [`Expr::expect_var`], named `as_var`
     /// for parity; kept hand-written to share the `expect_var` body).
     #[inline]
@@ -1993,7 +1993,7 @@ impl Expr {
     /// `OpExpr`). Distinct from the generated `as_distinctexpr` only in name;
     /// kept because the generated `as_distinctexpr` already returns `&OpExpr`.
     #[inline]
-    pub fn as_distinctexpr(&self) -> Option<&OpExpr> {
+    pub fn as_distinctexpr(&self) -> Option<&OpExpr<'mcx>> {
         match self {
             Expr::DistinctExpr(o) => Some(o),
             _ => None,
@@ -2001,7 +2001,7 @@ impl Expr {
     }
     /// `castNode(OpExpr, node)` for a `NullIfExpr` payload.
     #[inline]
-    pub fn as_nullifexpr(&self) -> Option<&OpExpr> {
+    pub fn as_nullifexpr(&self) -> Option<&OpExpr<'mcx>> {
         match self {
             Expr::NullIfExpr(o) => Some(o),
             _ => None,
@@ -2010,12 +2010,12 @@ impl Expr {
     /// `castNode(PlaceHolderVar, node)` borrow (parity alias over
     /// [`Expr::expect_placeholdervar`]).
     #[inline]
-    pub fn as_placeholdervar(&self) -> Option<&PlaceHolderVar> {
+    pub fn as_placeholdervar(&self) -> Option<&PlaceHolderVar<'mcx>> {
         self.expect_placeholdervar()
     }
     /// `castNode(SubPlan, node)` — borrow the [`SubPlanExpr`] payload, or `None`.
     #[inline]
-    pub fn as_subplan(&self) -> Option<&SubPlanExpr> {
+    pub fn as_subplan(&self) -> Option<&SubPlanExpr<'mcx>> {
         match self {
             Expr::SubPlan(s) => Some(s),
             _ => None,
@@ -2023,7 +2023,7 @@ impl Expr {
     }
     /// `castNode(AlternativeSubPlan, node)` — borrow the payload, or `None`.
     #[inline]
-    pub fn as_alternativesubplan(&self) -> Option<&AlternativeSubPlanExpr> {
+    pub fn as_alternativesubplan(&self) -> Option<&AlternativeSubPlanExpr<'mcx>> {
         match self {
             Expr::AlternativeSubPlan(s) => Some(s),
             _ => None,
@@ -2052,26 +2052,26 @@ impl Expr {
 // arena outlives the planner run in practice).
 // ===========================================================================
 
-/// Deep-clone a `&Box<Expr>` child into a freshly allocated `Box<Expr>` (the
+/// Deep-clone a `&Box<Expr<'mcx>>` child into a freshly allocated `Box<Expr<'mcx>>` (the
 /// global-allocator boxes that make up the Expr tree), recursing via
 /// [`Expr::clone_in`].
-fn clone_box_expr<'b>(e: &Box<Expr>, mcx: Mcx<'b>) -> PgResult<Box<Expr>> {
+fn clone_box_expr<'b>(e: &Box<Expr<'_>>, mcx: Mcx<'b>) -> PgResult<Box<Expr<'b>>> {
     Ok(Box::new(e.clone_in(mcx)?))
 }
 
-/// Deep-clone an optional `Box<Expr>` child.
+/// Deep-clone an optional `Box<Expr<'mcx>>` child.
 fn clone_opt_box_expr<'b>(
-    e: &Option<Box<Expr>>,
+    e: &Option<Box<Expr<'_>>>,
     mcx: Mcx<'b>,
-) -> PgResult<Option<Box<Expr>>> {
+) -> PgResult<Option<Box<Expr<'b>>>> {
     match e {
         Some(b) => Ok(Some(clone_box_expr(b, mcx)?)),
         None => Ok(None),
     }
 }
 
-/// Deep-clone a `Vec<Expr>` child list.
-fn clone_vec_expr<'b>(v: &[Expr], mcx: Mcx<'b>) -> PgResult<Vec<Expr>> {
+/// Deep-clone a `Vec<Expr<'mcx>>` child list.
+fn clone_vec_expr<'b>(v: &[Expr<'_>], mcx: Mcx<'b>) -> PgResult<Vec<Expr<'b>>> {
     let mut out = Vec::with_capacity(v.len());
     for e in v.iter() {
         out.push(e.clone_in(mcx)?);
@@ -2079,12 +2079,12 @@ fn clone_vec_expr<'b>(v: &[Expr], mcx: Mcx<'b>) -> PgResult<Vec<Expr>> {
     Ok(out)
 }
 
-/// Deep-clone a `Vec<Option<Expr>>` child list (slice-subscript index lists may
+/// Deep-clone a `Vec<Option<Expr<'mcx>>>` child list (slice-subscript index lists may
 /// hold NULL elements).
 fn clone_vec_opt_expr<'b>(
-    v: &[Option<Expr>],
+    v: &[Option<Expr<'_>>],
     mcx: Mcx<'b>,
-) -> PgResult<Vec<Option<Expr>>> {
+) -> PgResult<Vec<Option<Expr<'b>>>> {
     let mut out = Vec::with_capacity(v.len());
     for e in v.iter() {
         out.push(match e {
@@ -2096,7 +2096,7 @@ fn clone_vec_opt_expr<'b>(
 }
 
 /// Deep-clone a `CaseWhen` arm (carried inline in [`CaseExpr`]).
-fn clone_case_when<'b>(w: &CaseWhen, mcx: Mcx<'b>) -> PgResult<CaseWhen> {
+fn clone_case_when<'b>(w: &CaseWhen<'_>, mcx: Mcx<'b>) -> PgResult<CaseWhen<'b>> {
     Ok(CaseWhen {
         expr: clone_opt_box_expr(&w.expr, mcx)?,
         result: clone_opt_box_expr(&w.result, mcx)?,
@@ -2106,9 +2106,9 @@ fn clone_case_when<'b>(w: &CaseWhen, mcx: Mcx<'b>) -> PgResult<CaseWhen> {
 
 /// Deep-clone a `JsonBehavior` (ON ERROR / ON EMPTY) node.
 fn clone_json_behavior<'b>(
-    b: &JsonBehavior,
+    b: &JsonBehavior<'_>,
     mcx: Mcx<'b>,
-) -> PgResult<JsonBehavior> {
+) -> PgResult<JsonBehavior<'b>> {
     Ok(JsonBehavior {
         btype: b.btype,
         expr: clone_opt_box_expr(&b.expr, mcx)?,
@@ -2117,18 +2117,30 @@ fn clone_json_behavior<'b>(
     })
 }
 
-impl Expr {
+impl<'mcx> Expr<'mcx> {
     /// Deep copy this expression into `mcx` (C: `copyObject` over an `Expr *`).
     ///
     /// The sanctioned deep-copy path for the lifetime-free `Expr` tree:
     /// recurses field-by-field through every variant, allocating each child into
     /// `mcx`, and never calls a panicking shallow `.clone()` on an
     /// `Aggref`/`WindowFunc`/`SubLink`/`SubPlan` payload.
-    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Expr> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Expr<'b>> {
         Ok(match self {
             // --- trivial / Copy / no Expr children: shallow `.clone()` is safe.
             Expr::Var(v) => Expr::Var(v.clone()),
-            Expr::Const(c) => Expr::Const(c.clone()),
+            // `Const.constvalue` is the by-ref `Datum` carrier that the campaign
+            // makes honest: deep-clone it into `mcx` so the result is tied to the
+            // mcx lifetime `'b` (no forged `'static`).
+            Expr::Const(c) => Expr::Const(Const {
+                consttype: c.consttype,
+                consttypmod: c.consttypmod,
+                constcollid: c.constcollid,
+                constlen: c.constlen,
+                constvalue: c.constvalue.clone_in(mcx)?,
+                constisnull: c.constisnull,
+                constbyval: c.constbyval,
+                location: c.location,
+            }),
             Expr::Param(p) => Expr::Param(p.clone()),
             Expr::CaseTestExpr(c) => Expr::CaseTestExpr(*c),
             Expr::SQLValueFunction(s) => Expr::SQLValueFunction(*s),
@@ -2150,7 +2162,7 @@ impl Expr {
                 location: g.location,
             }),
 
-            // --- variants with Box<Expr> / Vec<Expr> children: recurse.
+            // --- variants with Box<Expr<'mcx>> / Vec<Expr<'mcx>> children: recurse.
             Expr::OpExpr(o) => Expr::OpExpr(clone_opexpr(o, mcx)?),
             Expr::DistinctExpr(o) => Expr::DistinctExpr(clone_opexpr(o, mcx)?),
             Expr::NullIfExpr(o) => Expr::NullIfExpr(clone_opexpr(o, mcx)?),
@@ -2420,19 +2432,15 @@ impl Expr {
             Expr::SubLink(s) => Expr::SubLink(clone_sublink(s, mcx)?),
             Expr::SubPlan(s) => Expr::SubPlan(SubPlanExpr(clone_subplan_static(&s.0, mcx)?)),
             Expr::AlternativeSubPlan(a) => {
-                let mut subplans: Vec<PgBox<'static, SubPlan<'static>>> =
+                let mut subplans: Vec<PgBox<'b, SubPlan<'b>>> =
                     Vec::with_capacity(a.0.subplans.len());
                 for sp in a.0.subplans.iter() {
-                    // Deep-clone each SubPlan into mcx, then erase to 'static
-                    // (same convention as the SubPlanExpr / SubLink children).
+                    // Deep-clone each SubPlan into mcx; the result is tied to the
+                    // mcx lifetime `'b` (no `'static` erasure — the campaign makes
+                    // the Expr tree's lifetime honest).
                     let owned: SubPlan<'b> = sp.clone_in(mcx)?;
                     let boxed: PgBox<'b, SubPlan<'b>> = alloc_in(mcx, owned)?;
-                    // SAFETY: fully owned in mcx; lifetime-parameter-only erase
-                    // to the Expr tree's 'static notional lifetime (the arena
-                    // outlives the planner run; cf. query_into_static).
-                    let boxed_static: PgBox<'static, SubPlan<'static>> =
-                        unsafe { core::mem::transmute(boxed) };
-                    subplans.push(boxed_static);
+                    subplans.push(boxed);
                 }
                 Expr::AlternativeSubPlan(AlternativeSubPlanExpr(Box::new(
                     AlternativeSubPlan { subplans },
@@ -2444,7 +2452,7 @@ impl Expr {
 
 /// Deep-clone an [`OpExpr`] payload (shared by `OpExpr`/`DistinctExpr`/
 /// `NullIfExpr`, which carry the same struct).
-fn clone_opexpr<'b>(o: &OpExpr, mcx: Mcx<'b>) -> PgResult<OpExpr> {
+fn clone_opexpr<'b>(o: &OpExpr<'_>, mcx: Mcx<'b>) -> PgResult<OpExpr<'b>> {
     Ok(OpExpr {
         opno: o.opno,
         opfuncid: o.opfuncid,
@@ -2460,16 +2468,11 @@ fn clone_opexpr<'b>(o: &OpExpr, mcx: Mcx<'b>) -> PgResult<OpExpr> {
 /// Deep-clone an [`Aggref`]: `args` is a `TargetEntry` list deep-copied via the
 /// existing [`TargetEntry::clone_in`], and the result is re-erased to `'static`
 /// to match the lifetime-free Expr tree (cf. `tlist_into_static`).
-fn clone_aggref<'b>(a: &Aggref, mcx: Mcx<'b>) -> PgResult<Aggref> {
-    let mut args: Vec<TargetEntry<'static>> = Vec::with_capacity(a.args.len());
+fn clone_aggref<'b>(a: &Aggref<'_>, mcx: Mcx<'b>) -> PgResult<Aggref<'b>> {
+    let mut args: Vec<TargetEntry<'b>> = Vec::with_capacity(a.args.len());
     for te in a.args.iter() {
         let cloned: TargetEntry<'b> = te.clone_in(mcx)?;
-        // SAFETY: TargetEntry's children (expr/resname) are fully owned in mcx
-        // after clone_in; this erases the 'mcx lifetime to the Expr tree's
-        // 'static notional lifetime — a lifetime-parameter-only transmute (cf.
-        // tlist_into_static in backend-parser-agg).
-        let cloned_static: TargetEntry<'static> = unsafe { core::mem::transmute(cloned) };
-        args.push(cloned_static);
+        args.push(cloned);
     }
     Ok(Aggref {
         aggfnoid: a.aggfnoid,
@@ -2516,6 +2519,38 @@ pub fn targetentry_into_static(te: TargetEntry<'_>) -> TargetEntry<'static> {
     unsafe { core::mem::transmute(te) }
 }
 
+/// Erase a [`PlaceHolderVar`]'s lifetime to the planner arena's notional
+/// `'static` (sibling of [`targetentry_into_static`]). The PHV's `phexpr`
+/// subtree is fully owned (moved in), so this is a lifetime-parameter-only
+/// erase — used when a `PlaceHolderInfo`/`NestLoopParam` interns a PHV into the
+/// planner-run arena that, not Rust's borrow tracker, governs its validity.
+pub fn placeholdervar_into_static(phv: PlaceHolderVar<'_>) -> PlaceHolderVar<'static> {
+    // SAFETY: `phv`'s children are fully owned; lifetime-parameter-only erase to
+    // the Expr tree's 'static notional lifetime (cf. targetentry_into_static).
+    unsafe { core::mem::transmute(phv) }
+}
+
+impl<'mcx> Expr<'mcx> {
+    /// Erase an `Expr<'mcx>`'s lifetime to the planner `node_arena`'s notional
+    /// `'static`. The `node_arena` is an index-handle (`NodeId`) intern table that
+    /// *owns* its nodes for the planner run and is addressed by dense index, not by
+    /// borrow — exactly the `RinfoRef(u32)` handle-space carve-out the Expr-`'mcx`
+    /// campaign excludes from the borrow check. This is the single sanctioned
+    /// arena-intern erasure (sibling of [`targetentry_into_static`]), living here in
+    /// the unsafe-permitting `types-nodes` crate so the `#![forbid(unsafe_code)]`
+    /// `types-pathnodes` arena (`PlannerInfo::alloc_node`) can intern into it.
+    ///
+    /// SAFETY: `Expr<'mcx>` and `Expr<'static>` are the same type up to the
+    /// (invariant) lifetime parameter; the data is fully owned (moved in), so this
+    /// is a lifetime-parameter-only erase. The interning arena outlives no longer
+    /// than the planner run that produced the node, so the notional `'static` is
+    /// never observed as a real `'static` borrow.
+    #[must_use]
+    pub fn erase_lifetime(self) -> Expr<'static> {
+        unsafe { core::mem::transmute::<Expr<'mcx>, Expr<'static>>(self) }
+    }
+}
+
 pub fn query_box_into_static<'b>(
     q: crate::copy_query::Query<'b>,
     mcx: Mcx<'b>,
@@ -2529,17 +2564,12 @@ pub fn query_box_into_static<'b>(
 /// Deep-clone a [`SubLink`]: `subselect` is an embedded owned `Query` deep-cloned
 /// via [`crate::copy_query::Query::clone_in`] then re-erased to `'static` (cf.
 /// `query_into_static`); `testexpr` recurses via [`Expr::clone_in`].
-fn clone_sublink<'b>(s: &SubLink, mcx: Mcx<'b>) -> PgResult<SubLink> {
+fn clone_sublink<'b>(s: &SubLink<'_>, mcx: Mcx<'b>) -> PgResult<SubLink<'b>> {
     let subselect = match &s.subselect {
         Some(q) => {
             let owned: crate::copy_query::Query<'b> = q.clone_in(mcx)?;
             let boxed: PgBox<'b, crate::copy_query::Query<'b>> = alloc_in(mcx, owned)?;
-            // SAFETY: fully owned in mcx after clone_in; lifetime-parameter-only
-            // erase to the Expr tree's 'static notional lifetime (cf.
-            // query_into_static in backend-parser-parse-expr).
-            let boxed_static: PgBox<'static, crate::copy_query::Query<'static>> =
-                unsafe { core::mem::transmute(boxed) };
-            Some(boxed_static)
+            Some(boxed)
         }
         None => None,
     };
@@ -2556,14 +2586,11 @@ fn clone_sublink<'b>(s: &SubLink, mcx: Mcx<'b>) -> PgResult<SubLink> {
 /// Deep-clone a `Box<SubPlan<'static>>` (the [`SubPlanExpr`] payload) into mcx,
 /// re-erasing to `'static` to match the lifetime-free Expr tree.
 fn clone_subplan_static<'b>(
-    sp: &SubPlan<'static>,
+    sp: &SubPlan<'_>,
     mcx: Mcx<'b>,
-) -> PgResult<Box<SubPlan<'static>>> {
+) -> PgResult<Box<SubPlan<'b>>> {
     let owned: SubPlan<'b> = sp.clone_in(mcx)?;
-    // SAFETY: fully owned in mcx after clone_in; lifetime-parameter-only erase
-    // to the Expr tree's 'static notional lifetime (cf. query_into_static).
-    let owned_static: SubPlan<'static> = unsafe { core::mem::transmute(owned) };
-    Ok(Box::new(owned_static))
+    Ok(Box::new(owned))
 }
 
 /// Owned-tree form of `SubPlan` for embedding directly in the [`Expr`] enum.
@@ -2575,25 +2602,19 @@ fn clone_subplan_static<'b>(
 /// `'static` here is the read-only plan tree's notional lifetime (the executor
 /// never mutates it during evaluation).
 #[derive(Debug)]
-pub struct SubPlanExpr(pub Box<SubPlan<'static>>);
+pub struct SubPlanExpr<'mcx>(pub Box<SubPlan<'mcx>>);
 
-impl SubPlanExpr {
+impl<'mcx> SubPlanExpr<'mcx> {
     /// Build a `SubPlanExpr` from a live `SubPlan<'b>` by deep-cloning it into
-    /// `mcx` and erasing the lifetime parameter to the `Expr` tree's notional
-    /// `'static` (the sanctioned node-opaque convention, mirroring
-    /// `Expr::clone_in`'s `SubPlan` arm). Used to wrap a plan-tree `SubPlan` as
-    /// an `Expr::SubPlan` ancestor node for ruleutils' deparse-namespace.
-    pub fn from_subplan<'b>(mcx: Mcx<'b>, sp: &SubPlan<'_>) -> PgResult<Self> {
+    /// `mcx`. Used to wrap a plan-tree `SubPlan` as an `Expr::SubPlan` ancestor
+    /// node for ruleutils' deparse-namespace.
+    pub fn from_subplan<'b>(mcx: Mcx<'b>, sp: &SubPlan<'_>) -> PgResult<SubPlanExpr<'b>> {
         let owned: SubPlan<'b> = sp.clone_in(mcx)?;
-        // SAFETY: fully owned in mcx after clone_in; lifetime-parameter-only
-        // erase to the Expr tree's 'static notional lifetime (cf.
-        // clone_subplan_static / query_into_static).
-        let owned_static: SubPlan<'static> = unsafe { core::mem::transmute(owned) };
-        Ok(SubPlanExpr(Box::new(owned_static)))
+        Ok(SubPlanExpr(Box::new(owned)))
     }
 }
 
-impl Clone for SubPlanExpr {
+impl<'mcx> Clone for SubPlanExpr<'mcx> {
     fn clone(&self) -> Self {
         panic!(
             "SubPlanExpr::clone: SubPlan carries context-allocated children; \
@@ -2605,9 +2626,9 @@ impl Clone for SubPlanExpr {
 /// Owned-tree form of [`AlternativeSubPlan`] for the lifetime-free [`Expr`]
 /// enum (transient planner node; never present at execution).
 #[derive(Debug)]
-pub struct AlternativeSubPlanExpr(pub Box<AlternativeSubPlan<'static>>);
+pub struct AlternativeSubPlanExpr<'mcx>(pub Box<AlternativeSubPlan<'mcx>>);
 
-impl Clone for AlternativeSubPlanExpr {
+impl<'mcx> Clone for AlternativeSubPlanExpr<'mcx> {
     fn clone(&self) -> Self {
         panic!(
             "AlternativeSubPlanExpr::clone: transient planner node, never \
@@ -2620,7 +2641,7 @@ impl Clone for AlternativeSubPlanExpr {
 #[derive(Debug, Default)]
 pub struct TargetEntry<'mcx> {
     /// `Expr *expr` — expression to evaluate.
-    pub expr: Option<PgBox<'mcx, Expr>>,
+    pub expr: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `AttrNumber resno` — attribute number (the result attribute's position
     /// in the result tuple). Consumed by the junk filter's clean-map.
     pub resno: AttrNumber,
@@ -2674,7 +2695,7 @@ mod clone_in_tests {
     use mcx::MemoryContext;
 
     /// Build a trivial `Expr::Var` for use as a leaf child.
-    fn a_var(varattno: AttrNumber) -> Expr {
+    fn a_var<'mcx>(varattno: AttrNumber) -> Expr<'mcx> {
         Expr::Var(Var {
             varno: 1,
             varattno,
@@ -2717,7 +2738,12 @@ mod clone_in_tests {
     /// direct call would form a dependency cycle).
     #[test]
     fn clone_in_aggref_bearing_target_entry_list() {
-        let ctx = MemoryContext::new("clone_in_test");
+        // Leak the context so its `Mcx` is genuinely `'static`, matching the
+        // arena `'static`-intern convention the test exercises (invariant `Expr`
+        // makes a borrowed-`ctx` `'static` annotation unsound otherwise).
+        let ctx: &'static MemoryContext = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+            MemoryContext::new("clone_in_test"),
+        ));
         let mcx = ctx.mcx();
 
         // Aggref with one aggregated arg (a TargetEntry wrapping a Var) and a
@@ -2862,7 +2888,10 @@ mod clone_in_tests {
     #[test]
     fn node_clone_in_routes_sublink_expr_through_clone_in() {
         use crate::nodes::Node;
-        let ctx = MemoryContext::new("clone_in_test");
+        // Leak the context so its `Mcx` is genuinely `'static` (see sibling test).
+        let ctx: &'static MemoryContext = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+            MemoryContext::new("clone_in_test"),
+        ));
         let mcx = ctx.mcx();
 
         let q = crate::copy_query::Query::new(mcx);
@@ -2890,5 +2919,144 @@ mod clone_in_tests {
         assert_eq!(sl.subLinkType, SubLinkType::Exists);
         assert_eq!(sl.location, 7);
         assert!(sl.subselect.is_some());
+    }
+}
+
+/// Miri regression for the arena use-after-free class (the P0 of the
+/// `expr-mcx` lifetime campaign).
+///
+/// The campaign interns planner nodes into a long-lived arena by
+/// `Expr::erase_lifetime` (`PlannerInfo::alloc_node`:
+/// `node_arena.push(ArenaNode::Expr(node.erase_lifetime()))`). `erase_lifetime`
+/// only relabels the lifetime parameter `'mcx -> 'static`; it does **not**
+/// deep-copy the node's backing allocations. So if any payload of the interned
+/// node (here a by-reference `Datum::ByRef(PgVec<'mcx, u8>)`, whose buffer lives
+/// in a *transient* `MemoryContext`) outlives that context, reading it back is a
+/// use-after-free.
+///
+/// Two production SIGSEGVs came from exactly this: interning a node/Datum whose
+/// backing lived in a transient parse/relation context that then reset. In a
+/// release build that surfaces as a flaky segfault; under Miri it is a
+/// deterministic UB diagnostic.
+///
+/// These tests model the bug mechanism in pure Rust (no FFI): a durable
+/// `Vec<Expr<'static>>` standing in for `PlannerInfo::node_arena`, a transient
+/// **bump** `MemoryContext` standing in for the parse/relation context, and the
+/// real `Const`/`Datum::ByRef`/`Expr::erase_lifetime` types. The bump backend is
+/// load-bearing: it frees its whole arena on context drop (the C
+/// "freed-with-its-context" model), so the interned `PgVec`'s buffer pointer
+/// genuinely dangles — a malloc backend frees each box individually and would
+/// not reproduce the wholesale-reset shape.
+///
+/// Run with:
+///   MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" \
+///     cargo +nightly miri test -p types-nodes arena_uaf
+#[cfg(test)]
+mod arena_uaf_tests {
+    use super::*;
+    use mcx::MemoryContext;
+    use types_tuple::backend_access_common_heaptuple::Datum;
+
+    /// Build a `Const` carrying a by-reference `Datum` whose 8-byte image is
+    /// allocated in `mcx` (a `PgVec<'mcx, u8>` inside that context's arena).
+    fn byref_const<'mcx>(mcx: Mcx<'mcx>) -> Const<'mcx> {
+        let datum = Datum::from_byref_bytes_in(mcx, &[1u8, 2, 3, 4, 5, 6, 7, 8])
+            .expect("byref datum builds");
+        Const {
+            consttype: 17, // bytea, pass-by-reference
+            constlen: -1,
+            constvalue: datum,
+            constisnull: false,
+            constbyval: false,
+            ..Default::default()
+        }
+    }
+
+    /// THE BUG. Interning a node whose by-ref payload lives in a transient
+    /// context, then dropping that context, then reading the interned payload,
+    /// is a use-after-free. Under Miri this aborts with a "pointer to freed
+    /// allocation" / dangling-deref diagnostic — deterministically, every run.
+    ///
+    /// `#[cfg(miri)]`-only: under a normal `cargo test` this would dereference
+    /// freed memory and either read garbage or segfault flakily, so it must not
+    /// run there. Its whole purpose is to be the Miri tripwire for this class.
+    ///
+    /// `#[ignore]`d so a plain `cargo miri test` (the green gate) skips it — it
+    /// *intentionally* triggers UB, which aborts the whole test binary, so it
+    /// cannot share a run with the passing tests. Invoke it as an explicit
+    /// negative check that MUST fail (CI asserts non-zero exit):
+    ///   MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo +nightly \
+    ///     miri test -p types-nodes -- --ignored interning_byref_from_transient
+    /// Expected: "Undefined Behavior: pointer not dereferenceable: ... has been
+    /// freed, so this pointer is dangling" at the `as_ref_bytes()` deref.
+    #[cfg(miri)]
+    #[ignore = "intentionally triggers UB to prove Miri catches the arena UAF class; run with --ignored and assert it FAILS"]
+    #[test]
+    fn interning_byref_from_transient_context_is_uaf() {
+        // The durable arena (stands in for `PlannerInfo::node_arena`).
+        let mut node_arena: alloc::vec::Vec<Expr<'static>> = alloc::vec::Vec::new();
+
+        // A transient bump context (stands in for a parse/relation context).
+        let transient = MemoryContext::new_bump("transient-relcx");
+
+        // Build a by-ref Const in the transient context and intern it into the
+        // durable arena via erase_lifetime — exactly what alloc_node does.
+        let c = byref_const(transient.mcx());
+        node_arena.push(Expr::Const(c).erase_lifetime());
+
+        // The transient context resets/frees its whole arena.
+        drop(transient);
+
+        // Read the interned by-ref payload back. Its PgVec buffer pointed into
+        // the now-freed bump arena: this deref is the use-after-free. Miri must
+        // flag it here.
+        let interned = &node_arena[0];
+        let bytes = match interned {
+            Expr::Const(c) => c.constvalue.as_ref_bytes(),
+            _ => unreachable!(),
+        };
+        // Touch the bytes so the read is not elided.
+        let _sum: u32 = bytes.iter().map(|&b| b as u32).sum();
+    }
+
+    /// THE FIX. Clone the by-ref payload into the *durable* context BEFORE
+    /// interning (C: `copyObject`/`datumCopy` into the long-lived context). Now
+    /// the interned node's backing lives as long as the arena, so dropping the
+    /// transient context is harmless and the read is sound. Miri passes this.
+    ///
+    /// Runs under both normal `cargo test` and Miri (it is genuinely sound), so
+    /// it documents the correct pattern and is exercised by the normal gate too.
+    #[test]
+    fn cloning_into_durable_context_before_interning_is_sound() {
+        // A durable context that outlives the arena's use, leaked to make its
+        // Mcx genuinely 'static (matching the arena-intern convention; cf.
+        // clone_in_tests). Leaked memory is expected — run Miri with
+        // -Zmiri-ignore-leaks.
+        let durable: &'static MemoryContext = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+            MemoryContext::new("durable-planner"),
+        ));
+        let durable_mcx = durable.mcx();
+
+        let mut node_arena: alloc::vec::Vec<Expr<'static>> = alloc::vec::Vec::new();
+
+        {
+            let transient = MemoryContext::new_bump("transient-relcx");
+            let c = byref_const(transient.mcx());
+
+            // Deep-copy the node into the durable context FIRST, then intern.
+            // Expr::clone_in re-homes Datum::ByRef into durable_mcx (its Const
+            // arm calls constvalue.clone_in).
+            let durable_expr = Expr::Const(c).clone_in(durable_mcx).expect("clone_in");
+            node_arena.push(durable_expr.erase_lifetime());
+
+            drop(transient); // harmless now: the interned bytes live in `durable`
+        }
+
+        let interned = &node_arena[0];
+        let bytes = match interned {
+            Expr::Const(c) => c.constvalue.as_ref_bytes(),
+            _ => unreachable!(),
+        };
+        assert_eq!(bytes, &[1u8, 2, 3, 4, 5, 6, 7, 8]);
     }
 }

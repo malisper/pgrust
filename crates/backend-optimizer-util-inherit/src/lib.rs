@@ -54,7 +54,7 @@ use types_tuple::heaptuple::{
 };
 
 use backend_nodes_core::makefuncs;
-use backend_optimizer_util_appendinfo::{adjust_appendrel_attrs, make_append_rel_info};
+use backend_optimizer_util_appendinfo::{adjust_appendrel_attrs_in, make_append_rel_info};
 use backend_optimizer_util_relnode::{build_simple_rel, expand_planner_arrays};
 use backend_optimizer_util_relnode_seams as bms;
 
@@ -1022,7 +1022,7 @@ pub fn apply_child_basequals<'mcx>(
             )
         };
 
-        let childqual = adjust_appendrel_attrs(root, clause, &appinfos)?;
+        let childqual = adjust_appendrel_attrs_in(mcx, root, clause, &appinfos)?;
         let childqual =
             backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, childqual)?;
 
@@ -1129,12 +1129,12 @@ fn collect_child_security_quals<'mcx>(
     root: &PlannerInfo,
     child_rti: Index,
     mcx: Mcx<'mcx>,
-) -> PgResult<Vec<Vec<Expr>>> {
+) -> PgResult<Vec<Vec<Expr<'mcx>>>> {
     let rte = planner_rt_fetch(run, root, child_rti);
-    let mut out: Vec<Vec<Expr>> = Vec::new();
+    let mut out: Vec<Vec<Expr<'mcx>>> = Vec::new();
     for qualset_np in rte.securityQuals.iter() {
         // Each securityQuals element is itself a List of Exprs (a qual set).
-        let mut set: Vec<Expr> = Vec::new();
+        let mut set: Vec<Expr<'mcx>> = Vec::new();
         let qualset_node = &**qualset_np;
         if let Some(list) = qualset_node.as_list() {
             for q in list.iter() {

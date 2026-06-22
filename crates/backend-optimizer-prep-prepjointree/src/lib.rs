@@ -191,7 +191,7 @@ fn relids_to_expr_relids(a: Option<&Bitmapset>) -> ExprRelids {
 #[inline]
 fn qual_as_expr<'a, 'mcx>(
     quals: &'a Option<types_nodes::nodes::NodePtr<'mcx>>,
-) -> Option<&'a types_nodes::primnodes::Expr> {
+) -> Option<&'a types_nodes::primnodes::Expr<'mcx>> {
     quals.as_deref().and_then(|n| n.as_expr())
 }
 
@@ -556,7 +556,8 @@ fn remove_nulling_relids_in_append_rel_list<'mcx>(
         let mut node = Node::mk_expr(mcx, root.node(id).clone_in(mcx)?)?;
         backend_rewrite_core::remove_nulling_relids(&mut node, removable, except, mcx);
         if let Some(e) = node.into_expr() {
-            *root.node_mut(id) = e;
+            // Re-intern the rewritten node into the planner arena ('static).
+            *root.node_mut(id) = e.erase_lifetime();
         }
     }
     Ok(())

@@ -134,7 +134,9 @@ fn bms_member_index(keys: &Relids, attnum: i32) -> i32 {
 /// — split a 2-arg operator's arguments into the (Expr, Const, expronleft) parts,
 /// stripping a RelabelType off either side. Returns `None` when neither side is a
 /// bare `Const` (the C `false` return).
-fn examine_opclause_args<'a>(args: &'a [Expr]) -> Option<(&'a Expr, &'a Const, bool)> {
+fn examine_opclause_args<'a, 'mcx>(
+    args: &'a [Expr<'mcx>],
+) -> Option<(&'a Expr<'mcx>, &'a Const<'mcx>, bool)> {
     // Assert(list_length(args) == 2) — enforced by the caller.
     if args.len() != 2 {
         return None;
@@ -166,14 +168,14 @@ fn oprrest_supported(opno: Oid) -> PgResult<bool> {
  * statext_is_compatible_clause_internal (extended_stats.c:1328)
  * ======================================================================== */
 
-fn statext_is_compatible_clause_internal(
+fn statext_is_compatible_clause_internal<'mcx>(
     root: &PlannerInfo,
-    clause: &Expr,
+    clause: &Expr<'_>,
     relid: i32,
     attnums: &mut Relids,
-    exprs: &mut Vec<Expr>,
+    exprs: &mut Vec<Expr<'mcx>>,
     leakproof: &mut bool,
-    run: &PlannerRun<'_>,
+    run: &PlannerRun<'mcx>,
 ) -> PgResult<bool> {
     // Look inside any binary-compatible relabeling.
     let clause = strip_relabel(clause);
@@ -293,13 +295,13 @@ fn statext_is_compatible_clause_internal(
 /// pull_varattnos/all_rows_selectable owners — until they land, such a clause is
 /// conservatively rejected (returns false), exactly the safe direction the C
 /// permission check would take when access is not provable.
-fn statext_is_compatible_clause(
+fn statext_is_compatible_clause<'mcx>(
     root: &PlannerInfo,
-    clause: &Expr,
+    clause: &Expr<'_>,
     relid: i32,
     attnums: &mut Relids,
-    exprs: &mut Vec<Expr>,
-    run: &PlannerRun<'_>,
+    exprs: &mut Vec<Expr<'mcx>>,
+    run: &PlannerRun<'mcx>,
 ) -> PgResult<bool> {
     // Special-case bare BoolExpr AND clauses (no RestrictInfo built on top).
     if is_andclause(clause) {

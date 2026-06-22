@@ -4163,7 +4163,7 @@ fn scan_ns_item_for_column_by_posn<'mcx>(
     sublevels_up: i32,
     colname: &str,
     location: i32,
-) -> PgResult<Option<types_nodes::primnodes::Expr>> {
+) -> PgResult<Option<types_nodes::primnodes::Expr<'static>>> {
     // Recover the ambient query Mcx from an existing mcx-allocated pstate field
     // (p_rtable's allocator is the query context), as parse_func.c's pstate_mcx.
     let mcx = *pstate.p_rtable.allocator();
@@ -4198,12 +4198,15 @@ fn scan_ns_item_for_column_by_posn<'mcx>(
     Ok(match node {
         Some(n) => {
             let tag = n.node_tag();
+            // The node is allocated in the query-lifetime `mcx` (recovered from
+            // pstate), which outlives this parse-analysis call; erase to the seam's
+            // `'static` at this arena-intern boundary.
             Some(n.into_expr().unwrap_or_else(|| {
                 panic!(
                     "scan_ns_item_for_column_by_posn: scanNSItemForColumn returned non-Expr node (tag {})",
                     tag.0
                 )
-            }))
+            }).erase_lifetime())
         }
         None => None,
     })

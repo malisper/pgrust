@@ -241,6 +241,8 @@ pub struct CopyParseOptions {
     pub escape: u8,
     /// `CopyOnErrorChoice on_error`.
     pub on_error: CopyOnErrorChoice,
+    /// `int64 reject_limit` — maximum tolerable number of errors under ON_ERROR.
+    pub reject_limit: i64,
     /// `CopyLogVerbosityChoice log_verbosity`.
     pub log_verbosity: CopyLogVerbosityChoice,
 }
@@ -402,7 +404,7 @@ pub struct CopyParseState<'mcx> {
     /// (empty ⇒ the C `whereClause == NULL`, i.e. no WHERE). `CopyFrom` compiles
     /// this into [`qualexpr`](Self::qualexpr) via `ExecInitQual` and evaluates it
     /// per row.
-    pub where_clause: PgVec<'mcx, Expr>,
+    pub where_clause: PgVec<'mcx, Expr<'mcx>>,
     /// `ExprState *qualexpr` — the compiled WHERE qual (`None` ⇒ no WHERE),
     /// produced by `ExecInitQual(whereClause, ...)` at the top of `CopyFrom` and
     /// evaluated per row with `ExecQual` against the scan slot.

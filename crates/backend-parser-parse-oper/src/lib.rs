@@ -794,11 +794,11 @@ fn op_error(
 pub fn make_op<'mcx>(
     mut pstate: Option<&mut ParseState<'mcx>>,
     opname: &[String],
-    ltree: Option<Expr>,
-    rtree: Option<Expr>,
+    ltree: Option<Expr<'static>>,
+    rtree: Option<Expr<'static>>,
     last_srf: Option<&Expr>,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let ltype_id;
     let rtype_id;
     let opform;
@@ -933,10 +933,10 @@ pub fn make_scalar_array_op<'mcx>(
     mut pstate: Option<&mut ParseState<'mcx>>,
     opname: &[String],
     use_or: bool,
-    ltree: Expr,
-    rtree: Expr,
+    ltree: Expr<'static>,
+    rtree: Expr<'static>,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let rtype_id;
     let res_atype_id;
 

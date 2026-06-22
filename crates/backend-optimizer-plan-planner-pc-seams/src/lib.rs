@@ -29,8 +29,8 @@ seam_core::seam!(
     /// (`plancache.c`) is the sole caller.
     pub fn expression_planner_with_deps_value<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        expr: types_nodes::primnodes::Expr,
-    ) -> PgResult<(types_nodes::primnodes::Expr, Vec<Oid>, Vec<InvalItemKey>)>
+        expr: types_nodes::primnodes::Expr<'static>,
+    ) -> PgResult<(types_nodes::primnodes::Expr<'static>, Vec<Oid>, Vec<InvalItemKey>)>
 );
 
 seam_core::seam!(
@@ -45,8 +45,8 @@ seam_core::seam!(
     /// planner unit installs this.
     pub fn expression_planner_value<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        expr: types_nodes::primnodes::Expr,
-    ) -> PgResult<types_nodes::primnodes::Expr>
+        expr: types_nodes::primnodes::Expr<'static>,
+    ) -> PgResult<types_nodes::primnodes::Expr<'static>>
 );
 
 seam_core::seam!(

@@ -642,9 +642,17 @@ fn analyzeCTE<'mcx>(
             .ok_or_else(|| elog_error("cycle_clause is not a CTECycleClause node"))?;
 
         // cycle_mark_value = transformExpr(EXPR_KIND_CYCLE_MARK)
-        let mut mark_value = transform_cycle_expr(pstate, cycle_clause.cycle_mark_value.take())?;
-        let mut mark_default =
-            transform_cycle_expr(pstate, cycle_clause.cycle_mark_default.take())?;
+        // Bring the parser-arena `'static` transform results into `mcx` (invariant
+        // `Expr`) so the in-place `select_common_collation` (which ties pstate and
+        // the expr list to one `'mcx`) and the `'mcx` node store below agree.
+        let mut mark_value: Option<Expr<'mcx>> =
+            transform_cycle_expr(pstate, cycle_clause.cycle_mark_value.take())?
+                .map(|e| e.clone_in(mcx))
+                .transpose()?;
+        let mut mark_default: Option<Expr<'mcx>> =
+            transform_cycle_expr(pstate, cycle_clause.cycle_mark_default.take())?
+                .map(|e| e.clone_in(mcx))
+                .transpose()?;
 
         // cycle_mark_type = select_common_type(list_make2(value, default))
         cycle_clause.cycle_mark_type = {
@@ -653,21 +661,27 @@ fn analyzeCTE<'mcx>(
         };
 
         // cycle_mark_value = coerce_to_common_type(value, type, "CYCLE/SET/TO")
-        mark_value = Some(backend_parser_coerce::coerce_to_common_type(
-            mcx,
-            Some(pstate),
-            expect_expr(mark_value)?,
-            cycle_clause.cycle_mark_type,
-            "CYCLE/SET/TO",
-        )?);
+        mark_value = Some(
+            backend_parser_coerce::coerce_to_common_type(
+                mcx,
+                Some(pstate),
+                expect_expr(mark_value)?.erase_lifetime(),
+                cycle_clause.cycle_mark_type,
+                "CYCLE/SET/TO",
+            )?
+            .clone_in(mcx)?,
+        );
         // cycle_mark_default = coerce_to_common_type(default, type, "CYCLE/SET/DEFAULT")
-        mark_default = Some(backend_parser_coerce::coerce_to_common_type(
-            mcx,
-            Some(pstate),
-            expect_expr(mark_default)?,
-            cycle_clause.cycle_mark_type,
-            "CYCLE/SET/DEFAULT",
-        )?);
+        mark_default = Some(
+            backend_parser_coerce::coerce_to_common_type(
+                mcx,
+                Some(pstate),
+                expect_expr(mark_default)?.erase_lifetime(),
+                cycle_clause.cycle_mark_type,
+                "CYCLE/SET/DEFAULT",
+            )?
+            .clone_in(mcx)?,
+        );
 
         // cycle_mark_typmod = select_common_typmod(list_make2(value, default), type)
         cycle_clause.cycle_mark_typmod = {
@@ -1167,7 +1181,7 @@ pub fn analyzeCTETargetList<'mcx>(
 fn transform_cycle_expr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     node: Option<PgBox<'mcx, Node<'mcx>>>,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     let input = node.map(PgBox::into_inner);
     backend_parser_parse_expr::transformExpr(pstate, input, ParseExprKind::EXPR_KIND_CYCLE_MARK)
 }
@@ -1177,8 +1191,8 @@ fn transform_cycle_expr<'mcx>(
 /// builds a two-element list; a `None` (a NULL cell post-transformExpr) is
 /// dropped here, matching the coercion routines' NULL-cell handling (they treat
 /// an absent element as UNKNOWN). Both are always `Some` at these call sites.
-fn list_make2_exprs(a: &Option<Expr>, b: &Option<Expr>) -> Vec<Expr> {
-    let mut v: Vec<Expr> = Vec::new();
+fn list_make2_exprs<'mcx>(a: &Option<Expr<'mcx>>, b: &Option<Expr<'mcx>>) -> Vec<Expr<'mcx>> {
+    let mut v: Vec<Expr<'mcx>> = Vec::new();
     if let Some(x) = a {
         v.push(x.clone());
     }
@@ -1191,7 +1205,11 @@ fn list_make2_exprs(a: &Option<Expr>, b: &Option<Expr>) -> Vec<Expr> {
 /// Copy the (possibly collation-updated) `select_common_collation` exprs back
 /// into the value/default slots, mirroring the C in-place `exprSetCollation`
 /// over the aliased pointers.
-fn store_back_exprs(a: &mut Option<Expr>, b: &mut Option<Expr>, mut exprs: Vec<Expr>) {
+fn store_back_exprs<'mcx>(
+    a: &mut Option<Expr<'mcx>>,
+    b: &mut Option<Expr<'mcx>>,
+    mut exprs: Vec<Expr<'mcx>>,
+) {
     let mut it = exprs.drain(..);
     if a.is_some() {
         if let Some(x) = it.next() {
@@ -1207,7 +1225,7 @@ fn store_back_exprs(a: &mut Option<Expr>, b: &mut Option<Expr>, mut exprs: Vec<E
 
 /// Unwrap a `Some(Expr)` (the cycle-mark exprs are always present at the coerce
 /// call sites; C dereferences the non-NULL transformed node).
-fn expect_expr(e: Option<Expr>) -> PgResult<Expr> {
+fn expect_expr<'mcx>(e: Option<Expr<'mcx>>) -> PgResult<Expr<'mcx>> {
     e.ok_or_else(|| elog_error("cycle-mark expression is unexpectedly NULL"))
 }
 
@@ -1215,7 +1233,7 @@ fn expect_expr(e: Option<Expr>) -> PgResult<Expr> {
 /// `Option<NodePtr>`).
 fn wrap_expr_node<'mcx>(
     mcx: Mcx<'mcx>,
-    e: Option<Expr>,
+    e: Option<Expr<'mcx>>,
 ) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>> {
     match e {
         Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?)),

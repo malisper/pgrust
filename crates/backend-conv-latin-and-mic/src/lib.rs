@@ -24,6 +24,7 @@
 
 use backend_utils_error::PgResult;
 use backend_utils_mb_conv_string_helpers::{latin2mic, mic2latin, ConversionResult};
+use backend_utils_mb_conv_string_helpers::make_conversion_builtin;
 use backend_utils_mb_mbutils_seams::check_encoding_conversion_args;
 use types_wchar::encoding::{pg_enc, PG_LATIN1, PG_LATIN3, PG_LATIN4, PG_MULE_INTERNAL};
 use types_wchar::wchar::{LC_ISO8859_1, LC_ISO8859_3, LC_ISO8859_4};
@@ -138,7 +139,16 @@ pub fn mic_to_latin4(
 
 /// This crate owns no inward seams (conversions are dispatched via the
 /// `pg_conversion` catalog, mirroring the C module).
-pub fn init_seams() {}
+pub fn init_seams() {
+    backend_utils_fmgr_core::register_builtins_native([
+        make_conversion_builtin(4344, "latin1_to_mic", latin1_to_mic),
+        make_conversion_builtin(4345, "mic_to_latin1", mic_to_latin1),
+        make_conversion_builtin(4346, "latin3_to_mic", latin3_to_mic),
+        make_conversion_builtin(4347, "mic_to_latin3", mic_to_latin3),
+        make_conversion_builtin(4348, "latin4_to_mic", latin4_to_mic),
+        make_conversion_builtin(4349, "mic_to_latin4", mic_to_latin4),
+    ]);
+}
 
 #[cfg(test)]
 mod tests;

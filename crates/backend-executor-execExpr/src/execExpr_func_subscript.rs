@@ -399,8 +399,8 @@ pub(crate) fn is_assignment_indirection_expr(expr: Option<&Expr>) -> bool {
 pub(crate) fn exec_init_func<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
-    node: &Expr,
-    args: &[Expr],
+    node: &Expr<'mcx>,
+    args: &[Expr<'mcx>],
     funcid: types_core::Oid,
     inputcollid: types_core::Oid,
     state: &mut ExprState<'mcx>,
@@ -611,7 +611,7 @@ pub(crate) fn exec_init_func<'mcx>(
 pub(crate) fn exec_init_scalar_array_op<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
-    opexpr: &types_nodes::primnodes::ScalarArrayOpExpr,
+    opexpr: &types_nodes::primnodes::ScalarArrayOpExpr<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: types_nodes::execexpr::ResultCellId,
 ) -> PgResult<()> {
@@ -835,10 +835,26 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
     // non-`None` above). The built `SubPlanState` is carried directly on the
     // `EEOP_SUBPLAN` step (the owned-model equivalent of the C
     // `op->d.subplan.sstate`), where `ExecEvalSubPlan` finds it at run time. The
-    // C `state->parent->subPlan = lappend(...)` list registration is only used
-    // for ReScan/cleanup walking; in the owned model the step owns the
-    // `SubPlanState`, so no separate parent-list append is needed for the
-    // expression SubPlan execution path.
+    // C `state->parent->subPlan = lappend(state->parent->subPlan, sstate)`: the
+    // new `SubPlanState` is registered on the parent `PlanState`'s `subPlan`
+    // list. That list is consumed by ExecReScan (chgParam propagation into each
+    // correlated subplan's child) AND by EXPLAIN (it walks `planstate->subPlan`
+    // to print each SubPlan body). In the owned model the executing
+    // `SubPlanState` is single-owned on the `EEOP_SUBPLAN` step (below) and the
+    // parent `PlanState` is not address-stable at compile time, so we:
+    //   (a) record this SubPlan's 1-based `plan_id` on the ExprState's
+    //       `found_subplan_ids` discovery channel — the compile entry point
+    //       (ExecInitQual/ExecInitExpr/ExecBuildProjectionInfo) drains it into
+    //       `parent.sub_plan_ids` (the owned-model split of `PlanState.subPlan`);
+    //   (b) store a display-only `SubPlanState` (carrying the `SubPlan` node)
+    //       into `EState.es_initplan[plan_id-1]` so EXPLAIN can resolve the
+    //       `SubPlan` node for labeling. Regular-subplan `plan_id`s are disjoint
+    //       from InitPlan ones (the planner assigns a single global sequence to
+    //       `glob->subplans`), so this slot does not collide with any InitPlan's
+    //       `es_initplan` entry, and no `init_plan_ids` list references it (so it
+    //       is never mistaken for an InitPlan during param eval / rescan). The
+    //       child plan-state tree itself already lives in
+    //       `es_subplanstates[plan_id-1]` (filled by InitPlan in execMain).
     let owned_subplan: mcx::PgBox<'mcx, types_nodes::primnodes::SubPlan<'mcx>> =
         mcx::alloc_in(mcx, subplan.clone_in(mcx)?)?;
 
@@ -848,6 +864,29 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
     // `parent->state`).
     let mut es_link = state.es_link.expect("ExecInitSubPlanExpr: es_link present (guarded above)");
     let estate = es_link.get_mut();
+
+    // (a) Record the plan_id on the ExprState discovery channel.
+    let plan_id = subplan.plan_id;
+    state
+        .found_subplan_ids
+        .get_or_insert_with(alloc::vec::Vec::new)
+        .push(plan_id);
+
+    // (b) Register the display-only SubPlanState into es_initplan[plan_id-1]
+    // (carrying the SubPlan node for EXPLAIN labeling). Grow the slot vector to
+    // cover this 1-based plan_id.
+    {
+        let display_sstate = types_nodes::execexpr::SubPlanState {
+            subplan: Some(mcx::alloc_in(mcx, subplan.clone_in(mcx)?)?),
+            ..Default::default()
+        };
+        let idx = (plan_id as usize).saturating_sub(1);
+        while estate.es_initplan.len() <= idx {
+            estate.es_initplan.push(None);
+        }
+        estate.es_initplan[idx] = Some(display_sstate);
+    }
+
     let sstate = nodesubplan::exec_init_sub_plan::call(owned_subplan, estate)?;
 
     // scratch.opcode = EEOP_SUBPLAN; scratch.d.subplan.sstate = sstate;
@@ -961,7 +1000,7 @@ pub(crate) fn exec_init_whole_row_var<'mcx>(
 pub(crate) fn exec_init_subscripting_ref<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
-    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: types_nodes::execexpr::ResultCellId,
 ) -> PgResult<()> {
@@ -1381,7 +1420,7 @@ fn clone_state_inner<'mcx>(
 /// would be reached at their owners.
 fn subscript_exec_setup<'mcx>(
     routines: &types_nodes::execexpr::SubscriptRoutines,
-    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
     sbsrefstate: &mut types_nodes::execexpr::SubscriptingRefState<'mcx>,
     methods: &mut types_nodes::execexpr::SubscriptExecSteps,
 ) -> PgResult<()> {
@@ -1399,7 +1438,7 @@ fn subscript_exec_setup<'mcx>(
 /// no limit on the number of subscripts (jsonb has no nesting limit) and no
 /// slice support (the transform errored on slices).
 fn jsonb_exec_setup<'mcx>(
-    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
     sbsrefstate: &mut types_nodes::execexpr::SubscriptingRefState<'mcx>,
     methods: &mut types_nodes::execexpr::SubscriptExecSteps,
 ) -> PgResult<()> {
@@ -1447,7 +1486,7 @@ fn jsonb_exec_setup<'mcx>(
 /// `array_exec_setup(sbsref, sbsrefstate, methods)` (arraysubs.c) — set up the
 /// array subscript workspace and method discriminants.
 fn array_exec_setup<'mcx>(
-    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
     sbsrefstate: &mut types_nodes::execexpr::SubscriptingRefState<'mcx>,
     methods: &mut types_nodes::execexpr::SubscriptExecSteps,
 ) -> PgResult<()> {

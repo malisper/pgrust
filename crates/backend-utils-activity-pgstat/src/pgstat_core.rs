@@ -203,12 +203,17 @@ fn flush_pending_entries(nowait: bool) -> PgResult<bool> {
         // is the kind's flush logic which expects &mut PgStat_EntryRef.
         let er = unsafe { &mut *er_ptr };
 
-        let could_not_flush = flush_cb(er, nowait)?;
-        if could_not_flush {
-            not_all_flushed = true;
-        } else {
+        // C: did_flush = flush_pending_cb(entry_ref, nowait). The callback
+        // returns `true` when it *successfully flushed* the pending data and
+        // `false` when it could not (e.g. lock contention under nowait). On
+        // success C deletes the pending entry; otherwise it records that
+        // pending data remains.
+        let did_flush = flush_cb(er, nowait)?;
+        if did_flush {
             // Flushed: drop the pending data (C frees sr->pending here).
             er.pending = None;
+        } else {
+            not_all_flushed = true;
         }
     }
 
@@ -989,7 +994,7 @@ pub fn pgstat_get_kind_from_str(kind_str: &str) -> PgResult<PgStat_Kind> {
     // SQL-exposed `pg_stat_have_stats` validates its `stats_type` argument, so
     // an unknown name is a user-facing invalid-parameter error.
     Err(types_error::PgError::error(format!(
-        "invalid statistics kind \"{kind_str}\""
+        "invalid statistics kind: \"{kind_str}\""
     ))
     .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE))
 }

@@ -21,3 +21,5 @@ backend-utils-activity-pgstat-replslot = { path = "../backend-utils-activity-pgs
 backend-access-transam-xlogprefetcher = { path = "../backend-access-transam-xlogprefetcher" }
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-activity-status = { path = "../backend-utils-activity-status" }
+backend-utils-activity-pgstat-backend = { path = "../backend-utils-activity-pgstat-backend" }

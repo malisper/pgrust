@@ -66,10 +66,10 @@ pub fn inline_sql_function<'mcx>(
     result_type: Oid,
     result_collid: Oid,
     input_collid: Oid,
-    args: &[Expr],
+    args: &[Expr<'mcx>],
     _funcvariadic: bool,
     _estimate: bool,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     // ---- parse the body (clauses.c:4646/4666) -----------------------------
     // raw_parser borrows the source for 'mcx, so re-home prosrc into the mcx
     // arena once (lives for the whole fn so the borrow checker is satisfied).
@@ -220,7 +220,9 @@ pub fn inline_sql_function<'mcx>(
         let coerced = backend_parser_coerce::coerce_to_target_type(
             mcx,
             None,
-            newexpr.clone(),
+            // coerce takes/returns the parser-arena `'static`; erase the `'mcx`
+            // tlist expr in, re-`clone_in` the result below.
+            newexpr.clone_in(mcx)?.erase_lifetime(),
             src_type,
             result_type,
             -1,
@@ -229,7 +231,8 @@ pub fn inline_sql_function<'mcx>(
             -1,
         )?;
         match coerced {
-            Some(mut c) => {
+            Some(c) => {
+                let mut c: Expr<'mcx> = c.clone_in(mcx)?;
                 backend_parser_parse_collate::assign_expr_collations_in(mcx, &mut c)?;
                 newexpr = c;
             }
@@ -372,10 +375,10 @@ fn query_clone_from_node<'mcx>(
 /// `Param` by the actual argument expression, counting uses.
 fn substitute_actual_parameters<'mcx>(
     mcx: Mcx<'mcx>,
-    node: Expr,
-    args: &[Expr],
+    node: Expr<'mcx>,
+    args: &[Expr<'mcx>],
     usecounts: &mut [i32],
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     if let Some(p) = node.as_param() {
         if p.paramkind != ParamKind::PARAM_EXTERN {
             return Err(PgError::error(format!(

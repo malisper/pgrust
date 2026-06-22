@@ -41,11 +41,13 @@ seam_core::seam!(
     pub fn get_ri_constraint_root(constr_oid: Oid) -> PgResult<Oid>
 );
 seam_core::seam!(
-    /// `FindFKPeriodOpers(get_index_column_opclass(conindid, nkeys), ...)` —
-    /// resolve the PERIOD contained-by / agged-contained-by / intersect
-    /// operators from the supporting unique index's last-column opclass. Can
+    /// `FindFKPeriodOpers(opclass, ...)` (pg_constraint.c:1666) — resolve the
+    /// PERIOD contained-by / agged-contained-by / intersect operators from the
+    /// PERIOD element's `opclass`. Callers pass the opclass directly (matching
+    /// the C signature): `tablecmds.c` from `opclasses[numpks - 1]`, and
+    /// `ri_triggers.c` from `get_index_column_opclass(conindid, nkeys)`. Can
     /// `ereport(ERROR)`, carried on `Err`.
-    pub fn find_fk_period_opers(conindid: Oid, nkeys: i32) -> PgResult<PeriodOpers>
+    pub fn find_fk_period_opers(opclass: Oid) -> PgResult<PeriodOpers>
 );
 seam_core::seam!(
     /// `get_catalog_object_by_oid(pg_constraint, Anum_pg_constraint_oid,

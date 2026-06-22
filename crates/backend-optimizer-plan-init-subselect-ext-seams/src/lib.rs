@@ -43,7 +43,7 @@ seam_core::seam!(
     /// `find_placeholder_info(root, phv); phinfo->ph_needed = bms_add_members(
     /// phinfo->ph_needed, where_needed)` (placeholder.c / initsplan.c) — update
     /// a PlaceHolderVar's `ph_needed` set.
-    pub fn phinfo_add_needed(root: &mut PlannerInfo, phv: &PlaceHolderVar, where_needed: &Relids) -> PgResult<()>
+    pub fn phinfo_add_needed<'mcx>(root: &mut PlannerInfo, phv: &PlaceHolderVar<'mcx>, where_needed: &Relids) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -71,15 +71,17 @@ seam_core::seam!(
     pub fn preprocess_phv_expression<'mcx>(
         root: &mut PlannerInfo,
         run: &mut PlannerRun<'mcx>,
-        expr: Expr,
-    ) -> PgResult<Expr>
+        expr: Expr<'mcx>,
+    ) -> PgResult<Expr<'mcx>>
 );
 
 seam_core::seam!(
     /// `IncrementVarSublevelsUp((Node *) expr, -((int) phlevelsup), 0)`
     /// (rewriteManip.c) over an owned arena `Expr`. Only reached for upper-level
-    /// LATERAL PlaceHolderVars in `extract_lateral_references`.
-    pub fn increment_var_sublevels_up_expr(expr: Expr, delta_sublevels_up: i32, min_sublevels_up: i32) -> PgResult<Expr>
+    /// LATERAL PlaceHolderVars in `extract_lateral_references`. C allocates the
+    /// rebuilt tree in `CurrentMemoryContext`; the owned model threads that arena
+    /// as `mcx` so the result is `'mcx`-branded (no function-local scratch escape).
+    pub fn increment_var_sublevels_up_expr<'mcx>(mcx: mcx::Mcx<'mcx>, expr: Expr<'mcx>, delta_sublevels_up: i32, min_sublevels_up: i32) -> PgResult<Expr<'mcx>>
 );
 
 seam_core::seam!(
@@ -90,7 +92,7 @@ seam_core::seam!(
     /// (each a `Node *` in C). var.c is ported but its installed `&Expr`/`NodeId`
     /// var seams cannot name a whole parse `Node`; this per-`Node` seam is the
     /// home, loud-panic until var.c installs it.
-    pub fn pull_vars_of_level_node<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node<'mcx>, levelsup: i32) -> PgResult<alloc::vec::Vec<Expr>>
+    pub fn pull_vars_of_level_node<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node<'mcx>, levelsup: i32) -> PgResult<alloc::vec::Vec<Expr<'mcx>>>
 );
 
 seam_core::seam!(
@@ -99,7 +101,7 @@ seam_core::seam!(
     /// needs to walk the sub-`Query` (which enters one more query level); the
     /// owned `Query<'mcx>` is not a `Node` value and is not `Clone`, so it rides
     /// its own seam. Loud-panic until var.c installs it.
-    pub fn pull_vars_of_level_query<'mcx>(mcx: mcx::Mcx<'mcx>, query: &Query<'mcx>, levelsup: i32) -> PgResult<alloc::vec::Vec<Expr>>
+    pub fn pull_vars_of_level_query<'mcx>(mcx: mcx::Mcx<'mcx>, query: &Query<'mcx>, levelsup: i32) -> PgResult<alloc::vec::Vec<Expr<'mcx>>>
 );
 
 seam_core::seam!(
@@ -107,8 +109,9 @@ seam_core::seam!(
     /// an owned arena `Expr` (a single implicit-AND conjunct). The rewrite-core
     /// owner works over `&mut Node`, a model mismatch — homed here as a per-`Expr`
     /// seam. Only reached for outer-join clone quals in
-    /// `deconstruct_distribute_oj_quals`.
-    pub fn add_nulling_relids_expr(expr: Expr, target: Relids, added: Relids) -> Expr
+    /// `deconstruct_distribute_oj_quals`. C allocates the rebuilt tree in
+    /// `CurrentMemoryContext`; the owned model threads that arena as `mcx`.
+    pub fn add_nulling_relids_expr<'mcx>(mcx: mcx::Mcx<'mcx>, expr: Expr<'mcx>, target: Relids, added: Relids) -> Expr<'mcx>
 );
 
 seam_core::seam!(
@@ -120,14 +123,14 @@ seam_core::seam!(
     /// (`fold::eval_const_expressions`) threads only an `Mcx` (the C `root` is used
     /// solely for `boundParams`, not modeled by the port), so the seam carries the
     /// planner-run `Mcx<'mcx>` rather than `&mut PlannerInfo`.
-    pub fn eval_const_expressions_expr<'mcx>(mcx: mcx::Mcx<'mcx>, node: Expr) -> PgResult<Expr>
+    pub fn eval_const_expressions_expr<'mcx>(mcx: mcx::Mcx<'mcx>, node: Expr<'mcx>) -> PgResult<Expr<'mcx>>
 );
 
 seam_core::seam!(
     /// `find_nonnullable_rels((Node *) expr)` (clauses.c) over an owned arena
     /// `Expr`. clauses.c is ported but works over `&Node`; this is the cycle
     /// break used by `distribute_qual_to_rels`/`expr_is_nonnullable` callers.
-    pub fn find_nonnullable_rels_expr(expr: &Expr) -> Relids
+    pub fn find_nonnullable_rels_expr<'mcx>(expr: &Expr<'mcx>) -> Relids
 );
 
 seam_core::seam!(
@@ -135,7 +138,7 @@ seam_core::seam!(
     /// `Expr`, returning the `Var` (as an owned `Expr::Var`) forced to NULL by an
     /// IS NULL test, or `None`. The cycle break for
     /// `check_redundant_nullability_qual`.
-    pub fn find_forced_null_var_expr(clause: &Expr) -> Option<Expr>
+    pub fn find_forced_null_var_expr<'mcx>(clause: &Expr<'mcx>) -> Option<Expr<'mcx>>
 );
 
 seam_core::seam!(
@@ -248,9 +251,9 @@ seam_core::seam!(
     /// `Aggref` will be replaced by a Param referencing a MIN/MAX-optimization
     /// initplan output during setrefs.c, return that Param's id; else `None`.
     /// Used by `finalize_primnode`'s Aggref arm. Owner planagg.c is unported.
-    pub fn find_minmax_agg_replacement_param(
+    pub fn find_minmax_agg_replacement_param<'mcx>(
         root: &PlannerInfo,
-        aggref: &types_nodes::primnodes::Aggref,
+        aggref: &types_nodes::primnodes::Aggref<'mcx>,
     ) -> Option<i32>
 );
 

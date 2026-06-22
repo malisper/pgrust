@@ -818,7 +818,7 @@ fn finalize_primnode<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     run: &PlannerRun<'mcx>,
-    node: Option<&Expr>,
+    node: Option<&Expr<'mcx>>,
     context: &mut FinalizeCtx<'mcx>,
 ) -> PgResult<bool> {
     let node = match node {
@@ -884,7 +884,7 @@ fn finalize_agg_primnode<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     run: &PlannerRun<'mcx>,
-    node: Option<&Expr>,
+    node: Option<&Expr<'mcx>>,
     context: &mut FinalizeCtx<'mcx>,
 ) -> PgResult<bool> {
     let node = match node {

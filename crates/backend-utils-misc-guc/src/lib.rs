@@ -45,6 +45,7 @@
 //! sub-unit — the sanctioned mirror-and-panic, never a silent stub.
 
 pub mod cnum;
+pub mod custom;
 pub mod enum_lookup;
 pub mod guc_array;
 pub mod live;
@@ -893,9 +894,21 @@ pub(crate) fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> 
             }
             return Ok(false);
         }
-        // ... and it must not match any previously-reserved prefix.
-        // `reserved_class_prefix` is empty (MarkGUCPrefixReserved unported), so
-        // the C `foreach(lc, reserved_class_prefix)` loop is a no-op here.
+        // ... and it must not match any previously-reserved prefix. C iterates
+        // `reserved_class_prefix` comparing `className` against the name's class
+        // (the substring up to the `.`); `MarkGUCPrefixReserved` populates that
+        // list (see [`custom::mark_guc_prefix_reserved`]).
+        let class = &name[..name.find(GUC_QUALIFIER_SEPARATOR).unwrap()];
+        if custom::is_reserved_class_prefix(class) {
+            if !skip_errors {
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_INVALID_NAME)
+                    .errmsg(format!("invalid configuration parameter name \"{name}\""))
+                    .errdetail(format!("\"{class}\" is a reserved prefix."))
+                    .into_error());
+            }
+            return Ok(false);
+        }
 
         // OK to create it.
         return Ok(true);
@@ -929,7 +942,7 @@ fn check_guc_name_for_parameter_acl(name: &str) -> PgResult<()> {
 
 /// The live GUC store has not been built yet (`initialize_guc_options` not run).
 /// A parallel transfer cannot proceed without it — surface the project's error.
-fn guc_store_uninitialized() -> PgError {
+pub(crate) fn guc_store_uninitialized() -> PgError {
     ereport(ERROR)
         .errcode(types_error::ERRCODE_INTERNAL_ERROR)
         .errmsg("GUC state transfer attempted before the GUC store was initialized")

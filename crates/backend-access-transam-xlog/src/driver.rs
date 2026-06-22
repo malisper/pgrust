@@ -90,10 +90,19 @@ pub fn XLogSetAsyncXactLSN(async_xact_lsn: XLogRecPtr) {
     } else {
         // SAFETY: live shmem region.
         unsafe { refresh_xlog_write_result(ctl) };
-        let flushblocks =
-            write_rqst_ptr / XLOG_BLCKSZ as u64 - logwrt_result().Flush / XLOG_BLCKSZ as u64;
+        // C: `int flushblocks = WriteRqstPtr / XLOG_BLCKSZ - LogwrtResult.Flush
+        // / XLOG_BLCKSZ;` — the two block counts are `XLogRecPtr` (uint64) but
+        // their difference is assigned to a *signed* `int`. When the flush
+        // position is already past the requested async LSN the uint64 subtraction
+        // wraps and narrows to a negative `int`, which then correctly fails the
+        // `>= WalWriterFlushAfter` test (no wakeup). Mirror that with wrapping
+        // u64 math narrowed to i32 rather than a checked subtraction (which would
+        // panic on underflow in debug builds).
+        let flushblocks = (write_rqst_ptr / XLOG_BLCKSZ as u64)
+            .wrapping_sub(logwrt_result().Flush / XLOG_BLCKSZ as u64)
+            as i32;
         let wal_writer_flush_after = vars::WalWriterFlushAfter.read();
-        if wal_writer_flush_after == 0 || flushblocks >= wal_writer_flush_after as u64 {
+        if wal_writer_flush_after == 0 || flushblocks >= wal_writer_flush_after {
             wakeup = true;
         }
     }

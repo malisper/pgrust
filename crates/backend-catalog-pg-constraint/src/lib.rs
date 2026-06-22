@@ -2529,10 +2529,9 @@ pub fn check_functional_grouping(
 
 use types_ri_triggers::{FkConstraintRow, PeriodOpers};
 
-/// `find_fk_period_opers(conindid, nkeys)` — resolve the PERIOD opers from the
-/// supporting unique index's last-column opclass.
-fn find_fk_period_opers(conindid: Oid, nkeys: i32) -> PgResult<PeriodOpers> {
-    let opclass = lsyscache_seams::get_index_column_opclass::call(conindid, nkeys)?;
+/// `find_fk_period_opers(opclass)` — resolve the PERIOD opers from the PERIOD
+/// element's `opclass` (matching the C `FindFKPeriodOpers` signature).
+fn find_fk_period_opers(opclass: Oid) -> PgResult<PeriodOpers> {
     let o = FindFKPeriodOpers(opclass)?;
     Ok(PeriodOpers {
         period_contained_by_oper: o.containedbyoperoid,

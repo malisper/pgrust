@@ -319,7 +319,9 @@ pub fn transformAlterTableStmt<'mcx>(
                         EXPR_KIND_ALTER_COL_TRANSFORM,
                     )?;
                     def.cooked_default = match cooked {
-                        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
+                        // Bring the parser-arena `'static` result into `mcx` (Node
+                        // wrap is `'mcx`; `Expr` is invariant so clone_in is required).
+                        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?),
                         None => None,
                     };
                 }

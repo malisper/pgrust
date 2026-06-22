@@ -1086,6 +1086,76 @@ fn examine_attribute<'mcx>(
     Ok(Some(stats))
 }
 
+// ===========================================================================
+// examine_expression() -- pre-analysis of a single expression
+// (extended_stats.c:604). Owned here (shares examine_attribute's internals);
+// reached from the extended-statistics build leg through the
+// `examine_expression` seam.
+// ===========================================================================
+
+pub fn examine_expression<'mcx>(
+    mcx: Mcx<'mcx>,
+    onerel: &Relation<'mcx>,
+    expr: &types_nodes::primnodes::Expr,
+    stattarget: i32,
+) -> PgResult<Option<VacAttrStats<'mcx>>> {
+    // Create the VacAttrStats struct.
+    let mut stats = new_vac_attr_stats(mcx, onerel)?;
+
+    // We can't have statistics target specified for the expression, so use the
+    // target computed for the extended statistics.
+    stats.attstattarget = stattarget;
+
+    // When analyzing an expression, believe the expression tree's type.
+    let ti = nodefuncs::expr_type_info::call(expr)?;
+    stats.attrtypid = ti.typid;
+    stats.attrtypmod = ti.typmod;
+    // We don't allow collation to be specified in CREATE STATISTICS, so we have
+    // to use the collation specified for the expression (exprCollation()).
+    stats.attrcollid = ti.collation;
+
+    // GETSTRUCT(SearchSysCacheCopy1(TYPEOID, attrtypid)).
+    let typtuple: FormData_pg_type = match backend_utils_cache_syscache_seams::pg_type_form::call(
+        stats.attrtypid,
+    )? {
+        Some(t) => t,
+        None => {
+            return Err(PgError::error(format!(
+                "cache lookup failed for type {}",
+                stats.attrtypid
+            )));
+        }
+    };
+    stats.attrtype = Some(typtuple);
+    stats.anl_context = Some(mcx);
+    stats.tupattnum = INVALID_ATTR_NUMBER;
+
+    // Default stavalues[n] element types to the analyzed type.
+    let typ = stats.attrtype.as_ref().unwrap();
+    for i in 0..STATISTIC_NUM_SLOTS {
+        stats.statypid[i] = stats.attrtypid;
+        stats.statyplen[i] = typ.typlen;
+        stats.statypbyval[i] = typ.typbyval;
+        stats.statypalign[i] = typ.typalign;
+    }
+
+    // Call the type-specific typanalyze, or std_typanalyze.
+    let ok = if OidIsValid(typ.typanalyze) {
+        run_custom_typanalyze(mcx, typ.typanalyze, &mut stats)?
+    } else {
+        std_typanalyze(&mut stats)?
+    };
+
+    if !ok || stats.compute_stats.is_none() || stats.minrows <= 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(stats))
+}
+
+/// `InvalidAttrNumber` (access/attnum.h).
+const INVALID_ATTR_NUMBER: i32 = 0;
+
 // pg_proc OIDs (fmgroids.h) of the built-in `typanalyze` support functions.
 // The C `OidFunctionCall1(typanalyzeOid, PointerGetDatum(stats))` passes a live
 // `VacAttrStats*` (an `internal`-typed arg) through fmgr; that pointer cannot

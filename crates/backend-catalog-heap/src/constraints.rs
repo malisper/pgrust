@@ -63,7 +63,7 @@ const InvalidAttrNumber: AttrNumber = 0;
 
 /// Wrap a cooked [`Expr`] into a `Node::Expr` `NodePtr` for the storage
 /// boundary (`nodeToString` / `CreateConstraintEntry` take `&Node`).
-fn expr_to_nodeptr<'mcx>(mcx: Mcx<'mcx>, expr: Expr) -> PgResult<NodePtr<'mcx>> {
+fn expr_to_nodeptr<'mcx>(mcx: Mcx<'mcx>, expr: Expr<'mcx>) -> PgResult<NodePtr<'mcx>> {
     alloc_in(mcx, Node::mk_expr(mcx, expr)?)
 }
 
@@ -82,7 +82,7 @@ pub fn cookDefault<'mcx>(
     atttypmod: i32,
     attname: &str,
     attgenerated: i8,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     // Assert(raw_default != NULL); — the NodePtr is non-null by construction.
 
     /*
@@ -94,11 +94,15 @@ pub fn cookDefault<'mcx>(
     } else {
         ParseExprKind::EXPR_KIND_COLUMN_DEFAULT
     };
-    let mut expr = match backend_parser_parse_expr::transformExpr(pstate, Some(raw_node), expr_kind)?
-    {
-        Some(e) => e,
-        None => return Ok(None),
-    };
+    // The parser yields the parse-arena `'static` form; bring it into the
+    // pstate's `mcx` so the in-place collation pass, the `'mcx` node-wrap
+    // round-trips below, and the cooked-expr return all share `'mcx` (`Expr`
+    // is invariant over its lifetime).
+    let mut expr: Expr<'mcx> =
+        match backend_parser_parse_expr::transformExpr(pstate, Some(raw_node), expr_kind)? {
+            Some(e) => e.clone_in(mcx)?,
+            None => return Ok(None),
+        };
 
     if attgenerated != 0 {
         /* Disallow refs to other generated columns */
@@ -145,10 +149,13 @@ pub fn cookDefault<'mcx>(
     if OidIsValid(atttypid) {
         let type_id = backend_nodes_core::nodefuncs::expr_type(Some(&expr))?;
 
+        // `coerce_to_target_type` takes/returns the parse-arena `'static` form;
+        // erase at the call boundary and re-intern the result into `mcx` (the
+        // sanctioned `'static`↔`'mcx` round-trip — same arena, invariant `Expr`).
         let coerced = backend_parser_coerce::coerce_to_target_type(
             mcx,
             Some(pstate),
-            expr,
+            expr.erase_lifetime(),
             type_id,
             atttypid,
             atttypmod,
@@ -157,7 +164,7 @@ pub fn cookDefault<'mcx>(
             -1,
         )?;
         expr = match coerced {
-            Some(e) => e,
+            Some(e) => e.clone_in(mcx)?,
             None => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_DATATYPE_MISMATCH)
@@ -187,7 +194,7 @@ fn cookConstraint<'mcx>(
     pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
     raw_constraint: NodePtr<'mcx>,
     relname: &str,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     /*
      * Transform raw parsetree to executable expression.
      */
@@ -202,11 +209,14 @@ fn cookConstraint<'mcx>(
     /*
      * Make sure it yields a boolean result.
      */
-    let mut expr = backend_parser_coerce::coerce_to_boolean(mcx, Some(pstate), expr, "CHECK")?;
+    let expr = backend_parser_coerce::coerce_to_boolean(mcx, Some(pstate), expr, "CHECK")?;
 
     /*
-     * Take care of collations.
+     * Take care of collations. Bring the parser-arena `'static` result into the
+     * pstate's `mcx` (the collation routine mutates in place at `'mcx` and the
+     * cooked expr is stored at `'mcx`); `Expr` is invariant, so `clone_in`.
      */
+    let mut expr: Expr<'mcx> = expr.clone_in(mcx)?;
     backend_parser_parse_collate::assign_expr_collations(Some(pstate), &mut expr)?;
 
     /*
@@ -1976,14 +1986,196 @@ pub fn ClearAttributeHasDefault<'mcx>(
 }
 
 /// `StoreAttrMissingVal` (heap.c) — set the missing value of a single
-/// attribute. Needs `construct_array`-of-missingval + a writable full-row
-/// `ATTNUM` syscache copy + a `pg_attribute` `CatalogTupleUpdate` carrier;
-/// driven through a mirror-and-panic seam.
+/// attribute.
+///
+/// ```c
+/// attrrel = table_open(AttributeRelationId, RowExclusiveLock);
+/// atttup = SearchSysCache2(ATTNUM, RelationGetRelid(rel), attnum);
+/// attStruct = (Form_pg_attribute) GETSTRUCT(atttup);
+/// missingval = PointerGetDatum(construct_array(&missingval, 1,
+///     attStruct->atttypid, attStruct->attlen, attStruct->attbyval,
+///     attStruct->attalign));
+/// valuesAtt[Anum_pg_attribute_atthasmissing - 1] = BoolGetDatum(true);
+/// replacesAtt[Anum_pg_attribute_atthasmissing - 1] = true;
+/// valuesAtt[Anum_pg_attribute_attmissingval - 1] = missingval;
+/// replacesAtt[Anum_pg_attribute_attmissingval - 1] = true;
+/// newtup = heap_modify_tuple(atttup, RelationGetDescr(attrrel), ...);
+/// CatalogTupleUpdate(attrrel, &newtup->t_self, newtup);
+/// ReleaseSysCache(atttup); table_close(attrrel, RowExclusiveLock);
+/// ```
+///
+/// Mirrors [`ClearAttributeHasDefault`]'s genam scan idiom (key on the
+/// `attrelid` leading index column, filter to `attnum`) for the writable
+/// `SearchSysCache2(ATTNUM)` copy.
 pub fn StoreAttrMissingVal<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     attnum: AttrNumber,
     missingval: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
 ) -> PgResult<()> {
-    backend_catalog_heap_seams::store_attr_missing_val::call(rel.rd_id, attnum, &missingval)
+    use backend_access_common_scankey::ScanKeyInit;
+    use types_catalog::pg_attribute::{
+        Anum_pg_attribute_attalign, Anum_pg_attribute_attbyval, Anum_pg_attribute_atthasmissing,
+        Anum_pg_attribute_attlen, Anum_pg_attribute_attmissingval, Anum_pg_attribute_attnum,
+        Anum_pg_attribute_attrelid, Anum_pg_attribute_atttypid,
+    };
+    use types_core::fmgr::F_OIDEQ;
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use types_tuple::backend_access_common_heaptuple::Datum;
+
+    const AttributeRelationId: Oid = 1249;
+    const AttributeRelidNumIndexId: Oid = 2659;
+
+    let relid = rel.rd_id;
+
+    // attrrel = table_open(AttributeRelationId, RowExclusiveLock);
+    let attr_rel = backend_access_table_table::table_open(
+        mcx,
+        AttributeRelationId,
+        types_storage::lock::RowExclusiveLock,
+    )?;
+
+    // SearchSysCache2(ATTNUM, relid, attnum): scan on attrelid (the index's
+    // leading key) and filter to the target attnum in the loop.
+    let mut key = [ScanKeyData::empty()];
+    ScanKeyInit(
+        &mut key[0],
+        Anum_pg_attribute_attrelid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(relid),
+    )?;
+
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &attr_rel,
+        AttributeRelidNumIndexId,
+        true,
+        None,
+        &key[..1],
+    )?;
+
+    let mut found = false;
+    loop {
+        let Some(tuple) =
+            backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+        else {
+            break;
+        };
+
+        // Filter to the requested attnum.
+        let (this_attnum, _) = backend_access_common_heaptuple::heap_getattr(
+            mcx,
+            &tuple,
+            Anum_pg_attribute_attnum as i32,
+            &attr_rel.rd_att,
+        )?;
+        if this_attnum.as_i16() != attnum {
+            continue;
+        }
+
+        // attStruct = (Form_pg_attribute) GETSTRUCT(atttup);
+        let (atttypid_d, _) = backend_access_common_heaptuple::heap_getattr(
+            mcx,
+            &tuple,
+            Anum_pg_attribute_atttypid as i32,
+            &attr_rel.rd_att,
+        )?;
+        let (attlen_d, _) = backend_access_common_heaptuple::heap_getattr(
+            mcx,
+            &tuple,
+            Anum_pg_attribute_attlen as i32,
+            &attr_rel.rd_att,
+        )?;
+        let (attbyval_d, _) = backend_access_common_heaptuple::heap_getattr(
+            mcx,
+            &tuple,
+            Anum_pg_attribute_attbyval as i32,
+            &attr_rel.rd_att,
+        )?;
+        let (attalign_d, _) = backend_access_common_heaptuple::heap_getattr(
+            mcx,
+            &tuple,
+            Anum_pg_attribute_attalign as i32,
+            &attr_rel.rd_att,
+        )?;
+        let atttypid = atttypid_d.as_oid();
+        let attlen = attlen_d.as_i16() as i32;
+        let attbyval = attbyval_d.as_bool();
+        let attalign = attalign_d.as_char() as u8;
+
+        // Make a one-element array containing the value.
+        //   missingval = PointerGetDatum(construct_array(&missingval, 1,
+        //       atttypid, attlen, attbyval, attalign));
+        let arr = backend_utils_adt_arrayfuncs::construct::construct_array_values(
+            mcx,
+            core::slice::from_ref(&missingval),
+            atttypid,
+            attlen,
+            attbyval,
+            attalign,
+        )?;
+        let missing_arr_datum = Datum::ByRef(arr);
+
+        // Update the pg_attribute row.
+        let natts = attr_rel.rd_att.natts as usize;
+        let mut repl_val = alloc::vec![Datum::null(); natts];
+        let repl_null = alloc::vec![false; natts];
+        let mut repl_repl = alloc::vec![false; natts];
+
+        repl_val[(Anum_pg_attribute_atthasmissing - 1) as usize] = Datum::from_bool(true);
+        repl_repl[(Anum_pg_attribute_atthasmissing - 1) as usize] = true;
+
+        repl_val[(Anum_pg_attribute_attmissingval - 1) as usize] = missing_arr_datum;
+        repl_repl[(Anum_pg_attribute_attmissingval - 1) as usize] = true;
+
+        let mut newtuple = backend_access_common_heaptuple::heap_modify_tuple(
+            mcx,
+            &tuple,
+            &attr_rel.rd_att,
+            &repl_val,
+            &repl_null,
+            &repl_repl,
+        )?;
+
+        // CatalogTupleUpdate(attrrel, &newtup->t_self, newtup);
+        backend_catalog_indexing::keystone::CatalogTupleUpdate(
+            mcx,
+            &attr_rel,
+            tuple.tuple.t_self,
+            &mut newtuple,
+        )?;
+
+        found = true;
+        break;
+    }
+
+    scan.end()?;
+    attr_rel.close(types_storage::lock::RowExclusiveLock)?;
+
+    if found {
+        // C relies on CatalogTupleUpdate's CacheInvalidateHeapTuple (keyed on the
+        // pg_attribute row's attrelid) to rebuild the owning relation's relcache
+        // so the new `atthasmissing` / `constr->missing` becomes visible. The
+        // owned relcache does not rebuild a live entry in-transaction, so — as
+        // set_attnotnull does for the not-null flag — poke the live relcache
+        // entry's missing-value state directly so an in-transaction deform (e.g.
+        // the phase-3 NOT NULL verify scan of an ADD COLUMN ... NOT NULL DEFAULT)
+        // substitutes the missing value. `missingval` is the single element; the
+        // relcache reader stores the element-1 image, which equals this Datum's
+        // image.
+        let image = types_tuple::heaptuple::MissingValueImage::from_datum(&missingval);
+        backend_utils_cache_relcache_seams::set_relcache_attmissing::call(relid, attnum, image)?;
+        // Also register the standard relcache invalidation so other backends
+        // (and this backend's next-transaction rebuild) pick up the change.
+        backend_utils_cache_inval::cache_invalidate::CacheInvalidateRelcacheByRelid(relid)?;
+    }
+
+    if !found {
+        // C: elog(ERROR, "cache lookup failed for attribute %d of relation %u").
+        return Err(backend_utils_error::PgError::error(format!(
+            "cache lookup failed for attribute {attnum} of relation {relid}"
+        )));
+    }
+
+    Ok(())
 }

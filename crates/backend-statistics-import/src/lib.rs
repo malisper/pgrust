@@ -1269,7 +1269,7 @@ fn get_attr_expr<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,
     attnum: i32,
-) -> PgResult<Option<types_nodes::primnodes::Expr>> {
+) -> PgResult<Option<types_nodes::primnodes::Expr<'mcx>>> {
     // relation is not an index
     if rel.rd_rel.relkind != RELKIND_INDEX && rel.rd_rel.relkind != RELKIND_PARTITIONED_INDEX {
         return Ok(None);

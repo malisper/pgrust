@@ -131,7 +131,7 @@ fn is_funcclause(node: &Expr) -> bool {
 
 /// `get_notclausearg(notclause)` (clauses.h): the lone arg of a NOT clause.
 #[inline]
-fn get_notclausearg(notclause: &Expr) -> &Expr {
+fn get_notclausearg<'a, 'mcx>(notclause: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     let Some(b) = notclause.as_boolexpr() else {
         unreachable!("get_notclausearg on non-BoolExpr");
     };
@@ -140,13 +140,13 @@ fn get_notclausearg(notclause: &Expr) -> &Expr {
 
 /// `get_leftop((Expr *) clause)` (nodeFuncs.h): first arg of a binary OpExpr.
 #[inline]
-fn get_leftop(args: &[Expr]) -> &Expr {
+fn get_leftop<'a, 'mcx>(args: &'a [Expr<'mcx>]) -> &'a Expr<'mcx> {
     &args[0]
 }
 
 /// `get_rightop((Expr *) clause)` (nodeFuncs.h): second arg of a binary OpExpr.
 #[inline]
-fn get_rightop(args: &[Expr]) -> &Expr {
+fn get_rightop<'a, 'mcx>(args: &'a [Expr<'mcx>]) -> &'a Expr<'mcx> {
     &args[1]
 }
 
@@ -175,9 +175,9 @@ fn find_base_rel(root: &PlannerInfo, relid: Index) -> RelId {
  * ====================================================================== */
 
 /// `RangeQueryClause` (clausesel.c): an accumulating range-clause pair.
-struct RangeQueryClause {
+struct RangeQueryClause<'mcx> {
     /// `Node *var` — the common variable of the clauses.
-    var: Expr,
+    var: Expr<'mcx>,
     /// `bool have_lobound` — found a low-bound clause yet?
     have_lobound: bool,
     /// `bool have_hibound` — found a high-bound clause yet?
@@ -191,14 +191,14 @@ struct RangeQueryClause {
 /// `addRangeClause(&rqlist, clause, varonleft, isLTsel, s2)` (clausesel.c):
 /// match a new range-query clause against the accumulating pair list.
 fn addRangeClause<'mcx>(
-    rqlist: &mut Vec<RangeQueryClause>,
-    clause_args: &[Expr],
+    rqlist: &mut Vec<RangeQueryClause<'mcx>>,
+    clause_args: &[Expr<'_>],
     varonleft: bool,
     isLTsel: bool,
     s2: f64,
     mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<()> {
-    let var: Expr;
+    let var: Expr<'mcx>;
     let is_lobound: bool;
 
     // clone_in: a HAVING range clause's var may be an Aggref (e.g. count(*) > 1),
@@ -276,7 +276,7 @@ fn addRangeClause<'mcx>(
 /// reference only a single relation, return its [`RelId`]; else `None`.
 fn find_single_rel_for_clauses<'mcx>(
     root: &mut PlannerInfo,
-    clauses: &[ListEntry],
+    clauses: &[ListEntry<'_>],
     mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<Option<RelId>> {
     match find_single_relid_for_clauses(root, clauses, mcx)? {
@@ -292,7 +292,7 @@ fn find_single_rel_for_clauses<'mcx>(
 /// `Some(0)` if no rel was referenced, else `Some(relid)`.
 fn find_single_relid_for_clauses<'mcx>(
     root: &mut PlannerInfo,
-    clauses: &[ListEntry],
+    clauses: &[ListEntry<'_>],
     mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<Option<Index>> {
     let mut lastrelid: Index = 0;
@@ -380,7 +380,7 @@ pub fn clauselist_selectivity_mixed<'mcx>(
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let mut entries: Vec<ListEntry> = Vec::with_capacity(clauses.len());
+    let mut entries: Vec<ListEntry<'mcx>> = Vec::with_capacity(clauses.len());
     for e in clauses {
         entries.push(match e {
             seam::ClauseListEntry::Rinfo(r) => ListEntry::Rinfo(*r),
@@ -412,7 +412,7 @@ pub fn clauselist_selectivity_ext<'mcx>(
 fn clauselist_selectivity_ext_entries<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    clauses: &[ListEntry],
+    clauses: &[ListEntry<'_>],
     var_relid: i32,
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
@@ -651,7 +651,7 @@ fn clauselist_selectivity_ext_entries<'mcx>(
 fn clauselist_selectivity_or<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    clauses: &[ListEntry],
+    clauses: &[ListEntry<'_>],
     var_relid: i32,
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
@@ -717,7 +717,7 @@ fn clauselist_selectivity_or<'mcx>(
 
 /// All entries as `RinfoId`s, or `None` if any entry is a bare expression.
 /// Extended-statistics estimation only ever consumes real RestrictInfos.
-fn all_rinfos(clauses: &[ListEntry]) -> Option<Vec<RinfoId>> {
+fn all_rinfos(clauses: &[ListEntry<'_>]) -> Option<Vec<RinfoId>> {
     let mut out = Vec::with_capacity(clauses.len());
     for e in clauses {
         match e {
@@ -752,20 +752,20 @@ enum ClauseRef {
 /// AND/OR clause's `args`, which in this arena are plain `Expr` nodes rather
 /// than nested sub-RestrictInfos) by value.
 #[derive(Clone)]
-enum ListEntry {
+enum ListEntry<'mcx> {
     /// A `RestrictInfo` element.
     Rinfo(RinfoId),
     /// A bare `Expr *` element (the C `rinfo == NULL` element).
-    Bare(Expr),
+    Bare(Expr<'mcx>),
 }
 
-impl ListEntry {
+impl<'mcx> ListEntry<'mcx> {
     /// `(Node *) lfirst(l)` — the element's clause expression. For a
     /// RestrictInfo this is `rinfo->clause`; for a bare element it is the
     /// element itself. Deep-copy via `clone_in` (a HAVING qual clause may carry
     /// an Aggref, whose context-allocated TargetEntry args a bare derived
     /// `.clone()` cannot copy).
-    fn clause<'mcx>(&self, root: &PlannerInfo, mcx: mcx::Mcx<'mcx>) -> PgResult<Expr> {
+    fn clause<'a>(&self, root: &PlannerInfo, mcx: mcx::Mcx<'a>) -> PgResult<Expr<'a>> {
         match self {
             ListEntry::Rinfo(rid) => root.node(root.rinfo(*rid).clause).clone_in(mcx),
             ListEntry::Bare(e) => e.clone_in(mcx),
@@ -782,16 +782,16 @@ impl ListEntry {
 }
 
 /// Wrap a `&[RinfoId]` list (the public-seam form) as `ListEntry`s.
-fn rinfos_as_entries(clauses: &[RinfoId]) -> Vec<ListEntry> {
+fn rinfos_as_entries(clauses: &[RinfoId]) -> Vec<ListEntry<'static>> {
     clauses.iter().map(|&r| ListEntry::Rinfo(r)).collect()
 }
 
 /// The bare-expr `args` of an AND/OR `BoolExpr`, as `ListEntry`s (the C
 /// `((BoolExpr *) clause)->args`).
 fn boolexpr_args_as_entries<'mcx>(
-    clause: &Expr,
+    clause: &Expr<'_>,
     mcx: mcx::Mcx<'mcx>,
-) -> PgResult<Vec<ListEntry>> {
+) -> PgResult<Vec<ListEntry<'mcx>>> {
     if let Some(b) = clause.as_boolexpr() {
         let mut out = Vec::with_capacity(b.args.len());
         for a in &b.args {
@@ -1174,7 +1174,7 @@ fn clause_selectivity_ext<'mcx>(
  * Expr-shape accessors for OpExpr / DistinctExpr / NullIfExpr payloads.
  * ====================================================================== */
 
-fn opexpr_args(clause: &Expr) -> Option<&[Expr]> {
+fn opexpr_args<'a, 'mcx>(clause: &'a Expr<'mcx>) -> Option<&'a [Expr<'mcx>]> {
     match clause {
         Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => Some(&o.args),
         _ => None,
@@ -1819,10 +1819,10 @@ fn clauselist_selectivity_nodes<'mcx>(
 ) -> f64 {
     // clone_in: a HAVING qual clause may carry an Aggref, whose context-allocated
     // TargetEntry args a bare derived `.clone()` panics on.
-    let entries: Vec<ListEntry> = clauses
+    let entries: Vec<ListEntry<'mcx>> = clauses
         .iter()
         .map(|&id| Ok(ListEntry::Bare(root.node(id).clone_in(run.mcx())?)))
-        .collect::<PgResult<Vec<ListEntry>>>()
+        .collect::<PgResult<Vec<ListEntry<'mcx>>>>()
         .expect("clauselist_selectivity clone_in");
     clauselist_selectivity_ext_entries(
         run,
@@ -1849,7 +1849,7 @@ fn clauselist_selectivity_rinfos<'mcx>(
     jointype: i32,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> f64 {
-    let entries: Vec<ListEntry> = clauses.iter().map(|&r| ListEntry::Rinfo(r)).collect();
+    let entries: Vec<ListEntry<'static>> = clauses.iter().map(|&r| ListEntry::Rinfo(r)).collect();
     clauselist_selectivity_ext_entries(
         run,
         root,

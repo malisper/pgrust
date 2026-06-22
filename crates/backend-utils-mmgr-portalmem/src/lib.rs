@@ -41,7 +41,7 @@ use types_error::{
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_portal::{
-    CachedPlanHandle, CommandTag, FcinfoHandle, PgCursorRow, Portal, PortalCleanupHook, PortalData,
+    CachedPlanHandle, CommandTag, PgCursorRow, Portal, PortalCleanupHook, PortalData,
     PortalStatus, PortalStrategy, QueryCompletion, ResourceOwner, CMDTAG_SELECT, CMDTAG_UNKNOWN,
     CURSOR_OPT_BINARY, CURSOR_OPT_HOLD, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, MAX_PORTALNAME_LEN,
     PORTAL_ACTIVE, PORTAL_DEFINED, PORTAL_DONE, PORTAL_FAILED, PORTAL_MULTI_QUERY, PORTAL_NEW,
@@ -1491,18 +1491,31 @@ pub fn AtSubCleanup_Portals(mySubid: SubTransactionId) -> PgResult<()> {
     Ok(())
 }
 
+/// The number of result columns of `pg_cursors` (`pg_cursor`'s OUT params):
+/// `name`, `statement`, `is_holdable`, `is_binary`, `is_scrollable`,
+/// `creation_time` (pg_proc.dat oid 2511 `proallargtypes`).
+const PG_CURSOR_COLS: usize = 6;
+
 /// `pg_cursor(PG_FUNCTION_ARGS)` — find all available cursors (portalmem.c:1131).
 ///
-/// The in-crate part is the one-scan `hash_seq_search` walk collecting every
-/// visible, defined (`sourceText` set) portal. The SRF / `Datum` body
-/// (`InitMaterializedSRF` + per-row `Datum` conversions + `tuplestore_putvalues`)
-/// is the fmgr/`Datum` value layer (project-wide deferral) and routes through
-/// the portalcmds seam.
-pub fn pg_cursor(fcinfo: FcinfoHandle) -> PgResult<Datum<'static>> {
-    let portals = portal_handles()?;
-    let workspace = MemoryContext::new("pg_cursor");
-    let mcx = workspace.mcx();
+/// The materialized-SRF body: one `hash_seq_search` scan of the portal table
+/// collecting every visible, defined (`sourceText` set) portal into the
+/// `InitMaterializedSRF`-prepared tuplestore via `tuplestore_putvalues`. C builds
+/// `values[6]`/`nulls[6]` per portal and appends; mirrored faithfully here.
+pub fn pg_cursor<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
+    // C:
+    //   ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    //   /* one scan of the hashtable into a tuplestore */
+    //   InitMaterializedSRF(fcinfo, 0);
+    backend_utils_fmgr_funcapi_seams::InitMaterializedSRF::call(fcinfo, 0)?;
 
+    // Snapshot the visible, defined portals before re-entering the tuplestore
+    // append (the C `hash_seq_search` walk; our portal table is borrowed below
+    // and the append can `ereport`, so collect first).
+    let portals = portal_handles()?;
     let mut rows: PgVec<PgCursorRow> = mcx::vec_with_capacity_in(mcx, portals.len())?;
     for portal in &portals {
         let p = portal.borrow();
@@ -1510,7 +1523,7 @@ pub fn pg_cursor(fcinfo: FcinfoHandle) -> PgResult<Datum<'static>> {
         if !p.visible {
             continue;
         }
-        // ignore it if PortalDefineQuery hasn't been called yet
+        // also ignore it if PortalDefineQuery hasn't been called yet
         let statement = match &p.sourceText {
             Some(s) => s.clone(),
             None => continue,
@@ -1525,14 +1538,34 @@ pub fn pg_cursor(fcinfo: FcinfoHandle) -> PgResult<Datum<'static>> {
         });
     }
 
-    pg_cursor_srf(fcinfo, &rows)
-}
+    let rsinfo = fcinfo
+        .resultinfo
+        .as_mut()
+        .expect("InitMaterializedSRF establishes fcinfo->resultinfo");
 
-/// The `pg_cursor()` SRF body: `InitMaterializedSRF` + per-row `Datum`
-/// conversions + `tuplestore_putvalues` (the fmgr/`Datum` value layer, a
-/// project-wide deferral). Given the already-collected visible rows, returns the
-/// SRF result Datum. Stubbed until the fmgr/`Datum` value layer lands.
-fn pg_cursor_srf(_fcinfo: FcinfoHandle, _rows: &[PgCursorRow]) -> PgResult<Datum<'static>> {
+    for row in &rows {
+        // C: Datum values[6]; bool nulls[6] = {0};
+        let mut values: [Datum<'mcx>; PG_CURSOR_COLS] = core::array::from_fn(|_| Datum::null());
+        let nulls = [false; PG_CURSOR_COLS];
+
+        // C: values[0] = CStringGetTextDatum(portal->name);
+        values[0] = backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, &row.name)?;
+        // C: values[1] = CStringGetTextDatum(portal->sourceText);
+        values[1] = backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, &row.statement)?;
+        // C: values[2] = BoolGetDatum(portal->cursorOptions & CURSOR_OPT_HOLD);
+        values[2] = Datum::from_bool(row.is_holdable);
+        // C: values[3] = BoolGetDatum(portal->cursorOptions & CURSOR_OPT_BINARY);
+        values[3] = Datum::from_bool(row.is_binary);
+        // C: values[4] = BoolGetDatum(portal->cursorOptions & CURSOR_OPT_SCROLL);
+        values[4] = Datum::from_bool(row.is_scrollable);
+        // C: values[5] = TimestampTzGetDatum(portal->creation_time);
+        values[5] = Datum::from_i64(row.creation_time);
+
+        // C: tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+        backend_utils_fmgr_funcapi_seams::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
+    }
+
+    // C: return (Datum) 0;
     Ok(Datum::null())
 }
 

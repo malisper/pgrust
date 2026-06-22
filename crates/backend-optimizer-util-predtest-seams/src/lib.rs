@@ -38,8 +38,8 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn predicate_implied_by_exprs<'mcx>(
         mcx: Mcx<'mcx>,
-        predicate: &[Expr],
-        clause: &[Expr],
+        predicate: &[Expr<'mcx>],
+        clause: &[Expr<'mcx>],
         weak: bool
     ) -> PgResult<bool>
 );
@@ -54,8 +54,8 @@ seam_core::seam!(
     /// the prover can `ereport(ERROR)`, carried on `Err`.
     pub fn predicate_refuted_by_exprs<'mcx>(
         mcx: Mcx<'mcx>,
-        predicate: &[Expr],
-        clause: &[Expr],
+        predicate: &[Expr<'mcx>],
+        clause: &[Expr<'mcx>],
         weak: bool
     ) -> PgResult<bool>
 );

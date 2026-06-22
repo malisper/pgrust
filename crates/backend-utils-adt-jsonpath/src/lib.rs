@@ -1672,7 +1672,13 @@ fn jsp_is_mutable_seam(jsonexpr: &types_nodes::primnodes::Expr) -> PgResult<bool
         .iter()
         .map(|e| ExternalFnExpr {
             tag: e.expr_tag().0,
-            node: Some(types_core::fmgr::FnExprErased::new(e.clone())),
+            // Erase the borrowed `Expr<'_>` clone into the `'static` `fn_expr`
+            // carrier via the sanctioned from_node_erased boundary (the value is
+            // only read back transiently by exprType during the walk).
+            node: Some(types_core::fmgr::FnExprErased::from_node_erased::<
+                types_nodes::primnodes::Expr<'_>,
+                types_nodes::primnodes::Expr<'static>,
+            >(e.clone())),
         })
         .collect();
 

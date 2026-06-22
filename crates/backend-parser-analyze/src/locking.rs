@@ -28,6 +28,21 @@ pub fn LCS_asString(strength: LockClauseStrength) -> &'static str {
     }
 }
 
+/// Build a row-locking parse-analysis error carrying the offending
+/// `RangeVar`'s token position (C: `parser_errposition(pstate, thisrel->location)`).
+fn locking_errpos(
+    pstate: &ParseState<'_>,
+    errcode: types_error::SqlState,
+    msg: alloc::string::String,
+    location: i32,
+) -> types_error::PgError {
+    backend_utils_error::ereport(types_error::ERROR)
+        .errcode(errcode)
+        .errmsg(msg)
+        .errposition(backend_parser_small1::parser_errposition(pstate, location))
+        .into_error()
+}
+
 /// `CheckSelectLocking(qry, strength)` — reject FOR UPDATE/SHARE combined with
 /// features it cannot support.
 pub fn CheckSelectLocking(qry: &Query<'_>, strength: LockClauseStrength) -> PgResult<()> {
@@ -147,6 +162,8 @@ pub fn transformLockingClause<'mcx>(
                 .as_deref()
                 .ok_or_else(|| elog_error("locked relation has no name"))?
                 .to_string();
+            // C: parser_errposition(pstate, thisrel->location).
+            let thisrel_location = thisrel.location;
 
             let nrtes = qry.rtable.len();
             let mut found = false;
@@ -222,40 +239,64 @@ pub fn transformLockingClause<'mcx>(
                         qry.rtable[idx].subquery = sub;
                     }
                     RTEKind::RTE_JOIN => {
-                        return Err(elog_error(format!(
-                            "{} cannot be applied to a join",
-                            LCS_asString(lc.strength)
-                        )))
+                        return Err(locking_errpos(
+                            pstate,
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!("{} cannot be applied to a join", LCS_asString(lc.strength)),
+                            thisrel_location,
+                        ))
                     }
                     RTEKind::RTE_FUNCTION => {
-                        return Err(elog_error(format!(
-                            "{} cannot be applied to a function",
-                            LCS_asString(lc.strength)
-                        )))
+                        return Err(locking_errpos(
+                            pstate,
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!(
+                                "{} cannot be applied to a function",
+                                LCS_asString(lc.strength)
+                            ),
+                            thisrel_location,
+                        ))
                     }
                     RTEKind::RTE_TABLEFUNC => {
-                        return Err(elog_error(format!(
-                            "{} cannot be applied to a table function",
-                            LCS_asString(lc.strength)
-                        )))
+                        return Err(locking_errpos(
+                            pstate,
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!(
+                                "{} cannot be applied to a table function",
+                                LCS_asString(lc.strength)
+                            ),
+                            thisrel_location,
+                        ))
                     }
                     RTEKind::RTE_VALUES => {
-                        return Err(elog_error(format!(
-                            "{} cannot be applied to VALUES",
-                            LCS_asString(lc.strength)
-                        )))
+                        return Err(locking_errpos(
+                            pstate,
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!("{} cannot be applied to VALUES", LCS_asString(lc.strength)),
+                            thisrel_location,
+                        ))
                     }
                     RTEKind::RTE_CTE => {
-                        return Err(elog_error(format!(
-                            "{} cannot be applied to a WITH query",
-                            LCS_asString(lc.strength)
-                        )))
+                        return Err(locking_errpos(
+                            pstate,
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!(
+                                "{} cannot be applied to a WITH query",
+                                LCS_asString(lc.strength)
+                            ),
+                            thisrel_location,
+                        ))
                     }
                     RTEKind::RTE_NAMEDTUPLESTORE => {
-                        return Err(elog_error(format!(
-                            "{} cannot be applied to a named tuplestore",
-                            LCS_asString(lc.strength)
-                        )))
+                        return Err(locking_errpos(
+                            pstate,
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!(
+                                "{} cannot be applied to a named tuplestore",
+                                LCS_asString(lc.strength)
+                            ),
+                            thisrel_location,
+                        ))
                     }
                     other => {
                         return Err(elog_error(format!(
@@ -267,11 +308,16 @@ pub fn transformLockingClause<'mcx>(
                 break; /* out of inner loop */
             }
             if !found {
-                return Err(elog_error(format!(
-                    "relation \"{}\" in {} clause not found in FROM clause",
-                    thisrel_name,
-                    LCS_asString(lc.strength)
-                )));
+                return Err(locking_errpos(
+                    pstate,
+                    types_error::ERRCODE_UNDEFINED_TABLE,
+                    format!(
+                        "relation \"{}\" in {} clause not found in FROM clause",
+                        thisrel_name,
+                        LCS_asString(lc.strength)
+                    ),
+                    thisrel_location,
+                ));
             }
         }
     }

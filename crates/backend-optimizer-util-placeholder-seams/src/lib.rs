@@ -21,9 +21,9 @@ seam_core::seam!(
     /// Touches only `root->glob`.
     pub fn make_placeholder_expr(
         root: &mut types_pathnodes::PlannerInfo,
-        expr: types_nodes::primnodes::Expr,
+        expr: types_nodes::primnodes::Expr<'static>,
         phrels: types_pathnodes::Relids,
-    ) -> types_nodes::primnodes::PlaceHolderVar
+    ) -> types_nodes::primnodes::PlaceHolderVar<'static>
 );
 
 seam_core::seam!(
@@ -32,8 +32,8 @@ seam_core::seam!(
     /// returning its `PhInfoId`. `Err` carries the `elog(ERROR, "too late to
     /// create a new PlaceHolderInfo")` surface (after the PHI set is frozen) and
     /// the `get_typavgwidth` catalog-lookup failure surface.
-    pub fn find_placeholder_info(
+    pub fn find_placeholder_info<'a>(
         root: &mut types_pathnodes::PlannerInfo,
-        phv: &types_nodes::primnodes::PlaceHolderVar,
+        phv: &types_nodes::primnodes::PlaceHolderVar<'a>,
     ) -> types_error::PgResult<types_pathnodes::PhInfoId>
 );

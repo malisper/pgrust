@@ -25,7 +25,7 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         pstate: &mut ParseState<'mcx>,
         node: &Node<'mcx>,
-        expr: Expr,
+        expr: Expr<'static>,
         expr_kind: ParseExprKind,
         colname: Option<&str>,
         resjunk: bool,

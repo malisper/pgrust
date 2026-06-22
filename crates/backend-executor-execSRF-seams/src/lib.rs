@@ -21,13 +21,28 @@ seam_core::seam!(
     /// non-`FuncExpr`/`OpExpr` node (the C
     /// `elog(ERROR, "unrecognized node type")`).
     pub fn exec_init_function_result_set<'mcx>(
-        expr: &types_nodes::primnodes::Expr,
+        expr: &types_nodes::primnodes::Expr<'mcx>,
         econtext: types_nodes::EcxtId,
         parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<
         mcx::PgBox<'mcx, types_nodes::execexpr::SetExprState<'mcx>>,
     >
+);
+
+seam_core::seam!(
+    /// `RestartSetExprState(fcache)` (execSRF, owned-model addition): reset a
+    /// [`SetExprState`](types_nodes::execexpr::SetExprState) abandoned mid
+    /// value-per-call series (a tSRF cut short by an enclosing LIMIT) so the next
+    /// rescan re-evaluates it from the start. This is the owned-model equivalent
+    /// of the `shutdown_MultiFuncCall` ExprContext shutdown callback C fires from
+    /// `ReScanExprContext`; nodeProjectSet drives it for each SRF element from
+    /// `ExecReScanProjectSet`. Tears down any leftover `fn_extra` multi-call
+    /// context, ends any partially-drained materialize tuplestore, and clears
+    /// `setArgsValid`.
+    pub fn restart_set_expr_state<'mcx>(
+        fcache: &mut types_nodes::execexpr::SetExprState<'mcx>,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -68,7 +83,7 @@ seam_core::seam!(
     /// per-node `ExprContext`; `parent` is the lent plan-state. The compiled
     /// state is allocated in the per-query context; fallible on OOM.
     pub fn exec_init_table_function_result<'mcx>(
-        expr: &types_nodes::primnodes::Expr,
+        expr: &types_nodes::primnodes::Expr<'mcx>,
         econtext: types_nodes::EcxtId,
         parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,

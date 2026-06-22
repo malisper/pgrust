@@ -146,7 +146,7 @@ seam_core::seam!(
         is_outer: bool,
         hashfuncids: &[Oid],
         collations: &[Oid],
-        hash_exprs: &[Expr],
+        hash_exprs: &[Expr<'mcx>],
         opstrict: &[bool],
         keep_nulls: bool,
         estate: &mut EStateData<'mcx>,

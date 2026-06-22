@@ -445,7 +445,7 @@ fn transformPartitionBoundValue<'mcx>(
     col_type: Oid,
     col_typmod: i32,
     part_collation: Oid,
-) -> PgResult<Const> {
+) -> PgResult<Const<'mcx>> {
     let val_location = bound_value_location(val);
 
     // value = transformExpr(pstate, val, EXPR_KIND_PARTITION_BOUND);
@@ -474,8 +474,8 @@ fn transformPartitionBoundValue<'mcx>(
         -1,
     )?;
 
-    let mut value = match coerced {
-        Some(v) => v,
+    let mut value: Expr<'mcx> = match coerced {
+        Some(v) => v.clone_in(mcx)?,
         None => {
             let type_name =
                 backend_utils_adt_format_type::format_type_be(mcx, col_type)?;
@@ -921,6 +921,36 @@ pub fn define_relation_clone_partition_objects<'mcx>(
         for &idx in idxlist.iter() {
             let idx_rel =
                 backend_access_index_indexam_seams::index_open::call(mcx, idx, AccessShareLock)?;
+
+            // if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE) — a foreign
+            // table cannot carry a unique index; a non-unique parent index is
+            // simply not cloned into the foreign partition.
+            if rel.rd_rel.relkind == types_tuple::access::RELKIND_FOREIGN_TABLE {
+                let is_unique = idx_rel
+                    .rd_index
+                    .as_ref()
+                    .map(|i| i.indisunique)
+                    .unwrap_or(false);
+                if is_unique {
+                    let parent_name = parent.name().to_string();
+                    idx_rel.close(AccessShareLock)?;
+                    rel.close(NoLock)?;
+                    parent.close(NoLock)?;
+                    return ereport(ERROR)
+                        .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                        .errmsg(format!(
+                            "cannot create foreign partition of partitioned table \"{parent_name}\""
+                        ))
+                        .errdetail(format!(
+                            "Table \"{parent_name}\" contains indexes that are unique."
+                        ))
+                        .finish(here("define_relation_clone_partition_objects"))
+                        .map(|()| ());
+                } else {
+                    idx_rel.close(AccessShareLock)?;
+                    continue;
+                }
+            }
 
             // attmap = build_attrmap_by_name(RelationGetDescr(rel),
             //                                RelationGetDescr(parent), false);

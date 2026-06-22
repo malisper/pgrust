@@ -40,8 +40,11 @@ use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, LOCKMODE, NoLock, RowExclusiveLock,
 };
 
+use backend_access_common_heaptuple::heap_deform_tuple;
 use backend_access_common_relation::relation_open;
+use backend_access_common_scankey::ScanKeyInit;
 use backend_access_transam_xact::CommandCounterIncrement;
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use backend_catalog_indexing_seams as indexing_seam;
 use backend_catalog_objectaddress::consts::ConstraintRelationId;
 use backend_catalog_pg_inherits::{find_all_inheritors, find_inheritance_children};
@@ -269,11 +272,38 @@ pub fn dropconstraint_internal<'mcx>(
                 .into_error());
         }
 
-        // Disallow if it's a GENERATED AS IDENTITY column. The live relcache
-        // descriptor carries attidentity (C reads it from a fresh syscache copy;
-        // the live form is equivalent here).
-        let att = rel.rd_att.attr((attnum - 1) as usize);
-        if att.attidentity != 0 {
+        // Disallow if it's a GENERATED AS IDENTITY column, and reset attnotnull
+        // if needed. C reads attidentity/attnotnull from a *fresh* syscache copy
+        // (`SearchSysCacheCopyAttName`), not the relcache descriptor: an earlier
+        // subcommand in the same ALTER pass (e.g. DROP IDENTITY, which runs in
+        // AT_PASS_DROP just like DROP NOT NULL) may already have cleared
+        // attidentity in pg_attribute. The owned `rel.rd_att` snapshot was taken
+        // at pass open and would still show the column as an identity column.
+        let tuple = backend_utils_cache_syscache::SearchSysCacheAttNum(mcx, rel.rd_id, attnum)?
+            .ok_or_else(|| {
+                backend_utils_error::ereport(ERROR)
+                    .errmsg_internal(format!(
+                        "cache lookup failed for attribute {attnum} of relation {}",
+                        rel.rd_id
+                    ))
+                    .into_error()
+            })?;
+        let attidentity = backend_utils_cache_syscache::SysCacheGetAttrNotNull(
+            mcx,
+            backend_utils_cache_syscache::ATTNUM,
+            &tuple,
+            types_catalog::pg_attribute::Anum_pg_attribute_attidentity as i32,
+        )?
+        .as_char();
+        let attnotnull = backend_utils_cache_syscache::SysCacheGetAttrNotNull(
+            mcx,
+            backend_utils_cache_syscache::ATTNUM,
+            &tuple,
+            types_catalog::pg_attribute::Anum_pg_attribute_attnotnull as i32,
+        )?
+        .as_bool();
+
+        if attidentity != 0 {
             let aname = get_attname::call(mcx, rel.rd_id, attnum, false)?
                 .map(|s| s.as_str().to_string())
                 .unwrap_or_default();
@@ -287,17 +317,8 @@ pub fn dropconstraint_internal<'mcx>(
         }
 
         // All good -- reset attnotnull if needed.
-        if att.attnotnull {
+        if attnotnull {
             // attForm->attnotnull = false; CatalogTupleUpdate(attrel, &atttup->t_self, atttup);
-            let tuple = backend_utils_cache_syscache::SearchSysCacheAttNum(mcx, rel.rd_id, attnum)?
-                .ok_or_else(|| {
-                    backend_utils_error::ereport(ERROR)
-                        .errmsg_internal(format!(
-                            "cache lookup failed for attribute {attnum} of relation {}",
-                            rel.rd_id
-                        ))
-                        .into_error()
-                })?;
             let row = PgAttributeUpdateRow {
                 attnotnull: Some(false),
                 ..Default::default()
@@ -548,10 +569,38 @@ pub fn ATExecDropNotNull<'mcx>(
         objectSubId: attnum as i32,
     };
 
-    let att = rel.rd_att.attr((attnum - 1) as usize);
+    // C reads attnotnull/attidentity from a *fresh* syscache copy
+    // (`SearchSysCacheCopyAttName`), not the relcache descriptor. An earlier
+    // subcommand in the same ALTER pass (e.g. DROP IDENTITY, which also runs in
+    // AT_PASS_DROP) may already have cleared attidentity in pg_attribute; the
+    // owned `rel.rd_att` snapshot was taken at pass open and would still show
+    // the column as an identity column.
+    let att_tuple = backend_utils_cache_syscache::SearchSysCacheAttNum(mcx, rel.rd_id, attnum)?
+        .ok_or_else(|| {
+            backend_utils_error::ereport(ERROR)
+                .errmsg_internal(format!(
+                    "cache lookup failed for attribute {attnum} of relation {}",
+                    rel.rd_id
+                ))
+                .into_error()
+        })?;
+    let att_attnotnull = backend_utils_cache_syscache::SysCacheGetAttrNotNull(
+        mcx,
+        backend_utils_cache_syscache::ATTNUM,
+        &att_tuple,
+        types_catalog::pg_attribute::Anum_pg_attribute_attnotnull as i32,
+    )?
+    .as_bool();
+    let att_attidentity = backend_utils_cache_syscache::SysCacheGetAttrNotNull(
+        mcx,
+        backend_utils_cache_syscache::ATTNUM,
+        &att_tuple,
+        types_catalog::pg_attribute::Anum_pg_attribute_attidentity as i32,
+    )?
+    .as_char();
 
     // If the column is already nullable there's nothing to do.
-    if !att.attnotnull {
+    if !att_attnotnull {
         drop(attr_rel);
         return Ok(ObjectAddress {
             classId: InvalidOid,
@@ -569,7 +618,7 @@ pub fn ATExecDropNotNull<'mcx>(
     }
 
     // if (attTup->attidentity) ereport(...identity column...)
-    if att.attidentity != 0 {
+    if att_attidentity != 0 {
         return Err(backend_utils_error::ereport(ERROR)
             .errcode(types_error::ERRCODE_SYNTAX_ERROR)
             .errmsg(format!(
@@ -729,7 +778,7 @@ pub(crate) fn QueueFKConstraintValidation<'mcx>(
     conoid: Oid,
     conform: &types_catalog::pg_constraint::FormData_pg_constraint,
     constr_name: &str,
-    _lockmode: LOCKMODE,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
     debug_assert_eq!(conform.contype, CONSTRAINT_FOREIGN);
     debug_assert!(!conform.convalidated);
@@ -749,12 +798,96 @@ pub(crate) fn QueueFKConstraintValidation<'mcx>(
         wqueue[tab].constraints.push(newcon);
     }
 
-    // If either end is partitioned, recurse over child constraints.
+    // If the table at either end of the constraint is partitioned, we need to
+    // recurse and handle every unvalidated constraint that is a child of this
+    // constraint (tablecmds.c:13043).
     if fkrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE
         || backend_utils_cache_lsyscache_seams::get_rel_relkind::call(conform.confrelid)?
             == RELKIND_PARTITIONED_TABLE
     {
-        unported("VALIDATE CONSTRAINT FK recursion over partition child constraints");
+        // ScanKeyInit(&pkey, Anum_pg_constraint_conparentid, BTEqual, F_OIDEQ, con->oid);
+        // pscan = systable_beginscan(conrel, ConstraintParentIndexId, true, NULL, 1, &pkey);
+        let conrel = backend_access_table_table_seams::table_open::call(
+            mcx,
+            ConstraintRelationId,
+            RowExclusiveLock,
+        )?;
+
+        let mut key = ScanKeyData::empty();
+        ScanKeyInit(
+            &mut key,
+            types_catalog::pg_constraint::Anum_pg_constraint_conparentid,
+            BTEqualStrategyNumber,
+            types_core::fmgr::F_OIDEQ,
+            types_tuple::backend_access_common_heaptuple::Datum::from_oid(conoid),
+        )?;
+        let keys = [key];
+
+        let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+            &conrel,
+            types_catalog::pg_constraint::ConstraintParentIndexId,
+            true,
+            None,
+            &keys,
+        )?;
+
+        // Collect child constraint OIDs first; the recursion below re-opens
+        // pg_constraint (it marks each child validated), so we don't hold the
+        // scan across the recursive calls. We capture convalidated here so we
+        // can skip already-valid subtrees without a re-lookup.
+        let mut children: Vec<(Oid, bool)> = Vec::new();
+        while let Some(tup) =
+            backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+        {
+            let cols = heap_deform_tuple(mcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
+            let child_oid = cols
+                [types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1]
+                .0
+                .as_oid();
+            let child_validated = cols
+                [types_catalog::pg_constraint::Anum_pg_constraint_convalidated as usize - 1]
+                .0
+                .as_bool();
+            children.push((child_oid, child_validated));
+        }
+        drop(scan);
+        conrel.close(NoLock)?;
+
+        for (child_oid, child_validated) in children {
+            // If the child constraint has already been validated, no further
+            // action is required for it or its descendants, as they are all
+            // valid.
+            if child_validated {
+                continue;
+            }
+
+            let childcon =
+                backend_utils_cache_syscache_seams::search_constraint_form_by_oid::call(child_oid)?
+                    .ok_or_else(|| {
+                        backend_utils_error::ereport(ERROR)
+                            .errmsg_internal(format!(
+                                "cache lookup failed for constraint {child_oid}"
+                            ))
+                            .into_error()
+                    })?;
+            let childform = childcon.form;
+
+            let childrel = relation_open(mcx, childform.conrelid, lockmode)?;
+
+            // NB: pkrelid is passed as-is during recursion, as it is required
+            // to identify the root referenced table.
+            QueueFKConstraintValidation(
+                mcx,
+                wqueue,
+                &childrel,
+                pkrelid,
+                child_oid,
+                &childform,
+                constr_name,
+                lockmode,
+            )?;
+            childrel.close(NoLock)?;
+        }
     }
 
     // Mark the pg_constraint row as validated.
@@ -842,7 +975,7 @@ fn QueueCheckConstraintValidation<'mcx>(
     })?;
     let expanded = backend_rewrite_rewritehandler_seams::expand_generated_columns_in_expr::call(
         mcx,
-        Some(cexpr),
+        Some(cexpr.erase_lifetime()),
         rel.rd_id,
         1,
     )?
@@ -851,7 +984,7 @@ fn QueueCheckConstraintValidation<'mcx>(
             .errmsg_internal("expand_generated_columns_in_expr returned None".to_string())
             .into_error()
     })?;
-    let qual_node = mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_expr(mcx, expanded)?)?;
+    let qual_node = mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_expr(mcx, expanded.clone_in(mcx)?)?)?;
 
     let newcon = NewConstraint {
         name: Some(mcx::PgString::from_str_in(constr_name, mcx)?),

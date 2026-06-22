@@ -148,7 +148,7 @@ pub fn inline_set_returning_function<'mcx>(
 /// node is exactly a `Node::Expr(Expr::FuncExpr(..))`.
 fn rtfunc_funcexpr<'a, 'mcx>(
     node: &'a types_nodes::nodes::NodePtr<'mcx>,
-) -> Option<&'a types_nodes::primnodes::FuncExpr> {
+) -> Option<&'a types_nodes::primnodes::FuncExpr<'mcx>> {
     let rtf = node.as_rangetblfunction()?;
     let fe = rtf.funcexpr.as_deref()?;
     fe.as_funcexpr()
@@ -156,6 +156,6 @@ fn rtfunc_funcexpr<'a, 'mcx>(
 
 /// Re-export of the funcid-keyed scalar-inline declination, kept for the
 /// `inline_set_returning_function_core` consumers that delegate by OID.
-pub fn inline_set_returning_function_by_oid(funcid: Oid) -> PgResult<Option<Expr>> {
+pub fn inline_set_returning_function_by_oid(funcid: Oid) -> PgResult<Option<Expr<'static>>> {
     clauses_seam::inline_set_returning_function_core::call(funcid)
 }

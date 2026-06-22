@@ -751,9 +751,21 @@ fn standard_planner<'mcx>(
     // result->partPruneInfos = glob->partPruneInfos; (planner.c:580). The glob
     // list carries the `PartitionPruneInfo` carriers registered by
     // `register_partpruneinfo` during set_plan_references.
+    // The glob carriers are arena-interned at the notional `'static`; deep-clone
+    // each into the PlannedStmt's `mcx` (the carrier is invariant over its
+    // lifetime, so a `clone_in` re-intern is required, not a coercion).
     let part_prune_infos: alloc::vec::Vec<
-        types_nodes::partprune_carrier::PartitionPruneInfo,
-    > = root.glob.as_ref().map(|g| g.part_prune_infos.clone()).unwrap_or_default();
+        types_nodes::partprune_carrier::PartitionPruneInfo<'mcx>,
+    > = match root.glob.as_ref() {
+        Some(g) => {
+            let mut v = alloc::vec::Vec::with_capacity(g.part_prune_infos.len());
+            for pinfo in g.part_prune_infos.iter() {
+                v.push(pinfo.clone_in(mcx)?);
+            }
+            v
+        }
+        None => alloc::vec::Vec::new(),
+    };
 
     // result->appendRelations = glob->appendRelations; (planner.c:574). The
     // glob list carries the flattened `AppendRelInfo` carriers accumulated by
@@ -829,6 +841,7 @@ fn subquery_planner_for_setop_impl<'mcx>(
     recursion_carry: Option<(i32, f64)>,
     has_recursion: bool,
     tuple_fraction: f64,
+    setop_op: Option<&'mcx types_nodes::rawnodes::SetOperationStmt<'mcx>>,
 ) -> PgResult<PlannerInfo> {
     subquery_planner_carried(
         mcx,
@@ -839,7 +852,7 @@ fn subquery_planner_for_setop_impl<'mcx>(
         recursion_carry,
         has_recursion,
         tuple_fraction,
-        None,
+        setop_op,
     )
 }
 
@@ -887,7 +900,7 @@ fn subquery_planner<'mcx>(
     parent_root: Option<PlannerInfo>,
     has_recursion: bool,
     tuple_fraction: f64,
-    setops: Option<()>,
+    setops: Option<&'mcx types_nodes::rawnodes::SetOperationStmt<'mcx>>,
 ) -> PgResult<PlannerInfo> {
     subquery_planner_carried(
         mcx, run, glob, parse_id, parent_root, None, has_recursion,
@@ -1232,7 +1245,7 @@ fn pqe_append_rel_list<'mcx>(
             EXPRKIND_APPINFO,
         )?;
         match processed {
-            Some(e) => *root.node_mut(id) = e,
+            Some(e) => *root.node_mut(id) = e.erase_lifetime(),
             // EXPRKIND_APPINFO (not a QUAL) never reduces an expression
             // to NULL; preprocess_expression only returns None for a
             // None input or a canonicalize_qual collapse, neither of
@@ -2067,7 +2080,7 @@ fn subquery_planner_carried<'mcx>(
     recursion_carry: Option<(i32, f64)>,
     has_recursion: bool,
     tuple_fraction: f64,
-    setops: Option<()>,
+    setops: Option<&'mcx types_nodes::rawnodes::SetOperationStmt<'mcx>>,
 ) -> PgResult<PlannerInfo> {
     // root = makeNode(PlannerInfo); + field init (C:664-703).
     let mut root = PlannerInfo::default();
@@ -2657,9 +2670,9 @@ pub fn preprocess_expression<'mcx>(
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
     outer_query: Option<&Node<'mcx>>,
-    expr: Option<Expr>,
+    expr: Option<Expr<'mcx>>,
     kind: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     // Fall out quickly if expression is empty (C:1262).
     let mut expr = match expr {
         None => return Ok(None),
@@ -2896,7 +2909,7 @@ fn grouping_planner<'mcx>(
     run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     mut tuple_fraction: f64,
-    setops: Option<()>,
+    setops: Option<&'mcx types_nodes::rawnodes::SetOperationStmt<'mcx>>,
 ) -> PgResult<()> {
     let mut offset_est: i64 = 0;
     let mut count_est: i64 = 0;
@@ -3049,7 +3062,7 @@ fn grouping_planner<'mcx>(
                 // an Aggref), process+number it, then write it back.
                 let mut live = root.node(expr_id).clone_in(mcx)?;
                 backend_optimizer_prep_prepagg::preprocess_aggrefs(mcx, root, &mut live)?;
-                *root.node_mut(expr_id) = live;
+                *root.node_mut(expr_id) = live.erase_lifetime();
             }
             // preprocess_aggrefs(root, (Node *) parse->havingQual) (C:1580).
             // `havingQual` is the concretely-typed `Option<PgBox<Expr>>` view.
@@ -3141,9 +3154,8 @@ fn grouping_planner<'mcx>(
     }
 
     // Set up standard_qp_extra (C:1637-1645): activeWindows = NIL,
-    // gset_data = NULL, setop = setops. On the regular non-setop SELECT path
-    // these are all empty/none.
-    let _ = setops;
+    // gset_data = NULL, setop = setops. `setops` (the parent SetOperationStmt for
+    // a set-op child) is bridged into the qp_callback below as `setop_child`.
 
     // query_planner(root, standard_qp_callback, &qp_extra) (C:1654).
     //
@@ -3199,6 +3211,24 @@ fn grouping_planner<'mcx>(
             .map(|r| r.groupClause.clone())
             .unwrap_or_default()
     });
+    // setting setop_pathkeys might be useful to the union planner (C:3589). Bridge
+    // the parent SetOperationStmt's groupClauses (interned) + colTypes so the
+    // qp_callback (which can't reach `run`) can compute root->setop_pathkeys.
+    let setop_child: Option<(Vec<types_pathnodes::NodeId>, Vec<Oid>)> = match setops {
+        Some(op) => {
+            let group_clause_ids: Vec<types_pathnodes::NodeId> = op
+                .groupClauses
+                .iter()
+                .map(|np| {
+                    let sgc = sortgroupclause_from_node(np)?;
+                    Ok(root.alloc_sortgroupclause(sgc))
+                })
+                .collect::<PgResult<Vec<_>>>()?;
+            let col_types: Vec<Oid> = op.colTypes.iter().copied().collect();
+            Some((group_clause_ids, col_types))
+        }
+        None => None,
+    };
     let mut qp_callback = move |root: &mut PlannerInfo| -> PgResult<()> {
         standard_qp_callback(
             root,
@@ -3207,6 +3237,7 @@ fn grouping_planner<'mcx>(
             &distinct_clause_ids,
             first_active_window,
             gset_group_clause.as_deref(),
+            setop_child.as_ref().map(|(g, c)| (g.as_slice(), c.as_slice())),
         )
     };
     let mut current_rel =
@@ -4359,6 +4390,7 @@ fn make_group_input_target<'mcx>(
             let col_id = if strip_group_rtindex {
                 let owned = root.node(expr_id).clone_in(mcx)?;
                 let stripped = backend_nodes_nodeFuncs_seams::remove_nulling_relids::call(
+                    mcx,
                     owned,
                     &group_singleton,
                     &None,
@@ -4413,6 +4445,7 @@ fn make_group_input_target<'mcx>(
             // that breaks downstream sort-key matching.
             let vid = if strip_group_rtindex {
                 let stripped = backend_nodes_nodeFuncs_seams::remove_nulling_relids::call(
+                    mcx,
                     v,
                     &group_singleton,
                     &None,
@@ -6317,7 +6350,7 @@ fn create_ordinary_grouping_paths<'mcx>(
     // extra->havingQual: the HAVING qual to use for this rel. None means "read
     // parse->havingQual" (the top rel); Some carries the per-child translated
     // qual produced by adjust_appendrel_attrs in the partitionwise recursion.
-    having_qual_override: Option<&Expr>,
+    having_qual_override: Option<&Expr<'mcx>>,
 ) -> PgResult<Option<RelId>> {
     // If this is the topmost grouping relation or if the parent relation is
     // doing some form of partitionwise aggregation, then we may be able to do it
@@ -6678,7 +6711,7 @@ fn create_partitionwise_grouping_paths<'mcx>(
     _agg_final_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
     mut gd: Option<&mut GroupingSetsData<'mcx>>,
     patype: PartitionwiseAggregateType,
-    having_qual_override: Option<&Expr>,
+    having_qual_override: Option<&Expr<'mcx>>,
 ) -> PgResult<()> {
     debug_assert!(patype != PartitionwiseAggregateType::None);
     debug_assert!(
@@ -6702,7 +6735,7 @@ fn create_partitionwise_grouping_paths<'mcx>(
     // translated qual for a nested partitionwise child). Deep-copy via clone_in:
     // the HAVING qual carries Aggrefs whose derived Expr::clone guards a shallow
     // copy.
-    let parent_having: Option<Expr> = match having_qual_override {
+    let parent_having: Option<Expr<'mcx>> = match having_qual_override {
         Some(e) => Some(e.clone_in(mcx)?),
         None => match run.resolve(root.parse).havingQual.as_deref() {
             Some(e) => Some(e.clone_in(mcx)?),
@@ -6892,7 +6925,7 @@ fn add_paths_to_grouping_rel<'mcx>(
     mut gd: Option<&mut GroupingSetsData<'mcx>>,
     // extra->havingQual override (per-child translated qual). None => read
     // parse->havingQual (top rel).
-    having_qual_override: Option<&Expr>,
+    having_qual_override: Option<&Expr<'mcx>>,
 ) -> PgResult<()> {
     let has_grouping_sets = gd.is_some();
 
@@ -6908,7 +6941,7 @@ fn add_paths_to_grouping_rel<'mcx>(
     // having_qual_override. Clone it into the arena to obtain the qual list the
     // Agg/Group path carries.
     let having_quals: Vec<types_pathnodes::NodeId> = {
-        let src: Option<&Expr> = match having_qual_override {
+        let src: Option<&Expr<'mcx>> = match having_qual_override {
             Some(e) => Some(e),
             None => run.resolve(root.parse).havingQual.as_deref(),
         };
@@ -7150,7 +7183,7 @@ fn create_partial_grouping_paths<'mcx>(
     // partitionwise aggregation, which enables the non-partial partial-agg leg).
     parent_patype: PartitionwiseAggregateType,
     // extra->havingQual: per-child translated qual (None => parse->havingQual).
-    having_qual_override: Option<&Expr>,
+    having_qual_override: Option<&Expr<'mcx>>,
 ) -> PgResult<Option<RelId>> {
     let has_aggs = run.resolve(root.parse).hasAggs;
 
@@ -7503,7 +7536,7 @@ fn make_partial_grouping_target<'mcx>(
     // extra->havingQual: the HAVING qual to source HAVING Vars/Aggrefs from. None
     // => parse->havingQual (top rel); Some => the per-child translated qual, so
     // the pulled columns carry the child's varnos (matching the child scan).
-    having_qual_override: Option<&Expr>,
+    having_qual_override: Option<&Expr<'mcx>>,
 ) -> PgResult<PathTarget> {
     let mut partial_target = backend_optimizer_util_vars::tlist::create_empty_pathtarget();
     let mut non_group_cols: Vec<types_pathnodes::NodeId> = Vec::new();
@@ -8207,12 +8240,25 @@ fn apply_scanjoin_target_to_paths<'mcx>(
                 // target->exprs = adjust_appendrel_attrs(root, target->exprs, appinfos);
                 let mut new_exprs: Vec<types_pathnodes::NodeId> =
                     Vec::with_capacity(t.exprs.len());
+                let mcx = run.mcx();
                 for &expr_id in t.exprs.iter() {
-                    let expr = root.node(expr_id).clone();
+                    // Deep-copy via `clone_in` into the planner-run arena rather
+                    // than the derived `Expr::clone`: a scan/join target expr can
+                    // carry an owned-subtree child (`SubPlan`/`SubLink`/`Aggref`,
+                    // e.g. a correlated MULTIEXPR `SET (a,b)=(SELECT ...)` over a
+                    // partitioned UPDATE) whose derived `clone` panics
+                    // (`SubPlanExpr::clone: SubPlan carries context-allocated
+                    // children`). `clone_in` routes the `SubPlan` arm through
+                    // `SubPlan::clone_in`; the copy is interned back into `root`'s
+                    // node arena via `alloc_node`, so it must outlive the whole
+                    // run (the long-lived planner `mcx` = `run.mcx()`). Threaded
+                    // through `'mcx`, re-erased to the arena at `alloc_node`
+                    // (`Expr` is invariant — sanctioned intern boundary).
+                    let expr = root.node(expr_id).clone_in(mcx)?;
                     let adjusted = backend_optimizer_util_appendinfo::adjust_appendrel_attrs_run(
                         Some(run), root, expr, &appinfos,
                     )?;
-                    new_exprs.push(root.alloc_node(adjusted));
+                    new_exprs.push(root.alloc_node(adjusted.erase_lifetime()));
                 }
                 t.exprs = new_exprs;
                 child_scanjoin_targets.push(t);
@@ -8451,7 +8497,7 @@ fn adjust_group_pathkeys_for_groupagg(root: &mut PlannerInfo, mcx: Mcx<'_>) {
             // sortlist = aggref->aggdistinct ? : aggref->aggorder; args =
             // aggref->args. Intern both into the planner node arena (the form
             // make_pathkeys_for_sortclauses consumes).
-            let (sortlist_ids, args_ids) = intern_aggref_sort_inputs(root, aggref_id);
+            let (sortlist_ids, args_ids) = intern_aggref_sort_inputs(root, aggref_id, mcx);
             let pathkeys = backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses(
                 root,
                 mcx,
@@ -8555,7 +8601,7 @@ fn adjust_group_pathkeys_for_groupagg(root: &mut PlannerInfo, mcx: Mcx<'_>) {
 fn aggref_of_node<'a>(
     root: &'a PlannerInfo,
     id: types_pathnodes::NodeId,
-) -> &'a types_nodes::primnodes::Aggref {
+) -> &'a types_nodes::primnodes::Aggref<'static> {
     match root.node(id) {
         types_nodes::primnodes::Expr::Aggref(a) => a,
         other => panic!(
@@ -8569,16 +8615,17 @@ fn aggref_of_node<'a>(
 /// present — DISTINCT preferred, as in C) and its `args` (`TargetEntry` list)
 /// into the planner node arena, returning the `(sortclause_ids, tlist_ids)` that
 /// `make_pathkeys_for_sortclauses(root, sortlist, aggref->args)` consumes.
-fn intern_aggref_sort_inputs(
+fn intern_aggref_sort_inputs<'mcx>(
     root: &mut PlannerInfo,
     aggref_id: types_pathnodes::NodeId,
+    mcx: Mcx<'mcx>,
 ) -> (Vec<types_pathnodes::NodeId>, Vec<types_pathnodes::NodeId>) {
     // Snapshot the inputs out of the arena into plain (cloneable) values so we
     // can re-intern them without holding a borrow on root. `TargetEntry<'static>`
     // is not `Clone` (it holds PgBox/PgString), so extract the per-TLE fields we
     // need (the expr cloned, plus the scalar labels) up front.
     type TleSnapshot = (
-        types_nodes::primnodes::Expr,
+        types_nodes::primnodes::Expr<'static>,
         types_core::primitive::AttrNumber,
         Option<alloc::string::String>,
         types_core::primitive::Index,
@@ -8586,6 +8633,10 @@ fn intern_aggref_sort_inputs(
         types_core::primitive::AttrNumber,
         bool,
     );
+    // Deep-clone the per-TLE expr into the planner `mcx` so the snapshot owns its
+    // nodes independently of the `root` borrow (releasing it before the re-intern
+    // below). The clone lands in the planner's permanent context (NOT a scratch),
+    // so the node stays valid after `alloc_node` interns it into root's arena.
     let (sortlist, args): (Vec<types_nodes::rawnodes::SortGroupClause>, Vec<TleSnapshot>) = {
         let aggref = aggref_of_node(root, aggref_id);
         let sortlist = if !aggref.aggdistinct.is_empty() {
@@ -8593,26 +8644,28 @@ fn intern_aggref_sort_inputs(
         } else {
             aggref.aggorder.clone()
         };
-        let args = aggref
-            .args
-            .iter()
-            .map(|tle| {
-                let expr = tle
-                    .expr
-                    .as_deref()
-                    .cloned()
-                    .unwrap_or_else(|| types_nodes::primnodes::Expr::Const(Default::default()));
-                (
-                    expr,
-                    tle.resno,
-                    tle.resname.as_ref().map(|s| alloc::string::String::from(s.as_str())),
-                    tle.ressortgroupref,
-                    tle.resorigtbl,
-                    tle.resorigcol,
-                    tle.resjunk,
-                )
-            })
-            .collect();
+        let mut args: Vec<TleSnapshot> = Vec::with_capacity(aggref.args.len());
+        for tle in aggref.args.iter() {
+            let expr = match tle.expr.as_deref() {
+                // C `copyObject` — an OOM here aborts the backend (palloc), so
+                // mirror that with `expect` rather than thread fallibility through
+                // the infallible `standard_qp_callback` upcall chain.
+                Some(e) => e
+                    .clone_in(mcx)
+                    .expect("intern_aggref_sort_inputs: copyObject OOM")
+                    .erase_lifetime(),
+                None => types_nodes::primnodes::Expr::Const(Default::default()),
+            };
+            args.push((
+                expr,
+                tle.resno,
+                tle.resname.as_ref().map(|s| alloc::string::String::from(s.as_str())),
+                tle.ressortgroupref,
+                tle.resorigtbl,
+                tle.resorigcol,
+                tle.resjunk,
+            ));
+        }
         (sortlist, args)
     };
 
@@ -8641,6 +8694,68 @@ fn intern_aggref_sort_inputs(
     (sortlist_ids, args_ids)
 }
 
+/// `generate_setop_child_grouplist(op, targetlist)` (planner.c:8295). Pair each
+/// non-resjunk target with the parent op's groupClause (`group_clause_ids`, an
+/// arena copy of `op->groupClauses`) and colType, reject on any type mismatch
+/// (returns `None` -> NIL), and assign each SortGroupClause a `tleSortGroupRef`
+/// matching the target. Mutates `root.processed_tlist` (assignSortGroupRef).
+fn generate_setop_child_grouplist(
+    root: &mut PlannerInfo,
+    group_clause_ids: &[types_pathnodes::NodeId],
+    col_types: &[Oid],
+    targetlist: &[types_pathnodes::NodeId],
+) -> Option<Vec<types_pathnodes::NodeId>> {
+    let mut out: Vec<types_pathnodes::NodeId> = Vec::with_capacity(group_clause_ids.len());
+    let mut lg = 0usize;
+    let mut ct = 0usize;
+    for &tnode in targetlist {
+        if root.targetentry(tnode).resjunk {
+            continue;
+        }
+        debug_assert!(lg < group_clause_ids.len());
+        debug_assert!(ct < col_types.len());
+        let coltype = col_types[ct];
+        let te_expr = root.targetentry(tnode).expr;
+        let exprtype =
+            backend_nodes_core::nodefuncs::expr_type(Some(root.node(te_expr))).unwrap_or(0);
+        if coltype != exprtype {
+            return None;
+        }
+        let sortgroupref = assign_setop_sort_group_ref(root, tnode, targetlist);
+        let mut sgc = *root.sortgroupclause(group_clause_ids[lg]);
+        sgc.tleSortGroupRef = sortgroupref;
+        out.push(root.alloc_sortgroupclause(sgc));
+        lg += 1;
+        ct += 1;
+    }
+    debug_assert!(lg == group_clause_ids.len());
+    debug_assert!(ct == col_types.len());
+    Some(out)
+}
+
+/// `assignSortGroupRef(tle, tlist)` over the arena targetlist: ensure `tnode` has
+/// a `ressortgroupref`, picking max-used+1 if unset, and return it.
+fn assign_setop_sort_group_ref(
+    root: &mut PlannerInfo,
+    tnode: types_pathnodes::NodeId,
+    tlist: &[types_pathnodes::NodeId],
+) -> types_core::Index {
+    let cur = root.targetentry(tnode).ressortgroupref;
+    if cur != 0 {
+        return cur;
+    }
+    let mut max_ref: types_core::Index = 0;
+    for &t in tlist {
+        let r = root.targetentry(t).ressortgroupref;
+        if r > max_ref {
+            max_ref = r;
+        }
+    }
+    let new_ref = max_ref + 1;
+    root.targetentry_mut(tnode).ressortgroupref = new_ref;
+    new_ref
+}
+
 /// `standard_qp_callback(root, extra)` (planner.c:3453) — the
 /// `query_pathkeys_callback` upcall, computing the grouping/ordering pathkeys
 /// once EquivalenceClasses are canonical.
@@ -8665,6 +8780,7 @@ fn standard_qp_callback(
     distinct_clause_ids: &[types_pathnodes::NodeId],
     first_active_window: Option<types_pathnodes::NodeId>,
     gset_group_clause: Option<&[types_pathnodes::NodeId]>,
+    setop_child: Option<(&[types_pathnodes::NodeId], &[Oid])>,
 ) -> PgResult<()> {
     // tlist = root->processed_tlist (C:3457).
     let tlist = root.processed_tlist.clone();
@@ -8764,7 +8880,30 @@ fn standard_qp_callback(
     }
 
     // set-op pathkeys: NIL on this path (set operations gated out upstream).
-    root.setop_pathkeys = Vec::new();
+    root.setop_pathkeys = match setop_child {
+        Some((group_clause_ids, col_types)) => {
+            match generate_setop_child_grouplist(root, group_clause_ids, col_types, &tlist) {
+                Some(mut group_clauses) => {
+                    let (pathkeys, sortable) =
+                        backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(
+                            root, mcx, &mut group_clauses, &tlist, false, false, false,
+                        );
+                    // A volatile sort key's EquivalenceClass identifies its target
+                    // entry only by ec_sortref, which a setop child's projected plan
+                    // targetlist does not carry through our arena rebuild; such a key
+                    // can't serve as a useful presort for the parent set-op's merge
+                    // anyway, so don't advertise setop_pathkeys when any is volatile
+                    // (PG plans these via Sort-over-Append regardless).
+                    let any_volatile = pathkeys
+                        .iter()
+                        .any(|pk| pk.pk_eclass.is_some_and(|ec| root.ec(ec).ec_has_volatile));
+                    if sortable && !any_volatile { pathkeys } else { Vec::new() }
+                }
+                None => Vec::new(),
+            }
+        }
+        None => Vec::new(),
+    };
 
     // root->sort_pathkeys =
     //   make_pathkeys_for_sortclauses(root, parse->sortClause, tlist) (C:3583).
@@ -10199,7 +10338,7 @@ fn preprocess_groupclause<'mcx>(
 /// `expression_planner(expr)` (planner.c:6779). Prepares an expression tree for
 /// execution (used outside the main planner). `eval_const_expressions(NULL, expr)`
 /// then `fix_opfuncids`.
-pub fn expression_planner<'mcx>(mcx: Mcx<'mcx>, expr: Expr) -> PgResult<Expr> {
+pub fn expression_planner<'mcx>(mcx: Mcx<'mcx>, expr: Expr<'mcx>) -> PgResult<Expr<'mcx>> {
     // eval_const_expressions(NULL, expr) (C:6789). The owner takes an Mcx (no
     // PlannerInfo needed; the `NULL` root path).
     let mut result = backend_optimizer_util_clauses::eval_const_expressions(mcx, expr)?;
@@ -10226,8 +10365,8 @@ pub fn expression_planner<'mcx>(mcx: Mcx<'mcx>, expr: Expr) -> PgResult<Expr> {
 /// already depends on setrefs).
 pub fn expression_planner_with_deps<'mcx>(
     mcx: Mcx<'mcx>,
-    expr: Expr,
-) -> PgResult<(Expr, alloc::vec::Vec<Oid>, alloc::vec::Vec<types_plancache::InvalItemKey>)> {
+    expr: Expr<'mcx>,
+) -> PgResult<(Expr<'mcx>, alloc::vec::Vec<Oid>, alloc::vec::Vec<types_plancache::InvalItemKey>)> {
     // result = (Expr *) expression_planner((Expr *) expr); (const-fold + opfuncids)
     let result = expression_planner(mcx, expr)?;
 
@@ -10432,9 +10571,9 @@ fn expr_from_nodeptr<'mcx, F>(
     run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     pick: F,
-) -> PgResult<Option<Expr>>
+) -> PgResult<Option<Expr<'mcx>>>
 where
-    F: for<'a> Fn(&'a Query<'mcx>) -> Option<&'a mcx::PgBox<'mcx, Expr>>,
+    F: for<'a> Fn(&'a Query<'mcx>) -> Option<&'a mcx::PgBox<'mcx, Expr<'mcx>>>,
 {
     let parse = run.resolve(root.parse);
     match pick(parse) {
@@ -10448,14 +10587,14 @@ where
 /// `((Const *) node)->constisnull` / `DatumGetInt64(constvalue)` over a limit/
 /// offset `Expr` that may be a `Const`. Returns `Some((isnull, value))` if the
 /// expression is a `Const`, else `None` (non-constant).
-fn nodeptr_as_const_isnull_value(expr: &Expr) -> Option<(bool, i64)> {
+fn nodeptr_as_const_isnull_value(expr: &Expr<'_>) -> Option<(bool, i64)> {
     expr.as_const()
         .map(|c| (c.constisnull, datum_get_int64(c)))
 }
 
 /// `DatumGetInt64(((Const *) est)->constvalue)` — read an `int8` from a `Const`'s
 /// by-value Datum.
-fn datum_get_int64(c: &types_nodes::primnodes::Const) -> i64 {
+fn datum_get_int64(c: &types_nodes::primnodes::Const<'_>) -> i64 {
     if c.constisnull {
         0
     } else {
@@ -10473,7 +10612,7 @@ fn extract_windowclause_offset<'mcx>(
     root: &PlannerInfo,
     i: usize,
     start: bool,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     let wc_node = &*run.resolve(root.parse).windowClause[i];
     let wc = match wc_node.node_tag() {
         ntag::T_WindowClause => wc_node.expect_windowclause(),
@@ -10503,7 +10642,7 @@ fn set_windowclause_offset<'mcx>(
     root: &PlannerInfo,
     i: usize,
     start: bool,
-    processed: Option<Expr>,
+    processed: Option<Expr<'mcx>>,
 ) -> PgResult<()> {
     let wrapped = match processed {
         Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
@@ -10551,7 +10690,7 @@ fn take_onconflict_list_expr<'mcx>(
     root: &PlannerInfo,
     which: OcList,
     i: usize,
-) -> Option<Expr> {
+) -> Option<Expr<'mcx>> {
     let oc = run.resolve_mut(root.parse).onConflict.as_deref_mut()?;
     match which {
         OcList::ArbiterElems => match oc.arbiterElems[i].as_expr() {
@@ -10580,7 +10719,7 @@ fn set_onconflict_list_expr<'mcx>(
     root: &PlannerInfo,
     which: OcList,
     i: usize,
-    processed: Option<Expr>,
+    processed: Option<Expr<'mcx>>,
 ) -> PgResult<()> {
     let oc = match run.resolve_mut(root.parse).onConflict.as_deref_mut() {
         Some(oc) => oc,
@@ -10619,7 +10758,7 @@ fn take_onconflict_scalar<'mcx>(
     run: &mut PlannerRun<'mcx>,
     root: &PlannerInfo,
     which: OcScalar,
-) -> Option<Expr> {
+) -> Option<Expr<'mcx>> {
     let oc = run.resolve_mut(root.parse).onConflict.as_deref_mut()?;
     let slot = match which {
         OcScalar::ArbiterWhere => &mut oc.arbiterWhere,
@@ -10644,7 +10783,7 @@ fn set_onconflict_scalar<'mcx>(
     run: &mut PlannerRun<'mcx>,
     root: &PlannerInfo,
     which: OcScalar,
-    processed: Option<Expr>,
+    processed: Option<Expr<'mcx>>,
 ) -> PgResult<()> {
     let oc = match run.resolve_mut(root.parse).onConflict.as_deref_mut() {
         Some(oc) => oc,
@@ -10697,34 +10836,78 @@ fn apply_tlist_labeling_impl<'mcx>(
         })
         .collect();
 
-    let dest = match plan.plan_head_mut().targetlist.as_deref_mut() {
-        Some(d) => d,
-        None => {
-            // An empty dest is only valid when the source is also empty.
-            assert!(
-                src_labels.is_empty(),
-                "apply_tlist_labeling: dest tlist is NIL but processed_tlist is not"
-            );
-            return Ok(());
+    // Apply the labeling to the topmost plan node, then propagate it down
+    // through tlist-passthrough (non-projecting) plan nodes.
+    //
+    // In C, pass-through plan nodes (Sort, IncrementalSort, Unique, Material,
+    // Memoize, LockRows, Limit, Hash, Gather, GatherMerge) reuse their child's
+    // `targetlist` *List pointer*, so the whole chain shares the same
+    // TargetEntry objects down to the bottom-most node that builds its own
+    // tlist (e.g. a SubqueryScan or table scan). `apply_tlist_labeling`'s single
+    // in-place mutation in C therefore labels every node in that shared chain.
+    // Our owned model gives each plan node its own TargetEntry copies, so we
+    // must walk the chain and apply the labeling to each node explicitly.
+    // Notably `trivial_subqueryscan` (setrefs.c) compares the SubqueryScan
+    // tlist's `resjunk` against its subplan's; without this propagation the
+    // SubqueryScan keeps `resjunk=false` on junk sort columns and is wrongly
+    // judged trivial and removed.
+    let mut cur: &mut Node<'mcx> = plan;
+    loop {
+        {
+            let dest = match cur.plan_head_mut().targetlist.as_deref_mut() {
+                Some(d) => d,
+                None => {
+                    // An empty dest is only valid when the source is also empty.
+                    assert!(
+                        src_labels.is_empty(),
+                        "apply_tlist_labeling: dest tlist is NIL but processed_tlist is not"
+                    );
+                    return Ok(());
+                }
+            };
+            // If lengths differ, the child projects to a different tlist (this
+            // node does not share its parent's TLEs); stop the descent.
+            if dest.len() != src_labels.len() {
+                break;
+            }
+            for (dest_tle, (resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk)) in
+                dest.iter_mut().zip(src_labels.iter())
+            {
+                debug_assert_eq!(dest_tle.resno, *resno);
+                dest_tle.resname = match resname {
+                    Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
+                    None => None,
+                };
+                dest_tle.ressortgroupref = *ressortgroupref;
+                dest_tle.resorigtbl = *resorigtbl;
+                dest_tle.resorigcol = *resorigcol;
+                dest_tle.resjunk = *resjunk;
+            }
         }
-    };
-    assert_eq!(
-        dest.len(),
-        src_labels.len(),
-        "apply_tlist_labeling: tlist length mismatch"
-    );
-    for (dest_tle, (resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk)) in
-        dest.iter_mut().zip(src_labels.into_iter())
-    {
-        debug_assert_eq!(dest_tle.resno, resno);
-        dest_tle.resname = match resname {
-            Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
-            None => None,
-        };
-        dest_tle.ressortgroupref = ressortgroupref;
-        dest_tle.resorigtbl = resorigtbl;
-        dest_tle.resorigcol = resorigcol;
-        dest_tle.resjunk = resjunk;
+
+        // Descend into the lefttree only through tlist-passthrough node types,
+        // mirroring the createplan.c make_* functions that set
+        // `plan->targetlist = lefttree->targetlist`.
+        let is_passthrough = matches!(
+            cur.node_tag(),
+            types_nodes::nodes::T_Sort
+                | types_nodes::nodeincrementalsort::T_IncrementalSort
+                | types_nodes::nodeunique::T_Unique
+                | types_nodes::nodes::T_Material
+                | types_nodes::nodememoize::T_Memoize
+                | types_nodes::nodes::T_LockRows
+                | types_nodes::nodes::T_Limit
+                | types_nodes::nodehashjoin::T_Hash
+                | types_nodes::nodegather::T_Gather
+                | types_nodes::nodegathermerge::T_GatherMerge
+        );
+        if !is_passthrough {
+            break;
+        }
+        match cur.plan_head_mut().lefttree.as_deref_mut() {
+            Some(child) => cur = child,
+            None => break,
+        }
     }
     Ok(())
 }
@@ -10842,10 +11025,19 @@ pub fn init_seams() {
     backend_optimizer_plan_planner_seams::subquery_planner_for_fromsubquery::set(
         subquery_planner_for_fromsubquery_impl,
     );
+    // The VALUE seams carry the parser-arena `'static` Expr across the typcache /
+    // execExpr serialization boundary (callers erase-in / clone-out); the public
+    // `expression_planner[_with_deps]` thread `'mcx` for in-planner direct callers,
+    // so bridge at the seam with a `clone_in(mcx)` round-trip (Expr is invariant).
     backend_optimizer_plan_planner_pc_seams::expression_planner_with_deps_value::set(
-        expression_planner_with_deps,
+        |mcx, expr| {
+            let (planned, oids, items) = expression_planner_with_deps(mcx, expr.clone_in(mcx)?)?;
+            Ok((planned.erase_lifetime(), oids, items))
+        },
     );
-    backend_optimizer_plan_planner_pc_seams::expression_planner_value::set(expression_planner);
+    backend_optimizer_plan_planner_pc_seams::expression_planner_value::set(|mcx, expr| {
+        Ok(expression_planner(mcx, expr.clone_in(mcx)?)?.erase_lifetime())
+    });
 
     // `preprocess_phv_expression(root, expr)` = `preprocess_expression(root, expr,
     // EXPRKIND_PHV)` (planner.c) — consumed by `extract_lateral_references`

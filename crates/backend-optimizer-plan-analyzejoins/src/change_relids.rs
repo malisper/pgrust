@@ -65,14 +65,18 @@ pub(crate) fn change_relids_in_node<'mcx>(
     // `(Node *) rinfo->clause` pointer). Taking the value by `mem::replace`
     // avoids a derived `Expr::clone`, which would panic on a context-allocated
     // child (Aggref/SubLink/SubPlan). The opaque `Node` is allocated in `mcx`.
-    let taken = core::mem::replace(root.node_mut(id), Expr::Var(Default::default()));
-    let mut node = Node::mk_expr(mcx, taken)?;
+    let taken: Expr<'static> =
+        core::mem::replace(root.node_mut(id), Expr::Var(Default::default()));
+    // Deep-clone the arena ('static) node into the walk arena `mcx`, mutate, then
+    // re-intern into the planner node arena via `erase_lifetime` (the sanctioned
+    // arena-intern boundary). A move would tie the `'static` arena slot to `'mcx`.
+    let mut node = Node::mk_expr(mcx, taken.clone_in(mcx)?)?;
     ChangeVarNodes(&mut node, ctx.rt_index, ctx.new_index, 0, mcx);
     // ChangeVarNodes never changes the top-level node kind for an Expr input.
     let walked = node
         .into_expr()
         .unwrap_or_else(|| unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"));
-    *root.node_mut(id) = walked;
+    *root.node_mut(id) = walked.erase_lifetime();
     Ok(())
 }
 
@@ -302,6 +306,67 @@ pub fn change_relids_in_query(
         .unwrap_or_else(|| unreachable!("ChangeVarNodes returned a non-Query for a Query input"));
     *run.resolve_mut(parse) = walked;
     Ok(())
+}
+
+/// Re-apply the self-join relid substitution to the planner's per-RT-index RTE
+/// copies (`root->simple_rte_array`).
+///
+/// In C, `setup_simple_rel_arrays` records `simple_rte_array[rti] =
+/// rt_fetch(rti, parse->rtable)`, i.e. the array entries are the *same*
+/// `RangeTblEntry *` pointers as live in `parse->rtable`. So when
+/// `remove_self_join_rel` runs `ChangeVarNodes((Node *) root->parse, ...)`, the
+/// rewrite of a LATERAL subquery/function/values/tablefunc RTE inside the range
+/// table is automatically visible through `simple_rte_array` too.
+///
+/// In this repo `simple_rte_array` carries `RangeTblEntryId` handles into a
+/// *separate* run store — `setup_simple_rel_arrays` clones each `parse.rtable`
+/// entry and interns a distinct copy. The `change_relids_in_query` walk above
+/// therefore rewrites only the `parse.rtable` copy; the `simple_rte_array` copy
+/// stays stale. `set_subquery_pathlist` later reads the LATERAL subquery out of
+/// `simple_rte_array` (not `parse.rtable`) and derives its nestloop params from
+/// it, so a stale varno there produces a Var referencing the *removed* relation
+/// (→ `non-LATERAL parameter required by subquery`).
+///
+/// This restores C's aliasing semantics by running the identical relid
+/// substitution over each interned RTE. We reuse `range_table_mutator`, which
+/// already knows how to descend into each RTE-kind's lateral-bearing subfields
+/// (subquery, functions, values_lists, tablefunc, RTE_RELATION tablesample),
+/// wrapping each interned RTE in a one-element slice. `sublevels_up` starts at 0,
+/// exactly as for the `parse` walk.
+pub fn change_relids_in_simple_rte_array<'mcx>(
+    run: &mut types_pathnodes::planner_run::PlannerRun<'mcx>,
+    simple_rte_array: &[types_pathnodes::RangeTblEntryId],
+    ctx: ReplaceRelidContext,
+) {
+    use backend_nodes_core::node_walker::range_table_mutator;
+    use backend_rewrite_core::change::{ChangeVarNodes_walker, ChangeVarNodesContext};
+
+    let mcx = run.mcx();
+    // simple_rte_array[0] is the unused RT-index-0 slot (a sentinel handle); the
+    // real per-RTE handles begin at index 1, mirroring rt_fetch's 1-based RT
+    // indices. Skip the 0-slot by position.
+    for &rte_id in simple_rte_array.iter().skip(1) {
+        // Move the interned RTE out, walk it as a one-element range table (which
+        // dispatches per rtekind to the lateral-bearing subfields), write it back.
+        let mut rte = core::mem::replace(
+            run.resolve_rte_mut(rte_id),
+            types_nodes::parsenodes::RangeTblEntry::new_in(mcx),
+        );
+        let mut context = ChangeVarNodesContext {
+            rt_index: ctx.rt_index,
+            new_index: ctx.new_index,
+            sublevels_up: 0,
+            mcx,
+        };
+        let mut cb: Option<backend_rewrite_core::change::ChangeVarNodesCallback> = None;
+        range_table_mutator(
+            core::slice::from_mut(&mut rte),
+            &mut |n| ChangeVarNodes_walker(n, &mut context, &mut cb),
+            0,
+            mcx,
+        );
+        *run.resolve_rte_mut(rte_id) = rte;
+    }
 }
 
 /// `ChangeVarNodesExtended((Node *) node, from, to, 0, replace_relid_callback)`

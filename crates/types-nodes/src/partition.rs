@@ -99,7 +99,7 @@ pub struct PartitionKeyData<'mcx> {
     /// `AttrNumber *partattrs` — attribute numbers, or 0 if it's an expr.
     pub partattrs: PgVec<'mcx, AttrNumber>,
     /// `List *partexprs` — expressions in the partitioning key.
-    pub partexprs: PgVec<'mcx, Expr>,
+    pub partexprs: PgVec<'mcx, Expr<'mcx>>,
     /// `Oid *partopfamily` — OIDs of operator families.
     pub partopfamily: PgVec<'mcx, Oid>,
     /// `Oid *partopcintype` — OIDs of opclass declared input data types.

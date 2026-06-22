@@ -43,3 +43,18 @@ types-pathnodes = { path = "../types-pathnodes" }
 backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-seams" }
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+# stxexprs decode leg: stringToNode + eval_const_expressions + fix_opfuncids,
+# examine_expression (via analyze), the executor per-row eval (make_build_data /
+# compute_expr_stats) and serialize_expr_stats (pg_statistic composite array).
+backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
+backend-commands-analyze-seams = { path = "../backend-commands-analyze-seams" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }
+backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }

@@ -358,7 +358,7 @@ const F_NEQJOINSEL: Oid = 106;
 
 /// `strip_array_coercion(node)` (selfuncs.c:1790) — peel binary-compatible
 /// `ArrayCoerceExpr` / `RelabelType` wrappers off an array-valued expression.
-pub(crate) fn strip_array_coercion(node: &Expr) -> &Expr {
+pub(crate) fn strip_array_coercion<'a, 'mcx>(node: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     let mut node = node;
     loop {
         if let Some(acoerce) = node.as_arraycoerceexpr() {
@@ -402,8 +402,8 @@ fn saop_element_selec<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     operator: Oid,
-    leftop: &Expr,
-    elem: &Expr,
+    leftop: &Expr<'mcx>,
+    elem: &Expr<'mcx>,
     inputcollid: Oid,
     is_join_clause: bool,
     var_relid: i32,
@@ -424,11 +424,11 @@ fn saop_element_selec<'mcx>(
 /// estimation runs through the installed `restriction_selectivity` /
 /// `join_selectivity` seams, which look up the operator's `oprrest`/`oprjoin`
 /// and invoke it exactly as the C inner loop's `FunctionCall4Coll` does.
-pub(crate) fn scalararraysel<'mcx>(
+pub(crate) fn scalararraysel<'mcx, 'a>(
     mcx: Mcx<'mcx>,
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    clause: &Expr,
+    clause: &Expr<'a>,
     is_join_clause: bool,
     var_relid: i32,
     jointype: JoinType,
@@ -449,9 +449,11 @@ pub(crate) fn scalararraysel<'mcx>(
     let leftop = saop.args[0].clone();
     let rightop = saop.args[1].clone();
 
-    // Aggressively reduce both sides to constants.
-    let leftop = clausesel::estimate_expression_value::call(run, root, &leftop)?;
-    let rightop = clausesel::estimate_expression_value::call(run, root, &rightop)?;
+    // Aggressively reduce both sides to constants. The fold seam yields the
+    // planner-arena `'static` form; bring each into this run's `mcx` (invariant
+    // `Expr`) for the downstream `'mcx`-keyed selectivity helpers.
+    let leftop: Expr<'mcx> = clausesel::estimate_expression_value::call(run, root, &leftop)?.clone_in(mcx)?;
+    let rightop: Expr<'mcx> = clausesel::estimate_expression_value::call(run, root, &rightop)?.clone_in(mcx)?;
 
     // Get nominal (after relabeling) element type of rightop.
     let nominal_element_type =
@@ -713,10 +715,10 @@ pub fn seam_rowcomparesel<'mcx>(
 }
 
 /// Seam body for `scalararraysel`.
-pub fn seam_scalararraysel<'mcx>(
+pub fn seam_scalararraysel<'mcx, 'a>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    clause: &Expr,
+    clause: &Expr<'a>,
     is_join_clause: bool,
     var_relid: i32,
     jointype: JoinType,

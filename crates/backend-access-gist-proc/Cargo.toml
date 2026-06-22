@@ -26,4 +26,10 @@ backend-utils-adt-network-gist-seams = { path = "../backend-utils-adt-network-gi
 types-network = { path = "../types-network" }
 backend-utils-adt-rangetypes-gist = { path = "../backend-utils-adt-rangetypes-gist" }
 types-rangetypes = { path = "../types-rangetypes" }
+backend-utils-adt-tsgistidx = { path = "../backend-utils-adt-tsgistidx" }
+backend-utils-adt-tsquery-core = { path = "../backend-utils-adt-tsquery-core" }
+backend-utils-adt-ts-small = { path = "../backend-utils-adt-ts-small" }
+backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+types-tsearch = { path = "../types-tsearch" }
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }

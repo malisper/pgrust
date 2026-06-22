@@ -53,7 +53,7 @@ type CDatum = types_tuple::backend_access_common_heaptuple::Datum<'static>;
 
 /// `DatumGetBool(d)` — `((bool) ((d) & 1))` (matches `clauses.c`).
 #[inline]
-fn datum_get_bool(d: &CDatum) -> bool {
+fn datum_get_bool(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -> bool {
     (d.as_usize() & 1) != 0
 }
 
@@ -105,7 +105,7 @@ fn list_member(list: &[Expr], datum: &Expr) -> bool {
 /// each not-already-present cell's pointer (no node copy); the owned model moves
 /// each surviving element from `list2` into the result (consuming `list2`),
 /// which avoids deep-cloning Aggref-bearing clauses.
-fn list_union(mut result: Vec<Expr>, list2: Vec<Expr>) -> Vec<Expr> {
+fn list_union<'mcx>(mut result: Vec<Expr<'mcx>>, list2: Vec<Expr<'mcx>>) -> Vec<Expr<'mcx>> {
     for cell in list2 {
         if !list_member(&result, &cell) {
             result.push(cell);
@@ -117,13 +117,13 @@ fn list_union(mut result: Vec<Expr>, list2: Vec<Expr>) -> Vec<Expr> {
 /// `list_difference(list1, list2)` — generic list difference using `equal()`:
 /// the elements of `list1` not `equal()` to any element of `list2`. Consumes
 /// `list1` (its surviving elements move into the result).
-fn list_difference(list1: Vec<Expr>, list2: &[Expr]) -> Vec<Expr> {
+fn list_difference<'mcx>(list1: Vec<Expr<'mcx>>, list2: &[Expr<'mcx>]) -> Vec<Expr<'mcx>> {
     /* C: if (list2 == NIL) return list_copy(list1); */
     if list2.is_empty() {
         return list1;
     }
 
-    let mut result: Vec<Expr> = Vec::new();
+    let mut result: Vec<Expr<'mcx>> = Vec::new();
     for datum in list1 {
         if !list_member(list2, &datum) {
             result.push(datum);
@@ -148,7 +148,7 @@ fn list_difference(list1: Vec<Expr>, list2: &[Expr]) -> Vec<Expr> {
 /// non-NULL node (the `if (node == NULL) elog(ERROR, ...)` guard is enforced
 /// by [`negate_clause_opt`] for callers holding an `Option`), so the API
 /// takes an owned `Expr`.
-pub fn negate_clause(node: Expr) -> PgResult<Expr> {
+pub fn negate_clause<'mcx>(node: Expr<'mcx>) -> PgResult<Expr<'mcx>> {
     match node {
         Expr::Const(c) => {
             /* NOT NULL is still NULL */
@@ -303,7 +303,7 @@ pub fn negate_clause(node: Expr) -> PgResult<Expr> {
 /// The owned `Expr` has no NULL, so callers holding an `Option<Expr>` route
 /// through this wrapper, which performs the NULL check and then delegates to
 /// [`negate_clause`].
-pub fn negate_clause_opt(node: Option<Expr>) -> PgResult<Expr> {
+pub fn negate_clause_opt<'mcx>(node: Option<Expr<'mcx>>) -> PgResult<Expr<'mcx>> {
     match node {
         None /* should not happen */ => {
             /* C: elog(ERROR, "can't negate an empty subexpression") */
@@ -323,9 +323,9 @@ pub fn negate_clause_opt(node: Option<Expr>) -> PgResult<Expr> {
 /// an empty output).
 pub fn canonicalize_qual<'mcx>(
     mcx: Mcx<'mcx>,
-    qual: Option<Expr>,
+    qual: Option<Expr<'mcx>>,
     is_check: bool,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     /* Quick exit for empty qual */
     let qual = match qual {
         None => return Ok(None),
@@ -354,7 +354,7 @@ pub fn canonicalize_qual<'mcx>(
 /// Input is the arglist of an AND clause.
 ///
 /// C: `static List *pull_ands(List *andlist)`                     (prepqual.c:322)
-fn pull_ands(andlist: Vec<Expr>) -> Vec<Expr> {
+fn pull_ands<'mcx>(andlist: Vec<Expr<'mcx>>) -> Vec<Expr<'mcx>> {
     let mut out_list: Vec<Expr> = Vec::new();
 
     for subexpr in andlist {
@@ -375,7 +375,7 @@ fn pull_ands(andlist: Vec<Expr>) -> Vec<Expr> {
 /// Input is the arglist of an OR clause.
 ///
 /// C: `static List *pull_ors(List *orlist)`                       (prepqual.c:349)
-fn pull_ors(orlist: Vec<Expr>) -> Vec<Expr> {
+fn pull_ors<'mcx>(orlist: Vec<Expr<'mcx>>) -> Vec<Expr<'mcx>> {
     let mut out_list: Vec<Expr> = Vec::new();
 
     for subexpr in orlist {
@@ -398,7 +398,7 @@ fn pull_ors(orlist: Vec<Expr>) -> Vec<Expr> {
 /// structure, eg in a WHERE clause, "x OR NULL::boolean" is reduced to "x".
 ///
 /// C: `static Expr *find_duplicate_ors(Expr *qual, bool is_check)` (prepqual.c:406)
-fn find_duplicate_ors<'mcx>(mcx: Mcx<'mcx>, qual: Expr, is_check: bool) -> PgResult<Expr> {
+fn find_duplicate_ors<'mcx>(mcx: Mcx<'mcx>, qual: Expr<'mcx>, is_check: bool) -> PgResult<Expr<'mcx>> {
     if is_orclause(&qual) {
         let be = qual.expect_into_boolexpr();
         let mut orlist: Vec<Expr> = Vec::new();
@@ -492,7 +492,7 @@ fn find_duplicate_ors<'mcx>(mcx: Mcx<'mcx>, qual: Expr, is_check: bool) -> PgRes
 /// clause, or maybe even a single subexpression).
 ///
 /// C: `static Expr *process_duplicate_ors(List *orlist)`         (prepqual.c:517)
-fn process_duplicate_ors<'mcx>(mcx: Mcx<'mcx>, mut orlist: Vec<Expr>) -> PgResult<Expr> {
+fn process_duplicate_ors<'mcx>(mcx: Mcx<'mcx>, mut orlist: Vec<Expr<'mcx>>) -> PgResult<Expr<'mcx>> {
     /* OR of no inputs reduces to FALSE */
     if orlist.is_empty() {
         return Ok(Expr::Const(make_bool_const(false, false)));

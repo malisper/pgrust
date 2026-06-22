@@ -49,7 +49,7 @@ seam_core::seam!(
     /// value (the typcache stores it at cache lifetime; `Expr` is lifetime-free).
     /// `ctx` is the "Domain constraints" memory context C plans into; the owner
     /// uses it only as scratch (the returned `Expr` is owned, not arena-bound).
-    pub fn plan_check_expr(conbin: &str, ctx: DomainCtxHandle) -> PgResult<Expr>
+    pub fn plan_check_expr(conbin: &str, ctx: DomainCtxHandle) -> PgResult<Expr<'static>>
 );
 
 seam_core::seam!(

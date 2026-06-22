@@ -501,7 +501,7 @@ seam_core::seam!(
     /// lookup.
     pub fn exec_type_from_expr_list<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        expr_list: &[types_nodes::primnodes::Expr],
+        expr_list: &[types_nodes::primnodes::Expr<'mcx>],
     ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
 );
 

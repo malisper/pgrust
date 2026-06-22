@@ -77,7 +77,7 @@ pub fn make_outerjoininfo(
     inner_join_rels: &Relids,
     jointype: types_pathnodes::JoinType,
     rtindex: i32,
-    clause: &[Expr],
+    clause: &[Expr<'_>],
 ) -> PgResult<SpecialJoinInfo> {
     // We should not see RIGHT JOIN here because left/right were switched earlier.
     debug_assert!(jointype != JOIN_INNER);
@@ -385,7 +385,7 @@ pub fn compute_semijoin_info(
     mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     sjinfo: &mut SpecialJoinInfo,
-    clause: &[Expr],
+    clause: &[Expr<'_>],
 ) -> PgResult<()> {
     // Initialize semijoin-related fields in case we can't unique-ify.
     sjinfo.semi_can_btree = false;
@@ -553,7 +553,7 @@ fn del_member(a: Relids, x: i32) -> Relids {
 
 /// `pull_varnos(root, (Node *) clause)` over an implicit-AND `List *` of quals:
 /// the relids of an AND-list is the union of the per-conjunct relids.
-fn pull_varnos_clause(root: &PlannerInfo, clause: &[Expr]) -> Relids {
+fn pull_varnos_clause(root: &PlannerInfo, clause: &[Expr<'_>]) -> Relids {
     let mut acc: Relids = None;
     for c in clause {
         let v = eqext::pull_varnos::call(root, c);
@@ -566,7 +566,7 @@ fn pull_varnos_clause(root: &PlannerInfo, clause: &[Expr]) -> Relids {
 /// is non-nullable for the AND iff it is non-nullable for some conjunct, i.e. the
 /// union over conjuncts (`find_nonnullable_rels` of a `BoolExpr(AND)` unions its
 /// arms' results). Routed through the per-`Expr` cycle-break seam.
-fn find_nonnullable_rels_clause(clause: &[Expr]) -> Relids {
+fn find_nonnullable_rels_clause(clause: &[Expr<'_>]) -> Relids {
     let mut acc: Relids = None;
     for c in clause {
         let v = initext::find_nonnullable_rels_expr::call(c);
@@ -580,7 +580,7 @@ fn find_nonnullable_rels_clause(clause: &[Expr]) -> Relids {
 /// (logical OR over conjuncts).
 fn contain_placeholder_references_to_clause(
     root: &PlannerInfo,
-    clause: &[Expr],
+    clause: &[Expr<'_>],
     relid: i32,
 ) -> bool {
     clause

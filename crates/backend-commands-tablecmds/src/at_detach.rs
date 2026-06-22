@@ -154,6 +154,16 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
     // constraints.
     RemoveInheritance(mcx, &partRel, rel, false)?;
 
+    // Make RemoveInheritance's pg_attribute updates (the per-column attinhcount
+    // decrements) visible before DetachPartitionFinalize's identity-drop loop
+    // re-updates the same pg_attribute tuples via ATExecDropIdentity. Without
+    // this, an identity column that was inherited from the partitioned parent
+    // (attinhcount > 0) is updated twice in the same command → "tuple already
+    // updated by self". (C reaches the identity drop with the syscache still
+    // serving the pre-decrement tuple version; our owned-snapshot model needs
+    // the explicit command-counter bump to get the same effect.)
+    backend_access_transam_xact::CommandCounterIncrement()?;
+
     // Ensure foreign keys still hold after this detach.
     ATDetachCheckNoForeignKeyRefs(mcx, &partRel)?;
 
@@ -474,19 +484,34 @@ fn DetachPartitionFinalize<'mcx>(
     backend_catalog_heap::ClearPartitionBound(mcx, partRel)?;
 
     // Drop identity property from all identity columns of partition.
-    let tupdesc = &partRel.rd_att;
-    for attno in 0..tupdesc.natts {
-        let attr = tupdesc.attr(attno as usize);
-        if !attr.attisdropped && attr.attidentity != 0 {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                .errmsg(
-                    "DETACH PARTITION of a partition with an identity column is not yet supported \
-                     (ATExecDropIdentity unported)"
-                        .to_string(),
-                )
-                .into_error());
+    //
+    //   for (attno = 0; attno < RelationGetNumberOfAttributes(partRel); attno++)
+    //     if (!attr->attisdropped && attr->attidentity)
+    //       ATExecDropIdentity(partRel, NameStr(attr->attname), false,
+    //                          AccessExclusiveLock, true, true);
+    //
+    // Collect the names first so we don't read the relcache descriptor while
+    // ATExecDropIdentity mutates the catalog.
+    let mut identity_cols: Vec<String> = Vec::new();
+    {
+        let tupdesc = &partRel.rd_att;
+        for attno in 0..tupdesc.natts {
+            let attr = tupdesc.attr(attno as usize);
+            if !attr.attisdropped && attr.attidentity != 0 {
+                identity_cols.push(String::from_utf8_lossy(attr.attname.name_str()).into_owned());
+            }
         }
+    }
+    for colname in &identity_cols {
+        crate::at_identity::ATExecDropIdentity(
+            mcx,
+            partRel,
+            colname,
+            false,
+            AccessExclusiveLock,
+            true,
+            true,
+        )?;
     }
 
     if OidIsValid(default_part_oid) {

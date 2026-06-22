@@ -101,7 +101,7 @@ fn datum_get_bool(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -
 struct EceContext<'mcx> {
     mcx: Mcx<'mcx>,
     /// Constant test value for the CASE construct currently being examined.
-    case_val: Option<Expr>,
+    case_val: Option<Expr<'mcx>>,
     /// Unsafe (estimation-time-only) transformations OK?
     estimate: bool,
     /// `boundParams` (clauses.c:63) — the bound external-parameter values; the
@@ -121,7 +121,7 @@ struct EceContext<'mcx> {
 
 /// C: `Node *eval_const_expressions(PlannerInfo *root, Node *node)`
 /// (clauses.c:2254). Safe transformations only.
-pub fn eval_const_expressions(mcx: Mcx<'_>, node: Expr) -> PgResult<Expr> {
+pub fn eval_const_expressions<'mcx>(mcx: Mcx<'mcx>, node: Expr<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut ctx = EceContext {
         mcx,
         case_val: None,
@@ -140,11 +140,11 @@ pub fn eval_const_expressions(mcx: Mcx<'_>, node: Expr) -> PgResult<Expr> {
 /// The simple-Query/COPY path uses [`eval_const_expressions`] (None params);
 /// the custom-plan path (`BuildCachedPlan`) reaches here through the planner's
 /// `preprocess_expression`.
-pub fn eval_const_expressions_with_params(
-    mcx: Mcx<'_>,
-    node: Expr,
+pub fn eval_const_expressions_with_params<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Expr<'mcx>,
     bound_params: types_nodes::params::ParamListInfo,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let mut ctx = EceContext {
         mcx,
         case_val: None,
@@ -159,7 +159,7 @@ pub fn eval_const_expressions_with_params(
 /// C: `Node *estimate_expression_value(PlannerInfo *root, Node *node)`
 /// (clauses.c:2395). Estimation mode: unsafe transformations OK (stable
 /// functions fold; PlaceHolderVars strip).
-pub fn estimate_expression_value(mcx: Mcx<'_>, node: Expr) -> PgResult<Expr> {
+pub fn estimate_expression_value<'mcx>(mcx: Mcx<'mcx>, node: Expr<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut ctx = EceContext {
         mcx,
         case_val: None,
@@ -175,17 +175,17 @@ pub fn estimate_expression_value(mcx: Mcx<'_>, node: Expr) -> PgResult<Expr> {
 // ece_* helpers (clauses.c:2409-2435)
 // ---------------------------------------------------------------------------
 
-fn placeholder_node() -> Expr {
+fn placeholder_node<'mcx>() -> Expr<'mcx> {
     Expr::Const(Const::default())
 }
 
-fn bool_const(value: bool, isnull: bool) -> Expr {
+fn bool_const<'mcx>(value: bool, isnull: bool) -> Expr<'mcx> {
     Expr::Const(make_bool_const(value, isnull))
 }
 
 /// `ece_generic_processing(node)` — copy the node, const-simplifying its
 /// arguments via `expression_tree_mutator`.
-fn ece_generic_processing(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn ece_generic_processing<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut err: Option<PgError> = None;
     let out = expression_tree_mutator(node, &mut |child| {
         if err.is_some() {
@@ -206,7 +206,7 @@ fn ece_generic_processing(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// `MUTATE` over a `Vec<Expr>` child list.
-fn mutate_list(list: Vec<Expr>, ctx: &mut EceContext) -> PgResult<Vec<Expr>> {
+fn mutate_list<'mcx>(list: Vec<Expr<'mcx>>, ctx: &mut EceContext<'mcx>) -> PgResult<Vec<Expr<'mcx>>> {
     let mut out: Vec<Expr> = Vec::with_capacity(list.len());
     for n in list {
         out.push(mutate(n, ctx)?);
@@ -215,7 +215,7 @@ fn mutate_list(list: Vec<Expr>, ctx: &mut EceContext) -> PgResult<Vec<Expr>> {
 }
 
 /// `MUTATE` over an `Option<Box<Expr>>` child.
-fn mutate_opt(opt: Option<Box<Expr>>, ctx: &mut EceContext) -> PgResult<Option<Box<Expr>>> {
+fn mutate_opt<'mcx>(opt: Option<Box<Expr<'mcx>>>, ctx: &mut EceContext<'mcx>) -> PgResult<Option<Box<Expr<'mcx>>>> {
     match opt {
         Some(b) => Ok(Some(Box::new(mutate(*b, ctx)?))),
         None => Ok(None),
@@ -237,7 +237,7 @@ fn ece_function_is_safe(funcid: Oid, ctx: &EceContext) -> PgResult<bool> {
 
 /// `ece_evaluate_expr(node)` — `evaluate_expr` with the node's own
 /// type/typmod/collation.
-fn ece_evaluate_expr(node: Expr, ctx: &EceContext) -> PgResult<Expr> {
+fn ece_evaluate_expr<'mcx>(node: Expr<'mcx>, ctx: &EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let t = expr_type(Some(&node))?;
     let tm = expr_typmod(Some(&node))?;
     let c = expr_collation(Some(&node))?;
@@ -245,7 +245,7 @@ fn ece_evaluate_expr(node: Expr, ctx: &EceContext) -> PgResult<Expr> {
 }
 
 /// Unwrap a child the C tree dereferences unconditionally.
-fn req(opt: Option<Box<Expr>>, what: &str) -> PgResult<Expr> {
+fn req<'mcx>(opt: Option<Box<Expr<'mcx>>>, what: &str) -> PgResult<Expr<'mcx>> {
     opt.map(|b| *b)
         .ok_or_else(|| PgError::error(format!("eval_const_expressions: unexpected NULL {what}")))
 }
@@ -254,7 +254,7 @@ fn req(opt: Option<Box<Expr>>, what: &str) -> PgResult<Expr> {
 /// matching bound external-parameter value is available (and is OK to
 /// substitute — either we are in estimate mode or the slot is flagged
 /// `PARAM_FLAG_CONST`), fold the Param into a `Const`; otherwise copy the Param.
-fn arm_param<'mcx>(node: Expr, ctx: &EceContext<'mcx>) -> PgResult<Expr> {
+fn arm_param<'mcx>(node: Expr<'mcx>, ctx: &EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let param = match &node {
         Expr::Param(p) => p,
         _ => unreachable!("arm_param: node is not a Param"),
@@ -315,7 +315,7 @@ fn arm_param<'mcx>(node: Expr, ctx: &EceContext<'mcx>) -> PgResult<Expr> {
 // The mutator (clauses.c:2440)
 // ---------------------------------------------------------------------------
 
-fn mutate(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn mutate<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     // since this function recurses, it could be driven to stack overflow
     ctx.depth += 1;
     if ctx.depth > MAX_FOLD_DEPTH {
@@ -329,7 +329,7 @@ fn mutate(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
     r
 }
 
-fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn mutate_inner<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     match node.expr_tag() {
         // T_Param (clauses.c:2452).
         etag::T_Param => arm_param(node, ctx),
@@ -432,10 +432,11 @@ fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 // ---------------------------------------------------------------------------
 
 /// T_WindowFunc arm (clauses.c:2497).
-fn arm_windowfunc(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_windowfunc<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut wf = node.expect_into_windowfunc();
     let form = clauses_seam::get_func_form::call(wf.winfnoid)?;
     let args = expand_function_arguments(
+        ctx.mcx,
         core::mem::take(&mut wf.args),
         false,
         wf.wintype,
@@ -450,7 +451,7 @@ fn arm_windowfunc(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_FuncExpr arm (clauses.c:2552).
-fn arm_funcexpr(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_funcexpr<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let result_typmod = expr_typmod(Some(&node))?;
     let mut f = node.expect_into_funcexpr();
     let args = core::mem::take(&mut f.args);
@@ -474,7 +475,7 @@ fn arm_funcexpr(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_OpExpr arm (clauses.c:2589).
-fn arm_opexpr(mut node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_opexpr<'mcx>(mut node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     // Need to get OID of underlying function.
     set_opfuncid(node.as_opexpr_mut().expect("OpExpr"))?;
     let mut op = node.expect_into_opexpr();
@@ -506,7 +507,7 @@ fn arm_opexpr(mut node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_DistinctExpr arm (clauses.c:2643).
-fn arm_distinctexpr(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_distinctexpr<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut d = node.expect_into_distinctexpr();
     d.args = mutate_list(core::mem::take(&mut d.args), ctx)?;
 
@@ -561,7 +562,7 @@ fn arm_distinctexpr(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_NullIfExpr arm (clauses.c:2749).
-fn arm_nullifexpr(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_nullifexpr<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let node = ece_generic_processing(node, ctx)?;
     let mut ne = node.expect_into_nullifexpr();
 
@@ -588,7 +589,7 @@ fn arm_nullifexpr(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_ScalarArrayOpExpr arm (clauses.c:2780).
-fn arm_saop(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_saop<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut node = ece_generic_processing(node, ctx)?;
     set_sa_opfuncid(node.as_scalararrayopexpr_mut().expect("SAOP"))?;
     let opfuncid = node.as_scalararrayopexpr().expect("SAOP").opfuncid;
@@ -603,7 +604,7 @@ fn arm_saop(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 // ---------------------------------------------------------------------------
 
 /// T_BoolExpr arm (clauses.c:2802).
-fn arm_boolexpr(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_boolexpr<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let be = node.expect_into_boolexpr();
     match be.boolop {
         BoolExprType::OR_EXPR => {
@@ -660,7 +661,7 @@ fn arm_boolexpr(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 
 /// `make_orclause` returns `Expr` already in this repo.
 #[inline]
-fn make_orclause_(args: Vec<Expr>) -> Expr {
+fn make_orclause_<'mcx>(args: Vec<Expr<'mcx>>) -> Expr<'mcx> {
     backend_nodes_core::makefuncs::make_orclause(args)
 }
 
@@ -679,12 +680,12 @@ fn is_andclause(n: &Expr) -> bool {
 }
 
 /// `simplify_or_arguments` (clauses.c:3792).
-fn simplify_or_arguments(
-    args: Vec<Expr>,
-    ctx: &mut EceContext,
+fn simplify_or_arguments<'mcx>(
+    args: Vec<Expr<'mcx>>,
+    ctx: &mut EceContext<'mcx>,
     have_null: &mut bool,
     force_true: &mut bool,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     let mut newargs: Vec<Expr> = Vec::new();
     let mut unprocessed: VecDeque<Expr> = args.into();
     while let Some(arg) = unprocessed.pop_front() {
@@ -718,12 +719,12 @@ fn simplify_or_arguments(
 }
 
 /// `simplify_and_arguments` (clauses.c:3898).
-fn simplify_and_arguments(
-    args: Vec<Expr>,
-    ctx: &mut EceContext,
+fn simplify_and_arguments<'mcx>(
+    args: Vec<Expr<'mcx>>,
+    ctx: &mut EceContext<'mcx>,
     have_null: &mut bool,
     force_false: &mut bool,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     let mut newargs: Vec<Expr> = Vec::new();
     let mut unprocessed: VecDeque<Expr> = args.into();
     while let Some(arg) = unprocessed.pop_front() {
@@ -758,10 +759,10 @@ fn simplify_and_arguments(
 
 /// `simplify_boolean_equality(opno, args)` (clauses.c:3992). Returns
 /// `Ok(Ok(simplified))` or `Ok(Err(args))` (the unchanged list).
-fn simplify_boolean_equality(
+fn simplify_boolean_equality<'mcx>(
     opno: Oid,
-    mut args: Vec<Expr>,
-) -> PgResult<Result<Expr, Vec<Expr>>> {
+    mut args: Vec<Expr<'mcx>>,
+) -> PgResult<Result<Expr<'mcx>, Vec<Expr<'mcx>>>> {
     if args.len() != 2 {
         return Err(PgError::error(format!(
             "boolean-equality operator with {} arguments",
@@ -818,7 +819,7 @@ fn simplify_boolean_equality(
 // ---------------------------------------------------------------------------
 
 /// T_CoerceViaIO arm (clauses.c:2967).
-fn arm_coerceviaio(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_coerceviaio<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut cv = node.expect_into_coerceviaio();
     let arg = req(cv.arg.take(), "CoerceViaIO.arg")?;
 
@@ -880,7 +881,7 @@ fn arm_coerceviaio(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_ArrayCoerceExpr arm (clauses.c:3053).
-fn arm_arraycoerce(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_arraycoerce<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut ac = node.expect_into_arraycoerceexpr();
     ac.arg = mutate_opt(ac.arg, ctx)?;
 
@@ -906,7 +907,7 @@ fn arm_arraycoerce(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_CaseExpr arm (clauses.c:3120).
-fn arm_case(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_case<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut caseexpr = node.expect_into_caseexpr();
 
     // Simplify the test expression, if any.
@@ -985,7 +986,7 @@ fn arm_case(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_CoalesceExpr arm (clauses.c:3291).
-fn arm_coalesce(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_coalesce<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut coalesce = node.expect_into_coalesceexpr();
     let mut newargs: Vec<Expr> = Vec::new();
     for arg in core::mem::take(&mut coalesce.args) {
@@ -1015,7 +1016,7 @@ fn arm_coalesce(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_FieldSelect arm (clauses.c:3359).
-fn arm_fieldselect(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_fieldselect<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut fselect = node.expect_into_fieldselect();
     let arg = mutate(req(fselect.arg.take(), "FieldSelect.arg")?, ctx)?;
 
@@ -1104,7 +1105,7 @@ fn rowtype_field_matches(
 }
 
 /// T_NullTest arm (clauses.c:3456).
-fn arm_nulltest(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_nulltest<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut ntest = node.expect_into_nulltest();
     let arg = mutate(req(ntest.arg.take(), "NullTest.arg")?, ctx)?;
 
@@ -1154,7 +1155,7 @@ fn arm_nulltest(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_BooleanTest arm (clauses.c:3547).
-fn arm_booleantest(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_booleantest<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     use types_nodes::primnodes::BoolTestType::*;
     let mut btest = node.expect_into_booleantest();
     let arg = mutate(req(btest.arg.take(), "BooleanTest.arg")?, ctx)?;
@@ -1176,7 +1177,7 @@ fn arm_booleantest(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_CoerceToDomain arm (clauses.c:3607).
-fn arm_coercetodomain(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_coercetodomain<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut cdomain = node.expect_into_coercetodomain();
     let arg = mutate(req(cdomain.arg.take(), "CoerceToDomain.arg")?, ctx)?;
     if ctx.estimate || !clauses_seam::domain_has_constraints::call(cdomain.resulttype)? {
@@ -1197,7 +1198,7 @@ fn arm_coercetodomain(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_ConvertRowtypeExpr arm (clauses.c:3669).
-fn arm_convertrowtype(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_convertrowtype<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut cre = node.expect_into_convertrowtypeexpr();
     let mut arg = mutate(req(cre.arg.take(), "ConvertRowtypeExpr.arg")?, ctx)?;
 
@@ -1218,7 +1219,7 @@ fn arm_convertrowtype(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 }
 
 /// T_JsonValueExpr arm (clauses.c:2876).
-fn arm_jsonvalueexpr(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
+fn arm_jsonvalueexpr<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
     let mut jve = node.expect_into_jsonvalueexpr();
     let formatted = match jve.formatted_expr.take() {
         Some(f) => Some(mutate(*f, ctx)?),
@@ -1240,22 +1241,22 @@ fn arm_jsonvalueexpr(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 
 /// `simplify_function` (clauses.c:4061). Three strategies: execute
 /// (`evaluate_function`), consult the planner support function, or inline.
-fn simplify_function(
+fn simplify_function<'mcx>(
     funcid: Oid,
     result_type: Oid,
     result_typmod: i32,
     result_collid: Oid,
     input_collid: Oid,
-    mut args: Vec<Expr>,
+    mut args: Vec<Expr<'mcx>>,
     funcvariadic: bool,
     process_args: bool,
     allow_non_const: bool,
-    ctx: &mut EceContext,
-) -> PgResult<(Option<Expr>, Vec<Expr>)> {
+    ctx: &mut EceContext<'mcx>,
+) -> PgResult<(Option<Expr<'mcx>>, Vec<Expr<'mcx>>)> {
     let form = clauses_seam::get_func_form::call(funcid)?;
 
     if process_args {
-        args = expand_function_arguments(args, false, result_type, funcid, &form)?;
+        args = expand_function_arguments(ctx.mcx, args, false, result_type, funcid, &form)?;
         args = mutate_list(args, ctx)?;
     }
 
@@ -1309,23 +1310,25 @@ fn simplify_function(
 /// `include_out_arguments = true`. For a CALL we must match against OUT
 /// arguments too, so when `proallargtypes` is present we use it (and its length)
 /// in place of `proargtypes`/`pronargs`, exactly as the C does.
-pub fn expand_function_arguments(
-    args: Vec<Expr>,
+pub fn expand_function_arguments<'mcx>(
+    mcx: Mcx<'mcx>,
+    args: Vec<Expr<'mcx>>,
     include_out_arguments: bool,
     result_type: Oid,
     funcid: Oid,
     form: &PgProcSimple,
-) -> PgResult<Vec<Expr>> {
-    expand_function_arguments_inner(args, include_out_arguments, result_type, funcid, form)
+) -> PgResult<Vec<Expr<'mcx>>> {
+    expand_function_arguments_inner(mcx, args, include_out_arguments, result_type, funcid, form)
 }
 
-fn expand_function_arguments_inner(
-    mut args: Vec<Expr>,
+fn expand_function_arguments_inner<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut args: Vec<Expr<'mcx>>,
     include_out_arguments: bool,
     result_type: Oid,
     funcid: Oid,
     form: &PgProcSimple,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     // If we are asked to match to OUT arguments, use proallargtypes (which
     // includes those); otherwise use proargtypes. If proallargtypes is null we
     // always use proargtypes.
@@ -1349,29 +1352,30 @@ fn expand_function_arguments_inner(
     let has_named_args = args.iter().any(|a| a.is_namedargexpr());
 
     if has_named_args {
-        args = reorder_function_arguments(args, pronargs, funcid, eff_form)?;
-        args = recheck_cast_function_args(args, result_type, eff_form)?;
+        args = reorder_function_arguments(mcx, args, pronargs, funcid, eff_form)?;
+        args = recheck_cast_function_args(mcx, args, result_type, eff_form)?;
     } else if (args.len() as i32) < pronargs {
-        args = add_function_defaults(args, pronargs, funcid, eff_form)?;
-        args = recheck_cast_function_args(args, result_type, eff_form)?;
+        args = add_function_defaults(mcx, args, pronargs, funcid, eff_form)?;
+        args = recheck_cast_function_args(mcx, args, result_type, eff_form)?;
     }
     Ok(args)
 }
 
 /// `reorder_function_arguments` (clauses.c:4258).
-fn reorder_function_arguments(
-    args: Vec<Expr>,
+fn reorder_function_arguments<'mcx>(
+    mcx: Mcx<'mcx>,
+    args: Vec<Expr<'mcx>>,
     pronargs: i32,
     funcid: Oid,
     form: &PgProcSimple,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     let nargsprovided = args.len() as i32;
     debug_assert!(nargsprovided <= pronargs);
     if pronargs < 0 || pronargs > FUNC_MAX_ARGS {
         return Err(PgError::error("too many function arguments"));
     }
 
-    let mut argarray: Vec<Option<Expr>> = (0..pronargs).map(|_| None).collect();
+    let mut argarray: Vec<Option<Expr<'mcx>>> = (0..pronargs).map(|_| None).collect();
     let mut i = 0usize;
     for arg in args {
         if !arg.is_namedargexpr() {
@@ -1392,7 +1396,7 @@ fn reorder_function_arguments(
     }
 
     if nargsprovided < pronargs {
-        let defaults = clauses_seam::fetch_function_defaults::call(funcid)?;
+        let defaults = clauses_seam::fetch_function_defaults::call(mcx, funcid)?;
         let mut i = pronargs - form.pronargdefaults as i32;
         for d in defaults {
             if i >= 0 && (i as usize) < argarray.len() && argarray[i as usize].is_none() {
@@ -1402,7 +1406,7 @@ fn reorder_function_arguments(
         }
     }
 
-    let mut out: Vec<Expr> = Vec::with_capacity(argarray.len());
+    let mut out: Vec<Expr<'mcx>> = Vec::with_capacity(argarray.len());
     for slot in argarray {
         let n = slot.ok_or_else(|| {
             PgError::error("function call is missing an argument with no default")
@@ -1413,14 +1417,15 @@ fn reorder_function_arguments(
 }
 
 /// `add_function_defaults` (clauses.c:4328).
-fn add_function_defaults(
-    mut args: Vec<Expr>,
+fn add_function_defaults<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut args: Vec<Expr<'mcx>>,
     pronargs: i32,
     funcid: Oid,
     _form: &PgProcSimple,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     let nargsprovided = args.len() as i32;
-    let mut defaults = clauses_seam::fetch_function_defaults::call(funcid)?;
+    let mut defaults = clauses_seam::fetch_function_defaults::call(mcx, funcid)?;
     let ndelete = nargsprovided + defaults.len() as i32 - pronargs;
     if ndelete < 0 {
         return Err(PgError::error("not enough default arguments"));
@@ -1437,35 +1442,47 @@ fn add_function_defaults(
 /// `recheck_cast_function_args` (clauses.c:4382) — the
 /// `enforce_generic_type_consistency` + `make_fn_arguments` legs ride the seam;
 /// the FUNC_MAX_ARGS / pronargs sanity checks stay in-crate.
-fn recheck_cast_function_args(
-    args: Vec<Expr>,
+fn recheck_cast_function_args<'mcx>(
+    mcx: Mcx<'mcx>,
+    args: Vec<Expr<'mcx>>,
     result_type: Oid,
     form: &PgProcSimple,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     if args.len() as i32 > FUNC_MAX_ARGS {
         return Err(PgError::error("too many function arguments"));
     }
     debug_assert_eq!(args.len(), form.proargtypes.len());
-    clauses_seam::recheck_cast_function_args::call(
-        args,
+    // The seam re-runs `make_fn_arguments`/`coerce_type`, which operate over the
+    // parser/coerce `'static` arena; erase the args into it for the call and
+    // re-localize the (possibly cast) result back into `mcx`. The cast nodes the
+    // seam produces live in a backend-lifetime context, so `'static` is honest
+    // and the `clone_in` is the faithful copy back into the caller's arena.
+    let static_args: Vec<Expr<'static>> = args.into_iter().map(|e| e.erase_lifetime()).collect();
+    let out = clauses_seam::recheck_cast_function_args::call(
+        static_args,
         result_type,
         form.proargtypes.clone(),
         form.prorettype,
-    )
+    )?;
+    let mut result: Vec<Expr<'mcx>> = Vec::with_capacity(out.len());
+    for e in out.iter() {
+        result.push(e.clone_in(mcx)?);
+    }
+    Ok(result)
 }
 
 /// `evaluate_function` (clauses.c:4427).
-fn evaluate_function(
+fn evaluate_function<'mcx>(
     funcid: Oid,
     result_type: Oid,
     result_typmod: i32,
     result_collid: Oid,
     input_collid: Oid,
-    args: &[Expr],
+    args: &[Expr<'mcx>],
     funcvariadic: bool,
     form: &PgProcSimple,
-    ctx: &EceContext,
-) -> PgResult<Option<Expr>> {
+    ctx: &EceContext<'mcx>,
+) -> PgResult<Option<Expr<'mcx>>> {
     // Can't simplify if it returns a set or RECORD.
     if form.proretset || form.prorettype == RECORDOID {
         return Ok(None);
@@ -1503,7 +1520,8 @@ fn evaluate_function(
     }
 
     // All-Const arguments: exactly one fmgr invocation.
-    let mut pairs: Vec<(CDatum, bool, Oid)> = Vec::with_capacity(args.len());
+    let mut pairs: Vec<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool, Oid)> =
+        Vec::with_capacity(args.len());
     for a in args.iter() {
         let c = a.expect_const();
         pairs.push((c.constvalue.clone(), c.constisnull, c.consttype));
@@ -1545,16 +1563,16 @@ fn evaluate_function(
 /// expression" gate + `check_sql_fn_retval` + `substitute_actual_parameters` +
 /// usecount machinery rides the `inline_sql_function` seam (it cannot live in
 /// this crate, which must not depend on the parser).
-fn inline_function(
+fn inline_function<'mcx>(
     funcid: Oid,
     result_type: Oid,
     result_collid: Oid,
     input_collid: Oid,
-    args: &[Expr],
+    args: &[Expr<'mcx>],
     funcvariadic: bool,
     form: &PgProcSimple,
-    ctx: &mut EceContext,
-) -> PgResult<Option<Expr>> {
+    ctx: &mut EceContext<'mcx>,
+) -> PgResult<Option<Expr<'mcx>>> {
     // Forget it if the function is not SQL-language or has other showstopper
     // properties. (prokind / proretset / pronargs are paranoia, as in C.)
     if !form.prolang_is_sql
@@ -1672,13 +1690,36 @@ const PROKIND_FUNCTION: u8 = b'f';
 /// `FuncExpr`/`OpExpr`, `NullIfExpr` — through the `fmgr_call` seam; every other
 /// shape rides the executor-backed `evaluate_expr_fallback` seam (NEVER silently
 /// returned unsimplified, because C does fold them).
-pub fn evaluate_expr<'mcx>(
+/// Bridge to the executor-backed `evaluate_expr_fallback` seam, which is declared
+/// over the planner-arena `'static` `Expr` (the executor evaluates a self-contained
+/// const expression and returns a fresh `Const`). The input is interned to the
+/// arena `'static` for the transient evaluation, and the fresh `Const` result is
+/// re-localized into the caller's `mcx` via `clone_in` so the `'mcx`-threaded
+/// `evaluate_expr` returns an arena-correct node (a deep copy of a self-contained
+/// `Const` — observationally identical to C's in-place result).
+fn evaluate_expr_fallback_in_mcx<'mcx>(
     mcx: Mcx<'mcx>,
-    mut expr: Expr,
+    expr: Expr<'mcx>,
     result_type: Oid,
     result_typmod: i32,
     result_collation: Oid,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
+    let folded = clauses_seam::evaluate_expr_fallback::call(
+        expr.erase_lifetime(),
+        result_type,
+        result_typmod,
+        result_collation,
+    )?;
+    folded.clone_in(mcx)
+}
+
+pub fn evaluate_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut expr: Expr<'mcx>,
+    result_type: Oid,
+    result_typmod: i32,
+    result_collation: Oid,
+) -> PgResult<Expr<'mcx>> {
     // Make sure any opfuncids are filled in.
     fix_opfuncids(&mut expr)?;
 
@@ -1700,12 +1741,7 @@ pub fn evaluate_expr<'mcx>(
                     result_collation,
                     Some(&expr),
                 ),
-                None => clauses_seam::evaluate_expr_fallback::call(
-                    expr,
-                    result_type,
-                    result_typmod,
-                    result_collation,
-                ),
+                None => evaluate_expr_fallback_in_mcx(mcx, expr, result_type, result_typmod, result_collation),
             }
         }
         etag::T_OpExpr => {
@@ -1724,12 +1760,7 @@ pub fn evaluate_expr<'mcx>(
                     result_collation,
                     Some(&expr),
                 ),
-                None => clauses_seam::evaluate_expr_fallback::call(
-                    expr,
-                    result_type,
-                    result_typmod,
-                    result_collation,
-                ),
+                None => evaluate_expr_fallback_in_mcx(mcx, expr, result_type, result_typmod, result_collation),
             }
         }
         etag::T_NullIfExpr => {
@@ -1779,31 +1810,24 @@ pub fn evaluate_expr<'mcx>(
                         )?))
                     }
                 }
-                None => clauses_seam::evaluate_expr_fallback::call(
-                    expr,
-                    result_type,
-                    result_typmod,
-                    result_collation,
-                ),
+                None => evaluate_expr_fallback_in_mcx(mcx, expr, result_type, result_typmod, result_collation),
             }
         }
         // SAOP / MinMax / Row / SubscriptingRef / FieldSelect-on-Const /
         // ConvertRowtype / ArrayCoerce / SQLValueFunction / multidim ArrayExpr /
         // anything else: loud-defer to the executor-backed seam.
-        _ => clauses_seam::evaluate_expr_fallback::call(
-            expr,
-            result_type,
-            result_typmod,
-            result_collation,
-        ),
+        _ => evaluate_expr_fallback_in_mcx(mcx, expr, result_type, result_typmod, result_collation),
     }
 }
 
 /// All-`Const` argument extraction: `Some(triples)` iff every argument is Const.
 /// Each triple is `(value, isnull, consttype)` — the Const's CONCRETE type (what
 /// `get_fn_expr_argtype` would resolve for the call).
-fn const_datum_args(args: &[Expr]) -> Option<Vec<(CDatum, bool, Oid)>> {
-    let mut pairs: Vec<(CDatum, bool, Oid)> = Vec::with_capacity(args.len());
+fn const_datum_args<'mcx>(
+    args: &[Expr<'mcx>],
+) -> Option<Vec<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool, Oid)>> {
+    let mut pairs: Vec<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool, Oid)> =
+        Vec::with_capacity(args.len());
     for a in args {
         let c = a.as_const()?;
         pairs.push((c.constvalue.clone(), c.constisnull, c.consttype));
@@ -1825,8 +1849,8 @@ fn fmgr_fold<'mcx>(
     // so a const-folded polymorphic function reads its declared types; thread the
     // synthesized call node (`None` for the cast/coerce-fold sites that have no
     // FuncExpr/OpExpr, matching C's NULL fn_expr there).
-    fn_expr: Option<&Expr>,
-) -> PgResult<Expr> {
+    fn_expr: Option<&Expr<'mcx>>,
+) -> PgResult<Expr<'mcx>> {
     // Check permission to call the function, exactly as ExecInitFunc does
     // (execExpr.c:2715) for the executor-backed fold path. The in-crate
     // fast path here stands in for ExecInitExpr/ExecEvalExpr, which would
@@ -1875,16 +1899,16 @@ fn fmgr_fold<'mcx>(
 /// the executor-backed `evaluate_expr_fallback` over a single-dimension
 /// `ArrayExpr`; the array constructor itself is not duplicated here. The
 /// non-const path builds an `ArrayExpr`.
-pub fn make_SAOP_expr(
-    mcx: Mcx<'_>,
+pub fn make_SAOP_expr<'mcx>(
+    mcx: Mcx<'mcx>,
     oper: Oid,
-    leftexpr: Expr,
+    leftexpr: Expr<'mcx>,
     coltype: Oid,
     arraycollid: Oid,
     inputcollid: Oid,
-    exprs: Vec<Expr>,
+    exprs: Vec<Expr<'mcx>>,
     have_non_const: bool,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     let arraytype = match lsyscache::get_array_type::call(coltype)? {
         Some(t) => t,
         None => return Ok(None),

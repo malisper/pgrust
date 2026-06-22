@@ -223,6 +223,56 @@ pub use nodefunctionscan::{
     FunctionScanPerFuncState, FunctionScanState, T_FunctionScanState,
 };
 pub use primnodes::{TableFunc, TableFuncType, TFT_JSON_TABLE, TFT_XMLTABLE, Expr, TargetEntry, Var};
+
+// ---- Expr-`'mcx` campaign: `'static` alias bridge (Phase 0) -----------------
+// During the Expr-`'mcx` lifetime campaign, every Expr-embedding payload struct
+// gained an `<'mcx>` parameter. To let not-yet-converted consumer crates compile
+// UNCHANGED, we export a `<Name>Static = <Name><'static>` alias for each: a
+// consumer that names the `…Static` alias keeps today's `'static` behavior
+// (no safety regression or gain), while a converted consumer names the
+// `<'mcx>` form and gets the borrow-check. The aliases are dropped in the final
+// phase once every consumer names `<'mcx>`.
+pub type ExprStatic = primnodes::Expr<'static>;
+pub type ConstStatic = primnodes::Const<'static>;
+pub type OpExprStatic = primnodes::OpExpr<'static>;
+pub type ScalarArrayOpExprStatic = primnodes::ScalarArrayOpExpr<'static>;
+pub type BoolExprStatic = primnodes::BoolExpr<'static>;
+pub type AggrefStatic = primnodes::Aggref<'static>;
+pub type GroupingFuncStatic = primnodes::GroupingFunc<'static>;
+pub type WindowFuncStatic = primnodes::WindowFunc<'static>;
+pub type SubscriptingRefStatic = primnodes::SubscriptingRef<'static>;
+pub type FuncExprStatic = primnodes::FuncExpr<'static>;
+pub type NamedArgExprStatic = primnodes::NamedArgExpr<'static>;
+pub type SubLinkStatic = primnodes::SubLink<'static>;
+pub type FieldSelectStatic = primnodes::FieldSelect<'static>;
+pub type FieldStoreStatic = primnodes::FieldStore<'static>;
+pub type RelabelTypeStatic = primnodes::RelabelType<'static>;
+pub type CoerceViaIOStatic = primnodes::CoerceViaIO<'static>;
+pub type ArrayCoerceExprStatic = primnodes::ArrayCoerceExpr<'static>;
+pub type ConvertRowtypeExprStatic = primnodes::ConvertRowtypeExpr<'static>;
+pub type CollateExprStatic = primnodes::CollateExpr<'static>;
+pub type CaseExprStatic = primnodes::CaseExpr<'static>;
+pub type CaseWhenStatic = primnodes::CaseWhen<'static>;
+pub type ArrayExprStatic = primnodes::ArrayExpr<'static>;
+pub type RowExprStatic = primnodes::RowExpr<'static>;
+pub type RowCompareExprStatic = primnodes::RowCompareExpr<'static>;
+pub type CoalesceExprStatic = primnodes::CoalesceExpr<'static>;
+pub type MinMaxExprStatic = primnodes::MinMaxExpr<'static>;
+pub type XmlExprStatic = primnodes::XmlExpr<'static>;
+pub type JsonValueExprStatic = primnodes::JsonValueExpr<'static>;
+pub type JsonConstructorExprStatic = primnodes::JsonConstructorExpr<'static>;
+pub type JsonIsPredicateStatic = primnodes::JsonIsPredicate<'static>;
+pub type JsonBehaviorStatic = primnodes::JsonBehavior<'static>;
+pub type JsonExprStatic = primnodes::JsonExpr<'static>;
+pub type NullTestStatic = primnodes::NullTest<'static>;
+pub type BooleanTestStatic = primnodes::BooleanTest<'static>;
+pub type CoerceToDomainStatic = primnodes::CoerceToDomain<'static>;
+pub type InferenceElemStatic = primnodes::InferenceElem<'static>;
+pub type ReturningExprStatic = primnodes::ReturningExpr<'static>;
+pub type PlaceHolderVarStatic = primnodes::PlaceHolderVar<'static>;
+pub type SubPlanExprStatic = primnodes::SubPlanExpr<'static>;
+pub type AlternativeSubPlanExprStatic = primnodes::AlternativeSubPlanExpr<'static>;
+pub type TargetEntryStatic = primnodes::TargetEntry<'static>;
 pub use nodehashjoin::{
     HashJoin, HashJoinState, HashJoinTableData, T_HashJoin, T_HashJoinState,
 };

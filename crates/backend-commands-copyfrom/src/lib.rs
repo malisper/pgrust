@@ -15,11 +15,15 @@
 //! path exercised end to end is the **plain-table, text-format, all-columns,
 //! single-insert** case (`CIM_SINGLE`), including row/statement/transition-table
 //! **triggers** (BEFORE/INSTEAD-OF/AFTER ROW and BEFORE/AFTER STATEMENT, with
-//! transition capture). The partition-routing / FDW-batch / multi-insert-buffer
-//! branches are ported faithfully in structure but reach machinery that is gated
-//! behind a loud `ereport(ERROR)` (those paths bottom out on keystone-blocked
-//! subsystems — partition tuple routing and the FDW api). Triggers force
-//! `CIM_SINGLE` in C, so the per-row single-insert path here is exact.
+//! transition capture). **Partition tuple routing** is wired end to end on the
+//! single-insert path: a partitioned target sets up `ExecSetupPartitionTupleRouting`,
+//! routes each row through `ExecFindPartition` (with per-partition trigger
+//! recompute, root→child tuple conversion, partition-constraint check) and tears
+//! down with `ExecCleanupTupleRouting`. The FDW-batch / multi-insert-buffer
+//! branches remain gated (foreign tables `ereport(ERROR)`; the multi-insert
+//! buffer is not ported). Triggers force `CIM_SINGLE` in C, so the per-row
+//! single-insert path here is exact, and C also forces the single-insert
+//! realization whenever `proute` is active (`insertMethod == CIM_SINGLE || proute`).
 //!
 //! # By-reference input values (resolved)
 //!
@@ -42,8 +46,8 @@ use std::collections::HashMap;
 
 use mcx::Mcx;
 use types_copy::{
-    AttrValue, CopyFileHandle, CopyGetDataResult, CopyParseOptions, CopyParseState,
-    CopySource, EolType, INPUT_BUF_SIZE, RAW_BUF_SIZE,
+    AttrValue, CopyFileHandle, CopyGetDataResult, CopyLogVerbosityChoice, CopyOnErrorChoice,
+    CopyParseOptions, CopyParseState, CopySource, EolType, INPUT_BUF_SIZE, RAW_BUF_SIZE,
 };
 use types_core::primitive::{AttrNumber, Oid};
 use types_tuple::backend_access_common_heaptuple::Datum as RichDatum;
@@ -471,7 +475,7 @@ pub struct CopyFromStateData<'mcx> {
     /// and compile them into `cstate.defexprs` (+ build `defmap`/`num_defaults`)
     /// in `CopyFrom`, before the row loop. This is a faithful split of the same
     /// C steps — no behavior change, only the allocation context differs.
-    pub raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, types_nodes::Expr>>>,
+    pub raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, types_nodes::Expr<'mcx>>>>,
 }
 
 /* ===========================================================================
@@ -498,7 +502,10 @@ pub fn BeginCopyFrom<'mcx>(
     filename: Option<&str>,
     is_program: bool,
     data_source_cb: Option<CopyDataSourceCb>,
-    where_clause: mcx::PgVec<'mcx, types_nodes::primnodes::Expr>,
+    where_clause: mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>,
+    force_notnull_flags: mcx::PgVec<'mcx, bool>,
+    force_null_flags: mcx::PgVec<'mcx, bool>,
+    convert_select_flags: Option<mcx::PgVec<'mcx, bool>>,
 ) -> PgResult<CopyFromStateData<'mcx>> {
     let binary = opts.binary;
 
@@ -645,9 +652,9 @@ pub fn BeginCopyFrom<'mcx>(
         in_functions,
         typioparams,
         defexprs,
-        convert_select_flags: None,
-        force_notnull_flags: vec![false; num_phys_attrs],
-        force_null_flags: vec![false; num_phys_attrs],
+        convert_select_flags: convert_select_flags.map(|v| v.into_iter().collect()),
+        force_notnull_flags: force_notnull_flags.into_iter().collect(),
+        force_null_flags: force_null_flags.into_iter().collect(),
         defaults: vec![false; num_phys_attrs],
         num_defaults: 0,
         defmap: Vec::new(),
@@ -663,6 +670,18 @@ pub fn BeginCopyFrom<'mcx>(
     cstate.raw_buf.clear();
     cstate.raw_buf.resize((RAW_BUF_SIZE + 1) as usize, 0);
     cstate.raw_buf_len = 0;
+
+    // Set up soft error handler for ON_ERROR (copyfrom.c:1617-1632). When
+    // `on_error != STOP`, install an ErrorSaveContext so `InputFunctionCallSafe`
+    // routes recoverable input-function errors into the sink (returning false /
+    // None) instead of raising a hard ERROR. IGNORE wants no DETAIL.
+    if cstate.opts.on_error != CopyOnErrorChoice::COPY_ON_ERROR_STOP {
+        let details_wanted =
+            cstate.opts.on_error != CopyOnErrorChoice::COPY_ON_ERROR_IGNORE;
+        cstate.escontext = Some(types_error::SoftErrorContext::new(details_wanted));
+    } else {
+        cstate.escontext = None;
+    }
 
     // C (copyfrom.c BeginCopyFrom): `input_buf` is a distinct INPUT_BUF_SIZE+1
     // buffer only when transcoding; otherwise it aliases `raw_buf`
@@ -833,11 +852,21 @@ pub fn EndCopyFrom(state: CopyFromStateData<'_>) -> PgResult<()> {
 pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> PgResult<u64> {
     let relkind = state.cstate.rel.rd_rel.relkind;
 
-    // The target must be a plain, foreign, or partitioned relation, or an
-    // INSTEAD OF INSERT view. We support plain tables; the rest is gated.
+    // The target must be a plain, foreign, or partitioned relation, or have an
+    // INSTEAD OF INSERT row trigger (currently only allowed on views), in which
+    // case the per-row loop routes the tuple through ExecIRInsertTriggers
+    // (copyfrom.c:809-840).
+    let has_instead_insert_row = state
+        .cstate
+        .rel
+        .rd_trigdesc
+        .as_ref()
+        .map(|td| td.trig_insert_instead_row)
+        .unwrap_or(false);
     if relkind != RELKIND_RELATION
         && relkind != RELKIND_FOREIGN_TABLE
         && relkind != RELKIND_PARTITIONED_TABLE
+        && !has_instead_insert_row
     {
         let name = state.cstate.rel.rd_rel.relname.as_str();
         if relkind == RELKIND_VIEW {
@@ -868,10 +897,9 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         }
     }
 
-    if relkind == RELKIND_FOREIGN_TABLE || relkind == RELKIND_PARTITIONED_TABLE {
+    if relkind == RELKIND_FOREIGN_TABLE {
         return Err(unsupported(
-            "CopyFrom: foreign-table / partitioned-table COPY FROM (FDW api / \
-             partition tuple routing) is not yet wired",
+            "CopyFrom: foreign-table COPY FROM (FDW api) is not yet wired",
         ));
     }
 
@@ -917,14 +945,57 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         // ExecOpenIndices(resultRelInfo, false);
         backend_executor_execIndexing_seams::exec_open_indices::call(estate, rri, false)?;
 
-        // We do not set up a ModifyTableState / FDW init / batch size. The fake
-        // ModifyTableState C builds (copyfrom.c:930-936) exists only so FDWs and
-        // ExecFindPartition work (both gated here); its only field the trigger
-        // path reads is mt_transition_capture, which we carry as the local
-        // `transition_capture` below. insertMethod is always CIM_SINGLE on the
-        // ported (plain-table) path: when BEFORE/INSTEAD-OF row triggers exist C
-        // forces CIM_SINGLE (copyfrom.c:995-1006), and the multi-insert buffer is
-        // not ported, so the per-row single-insert path below is the only one.
+        // Set up a ModifyTableState so we can let partition tuple routing init
+        // itself (copyfrom.c:930-936). The C builds this fake mtstate so FDWs and
+        // ExecFindPartition work; the FDW init/batch-size legs are gated (no
+        // foreign tables reach here), but ExecFindPartition / the partition-init
+        // legs read `mtstate.resultRelInfo[0]`, `mtstate.rootResultRelInfo`,
+        // `mtstate.plan_node` (the C `(ModifyTable *) ps.plan`, NULL here →
+        // ONCONFLICT_NONE / no WCO/RETURNING/MERGE legs) and
+        // `mtstate.mt_transition_capture`. insertMethod is always CIM_SINGLE on
+        // the ported path: when BEFORE/INSTEAD-OF row triggers exist C forces
+        // CIM_SINGLE (copyfrom.c:995-1006), and the multi-insert buffer is not
+        // ported, so the per-row single-insert path below is the only one — but
+        // it carries the `proute` (partition tuple routing) branch exactly as C
+        // does in the `insertMethod == CIM_SINGLE || proute` realization.
+        //
+        //   mtstate = makeNode(ModifyTableState);
+        //   mtstate->ps.plan = NULL; mtstate->ps.state = estate;
+        //   mtstate->operation = CMD_INSERT; mtstate->mt_nrels = 1;
+        //   mtstate->resultRelInfo = resultRelInfo;
+        //   mtstate->rootResultRelInfo = resultRelInfo;
+        let mut mtstate_rels: mcx::PgVec<'mcx, RriId> = mcx::PgVec::new_in(mcx);
+        mtstate_rels.push(rri);
+        let mut mtstate: types_nodes::ModifyTableState<'mcx> =
+            types_nodes::ModifyTableState {
+                ps: types_nodes::execnodes::PlanStateData::default(),
+                plan_node: None,
+                operation: types_nodes::nodes::CmdType::CMD_INSERT,
+                onConflictAction: types_nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
+                canSetTag: false,
+                mt_done: false,
+                resultRelInfo: mtstate_rels,
+                rootResultRelInfo: Some(rri),
+                mt_epqstate: types_nodes::execnodes::EPQState::default(),
+                fireBSTriggers: true,
+                mt_resultOidAttno: 0,
+                mt_lastResultOid: types_core::primitive::InvalidOid,
+                mt_lastResultIndex: 0,
+                mt_resultOidHash: None,
+                mt_root_tuple_slot: None,
+                mt_partition_tuple_routing: None,
+                mt_transition_capture: None,
+                mt_oc_transition_capture: None,
+                mt_merge_subcommands: 0,
+                mt_merge_action: None,
+                mt_merge_pending_not_matched: None,
+                mt_merge_inserted: 0.0,
+                mt_merge_updated: 0.0,
+                mt_merge_deleted: 0.0,
+                mt_updateColnosLists: None,
+                mt_mergeActionLists: None,
+                mt_mergeJoinConditions: None,
+            };
 
         // singleslot = table_slot_create(rri->ri_RelationDesc, &estate->es_tupleTable);
         // bistate = GetBulkInsertState();
@@ -1002,26 +1073,55 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
 
         // If there are any triggers with transition tables on the named
         // relation, be prepared to capture transition tuples
-        // (copyfrom.c:963-974). C assigns to both cstate->transition_capture and
-        // mtstate->mt_transition_capture; here it is the local `transition_capture`
-        // owner threaded into the AR (per-row) and AS (statement) trigger calls.
-        // `None` is the C NULL (no transition tables wanted for CMD_INSERT).
-        let mut transition_capture = backend_commands_trigger_seams::make_transition_capture_state::call(
+        // (copyfrom.c:963-974). C assigns the same pointer to both
+        // cstate->transition_capture and mtstate->mt_transition_capture; the
+        // owned model stores the one owner in mtstate.mt_transition_capture so
+        // ExecFindPartition can read it (the C `mtstate` is passed to
+        // ExecFindPartition), and the per-row / statement trigger calls borrow it
+        // back from there. `None` is the C NULL (no transition tables wanted for
+        // CMD_INSERT).
+        mtstate.mt_transition_capture = backend_commands_trigger_seams::make_transition_capture_state::call(
             mcx,
             estate,
             rri,
             types_nodes::nodes::CmdType::CMD_INSERT,
         )?;
 
+        // If the named relation is a partitioned table, initialize state for
+        // CopyFrom tuple routing (copyfrom.c:978-981).
+        //   if (cstate->rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+        //       proute = ExecSetupPartitionTupleRouting(estate, cstate->rel);
+        let mut proute: Option<mcx::PgBox<'mcx, types_nodes::PartitionTupleRouting<'mcx>>> =
+            if relkind == RELKIND_PARTITIONED_TABLE {
+                let rel = relation_alias(estate, rri);
+                Some(
+                    backend_executor_execPartition_seams::exec_setup_partition_tuple_routing::call(
+                        mcx, estate, rel,
+                    )?,
+                )
+            } else {
+                None
+            };
+
         // has_before_insert_row_trig / has_instead_insert_row_trig
         // (copyfrom.c:1090-1094): precomputed from the result-rel's trigger
         // descriptor; the per-row BEFORE/INSTEAD-OF calls are gated on these.
-        let (has_before_insert_row_trig, has_instead_insert_row_trig) = {
+        let (mut has_before_insert_row_trig, mut has_instead_insert_row_trig) = {
             match estate.result_rel(rri).ri_TrigDesc.as_ref() {
                 Some(td) => (td.trig_insert_before_row, td.trig_insert_instead_row),
                 None => (false, false),
             }
         };
+
+        // `target_resultRelInfo` (copyfrom.c:782) — the named/root relation, used
+        // for the tableOid stamp and the statement-level (AS) triggers. The
+        // per-row `result_rel_info` starts equal to it and is reassigned to the
+        // routed leaf partition when `proute` is active (copyfrom.c:781,1215).
+        let target_rri = rri;
+        let mut result_rel_info = rri;
+        // prevResultRelInfo (copyfrom.c:788) — the partition the previous tuple
+        // routed to, so the per-partition trigger recompute only happens on change.
+        let mut prev_result_rel_info: Option<RriId> = None;
 
         // Check BEFORE STATEMENT insertion triggers (copyfrom.c:1102). It
         // can't change the COPY itself, but it can do anything else, including
@@ -1047,11 +1147,49 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 None => break,
             };
 
+            // if (cstate->opts.on_error == COPY_ON_ERROR_IGNORE &&
+            //     cstate->escontext->error_occurred) { ...skip... } (copyfrom.c:1152)
+            // A soft error occurred while parsing this row: NextCopyFrom already
+            // counted it (cstate.num_errors) and emitted any VERBOSE notice, so
+            // just reset the sink and skip the tuple, honoring REJECT_LIMIT.
+            if state.cstate.opts.on_error == CopyOnErrorChoice::COPY_ON_ERROR_IGNORE
+                && state
+                    .cstate
+                    .escontext
+                    .as_ref()
+                    .is_some_and(|c| c.error_occurred())
+            {
+                if let Some(c) = state.cstate.escontext.as_mut() {
+                    c.reset_error_occurred();
+                }
+
+                if state.cstate.opts.reject_limit > 0
+                    && state.cstate.num_errors > state.cstate.opts.reject_limit
+                {
+                    return Err(PgError::error(format!(
+                        "skipped more than REJECT_LIMIT ({}) rows due to data type incompatibility",
+                        state.cstate.opts.reject_limit
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION)
+                    .add_context(copy_from_error_context(&state.cstate)));
+                }
+
+                continue;
+            }
+
+            // `myslot` is the slot the per-row body operates on. On the
+            // single-insert path it is `singleslot`; with `proute` and a
+            // root→child conversion map it is reassigned to the partition's
+            // `ri_PartitionTupleSlot` below (copyfrom.c:1127-1129,1282-1286).
+            let mut myslot = singleslot;
+
             // Store the values/nulls into the slot (ExecStoreVirtualTuple).
             store_row_into_slot(estate, singleslot, &row)?;
 
             // Constraints and where clause might reference the tableoid column,
-            // so (re-)initialize tts_tableOid before evaluating them.
+            // so (re-)initialize tts_tableOid before evaluating them. C uses the
+            // root/target relation's OID here (copyfrom.c:1184); after routing it
+            // is re-stamped to the leaf partition below.
             estate.slot_mut(singleslot).tts_tableOid = result_oid;
 
             // if (cstate->whereClause) { econtext->ecxt_scantuple = myslot;
@@ -1067,6 +1205,76 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 }
             }
 
+            // Determine the partition to insert the tuple into (copyfrom.c:1205-
+            // 1321). With `proute`, ExecFindPartition routes `myslot` to its leaf
+            // partition (raising an error if none is suitable), and we recompute
+            // the per-partition trigger flags + the root→child tuple conversion.
+            if let Some(proute) = proute.as_mut() {
+                // resultRelInfo = ExecFindPartition(mtstate, target_resultRelInfo,
+                //                                   proute, myslot, estate);
+                result_rel_info = backend_executor_execPartition_seams::exec_find_partition::call(
+                    mcx,
+                    &mut mtstate,
+                    target_rri,
+                    proute,
+                    myslot,
+                    estate,
+                )?;
+
+                if prev_result_rel_info != Some(result_rel_info) {
+                    // Determine which triggers exist on this partition.
+                    let (b, i) = match estate.result_rel(result_rel_info).ri_TrigDesc.as_ref() {
+                        Some(td) => (td.trig_insert_before_row, td.trig_insert_instead_row),
+                        None => (false, false),
+                    };
+                    has_before_insert_row_trig = b;
+                    has_instead_insert_row_trig = i;
+
+                    // We always use the single-insert path here, so the
+                    // leafpart_use_multi_insert / buffer-flush branch is gated.
+                    // ReleaseBulkInsertStatePin(bistate) on partition change so a
+                    // freshly-pinned partition page is used.
+                    backend_access_heap_heapam::ReleaseBulkInsertStatePin(&mut bistate);
+                    prev_result_rel_info = Some(result_rel_info);
+                }
+
+                // If we're capturing transition tuples, remember the original
+                // unconverted tuple unless the partition has a BEFORE trigger that
+                // could change it (copyfrom.c:1268-1271).
+                if mtstate.mt_transition_capture.is_some() {
+                    let tcs_original = if !has_before_insert_row_trig {
+                        Some(myslot)
+                    } else {
+                        None
+                    };
+                    if let Some(tc) = mtstate.mt_transition_capture.as_mut() {
+                        tc.tcs_original_insert_tuple = tcs_original;
+                    }
+                }
+
+                // We might need to convert from the root rowtype to the partition
+                // rowtype (copyfrom.c:1273-1318, CIM_SINGLE branch). When the
+                // rowtypes already match ExecGetRootToChildMap returns NULL and no
+                // conversion is needed.
+                let map = backend_executor_execUtils_seams::exec_get_root_to_child_map::call(
+                    mcx, estate, result_rel_info,
+                )?;
+                if let Some(attr_map) = map {
+                    let new_slot = estate
+                        .result_rel(result_rel_info)
+                        .ri_PartitionTupleSlot
+                        .expect("routed partition with a conversion map has a tuple slot");
+                    myslot = backend_executor_execTuples_seams::execute_attr_map_slot_explicit::call(
+                        estate, &attr_map, myslot, new_slot,
+                    )?;
+                }
+
+                // ensure that triggers etc see the right relation
+                //   myslot->tts_tableOid = RelationGetRelid(resultRelInfo->...);
+                let leaf_oid = relation_alias(estate, result_rel_info).rd_id;
+                estate.slot_mut(myslot).tts_tableOid = leaf_oid;
+            }
+
             // BEFORE ROW INSERT Triggers (copyfrom.c:1324-1331). A BEFORE ROW
             // trigger may modify the slot (in place) or return "do nothing" — in
             // which case this row is skipped (not inserted, not counted). The C
@@ -1075,7 +1283,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             // behaviorally identical here since nothing else follows in the loop.
             if has_before_insert_row_trig
                 && !backend_commands_trigger_seams::exec_br_insert_triggers::call(
-                    estate, rri, singleslot,
+                    estate, result_rel_info, myslot,
                 )?
             {
                 // "do nothing": skip this tuple.
@@ -1088,7 +1296,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             if has_instead_insert_row_trig {
                 // ExecIRInsertTriggers(estate, resultRelInfo, myslot).
                 backend_commands_trigger_seams::exec_ir_insert_triggers::call(
-                    estate, rri, singleslot,
+                    estate, result_rel_info, myslot,
                 )?;
             } else {
                 // Compute stored generated columns (copyfrom.c:1347-1350): if the
@@ -1096,7 +1304,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 // evaluate the per-column generation expressions and write them
                 // back into the slot before checking constraints.
                 {
-                    let has_gen_stored = relation_alias(estate, rri)
+                    let has_gen_stored = relation_alias(estate, result_rel_info)
                         .rd_att
                         .constr
                         .as_ref()
@@ -1106,24 +1314,48 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                         backend_executor_nodeModifyTable_seams::exec_compute_stored_generated::call(
                             mcx,
                             estate,
-                            rri,
-                            singleslot,
+                            result_rel_info,
+                            myslot,
                             types_nodes::nodes::CmdType::CMD_INSERT,
                         )?;
                     }
                 }
 
                 // ExecConstraints: if the relation has constraints, check them.
-                if relation_alias(estate, rri).rd_att.constr.is_some() {
+                // The C `CopyFromErrorCallback` is on the error_context_stack for
+                // the whole per-row body, so a constraint violation here is
+                // reported with the `COPY <rel>, line N: "<rawline>"` context
+                // (copyfrom.c:251).
+                if relation_alias(estate, result_rel_info).rd_att.constr.is_some() {
                     backend_executor_execMain_seams::exec_constraints::call(
-                        estate, rri, singleslot,
-                    )?;
+                        estate, result_rel_info, myslot,
+                    )
+                    .map_err(|e| e.add_context(copy_from_error_context(&state.cstate)))?;
+                }
+
+                // Also check the tuple against the partition constraint, if there
+                // is one; except that if we got here via tuple-routing, we don't
+                // need to if there's no BR trigger defined on the partition
+                // (copyfrom.c:1360-1366).
+                //   if (resultRelInfo->ri_RelationDesc->rd_rel->relispartition &&
+                //       (proute == NULL || has_before_insert_row_trig))
+                //       ExecPartitionCheck(resultRelInfo, myslot, estate, true);
+                if relation_alias(estate, result_rel_info).rd_rel.relispartition
+                    && (proute.is_none() || has_before_insert_row_trig)
+                {
+                    backend_executor_execMain_seams::exec_partition_check::call(
+                        estate,
+                        result_rel_info,
+                        myslot,
+                        true,
+                    )
+                    .map_err(|e| e.add_context(copy_from_error_context(&state.cstate)))?;
                 }
 
                 // table_tuple_insert(rel, myslot, mycid, ti_options, bistate);
                 {
-                    let rel = relation_alias(estate, rri);
-                    let slot_ref = estate.slot_data_mut(singleslot);
+                    let rel = relation_alias(estate, result_rel_info);
+                    let slot_ref = estate.slot_data_mut(myslot);
                     backend_access_table_tableam::table_tuple_insert(
                         mcx,
                         &rel,
@@ -1131,7 +1363,8 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                         mycid,
                         ti_options,
                         Some(&mut bistate),
-                    )?;
+                    )
+                    .map_err(|e| e.add_context(copy_from_error_context(&state.cstate)))?;
                 }
 
                 // index entries. C captures recheckIndexes and threads it into
@@ -1139,12 +1372,12 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 // unique-index checks, which the AR queue replays — pass the
                 // produced OID list straight through.
                 let recheck_indexes: mcx::PgVec<'mcx, Oid> =
-                    if estate.result_rel(rri).ri_NumIndices > 0 {
+                    if estate.result_rel(result_rel_info).ri_NumIndices > 0 {
                         backend_executor_execIndexing_seams::exec_insert_index_tuples::call(
                             mcx,
                             estate,
-                            rri,
-                            singleslot,
+                            result_rel_info,
+                            myslot,
                             false,
                             false,
                             None,
@@ -1161,10 +1394,10 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 // transition table via `transition_capture`.
                 backend_commands_trigger_seams::exec_ar_insert_triggers::call(
                     estate,
-                    rri,
-                    singleslot,
+                    result_rel_info,
+                    myslot,
                     &recheck_indexes,
-                    transition_capture.as_deref_mut(),
+                    mtstate.mt_transition_capture.as_deref_mut(),
                 )?;
             }
 
@@ -1175,22 +1408,32 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         backend_access_heap_heapam::FreeBulkInsertState(&mut bistate);
 
         // Execute AFTER STATEMENT insertion triggers (copyfrom.c:1484-1485) —
-        // unconditional on the target result-rel (the trig_after_statement guard
-        // is internal to ExecASInsertTriggers), threading the statement-level
-        // transition capture.
+        // unconditional on the target (root) result-rel (the trig_after_statement
+        // guard is internal to ExecASInsertTriggers), threading the statement-
+        // level transition capture.
         backend_commands_trigger_seams::exec_as_insert_triggers::call(
             estate,
-            rri,
-            transition_capture.as_deref_mut(),
+            target_rri,
+            mtstate.mt_transition_capture.as_deref_mut(),
         )?;
 
         // Handle queued AFTER triggers (copyfrom.c:1487-1488): fire this query
         // level's AFTER IMMEDIATE events, balancing AfterTriggerBeginQuery above.
         backend_commands_trigger_seams::after_trigger_end_query::call(estate)?;
 
+        // Tear down tuple routing, if it was set up (copyfrom.c:1503-1504).
+        //   if (proute) ExecCleanupTupleRouting(mtstate, proute);
+        if let Some(mut proute) = proute.take() {
+            backend_executor_execPartition_seams::exec_cleanup_tuple_routing::call(
+                &mut mtstate,
+                estate,
+                &mut proute,
+            )?;
+        }
+
         // Drop the transition-capture state before tearing down the executor
         // state it borrows from (its tuplestores live in the AfterTriggers cxt).
-        drop(transition_capture);
+        mtstate.mt_transition_capture = None;
 
         // ExecResetTupleTable / ExecCloseResultRelations / ExecCloseRangeTableRelations.
         backend_executor_execUtils::ExecResetTupleTable(estate, false)?;
@@ -1199,6 +1442,23 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
 
         processed
     };
+
+    // copyfrom.c:1470-1477: report the count of rows skipped under ON_ERROR when
+    // any soft errors occurred and the verbosity is at least DEFAULT (not SILENT).
+    if state.cstate.opts.on_error != CopyOnErrorChoice::COPY_ON_ERROR_STOP
+        && state.cstate.num_errors > 0
+        && state.cstate.opts.log_verbosity != CopyLogVerbosityChoice::COPY_LOG_VERBOSITY_SILENT
+    {
+        let n = state.cstate.num_errors;
+        let msg = if n == 1 {
+            format!("{n} row was skipped due to data type incompatibility")
+        } else {
+            format!("{n} rows were skipped due to data type incompatibility")
+        };
+        ereport(types_error::NOTICE)
+            .errmsg(msg)
+            .finish(here("CopyFrom"))?;
+    }
 
     // FreeExecutorState(estate);
     backend_executor_execUtils::free_executor_state_in(estate_owned)?;

@@ -321,9 +321,14 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
         // payload of an `Opaque`; clone the planner-produced carriers into the
         // per-query context as `Opaque(Box<dyn Any>)`.
         for pinfo in plannedstmt.partPruneInfos.iter() {
+            // Deep-clone the carrier into the per-query context, then erase to the
+            // arena `'static` the type-erased `Opaque(Box<dyn Any>)` payload requires
+            // (the sanctioned partprune arena-intern boundary).
+            let owned =
+                types_nodes::partprune_carrier::partpruneinfo_into_static(pinfo.clone_in(mcx)?);
             estate
                 .es_part_prune_infos
-                .push(types_nodes::Opaque(Some(alloc::boxed::Box::new(pinfo.clone()))));
+                .push(types_nodes::Opaque(Some(alloc::boxed::Box::new(owned))));
         }
 
         // ExecDoInitialPruning(estate) — perform executor-startup pruning. The
@@ -2488,18 +2493,22 @@ fn ExecRelCheck<'mcx>(
             // checkconstr = stringToNode(check[i].ccbin);
             let node = backend_nodes_core::read::string_to_node(mcx, ci.ccbin.as_str())?;
             let checkconstr_expr = match node.as_expr() {
-                Some(e) => e.clone(),
+                Some(e) => e.clone_in(mcx)?,
                 None => return Err(unported_node("ExecRelCheck: ccbin is not an Expr", &node)),
             };
             // checkconstr = expand_generated_columns_in_expr(checkconstr, rel, 1);
+            // The expander operates in the parser-arena notional `'static`; erase
+            // the `'mcx` constraint in and re-intern the result into `mcx` for
+            // `exec_prepare_expr` (`Expr` is invariant — these are the boundary moves).
             let expanded = backend_rewrite_rewritehandler::expand_generated_columns_in_expr(
                 mcx,
-                Some(checkconstr_expr),
+                Some(checkconstr_expr.erase_lifetime()),
                 &rel_alias,
                 1,
             )?;
             let expanded_expr = expanded
-                .expect("expand_generated_columns_in_expr returned NULL for a non-NULL Expr");
+                .expect("expand_generated_columns_in_expr returned NULL for a non-NULL Expr")
+                .clone_in(mcx)?;
             exprs.push(Some(execExpr::exec_prepare_expr(&expanded_expr, estate)?));
         }
         estate
@@ -3095,14 +3104,17 @@ pub fn at_rewrite_table_scan<'mcx>(
         alloc::vec::Vec::with_capacity(check_constraints.len());
     for (name, qual) in check_constraints.iter() {
         needscan = true;
+        // The expander operates in the parser-arena notional `'static`; erase the
+        // `'mcx` qual in and re-intern the result into `mcx` for exec_prepare_expr.
         let expanded = backend_rewrite_rewritehandler::expand_generated_columns_in_expr(
             mcx,
-            Some(qual.clone_in(mcx)?),
+            Some(qual.clone_in(mcx)?.erase_lifetime()),
             &rel_alias,
             1,
         )?;
-        let expanded_expr =
-            expanded.expect("expand_generated_columns_in_expr returned NULL for a non-NULL Expr");
+        let expanded_expr = expanded
+            .expect("expand_generated_columns_in_expr returned NULL for a non-NULL Expr")
+            .clone_in(mcx)?;
         let state = execExpr::exec_prepare_expr(&expanded_expr, &mut estate)?;
         check_states.push(((*name).to_string(), state));
     }
@@ -3149,10 +3161,19 @@ pub fn at_rewrite_table_scan<'mcx>(
     let mut notnull_virtual_attrs: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
     if rewriting || verify_new_notnull {
         for i in 0..new_tup_desc.natts {
-            let att = new_tup_desc.attr(i as usize);
-            // attr->attnullability == ATTNULLABLE_VALID && !attisdropped. The
-            // owned descriptor exposes attnotnull (set for a valid NOT NULL).
-            if att.attnotnull && !att.attisdropped {
+            // C: `CompactAttribute *attr = TupleDescCompactAttr(newTupDesc, i);`
+            // then tests `attr->attnullability == ATTNULLABLE_VALID`. Only *valid*
+            // not-null constraints are rechecked here — a NOT VALID not-null
+            // constraint leaves `attnotnull` set but `attnullability` is
+            // ATTNULLABLE_UNKNOWN, so a table rewrite must NOT validate it (its
+            // own VALIDATE CONSTRAINT does that). Using `attnotnull` here would
+            // spuriously reject a rewrite (e.g. ADD COLUMN ... DEFAULT) on a table
+            // whose not-yet-validated NOT NULL column still contains nulls.
+            let compact = new_tup_desc.compact_attr(i as usize);
+            if compact.attnullability == types_tuple::heaptuple::ATTNULLABLE_VALID
+                && !compact.attisdropped
+            {
+                let att = new_tup_desc.attr(i as usize);
                 if att.attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL {
                     notnull_virtual_attrs.push(att.attnum as i32);
                 } else {

@@ -1142,7 +1142,7 @@ fn TransformPubWhereClauses<'mcx>(
         /* whereClause is Some(); copyObject + transform it. */
         let clause = pri.whereClause.take().expect("whereClause is Some");
         let clause_copy: Node<'mcx> = clause.clone_in(mcx)?;
-        let mut whereclause =
+        let whereclause =
             backend_parser_clause::transformWhereClause(
                 mcx,
                 &mut pstate,
@@ -1151,10 +1151,19 @@ fn TransformPubWhereClauses<'mcx>(
                 "PUBLICATION WHERE",
             )?;
 
-        /* Fix up collation information (on the Expr). */
+        /* Fix up collation information (on the Expr). The parser-arena `'static`
+         * clause is brought into `mcx` for the in-place collation pass (pstate+
+         * expr share one invariant `'mcx`), then erased back to the parser-arena
+         * `'static` the `expand_generated_columns_in_expr` seam expects. */
+        let mut whereclause: Option<types_nodes::primnodes::Expr<'mcx>> = match whereclause {
+            Some(e) => Some(e.clone_in(mcx)?),
+            None => None,
+        };
         if let Some(expr) = whereclause.as_mut() {
             backend_parser_parse_collate::assign_expr_collations(Some(&pstate), expr)?;
         }
+        let whereclause: Option<types_nodes::primnodes::Expr<'static>> =
+            whereclause.map(|e| e.erase_lifetime());
 
         /*
          * `expand_generated_columns_in_expr(whereclause, rel, 1)` —
@@ -1169,7 +1178,7 @@ fn TransformPubWhereClauses<'mcx>(
 
         /* Re-wrap the transformed Expr as a walkable Node for storage. */
         let wherenode: Option<PgBox<'mcx, Node<'mcx>>> = match whereclause {
-            Some(expr) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?),
+            Some(expr) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?),
             None => None,
         };
 

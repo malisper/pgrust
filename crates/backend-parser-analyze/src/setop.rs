@@ -513,20 +513,22 @@ fn transformSetOperationTree<'mcx>(
         // the location model is trimmed repo-wide, so bestlocation == -1.
         let _bestlocation = -1i32;
 
-        // Coerce UNKNOWN Const/Param children in place; verify others.
-        let lcolnode2 = if lcoltype != UNKNOWNOID {
-            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), lcolnode.clone_in(mcx)?, rescoltype, context)?
+        // Coerce UNKNOWN Const/Param children in place; verify others. The coerce
+        // entry takes/returns the parser-arena `'static`; the pass-through `else`
+        // arm erases to match (the results are re-`clone_in`'d into `mcx` below).
+        let lcolnode2: Expr<'static> = if lcoltype != UNKNOWNOID {
+            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), lcolnode.clone_in(mcx)?.erase_lifetime(), rescoltype, context)?
         } else if matches!(lcolnode, Expr::Const(_)) || matches!(lcolnode, Expr::Param(_)) {
-            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), lcolnode.clone_in(mcx)?, rescoltype, context)?
+            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), lcolnode.clone_in(mcx)?.erase_lifetime(), rescoltype, context)?
         } else {
-            lcolnode.clone_in(mcx)?
+            lcolnode.clone_in(mcx)?.erase_lifetime()
         };
-        let rcolnode2 = if rcoltype != UNKNOWNOID {
-            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), rcolnode.clone_in(mcx)?, rescoltype, context)?
+        let rcolnode2: Expr<'static> = if rcoltype != UNKNOWNOID {
+            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), rcolnode.clone_in(mcx)?.erase_lifetime(), rescoltype, context)?
         } else if matches!(rcolnode, Expr::Const(_)) || matches!(rcolnode, Expr::Param(_)) {
-            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), rcolnode.clone_in(mcx)?, rescoltype, context)?
+            backend_parser_coerce::coerce_to_common_type(mcx, Some(pstate), rcolnode.clone_in(mcx)?.erase_lifetime(), rescoltype, context)?
         } else {
-            rcolnode.clone_in(mcx)?
+            rcolnode.clone_in(mcx)?.erase_lifetime()
         };
 
         let mut coerced = [lcolnode2.clone_in(mcx)?, rcolnode2.clone_in(mcx)?];

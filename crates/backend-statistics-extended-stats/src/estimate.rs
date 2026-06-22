@@ -99,7 +99,7 @@ pub(crate) fn clamp_probability(p: f64) -> f64 {
 /// `if (IsA(node, RelabelType)) node = ((RelabelType *) node)->arg` — strip one
 /// binary-compatible relabel (the C arg is never NULL for a valid RelabelType).
 #[inline]
-pub(crate) fn strip_relabel(node: &Expr) -> &Expr {
+pub(crate) fn strip_relabel<'a, 'mcx>(node: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     match node {
         Expr::RelabelType(r) => match &r.arg {
             Some(inner) => inner,
@@ -219,13 +219,13 @@ fn dependency_is_compatible_clause(clause: &Expr, relid: i32) -> PgResult<Option
 /// concatenation of every dependency-kind statistics object's `exprs` (as
 /// `&Expr`), in statlist order; a match returns the matching expression's
 /// position so the caller can dedup with `equal`.
-fn dependency_is_compatible_expression(
-    clause: &Expr,
+fn dependency_is_compatible_expression<'e, 'mcx>(
+    clause: &Expr<'e>,
     relid: i32,
-    stat_exprs: &[Expr],
-    run: &PlannerRun<'_>,
-) -> PgResult<Option<Expr>> {
-    let clause_expr: &Expr = match clause {
+    stat_exprs: &[Expr<'e>],
+    run: &PlannerRun<'mcx>,
+) -> PgResult<Option<Expr<'mcx>>> {
+    let clause_expr: &Expr<'e> = match clause {
         Expr::OpExpr(expr) | Expr::DistinctExpr(expr) | Expr::NullIfExpr(expr) => {
             if expr.args.len() != 2 {
                 return Ok(None);
@@ -260,7 +260,7 @@ fn dependency_is_compatible_expression(
         }
         Expr::BoolExpr(b) if b.boolop == OR_EXPR => {
             // OR: all arguments must match the same statistics expression.
-            let mut matched: Option<Expr> = None;
+            let mut matched: Option<Expr<'mcx>> = None;
             for arg in &b.args {
                 match dependency_is_compatible_expression(arg, relid, stat_exprs, run)? {
                     None => return Ok(None),
@@ -723,11 +723,11 @@ pub(crate) fn has_stats_of_kind(root: &PlannerInfo, rel: RelId, requiredkind: i8
 /// The concatenation of every dependency-kind statistics object's expressions
 /// on `rel` (as owned `Expr`s), for `dependency_is_compatible_expression`. With
 /// the stxexprs build leg deferred these lists are empty.
-fn collect_dependency_stat_exprs(
+fn collect_dependency_stat_exprs<'mcx>(
     root: &PlannerInfo,
     rel: RelId,
-    run: &PlannerRun<'_>,
-) -> PgResult<Vec<Expr>> {
+    run: &PlannerRun<'mcx>,
+) -> PgResult<Vec<Expr<'mcx>>> {
     let mut out = Vec::new();
     let statlist = root.rel(rel).statlist.clone();
     for id in statlist {
@@ -748,16 +748,16 @@ fn collect_dependency_stat_exprs(
 /// attnums or expressions (the C "skip objects matching fewer than two
 /// attributes/expressions" gate). `exprs` is the object's own expression list,
 /// passed on to the per-dependency remapping.
-fn collect_stat_oids(
+fn collect_stat_oids<'mcx>(
     root: &PlannerInfo,
     rel: RelId,
     requiredkind: i8,
     rte_inh: bool,
     clauses_attnums: &Relids,
     attnum_offset: i32,
-    unique_exprs: &[Expr],
-    run: &PlannerRun<'_>,
-) -> PgResult<Vec<(Oid, Vec<Expr>)>> {
+    unique_exprs: &[Expr<'mcx>],
+    run: &PlannerRun<'mcx>,
+) -> PgResult<Vec<(Oid, Vec<Expr<'mcx>>)>> {
     let mut out = Vec::new();
     let statlist = root.rel(rel).statlist.clone();
     for id in statlist {

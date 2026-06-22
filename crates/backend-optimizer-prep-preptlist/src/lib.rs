@@ -551,6 +551,9 @@ fn expand_insert_targetlist<'mcx>(
                 } else {
                     // Normal column: NULL of the column datatype, applying any
                     // domain constraints (coerce_null_to_domain).
+                    // The coerce seam returns the node in the parser/coerce arena
+                    // (`'static`); re-localize into `mcx` to unify with the
+                    // `make_const` branch (both feed `root.alloc_node`).
                     backend_parser_coerce_seams::coerce_null_to_domain::call(
                         mcx,
                         att_tup.atttypid,
@@ -559,6 +562,7 @@ fn expand_insert_targetlist<'mcx>(
                         att_tup.attlen as i32,
                         att_tup.attbyval,
                     )?
+                    .clone_in(mcx)?
                     // C: if the result is not a bare Const, run
                     // eval_const_expressions. coerce_null_to_domain returns a
                     // bare Const for non-domain types; the domain case (a
@@ -773,6 +777,8 @@ fn expand_insert_targetlist_owned<'mcx>(
                         att_tup.attbyval,
                     )?)
                 } else {
+                    // Re-localize the coerce seam's parser/coerce-arena (`'static`)
+                    // result into `mcx` to unify with the `make_const` branch.
                     backend_parser_coerce_seams::coerce_null_to_domain::call(
                         mcx,
                         att_tup.atttypid,
@@ -781,6 +787,7 @@ fn expand_insert_targetlist_owned<'mcx>(
                         att_tup.attlen as i32,
                         att_tup.attbyval,
                     )?
+                    .clone_in(mcx)?
                 };
 
                 let resname =

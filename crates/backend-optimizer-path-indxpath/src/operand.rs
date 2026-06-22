@@ -124,7 +124,7 @@ pub fn contain_strippable_phv_walker(node: &Expr) -> bool {
 /// `strip_phvs_in_index_operand_mutator(node, context)` (indxpath.c:4551) —
 /// recursively remove non-nullable `PlaceHolderVar` nodes, replacing each with
 /// its contained expression.
-pub fn strip_phvs_in_index_operand_mutator(node: Expr) -> Expr {
+pub fn strip_phvs_in_index_operand_mutator<'mcx>(node: Expr<'mcx>) -> Expr<'mcx> {
     if let Some(phv) = node.as_placeholdervar() {
         // If it matches the criteria, strip it.
         if phv.phnullingrels.words.iter().all(|w| *w == 0) {
@@ -138,7 +138,7 @@ pub fn strip_phvs_in_index_operand_mutator(node: Expr) -> Expr {
         // Otherwise keep this PHV but check its contained expression (fall
         // through to the generic mutator, which descends into phexpr).
     }
-    let mut mutator = |n: Expr| strip_phvs_in_index_operand_mutator(n);
+    let mut mutator = |n: Expr<'mcx>| strip_phvs_in_index_operand_mutator(n);
     expression_tree_mutator(node, &mut mutator)
 }
 

@@ -216,6 +216,15 @@ impl GucRegistry {
     pub fn find_index_pub(&self, name: &str) -> Option<usize> {
         self.find_index(name)
     }
+
+    /// `hash_search(guc_hashtab, &name, HASH_REMOVE, NULL)` (guc.c): remove a
+    /// variable by exact name. Used by `MarkGUCPrefixReserved` to drop invalid
+    /// placeholders under a newly-reserved class prefix. No-op if absent.
+    pub fn remove_by_name(&mut self, name: &str) {
+        if let Some(idx) = self.vars.iter().position(|v| v.name() == name) {
+            self.vars.remove(idx);
+        }
+    }
 }
 
 impl core::ops::Index<usize> for GucRegistry {

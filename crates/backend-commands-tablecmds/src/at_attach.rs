@@ -90,7 +90,7 @@ const PRS2_NEW_VARNO: i32 = 2;
 
 /// Wrap a freshly built `Expr` as a `Node` (implicit-AND list element),
 /// allocating the opaque node in `mcx`.
-fn enode<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
+fn enode<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr<'mcx>) -> PgResult<Node<'mcx>> {
     Node::mk_expr(mcx, e)
 }
 
@@ -229,18 +229,29 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
             ))
             .into_error());
     }
-    // The `rd_islocaltemp` "another session's temp relation" checks apply only
-    // to TEMP relations. The trimmed RelationData omits `rd_islocaltemp`; a TEMP
-    // partition attach therefore needs that carrier field. Reached only when
-    // either side is TEMP (never in the permanent common case).
+    // If the parent is temp, it must belong to this session (tablecmds.c:20378).
+    // `rd_islocaltemp` is reached through the relcache seam (the same form
+    // MergeAttributes uses for the equivalent inheritance check).
     if rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP
-        || attachrel.rd_rel.relpersistence == RELPERSISTENCE_TEMP
+        && !backend_utils_cache_relcache_seams::rd_islocaltemp::call(rel)?
     {
-        panic!(
-            "ATTACH PARTITION of/under a TEMP relation is not yet supported \
-             (the trimmed types_rel::RelationData omits rd_islocaltemp, needed for \
-             the cross-session temp checks — out-of-lane carrier widen; see at_attach.rs)"
-        );
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(
+                "cannot attach as partition of temporary relation of another session".to_string(),
+            )
+            .into_error());
+    }
+    // Ditto for the partition (tablecmds.c:20385).
+    if attachrel.rd_rel.relpersistence == RELPERSISTENCE_TEMP
+        && !backend_utils_cache_relcache_seams::rd_islocaltemp::call(&attachrel)?
+    {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(
+                "cannot attach temporary relation of another session as partition".to_string(),
+            )
+            .into_error());
     }
 
     // Check identity columns / columns not in parent.
@@ -422,8 +433,8 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
 fn eval_const_expressions_list<'mcx>(
     mcx: Mcx<'mcx>,
     list: PgVec<'mcx, Node<'mcx>>,
-) -> PgResult<Vec<Expr>> {
-    let mut out: Vec<Expr> = Vec::with_capacity(list.len());
+) -> PgResult<Vec<Expr<'mcx>>> {
+    let mut out: Vec<Expr<'mcx>> = Vec::with_capacity(list.len());
     for n in list.into_iter() {
         let e = node_to_expr(n)?;
         out.push(backend_optimizer_util_clauses::eval_const_expressions(mcx, e)?);
@@ -1321,7 +1332,7 @@ fn ConstraintImpliedByRelConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     scanrel: &Relation<'mcx>,
     test_constraint: &[Node<'mcx>],
-    proven_constraint: Vec<Expr>,
+    proven_constraint: Vec<Expr<'mcx>>,
 ) -> PgResult<bool> {
     let mut exist_constraint = proven_constraint;
 

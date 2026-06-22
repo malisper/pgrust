@@ -225,13 +225,23 @@ pub fn init_seams() {
     costsize_seam::find_placeholder_info_width::set(|mcx, root, node| {
         // copyObject shape: the PHV's `phexpr` may carry a SubPlan whose derived
         // `Expr::clone` panics, so deep-copy through `clone_in`.
-        let phv = match root.node(node) {
-            Expr::PlaceHolderVar(phv) => phv
-                .clone_in(mcx)
-                .expect("find_placeholder_info_width: PHV clone_in failed"),
+        // The clone is interned into the planner-run `mcx` (long-lived relative to
+        // this call); `erase_lifetime` is the sanctioned arena-intern boundary that
+        // ties it to the planner arena so it satisfies the `'static` PHV the
+        // `find_placeholder_info` seam stores into `PlaceHolderInfo.ph_var`.
+        let phv_expr: Expr<'static> = match root.node(node) {
+            Expr::PlaceHolderVar(phv) => Expr::PlaceHolderVar(
+                phv.clone_in(mcx)
+                    .expect("find_placeholder_info_width: PHV clone_in failed"),
+            )
+            .erase_lifetime(),
             _ => panic!("find_placeholder_info_width: node is not a PlaceHolderVar"),
         };
-        let phid = find_placeholder_info(root, &phv)
+        let phv = match &phv_expr {
+            Expr::PlaceHolderVar(phv) => phv,
+            _ => unreachable!(),
+        };
+        let phid = find_placeholder_info(root, phv)
             .expect("find_placeholder_info_width: find_placeholder_info failed");
         let ph_width = root.phinfo(phid).ph_width;
         let phexpr = phv

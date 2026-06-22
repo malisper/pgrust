@@ -498,6 +498,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `UINT32_ACCESS_ONCE(GetPGProcByNumber(procno)->wait_event_info)` — the
+    /// encoded (class<<24 | event) wait-event word, read by
+    /// `pg_stat_get_activity` to display `wait_event_type`/`wait_event`.
+    pub fn proc_wait_event_info(procno: ProcNumber) -> u32
+);
+
+seam_core::seam!(
     /// `GetPGProcByNumber(procno)->isRegularBackend` — true for a regular client
     /// backend (read by `CountDBConnections`/`CountUserBackends`).
     pub fn proc_is_regular_backend(procno: ProcNumber) -> bool

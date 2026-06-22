@@ -20,6 +20,7 @@ backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-s
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 
 # Outward seams (cyclic / unported owners).

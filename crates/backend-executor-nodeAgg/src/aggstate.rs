@@ -365,7 +365,7 @@ pub struct AggStateData<'mcx> {
     /// `build_aggregate_*fn_expr`) — which take `&primnodes::Aggref` — can be
     /// called. Compile-time-only bookkeeping (not in the C struct). `None` is
     /// the pre-discovery NIL.
-    pub aggs_prim: Option<PgVec<'mcx, types_nodes::primnodes::Aggref>>,
+    pub aggs_prim: Option<PgVec<'mcx, types_nodes::primnodes::Aggref<'mcx>>>,
     /// `int numaggs`.
     pub numaggs: i32,
     /// `int numtrans`.

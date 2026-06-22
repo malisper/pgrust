@@ -162,13 +162,13 @@ pub struct WindowAgg<'mcx> {
     /// `int frameOptions` — frame_clause options, see WindowDef.
     pub frameOptions: i32,
     /// `Node *startOffset` — expression for starting bound, if any.
-    pub startOffset: Option<PgBox<'mcx, Expr>>,
+    pub startOffset: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `Node *endOffset` — expression for ending bound, if any.
-    pub endOffset: Option<PgBox<'mcx, Expr>>,
+    pub endOffset: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `List *runCondition` — qual to help short-circuit execution.
-    pub runCondition: Option<PgVec<'mcx, Expr>>,
+    pub runCondition: Option<PgVec<'mcx, Expr<'mcx>>>,
     /// `List *runConditionOrig` — runCondition for display in EXPLAIN.
-    pub runConditionOrig: Option<PgVec<'mcx, Expr>>,
+    pub runConditionOrig: Option<PgVec<'mcx, Expr<'mcx>>>,
     /// `Oid startInRangeFunc` — in_range function for startOffset.
     pub startInRangeFunc: Oid,
     /// `Oid endInRangeFunc` — in_range function for endOffset.
@@ -236,8 +236,8 @@ fn clone_opt_vec<'b, T: Copy>(
 
 fn clone_opt_expr_vec<'b>(
     mcx: Mcx<'b>,
-    src: &Option<PgVec<'_, Expr>>,
-) -> PgResult<Option<PgVec<'b, Expr>>> {
+    src: &Option<PgVec<'_, Expr<'_>>>,
+) -> PgResult<Option<PgVec<'b, Expr<'b>>>> {
     match src {
         None => Ok(None),
         Some(v) => {
@@ -254,11 +254,11 @@ fn clone_opt_expr_vec<'b>(
 
 fn clone_opt_box_expr<'b>(
     mcx: Mcx<'b>,
-    src: &Option<PgBox<'_, Expr>>,
-) -> PgResult<Option<PgBox<'b, Expr>>> {
+    src: &Option<PgBox<'_, Expr<'_>>>,
+) -> PgResult<Option<PgBox<'b, Expr<'b>>>> {
     match src {
         None => Ok(None),
-        Some(b) => Ok(Some(mcx::alloc_in(mcx, (**b).clone())?)),
+        Some(b) => Ok(Some(mcx::alloc_in(mcx, (**b).clone_in(mcx)?)?)),
     }
 }
 
@@ -271,7 +271,7 @@ fn clone_opt_box_expr<'b>(
 #[derive(Debug, Default)]
 pub struct WindowFuncExprState<'mcx> {
     /// `WindowFunc *wfunc` — the expression plan node.
-    pub wfunc: Option<PgBox<'mcx, WindowFunc>>,
+    pub wfunc: Option<PgBox<'mcx, WindowFunc<'mcx>>>,
     /// `List *args` — ExprStates for argument expressions.
     pub args: Option<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>>,
     /// `ExprState *aggfilter` — FILTER expression, if any.
@@ -318,7 +318,7 @@ pub struct WindowStatePerFuncData<'mcx> {
     /// `WindowFuncExprState *wfuncstate` — the expr/state node this is for.
     pub wfuncstate: Option<PgBox<'mcx, WindowFuncExprState<'mcx>>>,
     /// `WindowFunc *wfunc` — the WindowFunc plan node.
-    pub wfunc: Option<PgBox<'mcx, WindowFunc>>,
+    pub wfunc: Option<PgBox<'mcx, WindowFunc<'mcx>>>,
     /// `int numArguments` — number of arguments.
     pub numArguments: i32,
     /// `FmgrInfo flinfo` — fmgr lookup data for window function.

@@ -272,8 +272,8 @@ pub fn expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> bool
 /// `Node`-level bridge over the trimmed [`crate::nodefuncs::expression_tree_walker`]
 /// child set (same children, same order), re-expressed so the callback sees a
 /// `Node`.
-fn walk_expr_children(
-    e: &Expr,
+fn walk_expr_children<'mcx>(
+    e: &Expr<'mcx>,
     walker: &mut dyn FnMut(&Node) -> bool,
     mcx: mcx::Mcx<'_>,
 ) -> bool {
@@ -342,7 +342,7 @@ fn walk_expr_children(
 /// here (the read-only walker contract returns a plain `bool`), so it is a loud
 /// `expect` — mirror-PG-and-fail, not a silent skip.
 #[inline]
-pub fn node_expr_wrapper<'mcx>(e: &Expr, mcx: mcx::Mcx<'mcx>) -> Node<'mcx> {
+pub fn node_expr_wrapper<'a, 'mcx>(e: &Expr<'a>, mcx: mcx::Mcx<'mcx>) -> Node<'mcx> {
     // The opaque `Node` is invariant in `'mcx` (the trait-object payload), so the
     // wrapper is tied to `mcx` (the scratch context the deep-copied children live
     // in). The scratch context outliving each callback invocation keeps the
@@ -436,7 +436,7 @@ fn unrecognized_expression_node(node: &Node) -> bool {
 /// `.clone()` of an `Aggref` child is a deliberate panic (deep-copy is
 /// `clone_in`, which needs an allocator the walker does not have).
 #[inline]
-fn expr_walk_sentinel() -> Expr {
+fn expr_walk_sentinel<'mcx>() -> Expr<'mcx> {
     Expr::CaseTestExpr(types_nodes::primnodes::CaseTestExpr {
         typeId: 0,
         typeMod: -1,
@@ -580,7 +580,7 @@ pub fn expression_tree_walker_mut<'mcx>(
         // deliberate panic-`Clone`).
         ntag::T_TableSampleClause => {
             fn one<'mcx>(
-                e: &mut Expr,
+                e: &mut Expr<'mcx>,
                 walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
                 mcx: mcx::Mcx<'mcx>,
             ) -> bool {
@@ -637,11 +637,11 @@ pub fn expression_tree_walker_mut<'mcx>(
 /// In-place analogue of [`walk_table_func`]: walk each `Expr` child as a wrapped
 /// `Node::Expr`, writing the (possibly mutated) child back into its field.
 fn walk_table_func_mut<'mcx>(
-    tf: &mut types_nodes::primnodes::TableFunc,
+    tf: &mut types_nodes::primnodes::TableFunc<'mcx>,
     walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
     mcx: mcx::Mcx<'mcx>,
 ) -> bool {
-    fn one<'mcx>(e: &mut Expr, walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool, mcx: mcx::Mcx<'mcx>) -> bool {
+    fn one<'mcx>(e: &mut Expr<'mcx>, walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool, mcx: mcx::Mcx<'mcx>) -> bool {
         // Move the child out rather than `.clone()` it — an `Aggref` child's
         // `Clone` is a deliberate panic (see `expr_walk_sentinel`).
         let owned = core::mem::replace(e, expr_walk_sentinel());
@@ -654,7 +654,7 @@ fn walk_table_func_mut<'mcx>(
         aborted
     }
     fn list<'mcx>(
-        l: &mut Option<mcx::PgVec<'_, mcx::PgBox<'_, Expr>>>,
+        l: &mut Option<mcx::PgVec<'mcx, mcx::PgBox<'mcx, Expr<'mcx>>>>,
         walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
         mcx: mcx::Mcx<'mcx>,
     ) -> bool {
@@ -668,7 +668,7 @@ fn walk_table_func_mut<'mcx>(
         false
     }
     fn list_opt<'mcx>(
-        l: &mut Option<mcx::PgVec<'_, Option<mcx::PgBox<'_, Expr>>>>,
+        l: &mut Option<mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, Expr<'mcx>>>>>,
         walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
         mcx: mcx::Mcx<'mcx>,
     ) -> bool {
@@ -682,7 +682,7 @@ fn walk_table_func_mut<'mcx>(
         false
     }
     fn opt<'mcx>(
-        e: &mut Option<mcx::PgBox<'_, Expr>>,
+        e: &mut Option<mcx::PgBox<'mcx, Expr<'mcx>>>,
         walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
         mcx: mcx::Mcx<'mcx>,
     ) -> bool {
@@ -705,12 +705,12 @@ fn walk_table_func_mut<'mcx>(
 /// field. Uses the canonical Expr-level in-place driver
 /// [`crate::nodefuncs`]'s child set via a per-child wrap/unwrap.
 fn walk_expr_children_mut<'mcx>(
-    e: &mut Expr,
+    e: &mut Expr<'mcx>,
     walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
     mcx: mcx::Mcx<'mcx>,
 ) -> bool {
     let mut aborted = false;
-    crate::nodefuncs::for_each_expr_child_mut(e, &mut |child: &mut Expr| {
+    crate::nodefuncs::for_each_expr_child_mut(e, &mut |child: &mut Expr<'mcx>| {
         if aborted {
             return;
         }
@@ -1774,7 +1774,7 @@ pub fn query_or_expression_tree_mutator<'mcx>(
 }
 
 fn mutate_targetentry_list<'mcx>(
-    list: &mut [types_nodes::primnodes::TargetEntry],
+    list: &mut [types_nodes::primnodes::TargetEntry<'mcx>],
     mutator: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
     mcx: mcx::Mcx<'mcx>,
 ) -> bool {

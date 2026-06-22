@@ -148,7 +148,7 @@ pub fn transformPLAssignStmt<'mcx>(
     // read its type/typmod/collation/location here, and (only on the indirection
     // path) re-wrap it as a `Node` for `transformAssignmentIndirection`'s
     // basenode argument.
-    let target: types_nodes::primnodes::Expr = backend_parser_parse_expr::transformExpr(
+    let target: types_nodes::primnodes::Expr<'static> = backend_parser_parse_expr::transformExpr(
         pstate,
         Some(cref),
         ParseExprKind::EXPR_KIND_UPDATE_TARGET,
@@ -264,7 +264,7 @@ pub fn transformPLAssignStmt<'mcx>(
         let rhs_node = Node::mk_expr(mcx, mcx::PgBox::into_inner(rhs_expr))?;
 
         // C passes `target` (a Node *) as the basenode; re-wrap our Expr value.
-        let target_node = Node::mk_expr(mcx, target)?;
+        let target_node = Node::mk_expr(mcx, target.clone_in(mcx)?)?;
 
         let assigned = backend_parser_parse_target::transformAssignmentIndirection(
             mcx,
@@ -317,7 +317,7 @@ pub fn transformPLAssignStmt<'mcx>(
         let coerced = backend_parser_coerce::coerce_to_target_type(
             mcx,
             Some(pstate),
-            orig,
+            orig.erase_lifetime(),
             type_id,
             targettype,
             targettypmod,
@@ -327,7 +327,8 @@ pub fn transformPLAssignStmt<'mcx>(
         )?;
 
         match coerced {
-            Some(e) => tle.expr = Some(mcx::PgBox::new_in(e, mcx)),
+            // Parser-arena `'static` result re-cloned into the TLE's `mcx`.
+            Some(e) => tle.expr = Some(mcx::PgBox::new_in(e.clone_in(mcx)?, mcx)),
             None => {
                 // With COERCION_PLPGSQL, this error is probably unreachable.
                 let targettype_name =

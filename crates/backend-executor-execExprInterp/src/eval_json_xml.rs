@@ -43,8 +43,14 @@ pub fn ExecEvalXmlExpr<'mcx>(
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
 
-    // Snapshot the step payload (the node + arg cell ids) so the per-arg
-    // read_cell()s do not alias the &mut state borrow.
+    // Snapshot the step payload (the scalar XmlExpr fields + arg cell ids) so the
+    // per-arg read_cell()s do not alias the &mut state borrow. We must NOT clone
+    // the whole XmlExpr: its `args`/`named_args` are `Vec<Expr>` whose children may
+    // be context-allocated `Aggref`s (e.g. `xmlelement(... xmlagg(...))`), and the
+    // derived `Expr::clone` of an `Aggref` is a deliberate trap. C never copies the
+    // arg subtrees here — it only reads scalar fields and `exprType(args[i])`. So
+    // capture the scalar fields plus a precomputed `Vec<Oid>` of the positional arg
+    // types (the only thing the arg nodes are consulted for).
     let (xexpr, named_arg_cells, named_arg_types, arg_cells) =
         match &state.steps.as_ref().unwrap()[op].d {
             ExprEvalStepData::XmlExpr {
@@ -52,21 +58,36 @@ pub fn ExecEvalXmlExpr<'mcx>(
                 named_arg_cells,
                 named_arg_types,
                 arg_cells,
-            } => (
-                xexpr.clone(),
-                named_arg_cells
-                    .as_ref()
-                    .map(|v| v.iter().copied().collect::<Vec<_>>())
-                    .unwrap_or_default(),
-                named_arg_types
-                    .as_ref()
-                    .map(|v| v.iter().copied().collect::<Vec<_>>())
-                    .unwrap_or_default(),
-                arg_cells
-                    .as_ref()
-                    .map(|v| v.iter().copied().collect::<Vec<_>>())
-                    .unwrap_or_default(),
-            ),
+            } => {
+                let mut arg_types: Vec<types_core::primitive::Oid> =
+                    Vec::with_capacity(xexpr.args.len());
+                for e in &xexpr.args {
+                    arg_types.push(backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?.typid);
+                }
+                let snap = XmlExprSnapshot {
+                    op: xexpr.op,
+                    name: xexpr.name.clone(),
+                    arg_names: xexpr.arg_names.clone(),
+                    xmloption: xexpr.xmloption,
+                    indent: xexpr.indent,
+                    arg_types,
+                };
+                (
+                    snap,
+                    named_arg_cells
+                        .as_ref()
+                        .map(|v| v.iter().copied().collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                    named_arg_types
+                        .as_ref()
+                        .map(|v| v.iter().copied().collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                    arg_cells
+                        .as_ref()
+                        .map(|v| v.iter().copied().collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                )
+            }
             _ => unreachable!("EEOP_XMLEXPR: payload is not XmlExpr"),
         };
     let resv = state.steps.as_ref().unwrap()[op].resvalue;
@@ -140,7 +161,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
             for i in 0..arg_cells.len() {
                 let (v, isnull) = read_cell(state, arg_cells[i]);
                 if !isnull {
-                    let typid = expr_type_of_arg(&xexpr, i)?;
+                    let typid = xexpr.arg_types[i];
                     // XMLELEMENT content: map WITH escaping (xml.c xmlelement:
                     // content args pass true); the writer uses WriteRaw.
                     content.push(map_named_value(v, typid, mcx, true)?);
@@ -289,15 +310,18 @@ fn map_named_value<'mcx>(
     backend_utils_adt_xml::map_sql_value_to_xml_value_v(mcx, value, typid, xml_escape_strings)
 }
 
-/// `exprType(xexpr->args[i])` for an XMLELEMENT content argument. Recovered from
-/// the compiled named-arg-type list is not available for positional args, so we
-/// re-derive from the node via the nodeFuncs seam.
-fn expr_type_of_arg(
-    xexpr: &types_nodes::primnodes::XmlExpr,
-    i: usize,
-) -> PgResult<types_core::primitive::Oid> {
-    let e = &xexpr.args[i];
-    Ok(backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?.typid)
+/// Scalar snapshot of the [`XmlExpr`](types_nodes::primnodes::XmlExpr) fields the
+/// runtime evaluator needs, plus the positional-arg `exprType`s precomputed up
+/// front (`exprType(xexpr->args[i])`). Deliberately holds NO `Expr` subtrees: the
+/// arg nodes may carry context-allocated `Aggref`s whose derived `.clone()` is a
+/// trap (e.g. `xmlelement(... xmlagg(...))`), and C never copies them here.
+struct XmlExprSnapshot {
+    op: types_nodes::primnodes::XmlExprOp,
+    name: Option<String>,
+    arg_names: Vec<String>,
+    xmloption: types_nodes::primnodes::XmlOptionType,
+    indent: bool,
+    arg_types: Vec<types_core::primitive::Oid>,
 }
 
 /// Decode the `int` standalone argument of IS_XMLROOT (a `XmlStandaloneType`).
@@ -532,10 +556,10 @@ pub fn ExecEvalJsonIsPredicate<'mcx>(
 
     let (js, js_null) = read_cell(state, resv);
     if js_null {
-        write_cell(state, resv, Datum::from_bool(false), false);
-        if resnull != resv {
-            write_cell(state, resnull, Datum::from_bool(false), false);
-        }
+        // C: `*op->resvalue = BoolGetDatum(false); return;` — it writes the
+        // value cell but leaves `*op->resnull` untouched (still true), so the
+        // predicate result is NULL when the subject is NULL.
+        write_cell(state, resv, Datum::from_bool(false), js_null);
         return Ok(());
     }
 

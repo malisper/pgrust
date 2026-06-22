@@ -414,6 +414,14 @@ impl SoftErrorContext {
     pub fn mark_error_occurred(&mut self) {
         self.error_occurred = true;
     }
+
+    /// Clear the soft-error flag (and any saved error) so the context is ready
+    /// to be reused for the next operation — C resets `error_occurred = false`
+    /// after handling a skipped COPY row (copyfrom.c:1161).
+    pub fn reset_error_occurred(&mut self) {
+        self.error_occurred = false;
+        self.error = None;
+    }
 }
 
 /// C `ereturn(escontext, errorval, …)` in value form: with a soft-error

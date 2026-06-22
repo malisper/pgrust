@@ -360,6 +360,22 @@ pub fn deconstruct_array_values_bytes<'mcx>(
     deconstruct_array_values(mcx, &arr, elmtype, elmlen as i32, elmbyval, elmalign as u8)
 }
 
+/// `construct_array(values, 1, elmtype, elmlen, elmbyval, elmalign)` over the
+/// canonical value lane, returning the on-disk array varlena bytes — the
+/// constructive inverse of [`deconstruct_array_values_bytes`]. The seam-typed
+/// wrapper over [`construct_array_values`] (bridging the seam's
+/// `i16`/`c_char` metadata to the impl's `i32`/`u8`).
+pub fn construct_array_values_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[types_tuple::Datum<'mcx>],
+    elmtype: Oid,
+    elmlen: i16,
+    elmbyval: bool,
+    elmalign: core::ffi::c_char,
+) -> PgResult<PgVec<'mcx, u8>> {
+    construct_array_values(mcx, elems, elmtype, elmlen as i32, elmbyval, elmalign as u8)
+}
+
 /// `deconstruct_array(DatumGetArrayTypeP(arraydatum), elmtype, elmlen, elmbyval,
 /// elmalign, ...)` (arrayfuncs.c) over the canonical unified value type
 /// ([`types_tuple::Datum`]). The array `Datum` arrives as a pass-by-reference

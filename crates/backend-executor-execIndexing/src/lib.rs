@@ -734,6 +734,15 @@ fn check_exclusion_or_unique_constraint<'mcx>(
     // the EState; see the create comment).
     estate.ecxt_mut(per_tuple).ecxt_scantuple = save_scantuple;
 
+    // C: `ExecDropSingleTupleTableSlot(existing_slot);` (execIndexing.c:944). The
+    // owned model keeps `existing_slot` in the EState pool (it can't drop a single
+    // pool slot), but its `index_getnext_slot` fetch pins a heap buffer; since
+    // FreeExecutorState does NOT release buffer pins, that pin would leak
+    // ("resource was not closed") when the deferred-exclusion `unique_key_recheck`
+    // path runs this and the EState is later only torn down (not reset). Clear the
+    // slot here to release the pin, on both the conflict and no-conflict paths.
+    backend_executor_execTuples_seams::exec_clear_tuple::call(estate, existing_slot)?;
+
     result
 }
 

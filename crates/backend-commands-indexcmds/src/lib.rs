@@ -123,12 +123,14 @@ use types_tuple::access::{
 use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 use types_pgstat::backend_progress::ProgressCommandType;
 
+pub mod check_compat;
 pub mod choosers;
 pub mod compute;
 pub mod opclass;
 pub mod reindex_concurrently;
 pub mod reindex_multi;
 
+pub use check_compat::{check_index_compatible_stmt, CheckIndexCompatible};
 pub use choosers::{
     makeObjectName, ChooseIndexColumnNames, ChooseIndexName, ChooseRelationName,
 };
@@ -217,7 +219,7 @@ pub(crate) fn name_list_strings(
 /// `transformExpr()` already rejected subqueries / aggregates / window
 /// functions; the only remaining check is that a predicate using mutable
 /// functions is rejected.
-pub fn CheckPredicate(mcx: Mcx<'_>, predicate: Expr) -> PgResult<()> {
+pub fn CheckPredicate<'mcx>(mcx: Mcx<'mcx>, predicate: Expr<'mcx>) -> PgResult<()> {
     if contain_mutable_functions_after_planning(mcx, predicate)? {
         return Err(ereport(ERROR)
             .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
@@ -348,9 +350,13 @@ pub fn DefineIndex<'mcx>(
         x if x == RELKIND_RELATION || x == RELKIND_MATVIEW || x == RELKIND_PARTITIONED_TABLE => {}
         _ => {
             let name = rel.rd_rel.relname.as_str().to_string();
+            let detail = backend_catalog_pg_class_seams::errdetail_relkind_not_supported::call(
+                rel.rd_rel.relkind,
+            )?;
             return Err(ereport(ERROR)
                 .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!("cannot create index on relation \"{name}\""))
+                .errdetail(detail)
                 .into_error());
         }
     }
@@ -1961,6 +1967,10 @@ pub fn init_seams() {
             args.skip_build,
             args.quiet,
         )
+    });
+
+    backend_commands_indexcmds_seams::check_index_compatible::set(|mcx, old_id, stmt| {
+        check_index_compatible_stmt(mcx, old_id, stmt)
     });
 
     // --- ProcessUtilitySlow CREATE INDEX arm (utility.c:1455-1560) ---

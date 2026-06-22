@@ -247,7 +247,7 @@ pub struct BitmapHeapScan<'mcx> {
     pub scan: Scan<'mcx>,
     /// `List *bitmapqualorig` — original index quals (expression nodes), for
     /// rechecking on lossy pages.
-    pub bitmapqualorig: mcx::PgVec<'mcx, crate::primnodes::Expr>,
+    pub bitmapqualorig: mcx::PgVec<'mcx, crate::primnodes::Expr<'mcx>>,
 }
 
 impl BitmapHeapScan<'_> {

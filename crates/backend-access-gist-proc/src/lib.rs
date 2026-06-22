@@ -33,6 +33,10 @@ use backend_access_gist_proc_seams as gist_sortsupport_seams;
 use backend_utils_adt_network_gist_seams as inet_gist;
 use backend_utils_adt_geo_ops_seams as geo;
 use backend_utils_adt_rangetypes_gist as range_gist;
+use backend_utils_adt_tsgistidx as tsgist;
+use backend_utils_adt_tsquery_core::gist as tsqgist;
+use types_tsearch::tsearch::TSQuerySign;
+use types_tsearch::tsgistidx::SignTsVector;
 use types_network::{inet_struct, GistInetKey};
 use dispatch::{GistConsistentResult, GistDistanceResult, StrategyNumber};
 use mcx::{Mcx, PgBox};
@@ -1352,6 +1356,123 @@ const F_MULTIRANGE_GIST_CONSISTENT: Oid = 6154;
 /// `multirange_gist_compress` (pg_proc.dat oid 6156).
 const F_MULTIRANGE_GIST_COMPRESS: Oid = 6156;
 
+// ---------------------------------------------------------------------------
+// tsvector_ops opclass support-proc OIDs (pg_proc.dat) and the marshalling
+// between the GiST core's by-reference key [`Datum`] lane and the
+// [`SignTsVector`] GiST key (`tsgistidx.c`).
+//
+// The leaf input value is a `tsvector` varlena image (compress reads its
+// lexemes via `ARRPTR`/`STRPTR`); every other key is a `SignTSVector` varlena
+// image which round-trips through [`SignTsVector::from_image`] /
+// [`SignTsVector::to_image`] (the on-disk `flag`+`data[]` form). The consistent
+// query is a `tsquery` varlena image decoded into `QueryItem`s by `ts-small`.
+//
+// DIVERGENCE (faithful, deferred): the configured `siglen` opclass option
+// (`GET_SIGLEN()` = `fcinfo->flinfo->fn_opts`) is not threaded to the GiST
+// support procs in the owned model — the dispatch seams carry no `fn_opts`, and
+// the relcache deliberately drops `set_fn_opclass_options` on the support
+// `FmgrInfo` (see `backend-utils-cache-relcache` `index_getprocinfo`). The
+// build-side procs (compress/union/penalty/picksplit) therefore use
+// `SIGLEN_DEFAULT`. This is correctness-preserving for queries: every
+// `gtsvector_consistent` returns `recheck = true` (the heap recheck makes the
+// scan exact regardless of the signature length), and the read-side consistent
+// reads `siglen` from the stored key itself. Only the physical signature length
+// of an index built with an explicit non-default `siglen` differs from C.
+// ---------------------------------------------------------------------------
+
+/// `gtsvector_compress` (pg_proc.dat oid 3648).
+const F_GTSVECTOR_COMPRESS: Oid = 3648;
+/// `gtsvector_decompress` (pg_proc.dat oid 3649).
+const F_GTSVECTOR_DECOMPRESS: Oid = 3649;
+/// `gtsvector_picksplit` (pg_proc.dat oid 3650).
+const F_GTSVECTOR_PICKSPLIT: Oid = 3650;
+/// `gtsvector_union` (pg_proc.dat oid 3651).
+const F_GTSVECTOR_UNION: Oid = 3651;
+/// `gtsvector_same` (pg_proc.dat oid 3652).
+const F_GTSVECTOR_SAME: Oid = 3652;
+/// `gtsvector_penalty` (pg_proc.dat oid 3653).
+const F_GTSVECTOR_PENALTY: Oid = 3653;
+/// `gtsvector_consistent` (pg_proc.dat oid 3654).
+const F_GTSVECTOR_CONSISTENT: Oid = 3654;
+/// `gtsvector_consistent` obsolete 4-arg signature (pg_proc.dat oid 3790).
+const F_GTSVECTOR_CONSISTENT_OLDSIG: Oid = 3790;
+/// `gtsvector_options` (pg_proc.dat oid 3434).
+const F_GTSVECTOR_OPTIONS: Oid = 3434;
+
+/// Decode the GiST by-reference key image into a [`SignTsVector`] (the
+/// `DatumGetPointer(entry->key)` form the gtsvector bodies read). C's
+/// `gtsvector_decompress` first `PG_DETOAST_DATUM`s the key, and every body then
+/// reads `VARDATA(x)` over a plain 4-byte-header image; the stored key may carry
+/// a 1-byte ("short") header or be compressed, so we detoast to a canonical
+/// 4-byte-header image and strip the header (`VARDATA_ANY`).
+fn signtsvector_from_key<'mcx>(
+    mcx: Mcx<'mcx>,
+    key: &Datum<'mcx>,
+) -> PgResult<SignTsVector> {
+    let image = backend_access_common_detoast_seams::detoast_attr::call(mcx, key.as_ref_bytes())?;
+    SignTsVector::from_image(&image[4..])
+        .ok_or_else(|| PgError::error("corrupt gtsvector GiST key".to_string()))
+}
+
+/// Decode an entry-vector key, tolerating the index-0 placeholder slot
+/// (`entryvec->vector[0]`, carried as `Datum::ByVal(0)`) that the C union /
+/// picksplit methods keep present but never read (they index 1-based from
+/// `FirstOffsetNumber`). A placeholder decodes to an empty `ARRKEY` — a valid
+/// `SignTsVector` the methods skip.
+fn signtsvector_from_key_or_placeholder<'mcx>(
+    mcx: Mcx<'mcx>,
+    key: &Datum<'mcx>,
+) -> PgResult<SignTsVector> {
+    if matches!(key, Datum::ByVal(_)) {
+        return Ok(SignTsVector {
+            flag: types_tsearch::tsgistidx::ARRKEY,
+            data: types_tsearch::tsgistidx::SignTsVectorData::Arr(Vec::new()),
+        });
+    }
+    signtsvector_from_key(mcx, key)
+}
+
+/// Copy a [`SignTsVector`] result onto the GiST by-reference key lane as its
+/// full varlena image (`PointerGetDatum(res)`).
+fn signtsvector_result_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    key: &SignTsVector,
+) -> PgResult<Datum<'mcx>> {
+    Ok(Datum::ByRef(mcx::slice_in(mcx, &key.to_image())?))
+}
+
+// ---------------------------------------------------------------------------
+// tsquery_ops opclass support-proc OIDs (pg_proc.dat). The GiST key is a
+// [`TSQuerySign`] (`uint64`) carried by value (`TSQuerySignGetDatum` =
+// `Int64GetDatum`), so the key [`Datum`] is `ByVal`. The leaf compress input is
+// a `tsquery` varlena image; consistent's query is a `tsquery` varlena. The
+// signature is a fixed `TSQS_SIGLEN`-bit word with no opclass options.
+// ---------------------------------------------------------------------------
+
+/// `gtsquery_compress` (pg_proc.dat oid 3695).
+const F_GTSQUERY_COMPRESS: Oid = 3695;
+/// `gtsquery_picksplit` (pg_proc.dat oid 3697).
+const F_GTSQUERY_PICKSPLIT: Oid = 3697;
+/// `gtsquery_union` (pg_proc.dat oid 3698).
+const F_GTSQUERY_UNION: Oid = 3698;
+/// `gtsquery_same` (pg_proc.dat oid 3699).
+const F_GTSQUERY_SAME: Oid = 3699;
+/// `gtsquery_penalty` (pg_proc.dat oid 3700).
+const F_GTSQUERY_PENALTY: Oid = 3700;
+/// `gtsquery_consistent` (pg_proc.dat oid 3701).
+const F_GTSQUERY_CONSISTENT: Oid = 3701;
+/// `gtsquery_consistent` obsolete 4-arg signature (pg_proc.dat oid 3793).
+const F_GTSQUERY_CONSISTENT_OLDSIG: Oid = 3793;
+
+/// `DatumGetTSQuerySign(key)` — read the by-value `uint64` signature word.
+fn tsquerysign_from_key(key: &Datum<'_>) -> TSQuerySign {
+    match key {
+        Datum::ByVal(w) => *w as TSQuerySign,
+        // The signature is by-value; a by-reference key would be a corruption.
+        _ => key.as_usize() as TSQuerySign,
+    }
+}
+
 /// `VARSIZE_4B(ptr)` — the total image length of a plain (uncompressed, 4-byte
 /// header) varlena. A serialized `RangeType` / `MultirangeType` always carries a
 /// plain 4B header (`SET_VARSIZE`), so this is the exact byte length.
@@ -1411,17 +1532,37 @@ fn multirange_from_datum<'mcx>(
 
 /// Build the [`range_gist::GistQuery`] for a range/multirange consistent call
 /// from the GiST core's by-reference query [`Datum`] and the operator's
-/// right-hand-side `subtype` (`PG_GETARG_OID(3)`):
-///   * invalid / `ANYRANGEOID` => `DatumGetRangeTypeP(query)`,
-///   * `ANYMULTIRANGEOID`      => `DatumGetMultirangeTypeP(query)`,
-///   * any other subtype       => the bare element value `Datum`.
-/// (Matches the `if/else` in `range_gist_consistent` / `multirange_gist_consistent`.)
+/// right-hand-side `subtype` (`PG_GETARG_OID(3)`).
+///
+/// In C, the decode lives *inside* each consistent function, so an **invalid
+/// subtype means the query type matches the index key type** (rangetypes_gist.c
+/// "Note that invalid subtype means that query type matches key type"):
+///   * `range_gist_consistent`:      invalid/`ANYRANGEOID` => `DatumGetRangeTypeP`,
+///                                   `ANYMULTIRANGEOID`     => `DatumGetMultirangeTypeP`,
+///                                   else                   => bare element.
+///   * `multirange_gist_consistent`: invalid/`ANYMULTIRANGEOID` => `DatumGetMultirangeTypeP`,
+///                                   `ANYRANGEOID`              => `DatumGetRangeTypeP`,
+///                                   else                       => bare element.
+///
+/// `key_is_multirange` selects which of those two dispatch tables to use (true
+/// for `multirange_gist_consistent`, where the indexed key — and the default
+/// query — is a multirange).
 fn gist_range_query<'mcx>(
     mcx: Mcx<'mcx>,
     query: &Datum<'mcx>,
     subtype: Oid,
+    key_is_multirange: bool,
 ) -> PgResult<range_gist::GistQuery<'mcx>> {
-    if !types_core::primitive::OidIsValid(subtype) || subtype == range_gist::ANYRANGEOID {
+    let invalid = !types_core::primitive::OidIsValid(subtype);
+    if key_is_multirange {
+        if invalid || subtype == range_gist::ANYMULTIRANGEOID {
+            Ok(range_gist::GistQuery::Multirange(multirange_from_datum(mcx, query)?))
+        } else if subtype == range_gist::ANYRANGEOID {
+            Ok(range_gist::GistQuery::Range(range_key_from_entry(mcx, query)?))
+        } else {
+            Ok(range_gist::GistQuery::Elem(elem_word(query)))
+        }
+    } else if invalid || subtype == range_gist::ANYRANGEOID {
         Ok(range_gist::GistQuery::Range(range_key_from_entry(mcx, query)?))
     } else if subtype == range_gist::ANYMULTIRANGEOID {
         Ok(range_gist::GistQuery::Multirange(multirange_from_datum(mcx, query)?))
@@ -1534,16 +1675,37 @@ fn dispatch_consistent<'mcx>(
         }
         F_RANGE_GIST_CONSISTENT => {
             let key = range_key_from_entry(_mcx, &entry.key)?;
-            let q = gist_range_query(_mcx, query, _subtype)?;
+            let q = gist_range_query(_mcx, query, _subtype, false)?;
             let (matched, recheck) =
                 range_gist::range_gist_consistent(_mcx, is_leaf, key, &q, strategy, _subtype)?;
             Ok(GistConsistentResult { matched, recheck })
         }
         F_MULTIRANGE_GIST_CONSISTENT => {
             let key = range_key_from_entry(_mcx, &entry.key)?;
-            let q = gist_range_query(_mcx, query, _subtype)?;
+            let q = gist_range_query(_mcx, query, _subtype, true)?;
             let (matched, recheck) =
                 range_gist::multirange_gist_consistent(_mcx, is_leaf, key, &q, strategy, _subtype)?;
+            Ok(GistConsistentResult { matched, recheck })
+        }
+        F_GTSVECTOR_CONSISTENT | F_GTSVECTOR_CONSISTENT_OLDSIG => {
+            // gtsvector_consistent(entry, query, strategy, subtype, recheck):
+            // the key is a detoasted SignTSVector; the query is a tsquery
+            // varlena decoded into QueryItems. `strategy`/`subtype`/`is_leaf`
+            // are unused by the body (it dispatches on the key's flag).
+            let key = signtsvector_from_key(_mcx, &entry.key)?;
+            let query_image = query.as_ref_bytes();
+            let query_size = backend_utils_adt_ts_small::util::tsq_size(query_image);
+            let query_items = backend_utils_adt_ts_small::util::get_query(query_image)?;
+            let (matched, recheck) =
+                tsgist::gtsvector_consistent(_mcx, &key, &query_items, query_size)?;
+            Ok(GistConsistentResult { matched, recheck })
+        }
+        F_GTSQUERY_CONSISTENT | F_GTSQUERY_CONSISTENT_OLDSIG => {
+            // gtsquery_consistent(entry, query, strategy, subtype, recheck): the
+            // key is the by-value TSQuerySign; the query is a tsquery varlena.
+            let key = tsquerysign_from_key(&entry.key);
+            let q = query.as_ref_bytes();
+            let (matched, recheck) = tsqgist::gtsquery_consistent(key, q, strategy, is_leaf)?;
             Ok(GistConsistentResult { matched, recheck })
         }
         _ => Err(unrecognized_proc(proc_oid)),
@@ -1567,6 +1729,29 @@ fn dispatch_union<'mcx>(
             let evec = range_entryvec(mcx, entryvec)?;
             let r = range_gist::range_gist_union(mcx, &evec)?;
             range_result_datum(mcx, r)
+        }
+        F_GTSVECTOR_UNION => {
+            // gtsvector_union iterates GETENTRY(entryvec, i) for i in 0..n.
+            let n = entryvec.n as usize;
+            let mut keys: Vec<SignTsVector> = Vec::with_capacity(n);
+            for e in entryvec.vector.iter().take(n) {
+                keys.push(signtsvector_from_key_or_placeholder(mcx, &e.key)?);
+            }
+            let refs: Vec<&SignTsVector> = keys.iter().collect();
+            let u = tsgist::gtsvector_union(&refs, tsgist::SIGLEN_DEFAULT);
+            signtsvector_result_datum(mcx, &u)
+        }
+        F_GTSQUERY_UNION => {
+            // gtsquery_union ORs every entry's by-value TSQuerySign.
+            let n = entryvec.n as usize;
+            let signs: Vec<TSQuerySign> = entryvec
+                .vector
+                .iter()
+                .take(n)
+                .map(|e| tsquerysign_from_key(&e.key))
+                .collect();
+            let u = tsqgist::gtsquery_union(&signs);
+            Ok(Datum::from_u64(u))
         }
         _ => Err(unrecognized_proc(proc_oid)),
     }
@@ -1632,6 +1817,63 @@ fn dispatch_compress<'mcx>(
             }
             mcx::alloc_in(mcx, entry.clone())
         }
+        F_GTSVECTOR_COMPRESS => {
+            if entry.leafkey {
+                // The leaf value is a `tsvector` varlena (C: `DatumGetTSVector`
+                // = PG_DETOAST_DATUM); detoast to a plain 4-byte-header image and
+                // extract its per-lexeme byte slices (ARRPTR/STRPTR) to build the
+                // array key. See the DIVERGENCE note: build uses SIGLEN_DEFAULT.
+                use backend_utils_adt_tsvector_core::access::{arrptr, lexeme, tsv_size};
+                let detoasted = backend_access_common_detoast_seams::detoast_attr::call(
+                    mcx,
+                    entry.key.as_ref_bytes(),
+                )?;
+                let image: &[u8] = &detoasted;
+                let size = tsv_size(image);
+                let mut lexemes: Vec<&[u8]> = Vec::with_capacity(size.max(0) as usize);
+                for i in 0..size as usize {
+                    let e = arrptr(image, i);
+                    lexemes.push(lexeme(image, size, e));
+                }
+                let res = tsgist::gtsvector_compress_leaf(&lexemes, tsgist::SIGLEN_DEFAULT);
+                let key = signtsvector_result_datum(mcx, &res)?;
+                let retval = gistentryinit(key, entry.rel, entry.page, entry.offset, false);
+                return mcx::alloc_in(mcx, retval);
+            }
+            // Inner entry: rewrite an all-0xff SIGNKEY as ALLISTRUE; otherwise
+            // pass through unchanged. A NULL key (`DatumGetPointer(entry->key)`
+            // == NULL, carried as `Datum::ByVal(0)`) is not a SIGNKEY, so C's
+            // `else if (ISSIGNKEY(..) && !ISALLTRUE(..))` falls through to
+            // `retval = entry` — pass it through without decoding.
+            if matches!(entry.key, Datum::ByVal(_)) {
+                return mcx::alloc_in(mcx, entry.clone());
+            }
+            let key = signtsvector_from_key(mcx, &entry.key)?;
+            if key.is_signkey() && !key.is_alltrue() {
+                // The all-0xff scan walks the stored signature; use its own
+                // length (the build-time siglen baked into the key).
+                let key_siglen = key.sign().len() as i32;
+                if let Some(res) =
+                    tsgist::gtsvector_compress_inner_alltrue(&key, key_siglen)
+                {
+                    let datum = signtsvector_result_datum(mcx, &res)?;
+                    let retval = gistentryinit(datum, entry.rel, entry.page, entry.offset, false);
+                    return mcx::alloc_in(mcx, retval);
+                }
+            }
+            mcx::alloc_in(mcx, entry.clone())
+        }
+        F_GTSQUERY_COMPRESS => {
+            // gtsquery_compress (tsquery_gist.c:30): leaf — turn the tsquery
+            // image into its by-value TSQuerySign; non-leaf — identity.
+            if entry.leafkey {
+                let sign = tsqgist::gtsquery_compress_leaf(entry.key.as_ref_bytes())?;
+                let retval =
+                    gistentryinit(Datum::from_u64(sign), entry.rel, entry.page, entry.offset, false);
+                return mcx::alloc_in(mcx, retval);
+            }
+            mcx::alloc_in(mcx, entry.clone())
+        }
         // The box opclass has no compress proc (gistproc.c: "we store boxes as
         // boxes ... so we do not need compress").
         _ => Err(unrecognized_proc(proc_oid)),
@@ -1644,6 +1886,12 @@ fn dispatch_decompress<'mcx>(
     _collation: Oid,
     _entry: &GISTENTRY<'mcx>,
 ) -> PgResult<PgBox<'mcx, GISTENTRY<'mcx>>> {
+    // gtsvector_decompress (tsgistidx.c:242) only detoasts the stored key; on
+    // the owned by-reference lane the key is already a plain image, so it is
+    // the identity (return the entry unchanged).
+    if proc_oid == F_GTSVECTOR_DECOMPRESS {
+        return mcx::alloc_in(_mcx, _entry.clone());
+    }
     // The box/point opclass has no decompress proc (the AM uses the identity
     // decompress when none is registered). A registered decompress OID for
     // another opclass folds in here.
@@ -1668,6 +1916,25 @@ fn dispatch_penalty<'mcx>(
             let orig = range_key_from_entry(_mcx, &origentry.key)?;
             let new_ = range_key_from_entry(_mcx, &newentry.key)?;
             range_gist::range_gist_penalty(_mcx, orig, new_)
+        }
+        F_GTSVECTOR_PENALTY => {
+            // origval is always ISSIGNKEY (the build-time signature); newval is
+            // an ARRKEY (leaf) or a SIGNKEY (inner). siglen is the stored
+            // signature length (DEFAULT for an ALLISTRUE origval which carries
+            // no payload).
+            let origval = signtsvector_from_key(_mcx, &origentry.key)?;
+            let newval = signtsvector_from_key(_mcx, &newentry.key)?;
+            let siglen = if origval.is_signkey() && !origval.is_alltrue() {
+                origval.sign().len() as i32
+            } else {
+                tsgist::SIGLEN_DEFAULT
+            };
+            tsgist::gtsvector_penalty(_mcx, &origval, &newval, siglen)
+        }
+        F_GTSQUERY_PENALTY => {
+            let orig = tsquerysign_from_key(&origentry.key);
+            let new_ = tsquerysign_from_key(&newentry.key);
+            Ok(tsqgist::gtsquery_penalty(orig, new_))
         }
         _ => Err(unrecognized_proc(proc_oid)),
     }
@@ -1713,6 +1980,52 @@ fn dispatch_picksplit<'mcx>(
             splitvec.spl_rdatum_exists = sv.spl_rdatum_exists;
             Ok(())
         }
+        F_GTSVECTOR_PICKSPLIT => {
+            // The body indexes entries[FirstOffsetNumber..=entryvec_n-1] (1-based
+            // offset numbers); decode every key into a parallel Vec and pass
+            // borrowed refs in the same index order (index 0 is the unread
+            // placeholder slot).
+            let n = entryvec.n as usize;
+            let mut keys: Vec<SignTsVector> = Vec::with_capacity(n);
+            for e in entryvec.vector.iter().take(n) {
+                keys.push(signtsvector_from_key_or_placeholder(mcx, &e.key)?);
+            }
+            let refs: Vec<&SignTsVector> = keys.iter().collect();
+            let sv =
+                tsgist::gtsvector_picksplit(mcx, &refs, entryvec.n, tsgist::SIGLEN_DEFAULT)?;
+            splitvec.spl_left = sv.spl_left;
+            splitvec.spl_right = sv.spl_right;
+            splitvec.spl_ldatum = match sv.spl_ldatum {
+                Some(k) => Some(signtsvector_result_datum(mcx, &k)?),
+                None => None,
+            };
+            splitvec.spl_ldatum_exists = false;
+            splitvec.spl_rdatum = match sv.spl_rdatum {
+                Some(k) => Some(signtsvector_result_datum(mcx, &k)?),
+                None => None,
+            };
+            splitvec.spl_rdatum_exists = false;
+            Ok(())
+        }
+        F_GTSQUERY_PICKSPLIT => {
+            // entrysign holds every entry's by-value TSQuerySign indexed exactly
+            // as GETENTRY(entryvec, pos) (entrysign.len() == entryvec->n).
+            let n = entryvec.n as usize;
+            let signs: Vec<TSQuerySign> = entryvec
+                .vector
+                .iter()
+                .take(n)
+                .map(|e| tsquerysign_from_key(&e.key))
+                .collect();
+            let sv = tsqgist::gtsquery_picksplit(mcx, &signs)?;
+            splitvec.spl_left = sv.spl_left;
+            splitvec.spl_right = sv.spl_right;
+            splitvec.spl_ldatum = Some(Datum::from_u64(sv.spl_ldatum));
+            splitvec.spl_ldatum_exists = false;
+            splitvec.spl_rdatum = Some(Datum::from_u64(sv.spl_rdatum));
+            splitvec.spl_rdatum_exists = false;
+            Ok(())
+        }
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1735,6 +2048,24 @@ fn dispatch_same<'mcx>(
             let r1 = range_key_from_entry(_mcx, a)?;
             let r2 = range_key_from_entry(_mcx, b)?;
             range_gist::range_gist_same(r1, r2)
+        }
+        F_GTSVECTOR_SAME => {
+            let ka = signtsvector_from_key(_mcx, a)?;
+            let kb = signtsvector_from_key(_mcx, b)?;
+            // Both keys are the same form (the AM only compares like keys);
+            // siglen is the stored signature length (DEFAULT for two ALLISTRUE
+            // keys, which the body short-circuits before reading it).
+            let siglen = if ka.is_signkey() && !ka.is_alltrue() {
+                ka.sign().len() as i32
+            } else {
+                tsgist::SIGLEN_DEFAULT
+            };
+            Ok(tsgist::gtsvector_same(&ka, &kb, siglen))
+        }
+        F_GTSQUERY_SAME => {
+            let ka = tsquerysign_from_key(a);
+            let kb = tsquerysign_from_key(b);
+            Ok(tsqgist::gtsquery_same(ka, kb))
         }
         _ => Err(unrecognized_proc(proc_oid)),
     }

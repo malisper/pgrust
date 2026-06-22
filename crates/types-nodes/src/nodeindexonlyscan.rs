@@ -83,11 +83,11 @@ pub struct IndexOnlyScan<'mcx> {
     /// `Oid indexid` — OID of index to scan.
     pub indexid: Oid,
     /// `List *indexqual` — list of index quals (usually OpExprs).
-    pub indexqual: Option<PgVec<'mcx, Expr>>,
+    pub indexqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     /// `List *recheckqual` — index quals in recheckable form.
-    pub recheckqual: Option<PgVec<'mcx, Expr>>,
+    pub recheckqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     /// `List *indexorderby` — list of index ORDER BY exprs.
-    pub indexorderby: Option<PgVec<'mcx, Expr>>,
+    pub indexorderby: Option<PgVec<'mcx, Expr<'mcx>>>,
     /// `List *indextlist` — TargetEntry list describing index's cols.
     pub indextlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     /// `ScanDirection indexorderdir` — forward or backward or don't care.
@@ -96,7 +96,7 @@ pub struct IndexOnlyScan<'mcx> {
 
 impl IndexOnlyScan<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<IndexOnlyScan<'b>> {
-        let clone_exprs = |src: &Option<PgVec<'_, Expr>>| -> PgResult<Option<PgVec<'b, Expr>>> {
+        let clone_exprs = |src: &Option<PgVec<'_, Expr<'_>>>| -> PgResult<Option<PgVec<'b, Expr<'b>>>> {
             match src {
                 Some(list) => {
                     let mut out = vec_with_capacity_in(mcx, list.len())?;

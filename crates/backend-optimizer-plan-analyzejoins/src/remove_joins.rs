@@ -932,7 +932,7 @@ fn strip_relabel(mut e: Expr) -> Expr {
 /// expr never contains, so plain `ChangeVarNodes` suffices.
 fn change_expr_relids_standalone<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    expr: &mut Expr,
+    expr: &mut Expr<'mcx>,
     from: i32,
     to: i32,
 ) -> types_error::PgResult<()> {
@@ -947,7 +947,7 @@ fn change_expr_relids_standalone<'mcx>(
 
 /// A throwaway [`Expr`] used as the `mem::replace` placeholder; immediately
 /// overwritten and never observed.
-fn dummy_expr() -> Expr {
+fn dummy_expr<'mcx>() -> Expr<'mcx> {
     Expr::Const(types_nodes::primnodes::Const::default())
 }
 
@@ -1014,7 +1014,7 @@ fn match_unique_clauses<'mcx>(
 
 /// For an OpExpr clause, return `(iclause, c1)`:
 ///   when `left_empty`: `(get_rightop, get_leftop)` else `(get_leftop, get_rightop)`.
-fn op_sides(clause: &Expr, left_empty: bool) -> (Option<Expr>, Option<Expr>) {
+fn op_sides<'mcx>(clause: &Expr<'mcx>, left_empty: bool) -> (Option<Expr<'mcx>>, Option<Expr<'mcx>>) {
     if let Expr::OpExpr(op) = clause {
         let left = op.args.first().cloned();
         let right = op.args.get(1).cloned();
@@ -1346,6 +1346,17 @@ fn remove_self_join_rel<'mcx>(
 
     // Replace varno in all the query structures (except RangeTblRef).
     crate::change_relids::change_relids_in_query(run, root.parse, ctx)?;
+
+    // C's `simple_rte_array[rti]` aliases `parse->rtable` pointers, so the walk
+    // above is automatically reflected there. In this repo `simple_rte_array`
+    // holds *cloned* RTEs in a separate run store; re-apply the same relid
+    // substitution to those copies so a LATERAL subquery/function/values RTE that
+    // referenced the removed relation is rewritten before `set_subquery_pathlist`
+    // reads it to derive nestloop params (else: `non-LATERAL parameter required`).
+    {
+        let simple_rte_array = root.simple_rte_array.clone();
+        crate::change_relids::change_relids_in_simple_rte_array(run, &simple_rte_array, ctx);
+    }
 
     // Replace links in the planner info: full relid rename across SpecialJoinInfo
     // sets / semi_rhs_exprs, PlaceHolderVars, all EquivalenceClasses, the

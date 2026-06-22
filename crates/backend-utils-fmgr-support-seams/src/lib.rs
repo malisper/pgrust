@@ -32,5 +32,5 @@ seam_core::seam!(
         indexarg: i32,
         index: &IndexOptInfo,
         indexcol: i32
-    ) -> (Vec<Expr>, bool)
+    ) -> (Vec<Expr<'static>>, bool)
 );

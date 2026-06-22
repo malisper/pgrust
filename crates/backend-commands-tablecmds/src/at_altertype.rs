@@ -43,10 +43,11 @@ use mcx::{Mcx, PgVec};
 
 use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 use types_catalog::pg_attribute::{
-    Anum_pg_attribute_attcollation, Anum_pg_attribute_attgenerated, Anum_pg_attribute_atthasdef,
-    Anum_pg_attribute_atthasmissing, Anum_pg_attribute_attinhcount, Anum_pg_attribute_attnotnull,
-    Anum_pg_attribute_attnum, Anum_pg_attribute_atttypid, Anum_pg_attribute_atttypmod,
-    AttributeRelationId, PgAttributeUpdateRow,
+    Anum_pg_attribute_attalign, Anum_pg_attribute_attbyval, Anum_pg_attribute_attcollation,
+    Anum_pg_attribute_attgenerated, Anum_pg_attribute_atthasdef, Anum_pg_attribute_atthasmissing,
+    Anum_pg_attribute_attinhcount, Anum_pg_attribute_attlen, Anum_pg_attribute_attmissingval,
+    Anum_pg_attribute_attnotnull, Anum_pg_attribute_attnum, Anum_pg_attribute_atttypid,
+    Anum_pg_attribute_atttypmod, AttributeRelationId, PgAttributeUpdateRow,
 };
 use types_catalog::pg_attrdef::AttrDefaultRelationId;
 use types_catalog::pg_collation::CollationRelationId;
@@ -463,7 +464,7 @@ pub fn ATPrepAlterColumnType<'mcx>(
         let coerced = backend_parser_coerce::coerce_to_target_type(
             mcx,
             None,
-            transform,
+            transform.erase_lifetime(),
             src_type,
             targettype,
             targettypmod,
@@ -471,7 +472,7 @@ pub fn ATPrepAlterColumnType<'mcx>(
             CoercionForm::COERCE_IMPLICIT_CAST,
             -1,
         )?;
-        let Some(mut transform2) = coerced else {
+        let Some(coerced) = coerced else {
             // error text depends on whether USING was specified or not
             if def.cooked_default.is_some() {
                 return backend_utils_error::ereport(ERROR)
@@ -504,6 +505,9 @@ pub fn ATPrepAlterColumnType<'mcx>(
                     .map(|()| unreachable!());
             }
         };
+        // Bring the parser-arena `'static` coercion result into `mcx` for the
+        // in-place collation pass below (`Expr` is invariant over its lifetime).
+        let mut transform2: Expr<'mcx> = coerced.clone_in(mcx)?;
 
         // Fix collations after all else. C: assign_expr_collations(pstate,
         // transform) with a NULL-ish utility pstate; the port's in-place Node
@@ -511,14 +515,18 @@ pub fn ATPrepAlterColumnType<'mcx>(
         // (behaviourally identical to `assign_expr_collations(None, ...)`).
         assign_expr_collations_in(mcx, &mut transform2)?;
 
-        // Expand virtual generated columns in the expr.
+        // Expand virtual generated columns in the expr. The seam operates over
+        // the parser-arena `'static` form (erase in, clone the result back into
+        // `mcx` for the `'mcx` planner call below; `Expr` is invariant).
         let expanded = rewrite_seam::expand_generated_columns_in_expr::call(
             mcx,
-            Some(transform2),
+            Some(transform2.erase_lifetime()),
             rel.rd_id,
             1,
         )?;
-        let transform2 = expanded.expect("expand_generated_columns_in_expr returned None");
+        let transform2 = expanded
+            .expect("expand_generated_columns_in_expr returned None")
+            .clone_in(mcx)?;
 
         // Plan the expr now so we can accurately assess the need to rewrite.
         let planned = backend_optimizer_plan_planner::expression_planner(mcx, transform2)?;
@@ -1318,15 +1326,16 @@ fn ATPostAlterTypeParse<'mcx>(
         let tab_idx = crate::at_phase::ATGetQueueEntry(mcx, wqueue, &rel)?;
 
         if stm_tag == ntag::T_IndexStmt {
-            // if (!rewrite) TryReuseIndex(oldId, stmt) — for a rewriting ALTER
-            // (our reach), rewrite != 0, so TryReuseIndex is skipped and
-            // stmt->oldNumber stays Invalid; the index is rebuilt fresh.
+            // if (!rewrite) TryReuseIndex(oldId, stmt) — for a non-rewriting
+            // ALTER (rewrite == 0) we may be able to reuse the existing index's
+            // physical storage (and so preserve its relfilenode/tablespace);
+            // a rewriting ALTER (rewrite != 0) rebuilds the index fresh.
             let mut istmt = stm
                 .clone_in(mcx)?
                 .into_indexstmt()
                 .expect("ATPostAlterTypeParse: T_IndexStmt node");
             if rewrite == 0 {
-                unported("ATPostAlterTypeParse TryReuseIndex (non-rewriting ALTER COLUMN TYPE index reuse)");
+                TryReuseIndex(mcx, old_id, &mut istmt)?;
             }
             istmt.reset_default_tblspc = true;
             // keep the index's comment: idxcomment = GetComment(oldId, ...).
@@ -1365,9 +1374,14 @@ fn ATPostAlterTypeParse<'mcx>(
                             .clone_in(mcx)?
                             .into_indexstmt()
                             .expect("AT_AddIndex: def is IndexStmt");
-                        let indoid = pg_depend_seam::get_index_constraint::call(old_id)?;
+                        // indoid = get_constraint_index(oldId): the index OID
+                        // backing the constraint being rebuilt.
+                        let indoid =
+                            backend_utils_cache_lsyscache::collation_constraint_language_cast::get_constraint_index(
+                                old_id,
+                            )?;
                         if rewrite == 0 {
-                            unported("ATPostAlterTypeParse TryReuseIndex (non-rewriting ALTER COLUMN TYPE constraint index reuse)");
+                            TryReuseIndex(mcx, indoid, &mut indstmt)?;
                         }
                         check_no_comment(indoid, RelationRelationId)?;
                         indstmt.reset_default_tblspc = true;
@@ -1470,6 +1484,40 @@ fn ATPostAlterTypeParse<'mcx>(
     }
 
     rel.close(NoLock)?;
+    Ok(())
+}
+
+/// `TryReuseIndex(oldId, stmt)` (tablecmds.c:15886) — subroutine for
+/// `ATPostAlterTypeParse`. If the existing index `old_id` is compatible enough
+/// with the rebuilt definition `stmt` (`CheckIndexCompatible`), stash the old
+/// index's relfilenumber (and the subtransaction-id tracking fields) into the
+/// `IndexStmt` so `ATExecAddIndex`/`DefineIndex` reuse the existing storage
+/// instead of building from scratch — preserving the index's relfilenode and
+/// tablespace across a no-rewrite `ALTER COLUMN TYPE`.
+fn TryReuseIndex<'mcx>(
+    mcx: Mcx<'mcx>,
+    old_id: Oid,
+    stmt: &mut types_nodes::ddlnodes::IndexStmt<'mcx>,
+) -> PgResult<()> {
+    let compatible =
+        backend_commands_indexcmds_seams::check_index_compatible::call(mcx, old_id, stmt)?;
+    if compatible {
+        // irel = index_open(oldId, NoLock); caller holds a lock already.
+        let irel = relation_open(mcx, old_id, NoLock)?;
+
+        // If it's a partitioned index, there is no storage to share.
+        if irel.rd_rel.relkind != RELKIND_PARTITIONED_INDEX {
+            stmt.oldNumber = irel.rd_locator.relNumber;
+            // C reads irel->rd_createSubid / rd_firstRelfilelocatorSubid off the
+            // live relcache entry (not carried on the trimmed RelationData). For
+            // the reachable ALTER-COLUMN-TYPE path the index was created in a
+            // prior (sub)transaction, so both are InvalidSubTransactionId; the
+            // downstream restore (ATExecAddIndex) then lets relcache.c rebuild.
+            stmt.oldCreateSubid = types_core::xact::InvalidSubTransactionId;
+            stmt.oldFirstRelfilelocatorSubid = types_core::xact::InvalidSubTransactionId;
+        }
+        irel.close(NoLock)?;
+    }
     Ok(())
 }
 
@@ -1827,7 +1875,7 @@ pub fn ATExecAlterColumnType<'mcx>(
     // If there is a default, coerce it to the new datatype now (before changing
     // the column type), so build_column_default's own coercion will not fire the
     // wrong error.
-    let mut defaultexpr: Option<Expr> = None;
+    let mut defaultexpr: Option<Expr<'mcx>> = None;
     if atthasdef {
         let built = rewrite_seam::build_column_default::call(mcx, rel.alias(), attnum as i32)?;
         let built = built.expect("build_column_default returned NULL for atthasdef column");
@@ -1836,7 +1884,7 @@ pub fn ATExecAlterColumnType<'mcx>(
         let coerced = backend_parser_coerce::coerce_to_target_type(
             mcx,
             None,
-            stripped.clone_in(mcx)?,
+            stripped.clone_in(mcx)?.erase_lifetime(),
             src_type,
             targettype,
             targettypmod,
@@ -1864,7 +1912,9 @@ pub fn ATExecAlterColumnType<'mcx>(
                 .finish(here("ATExecAlterColumnType"))
                 .map(|()| unreachable!());
         };
-        defaultexpr = Some(coerced);
+        // `coerced` is the parser-arena `'static` coercion result; bring it into
+        // `mcx` for the `'mcx` `defaultexpr_node`/StoreAttrDefault path below.
+        defaultexpr = Some(coerced.clone_in(mcx)?);
     }
 
     // Find everything that depends on the column and record enough info to
@@ -1899,9 +1949,82 @@ pub fn ATExecAlterColumnType<'mcx>(
         )?;
     }
 
-    // The attmissingval array repack (no-rewrite path) is not yet ported.
-    if atthasmissing && rewrite == 0 {
-        unported("attmissingval repack (construct_array over the new type)");
+    // First fix up the missing value, if any. If `rewrite` is set the missing
+    // value should already have been cleared, so this only fires on the
+    // no-rewrite path. We assume that since the table doesn't need rewriting,
+    // the actual Datum doesn't need to be changed, only the array metadata: get
+    // the element out of the old-type array and repack it in a new array built
+    // with the new type data (tablecmds.c:14897).
+    let mut new_missingval: Option<Option<alloc::vec::Vec<u8>>> = None;
+    if atthasmissing {
+        // Assert(tab->rewrite == 0);
+        debug_assert_eq!(rewrite, 0);
+
+        // missingval = heap_getattr(heapTup, Anum_pg_attribute_attmissingval,
+        //                           attrelation->rd_att, &missingNull);
+        let (missingval_bytes, missing_null) = backend_utils_cache_syscache::SysCacheGetAttr(
+            mcx,
+            ATTNAME,
+            &heap_tup,
+            Anum_pg_attribute_attmissingval as i32,
+        )?;
+
+        // if it's a null array there is nothing to do.
+        if !missing_null {
+            // The old type's array element metadata (still current on the
+            // pg_attribute tuple before this update): attlen/attbyval/attalign.
+            let old_attlen =
+                SysCacheGetAttrNotNull(mcx, ATTNAME, &heap_tup, Anum_pg_attribute_attlen as i32)?
+                    .as_i16();
+            let old_attbyval = SysCacheGetAttrNotNull(
+                mcx,
+                ATTNAME,
+                &heap_tup,
+                Anum_pg_attribute_attbyval as i32,
+            )?
+            .as_bool();
+            let old_attalign = SysCacheGetAttrNotNull(
+                mcx,
+                ATTNAME,
+                &heap_tup,
+                Anum_pg_attribute_attalign as i32,
+            )?
+            .as_char();
+
+            // missingval = array_get_element(missingval, 1, &one, 0, attlen,
+            //                                attbyval, attalign, &isNull);
+            // The single-element array is deconstructed; element 0 is the C
+            // "element 1".
+            let old_bytes = missingval_bytes.as_ref_bytes();
+            let elems = backend_utils_adt_arrayfuncs_seams::deconstruct_array_values_bytes::call(
+                mcx,
+                old_bytes,
+                old_atttypid,
+                old_attlen,
+                old_attbyval,
+                old_attalign as core::ffi::c_char,
+            )?;
+            let (elem_datum, _elem_isnull) = elems
+                .first()
+                .ok_or_else(|| {
+                    backend_utils_error::PgError::error(
+                        "attmissingval array has no element".to_string(),
+                    )
+                })?
+                .clone();
+
+            // missingval = PointerGetDatum(construct_array(&missingval, 1,
+            //     targettype, tform->typlen, tform->typbyval, tform->typalign));
+            let new_arr = backend_utils_adt_arrayfuncs_seams::construct_array_values_bytes::call(
+                mcx,
+                core::slice::from_ref(&elem_datum),
+                targettype,
+                tform.typlen,
+                tform.typbyval,
+                tform.typalign as core::ffi::c_char,
+            )?;
+            new_missingval = Some(Some(new_arr.as_slice().to_vec()));
+        }
     }
 
     // Here we go — change the recorded column type and collation.
@@ -1924,6 +2047,8 @@ pub fn ATExecAlterColumnType<'mcx>(
         attalign: Some(tform.typalign),
         attstorage: Some(tform.typstorage),
         attcompression: Some(InvalidCompressionMethod),
+        // Repacked missing value (no-rewrite path); `None` leaves it unchanged.
+        attmissingval: new_missingval,
         ..Default::default()
     };
     indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, &attrelation, &heap_tup, &row)?;
@@ -2021,6 +2146,6 @@ fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<String> {
 }
 
 /// Wrap an `Expr` default back into a `Node` for `StoreAttrDefault`.
-fn defaultexpr_node<'mcx>(mcx: Mcx<'mcx>, expr: Expr) -> PgResult<Node<'mcx>> {
+fn defaultexpr_node<'mcx>(mcx: Mcx<'mcx>, expr: Expr<'mcx>) -> PgResult<Node<'mcx>> {
     Node::mk_expr(mcx, expr)
 }

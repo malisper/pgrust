@@ -23,7 +23,7 @@ seam_core::seam!(
         node: &mut types_nodes::IndexOnlyScanState<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
         index: types_rel::Relation<'mcx>,
-        quals: Option<&[types_nodes::primnodes::Expr]>,
+        quals: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
         is_orderby: bool,
     ) -> types_error::PgResult<()>
 );
@@ -54,7 +54,7 @@ seam_core::seam!(
         node: &mut types_nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
         index: types_rel::Relation<'mcx>,
-        quals: Option<&[types_nodes::primnodes::Expr]>,
+        quals: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
     ) -> types_error::PgResult<()>
 );
 

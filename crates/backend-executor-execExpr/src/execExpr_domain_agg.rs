@@ -186,7 +186,7 @@ pub fn exec_init_coerce_to_domain<'mcx>(
     mcx: Mcx<'mcx>,
     scratch: &mut ExprEvalStep<'mcx>,
     ctest_resulttype: Oid,
-    ctest_arg: &Expr,
+    ctest_arg: &Expr<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
 ) -> PgResult<()> {
@@ -294,8 +294,12 @@ pub fn exec_init_coerce_to_domain<'mcx>(
                 .check_expr
                 .as_ref()
                 .expect("DOM_CONSTRAINT_CHECK with no check_expr");
+            // The cached `check_expr` is the typcache's `'static`-erased tree;
+            // clone it into the executor query arena (`mcx`) to compile it, since
+            // `exec_init_expr_rec` threads the node tree as `'mcx` (Expr is invariant).
+            let check_expr = check_expr.clone_in(mcx)?;
             // ExecInitExprRec(con->check_expr, state, checkvalue, checknull)
-            core::exec_init_expr_rec(mcx, check_expr, state, checkvalue)?;
+            core::exec_init_expr_rec(mcx, &check_expr, state, checkvalue)?;
             state.innermost_domainval = save_dv;
 
             // scratch->opcode = EEOP_DOMAIN_CHECK; ExprEvalPushStep.
@@ -1172,7 +1176,7 @@ pub fn exec_build_hash32_expr<'mcx>(
     ops: TupleSlotKind,
     hashfunc_oids: &[Oid],
     collations: &[Oid],
-    hash_exprs: &[Expr],
+    hash_exprs: &[Expr<'mcx>],
     opstrict: &[bool],
     init_value: u32,
     keep_nulls: bool,
@@ -1428,7 +1432,7 @@ pub fn exec_build_param_set_equal<'mcx>(
     rops: TupleSlotKind,
     eqfunctions: &[Oid],
     collations: &[Oid],
-    param_exprs: &[Expr],
+    param_exprs: &[Expr<'mcx>],
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     // state->expr = NULL; state->flags = EEO_FLAG_IS_QUAL.
     let mut state = make_expr_state(mcx)?;
@@ -1634,7 +1638,7 @@ fn arg_tle_expr_clone<'mcx>(
     transno: usize,
     i: usize,
     mcx: Mcx<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let aggref = aggref_of(aggstate, transno);
     let args = aggref
         .args
@@ -1989,7 +1993,7 @@ pub fn resolve_combining_op(node: &SubPlanState<'_>, idx: usize) -> PgResult<Com
 }
 
 /// `lfirst_node(OpExpr, list_nth_cell(oplist, idx))`.
-fn oplist_op(testexpr: &Expr, idx: usize) -> &OpExpr {
+fn oplist_op<'a, 'mcx>(testexpr: &'a Expr<'mcx>, idx: usize) -> &'a OpExpr<'mcx> {
     let elem = match testexpr.expr_tag() {
         etag::T_OpExpr => {
             assert!(idx == 0, "oplist index {idx} out of range for single OpExpr");

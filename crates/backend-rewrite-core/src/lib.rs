@@ -165,11 +165,18 @@ pub fn init_seams() {
     // handles are unchanged (in-place mutation), so the same `Vec<NodeId>` is
     // returned.
     backend_optimizer_util_plancat_ext_seams::change_var_nodes::set(
-        |root: &mut types_pathnodes::PlannerInfo, nodes, rt_index, new_index| {
+        |mcx, root: &mut types_pathnodes::PlannerInfo, nodes, rt_index, new_index| {
             for &id in nodes {
-                let scratch = mcx::MemoryContext::new("change_var_nodes seam");
-                let mcx = scratch.mcx();
-                let mut node = types_nodes::nodes::Node::mk_expr(mcx, root.node(id).clone())
+                // Deep-copy the arena node into the caller-provided run arena `mcx`,
+                // re-stamp its Var refs in place, then re-intern into the
+                // `node_arena` `'static` handle-space. The clone lives in `mcx`
+                // (which owns the planner run), so the arena-intern erasure is sound
+                // (no function-local scratch escape).
+                let cloned = root
+                    .node(id)
+                    .clone_in(mcx)
+                    .expect("change_var_nodes: clone_in failed (OOM)");
+                let mut node = types_nodes::nodes::Node::mk_expr(mcx, cloned)
                     .expect("change_var_nodes: opaque Node alloc failed (OOM)");
                 change::ChangeVarNodes(&mut node, rt_index, new_index, 0, mcx);
                 let walked = match node.into_expr() {
@@ -178,7 +185,7 @@ pub fn init_seams() {
                     // Expr input.
                     None => unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"),
                 };
-                *root.node_mut(id) = walked;
+                *root.node_mut(id) = walked.erase_lifetime();
             }
             nodes.to_vec()
         },
@@ -192,13 +199,13 @@ pub fn init_seams() {
     // the `ExprRelids` the walker reads; `target = None` is the C NULL "modify all
     // level-zero Vars" case.
     backend_optimizer_plan_init_subselect_ext_seams::add_nulling_relids_expr::set(
-        |expr, target, added| {
+        |mcx, expr, target, added| {
             let target_er = target.map(|b| types_nodes::primnodes::ExprRelids { words: b.words });
             let added_er = added
                 .map(|b| types_nodes::primnodes::ExprRelids { words: b.words })
                 .unwrap_or_default();
-            let scratch = mcx::MemoryContext::new("add_nulling_relids seam");
-            let mcx = scratch.mcx();
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
             let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)
                 .expect("add_nulling_relids: opaque Node alloc failed (OOM)");
             nulling::add_nulling_relids(&mut node, target_er.as_ref(), &added_er, mcx);
@@ -214,9 +221,9 @@ pub fn init_seams() {
     // init-subselect for upper-level LATERAL PlaceHolderVars. Same `&mut Node`
     // wrap/unwrap as above; the walker is fallible (catalog lookups), propagated.
     backend_optimizer_plan_init_subselect_ext_seams::increment_var_sublevels_up_expr::set(
-        |expr, delta_sublevels_up, min_sublevels_up| {
-            let scratch = mcx::MemoryContext::new("increment_var_sublevels_up seam");
-            let mcx = scratch.mcx();
+        |mcx, expr, delta_sublevels_up, min_sublevels_up| {
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
             let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)?;
             increment::IncrementVarSublevelsUp(&mut node, delta_sublevels_up, min_sublevels_up, mcx)?;
             Ok(match node.into_expr() {
@@ -233,7 +240,7 @@ pub fn init_seams() {
     // make_pathkeys_for_sortclauses_extended when stripping the group RTE index.
     // Same `&mut Node` wrap/unwrap as above; `except_relids == None` is the C NULL.
     backend_nodes_nodeFuncs_seams::remove_nulling_relids::set(
-        |expr, removable_relids, except_relids| {
+        |mcx, expr, removable_relids, except_relids| {
             let removable_er = removable_relids
                 .as_ref()
                 .map(|b| types_nodes::primnodes::ExprRelids { words: b.words.clone() })
@@ -242,11 +249,8 @@ pub fn init_seams() {
                 .as_ref()
                 .map(|b| types_nodes::primnodes::ExprRelids { words: b.words.clone() })
                 .unwrap_or_default();
-            // `expr` is moved in (the seam takes it by value), so wrapping it in a
-            // `Node` is a move — no `.clone()` (which would panic on an owned-
-            // subtree Expr such as `Aggref`). C mutates the node tree in place.
-            let scratch = mcx::MemoryContext::new("remove_nulling_relids seam");
-            let mcx = scratch.mcx();
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
             let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)
                 .expect("remove_nulling_relids: opaque Node alloc failed (OOM)");
             nulling::remove_nulling_relids(&mut node, &removable_er, &except_er, mcx);
@@ -262,14 +266,14 @@ pub fn init_seams() {
     // equivclass-ext consumer seam. Same wrap/unwrap; the `Relids` (Bitmapset)
     // sets convert to `ExprRelids` by their word storage.
     backend_optimizer_path_equivclass_ext_seams::remove_nulling_relids::set(
-        |expr, removable, except| {
+        |mcx, expr, removable, except| {
             let to_er = |r: &types_pathnodes::Relids| types_nodes::primnodes::ExprRelids {
                 words: r.as_ref().map(|b| b.words.clone()).unwrap_or_default(),
             };
             let removable_er = to_er(&removable);
             let except_er = to_er(&except);
-            let scratch = mcx::MemoryContext::new("remove_nulling_relids seam");
-            let mcx = scratch.mcx();
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
             let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)
                 .expect("remove_nulling_relids: opaque Node alloc failed (OOM)");
             nulling::remove_nulling_relids(&mut node, &removable_er, &except_er, mcx);

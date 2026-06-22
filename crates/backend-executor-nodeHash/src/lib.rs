@@ -319,7 +319,7 @@ mod adapters {
         is_outer: bool,
         hashfuncids: &[types_core::primitive::Oid],
         collations: &[types_core::primitive::Oid],
-        hash_exprs: &[types_nodes::primnodes::Expr],
+        hash_exprs: &[types_nodes::primnodes::Expr<'mcx>],
         opstrict: &[bool],
         keep_nulls: bool,
         estate: &mut EStateData<'mcx>,

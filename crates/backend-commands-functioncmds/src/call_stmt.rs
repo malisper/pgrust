@@ -39,7 +39,7 @@ const FUNC_MAX_ARGS: usize = 100;
 const T_CALL_CONTEXT: u32 = 332;
 
 /// Read `stmt->funcexpr` off the live CALL node and `castNode(FuncExpr, .)` it.
-fn callstmt_funcexpr<'a, 'mcx>(stmt_node: &'a Node<'mcx>) -> PgResult<&'a FuncExpr> {
+fn callstmt_funcexpr<'a, 'mcx>(stmt_node: &'a Node<'mcx>) -> PgResult<&'a FuncExpr<'mcx>> {
     let stmt = stmt_node.expect_callstmt();
     let fexpr_node = stmt
         .funcexpr
@@ -249,10 +249,16 @@ pub fn ExecuteCallStmt<'mcx>(
 /// readers downcast it back to `Expr`).
 fn clone_funcexpr_erased<'mcx>(
     mcx: Mcx<'mcx>,
-    fexpr: &FuncExpr,
+    fexpr: &FuncExpr<'mcx>,
 ) -> PgResult<types_core::fmgr::FnExprErased> {
     let cloned = Expr::FuncExpr(fexpr.clone()).clone_in(mcx)?;
-    Ok(types_core::fmgr::FnExprErased::new(cloned))
+    // Erase the `'mcx`-arena clone into the `'static` `fn_expr` carrier via the
+    // sanctioned from_node_erased boundary (read back transiently by exprType /
+    // polymorphic resolution).
+    Ok(types_core::fmgr::FnExprErased::from_node_erased::<
+        Expr<'_>,
+        Expr<'static>,
+    >(cloned))
 }
 
 // ===========================================================================

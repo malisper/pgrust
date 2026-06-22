@@ -176,7 +176,9 @@ fn transformPartitionSpec<'mcx>(
                 ParseExprKind::EXPR_KIND_PARTITION_EXPRESSION,
             )?;
             /* we have to fix its collations too */
-            let mut transformed_expr = transformed.expect("transformExpr of a non-NULL partition expression");
+            let mut transformed_expr: Expr<'mcx> = transformed
+                .expect("transformExpr of a non-NULL partition expression")
+                .clone_in(mcx)?;
             backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut transformed_expr)?;
             new_elem.expr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, transformed_expr)?)?);
         }
@@ -203,13 +205,13 @@ fn ComputePartitionAttrs<'mcx>(
     strategy: PartitionStrategy,
 ) -> PgResult<(
     Vec<AttrNumber>,
-    Vec<Expr>,
+    Vec<Expr<'mcx>>,
     Vec<Oid>,
     Vec<Oid>,
 )> {
     let relid = rel.rd_id;
     let mut partattrs: Vec<AttrNumber> = Vec::with_capacity(part_params.len());
-    let mut partexprs: Vec<Expr> = Vec::new();
+    let mut partexprs: Vec<Expr<'mcx>> = Vec::new();
     let mut partopclass: Vec<Oid> = Vec::with_capacity(part_params.len());
     let mut partcollation: Vec<Oid> = Vec::with_capacity(part_params.len());
 

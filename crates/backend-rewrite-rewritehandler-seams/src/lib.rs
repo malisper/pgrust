@@ -71,7 +71,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         rel: types_rel::Relation<'mcx>,
         attrno: i32,
-    ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Expr>>>
+    ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Expr<'mcx>>>>
 );
 
 seam_core::seam!(
@@ -89,7 +89,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         rel: &types_rel::Relation<'mcx>,
         attrno: i32,
-    ) -> PgResult<mcx::PgBox<'mcx, types_nodes::Expr>>
+    ) -> PgResult<mcx::PgBox<'mcx, types_nodes::Expr<'static>>>
 );
 
 seam_core::seam!(
@@ -175,8 +175,8 @@ seam_core::seam!(
     /// is passed by OID (the seam re-opens / consults the relation).
     pub fn expand_generated_columns_in_expr<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        node: Option<types_nodes::primnodes::Expr>,
+        node: Option<types_nodes::primnodes::Expr<'static>>,
         rel_oid: types_core::Oid,
         rt_index: i32,
-    ) -> PgResult<Option<types_nodes::primnodes::Expr>>
+    ) -> PgResult<Option<types_nodes::primnodes::Expr<'static>>>
 );

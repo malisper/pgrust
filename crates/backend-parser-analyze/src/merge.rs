@@ -250,7 +250,8 @@ pub fn transformMergeStmt<'mcx>(
         ParseExprKind::EXPR_KIND_JOIN_ON,
     )?;
     qry.mergeJoinCondition = match merge_join_cond {
-        Some(e) => Some(mcx::alloc_in(mcx, e)?),
+        // Parser-arena `'static` result re-cloned into the query's `mcx`.
+        Some(e) => Some(mcx::alloc_in(mcx, e.clone_in(mcx)?)?),
         None => None,
     };
 
@@ -344,7 +345,8 @@ pub fn transformMergeStmt<'mcx>(
             "WHEN",
         )?;
         action.qual = match qual {
-            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
+            // Parser-arena `'static` qual re-cloned into `mcx` before wrapping.
+            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?),
             None => None,
         };
 

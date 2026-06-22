@@ -61,7 +61,7 @@ pub struct ChangeVarNodesContext<'mcx> {
 /// `true` return tells the walker to skip the node entirely.
 pub type ChangeVarNodesCallback<'a> = &'a mut dyn FnMut(&mut Node, &mut ChangeVarNodesContext) -> bool;
 
-fn ChangeVarNodes_walker<'mcx>(
+pub fn ChangeVarNodes_walker<'mcx>(
     node: &mut Node<'mcx>,
     context: &mut ChangeVarNodesContext<'mcx>,
     callback: &mut Option<ChangeVarNodesCallback>,

@@ -70,9 +70,9 @@ pub fn seam_const_node_info(node: NodeId) -> PgResult<Option<ConstNodeInfo>> {
 /// collected by `estimate_num_groups`, with its per-table distinct-value
 /// estimate. The C `Node *var` is held here as an owned [`Expr`] (the stripped,
 /// nullingrels-free expression).
-struct GroupVarInfo {
+struct GroupVarInfo<'mcx> {
     /// `Node *var` — might be an expression, not just a Var.
-    var: Expr,
+    var: Expr<'mcx>,
     /// `RelOptInfo *rel` — relation it belongs to.
     rel: Option<RelId>,
     /// `double ndistinct` — # distinct values.
@@ -84,12 +84,13 @@ struct GroupVarInfo {
 /// `add_unique_group_var(root, varinfos, var, vardata)` (selfuncs.c) — add an
 /// item to a list of [`GroupVarInfo`]s, but only if it's not known equal to any
 /// of the existing entries. 1:1 with the C body.
-fn add_unique_group_var(
+fn add_unique_group_var<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    mut varinfos: alloc::vec::Vec<GroupVarInfo>,
-    var: Expr,
+    mut varinfos: alloc::vec::Vec<GroupVarInfo<'mcx>>,
+    var: Expr<'mcx>,
     vardata: &VariableStatData,
-) -> alloc::vec::Vec<GroupVarInfo> {
+) -> alloc::vec::Vec<GroupVarInfo<'mcx>> {
     let (ndistinct, isdefault) = get_variable_numdistinct(root, vardata);
 
     // The nullingrels bits within the var could cause the same var to be counted
@@ -98,7 +99,7 @@ fn add_unique_group_var(
     // (see estimate_multivariate_ndistinct). So strip them out first.
     let outer_join_rels = root.outer_join_rels.clone();
     let none: Relids = None;
-    let var: Expr = nf::remove_nulling_relids::call(var, &outer_join_rels, &none);
+    let var: Expr = nf::remove_nulling_relids::call(mcx, var, &outer_join_rels, &none);
 
     // foreach over the existing varinfos, dropping duplicates / known-equal vars.
     let mut i = 0usize;
@@ -220,7 +221,7 @@ pub(crate) fn estimate_num_groups<'mcx>(
     // The allocation context for the per-expression examine work, recovered from
     // the planner-run store (C reaches it via CurrentMemoryContext).
     let mcx: Mcx<'mcx> = run.mcx();
-    let mut varinfos: alloc::vec::Vec<GroupVarInfo> = alloc::vec::Vec::new();
+    let mut varinfos: alloc::vec::Vec<GroupVarInfo<'mcx>> = alloc::vec::Vec::new();
     let mut srf_multiplier = 1.0f64;
     let mut numdistinct: f64;
 
@@ -269,7 +270,7 @@ pub(crate) fn estimate_num_groups<'mcx>(
         // complicated.
         let vardata = examine_variable(mcx, run, root, groupexpr_id, 0)?;
         if vardata.stats_tuple.is_some() || vardata.isunique {
-            varinfos = add_unique_group_var(root, varinfos, groupexpr.clone_in(mcx)?, &vardata);
+            varinfos = add_unique_group_var(mcx, root, varinfos, groupexpr.clone_in(mcx)?, &vardata);
             release_variable_stats(vardata);
             continue;
         }
@@ -295,9 +296,13 @@ pub(crate) fn estimate_num_groups<'mcx>(
 
         // Else add variables to varinfos list.
         for var in varshere.into_iter() {
+            // `pull_var_clause` yields the parser-arena `'static` form; bring each
+            // var into this run's `mcx` (invariant `Expr`) for the node-arena
+            // intern and the `'mcx`-keyed `GroupVarInfo` list.
+            let var: Expr<'mcx> = var.clone_in(mcx)?;
             let var_id = root.alloc_node(var.clone_in(mcx)?);
             let vardata = examine_variable(mcx, run, root, var_id, 0)?;
-            varinfos = add_unique_group_var(root, varinfos, var, &vardata);
+            varinfos = add_unique_group_var(mcx, root, varinfos, var, &vardata);
             release_variable_stats(vardata);
         }
     }
@@ -328,8 +333,8 @@ pub(crate) fn estimate_num_groups<'mcx>(
         let mut reldistinct = 1.0f64;
         let mut relmaxndistinct = reldistinct;
         let mut relvarcount = 0i32;
-        let mut newvarinfos: alloc::vec::Vec<GroupVarInfo> = alloc::vec::Vec::new();
-        let mut relvarinfos: alloc::vec::Vec<GroupVarInfo> = alloc::vec::Vec::new();
+        let mut newvarinfos: alloc::vec::Vec<GroupVarInfo<'mcx>> = alloc::vec::Vec::new();
+        let mut relvarinfos: alloc::vec::Vec<GroupVarInfo<'mcx>> = alloc::vec::Vec::new();
 
         // Split the list of varinfos in two - one for the current rel, one for
         // remaining Vars on other rels. (C processes varinfo1 = linitial, then
@@ -449,11 +454,11 @@ fn attr_number_is_for_user_defined_attr(attnum: AttrNumber) -> bool {
 /// covered var/expr), returns `Some(ndistinct)` and rewrites `*varinfos` to drop
 /// the matched entries; on no match returns `None` leaving `varinfos`
 /// untouched. 1:1 with the C body.
-fn estimate_multivariate_ndistinct<'run>(
+fn estimate_multivariate_ndistinct<'run, 'g>(
     run: &PlannerRun<'run>,
     root: &mut PlannerInfo,
     rel: Option<RelId>,
-    varinfos: &mut alloc::vec::Vec<GroupVarInfo>,
+    varinfos: &mut alloc::vec::Vec<GroupVarInfo<'g>>,
 ) -> PgResult<Option<f64>> {
     let relid = match rel {
         Some(r) => r,
@@ -620,7 +625,7 @@ fn estimate_multivariate_ndistinct<'run>(
 
     // Form the output varinfo list, keeping only unmatched ones.
     let old = core::mem::take(varinfos);
-    let mut newlist: alloc::vec::Vec<GroupVarInfo> = alloc::vec::Vec::new();
+    let mut newlist: alloc::vec::Vec<GroupVarInfo<'g>> = alloc::vec::Vec::new();
     for varinfo in old.into_iter() {
         if let Some(var) = varinfo.var.as_var() {
             let attnum = var.varattno;

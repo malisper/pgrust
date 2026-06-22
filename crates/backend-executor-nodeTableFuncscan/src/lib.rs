@@ -1332,7 +1332,7 @@ fn init_opt_expr<'mcx>(
 /// `ExecInitExprList(nodes, parent)` over an `Option<PgVec<Option<Expr>>>`
 /// list (NULL cells preserved).
 fn init_opt_expr_list<'mcx>(
-    list: &Option<PgVec<'_, Option<PgBox<'_, types_nodes::primnodes::Expr>>>>,
+    list: &Option<PgVec<'mcx, Option<PgBox<'mcx, types_nodes::primnodes::Expr<'mcx>>>>>,
     parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgVec<'mcx, Option<types_nodes::execexpr::ExprState<'mcx>>>> {
@@ -1346,7 +1346,7 @@ fn init_opt_expr_list<'mcx>(
 /// `ExecInitExprList(nodes, parent)` over an `Option<PgVec<Expr>>` list with no
 /// NULL cells, returning a list of `ExprState` (the `ns_uris` shape).
 fn init_expr_list_required<'mcx>(
-    list: &Option<PgVec<'_, PgBox<'_, types_nodes::primnodes::Expr>>>,
+    list: &Option<PgVec<'mcx, PgBox<'mcx, types_nodes::primnodes::Expr<'mcx>>>>,
     parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgVec<'mcx, types_nodes::execexpr::ExprState<'mcx>>> {
@@ -1366,7 +1366,7 @@ fn init_expr_list_required<'mcx>(
 /// `ExecInitExprList(tf->passingvalexprs, parent)` — the PASSING list, kept as
 /// `Option<ExprState<'mcx>>` cells.
 fn init_expr_list_required_opt<'mcx>(
-    list: &Option<PgVec<'_, PgBox<'_, types_nodes::primnodes::Expr>>>,
+    list: &Option<PgVec<'mcx, PgBox<'mcx, types_nodes::primnodes::Expr<'mcx>>>>,
     parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgVec<'mcx, Option<types_nodes::execexpr::ExprState<'mcx>>>> {

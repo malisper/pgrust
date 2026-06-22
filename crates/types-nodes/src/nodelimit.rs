@@ -109,10 +109,10 @@ pub struct Limit<'mcx> {
     /// `Node *`, but the planner only ever stores an expression here (the
     /// OFFSET expression), and `ExecInitLimit` casts it `(Expr *)`; the owned
     /// model stores the `Expr` directly.
-    pub limitOffset: Option<PgBox<'mcx, Expr>>,
+    pub limitOffset: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `Node *limitCount` — COUNT parameter, or `None` if none (see
     /// `limitOffset`).
-    pub limitCount: Option<PgBox<'mcx, Expr>>,
+    pub limitCount: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `LimitOption limitOption` — limit type.
     pub limitOption: LimitOption,
     /// `int uniqNumCols` — number of columns to check for similarity.
@@ -131,11 +131,11 @@ impl Limit<'_> {
     /// (C: `copyObject` shape). Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Limit<'b>> {
         let limitOffset = match &self.limitOffset {
-            Some(n) => Some(alloc_in(mcx, (**n).clone())?),
+            Some(n) => Some(alloc_in(mcx, (**n).clone_in(mcx)?)?),
             None => None,
         };
         let limitCount = match &self.limitCount {
-            Some(n) => Some(alloc_in(mcx, (**n).clone())?),
+            Some(n) => Some(alloc_in(mcx, (**n).clone_in(mcx)?)?),
             None => None,
         };
         let uniqColIdx = clone_vec(&self.uniqColIdx, mcx)?;

@@ -107,7 +107,7 @@ pub struct MergeAction<'mcx> {
     /// `Node *`, but the executor always casts it `(List *) action->qual` and
     /// feeds it to `ExecInitQual`, i.e. it is an implicit-AND `List` of `Expr`.
     /// Modeled as that Expr-list so the modify-qual builders can consume it.
-    pub qual: Option<PgVec<'mcx, Expr>>,
+    pub qual: Option<PgVec<'mcx, Expr<'mcx>>>,
     /// `List *targetList` — the target list (of `TargetEntry`).
     pub targetList: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     /// `List *updateColnos` — target attribute numbers for an UPDATE.
@@ -208,7 +208,7 @@ pub struct ModifyTable<'mcx> {
     /// `Node *onConflictWhere` — WHERE for ON CONFLICT UPDATE. Cast
     /// `(List *) node->onConflictWhere` and fed to `ExecInitQual`, so modeled
     /// as the implicit-AND `List` of `Expr`.
-    pub onConflictWhere: Option<PgVec<'mcx, Expr>>,
+    pub onConflictWhere: Option<PgVec<'mcx, Expr<'mcx>>>,
     /// `Index exclRelRTI` — RTI of the EXCLUDED pseudo relation.
     pub exclRelRTI: Index,
     /// `List *exclRelTlist` — tlist of the EXCLUDED pseudo relation.
@@ -218,7 +218,7 @@ pub struct ModifyTable<'mcx> {
     /// `List *mergeJoinConditions` — per-target-table MERGE join conditions.
     /// Each entry's `joinCondition` is cast `(List *) joinCondition` and fed to
     /// `ExecInitQual`, so modeled as the implicit-AND `List` of `Expr`.
-    pub mergeJoinConditions: Option<PgVec<'mcx, Option<PgVec<'mcx, Expr>>>>,
+    pub mergeJoinConditions: Option<PgVec<'mcx, Option<PgVec<'mcx, Expr<'mcx>>>>>,
 }
 
 impl ModifyTable<'_> {
@@ -633,7 +633,7 @@ pub struct ModifyTableState<'mcx> {
     /// `List *mt_mergeJoinConditions` — per-kept-target-table MERGE join
     /// conditions, borrowed from the plan node (`None` element = the C `NULL`).
     pub mt_mergeJoinConditions:
-        Option<PgVec<'mcx, Option<&'mcx PgVec<'mcx, Expr>>>>,
+        Option<PgVec<'mcx, Option<&'mcx PgVec<'mcx, Expr<'mcx>>>>>,
 }
 
 /// `HTAB *mt_resultOidHash` payload (the OID→resultRelInfo-index map for

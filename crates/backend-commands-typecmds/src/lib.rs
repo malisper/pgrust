@@ -69,7 +69,7 @@ use types_error::{
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
-    ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE, WARNING,
 };
 use types_nodes::parsenodes::OBJECT_FUNCTION;
 use types_parsenodes::{
@@ -2660,8 +2660,15 @@ fn cook_default<'mcx>(
     atttypid: Oid,
     atttypmod: i32,
     attname: &str,
+    source: Option<&str>,
 ) -> PgResult<Option<RichNode<'mcx>>> {
     let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+    // C threads DefineDomain's pstate (which carries the query string) into
+    // cookDefault, so coercion/eval errors on the DEFAULT expr carry
+    // `parser_errposition(pstate, expr->location)`.
+    if let Some(s) = source {
+        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(s, mcx)?);
+    }
 
     /* Transform raw parsetree to executable expression. */
     let expr = backend_parser_parse_expr::transformExpr(
@@ -2716,6 +2723,10 @@ fn cook_default<'mcx>(
     }
 
     /* Finally, take care of collations in the finished expression. */
+    // Bring the parser-arena `'static` result into this call's `mcx` (the
+    // collation routine mutates in place at `'mcx`, and the returned RichNode is
+    // `'mcx`); `Expr` is invariant over its lifetime, so `clone_in` is required.
+    let mut expr: Expr<'mcx> = expr.clone_in(mcx)?;
     backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut expr)?;
 
     Ok(Some(RichNode::mk_expr(mcx, expr)?))
@@ -2829,7 +2840,11 @@ fn domain_add_check_constraint<'mcx>(
     .expect("domainAddCheckConstraint: CHECK expression cannot be NULL");
 
     /* Make sure it yields a boolean result. */
-    let mut expr = backend_parser_coerce::coerce_to_boolean(mcx, Some(&mut pstate), expr, "CHECK")?;
+    let expr = backend_parser_coerce::coerce_to_boolean(mcx, Some(&mut pstate), expr, "CHECK")?;
+    // Bring the parser-arena `'static` result into this call's `mcx` for the
+    // in-place collation pass and the `'mcx` RichNode/var-clause checks below
+    // (`Expr` is invariant over its lifetime).
+    let mut expr: Expr<'mcx> = expr.clone_in(mcx)?;
 
     /* Fix up collation information. */
     backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut expr)?;
@@ -3031,6 +3046,25 @@ pub fn checkDomainOwner(typ: &types_tuple::pg_type::FormData_pg_type) -> PgResul
     Ok(())
 }
 
+/// Outward-seam body for `tablecmds.c` `RenameConstraint`'s
+/// `OBJECT_DOMCONSTRAINT` branch (tablecmds.c:4161-4173):
+/// `typid = typenameTypeId(NULL, makeTypeNameFromNameList(...))`, then
+/// `table_open(TypeRelationId, RowExclusiveLock)` + `SearchSysCache1(TYPEOID)` +
+/// `checkDomainOwner(tup)` + `table_close(NoLock)`. The `tablecmds` crate
+/// cannot depend on `parse-type`/`typecmds` without a cycle, so this lives here
+/// and is installed via `init_seams`. Returns the resolved domain type OID.
+fn rename_constraint_domain_typid_seam(names: &[String]) -> PgResult<Oid> {
+    // typid = typenameTypeId(NULL, makeTypeNameFromNameList(castNode(List, ...)))
+    let typid = typename_type_id_from_names(names)?;
+    // table_open(TypeRelationId, RowExclusiveLock) + SearchSysCache1(TYPEOID) +
+    // (!HeapTupleIsValid -> elog) + checkDomainOwner + ReleaseSysCache +
+    // table_close(NoLock). The fixed-part Form_pg_type projection through the
+    // syscache covers both the "cache lookup failed" guard and checkDomainOwner.
+    let typ = read_type_form(typid)?;
+    checkDomainOwner(&typ)?;
+    Ok(typid)
+}
+
 // ---------------------------------------------------------------------------
 // AlterDomainDefault   (typecmds.c:2613)
 // ---------------------------------------------------------------------------
@@ -3059,6 +3093,7 @@ pub fn AlterDomainDefault<'mcx>(
             typ.typbasetype,
             typ.typtypmod,
             &type_name_str(&typ),
+            None,
         )?;
 
         /*
@@ -3203,7 +3238,7 @@ pub fn AlterDomainDropConstraint<'mcx>(
                 .finish(errloc(2906, "AlterDomainDropConstraint"))
                 .map(|()| unreachable!());
         } else {
-            ereport(WARNING)
+            ereport(NOTICE)
                 .errmsg(format!(
                     "constraint \"{constr_name}\" of domain \"{}\" does not exist, skipping",
                     type_name_str(&typ)
@@ -3398,7 +3433,16 @@ pub fn DefineDomain<'mcx>(
      * pg_type.typtypmod (which is -1 for varchar). This typmod is stored as the
      * domain's typtypmod so coercion to the domain applies the length check.
      */
-    let (basetypeoid, basetypeMod) = typenameTypeIdAndMod(type_name)?;
+    let (basetypeoid, basetypeMod) = typenameTypeIdAndMod(type_name).map_err(|e| {
+        // C threads `pstate` so the "does not exist"/"is only a shell" error
+        // carries `parser_errposition(pstate, typeName->location)`; the seam
+        // strips the ParseState, so re-attach the cursor from the query string.
+        if e.cursor_position().is_none() {
+            e.with_cursor_position(parser_errposition_src(source, type_name.location))
+        } else {
+            e
+        }
+    })?;
     let baseType = read_type_form(basetypeoid)?;
 
     /*
@@ -3419,6 +3463,7 @@ pub fn DefineDomain<'mcx>(
                 "\"{}\" is not a valid base type for a domain",
                 TypeNameToString(mcx, type_name)?
             ))
+            .errposition(parser_errposition_src(source, type_name.location))
             .finish(errloc(783, "DefineDomain"))
             .map(|()| unreachable!());
     }
@@ -3498,6 +3543,7 @@ pub fn DefineDomain<'mcx>(
                     return ereport(ERROR)
                         .errcode(ERRCODE_SYNTAX_ERROR)
                         .errmsg("multiple default expressions")
+                        .errposition(parser_errposition_src(source, constr.location))
                         .finish(errloc(885, "DefineDomain"))
                         .map(|()| unreachable!());
                 }
@@ -3511,6 +3557,7 @@ pub fn DefineDomain<'mcx>(
                         basetypeoid,
                         basetypeMod,
                         &domainName,
+                        source,
                     )?;
                     let is_null_const = match default_expr.as_ref() {
                         None => true,
@@ -3541,12 +3588,14 @@ pub fn DefineDomain<'mcx>(
                         return ereport(ERROR)
                             .errcode(ERRCODE_SYNTAX_ERROR)
                             .errmsg("conflicting NULL/NOT NULL constraints")
+                            .errposition(parser_errposition_src(source, constr.location))
                             .finish(errloc(948, "DefineDomain"))
                             .map(|()| unreachable!());
                     }
                     return ereport(ERROR)
                         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                         .errmsg("redundant NOT NULL constraint definition")
+                        .errposition(parser_errposition_src(source, constr.location))
                         .finish(errloc(953, "DefineDomain"))
                         .map(|()| unreachable!());
                 }
@@ -3554,6 +3603,7 @@ pub fn DefineDomain<'mcx>(
                     return ereport(ERROR)
                         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                         .errmsg("not-null constraints for domains cannot be marked NO INHERIT")
+                        .errposition(parser_errposition_src(source, constr.location))
                         .finish(errloc(959, "DefineDomain"))
                         .map(|()| unreachable!());
                 }
@@ -3565,6 +3615,7 @@ pub fn DefineDomain<'mcx>(
                     return ereport(ERROR)
                         .errcode(ERRCODE_SYNTAX_ERROR)
                         .errmsg("conflicting NULL/NOT NULL constraints")
+                        .errposition(parser_errposition_src(source, constr.location))
                         .finish(errloc(969, "DefineDomain"))
                         .map(|()| unreachable!());
                 }
@@ -3577,13 +3628,17 @@ pub fn DefineDomain<'mcx>(
                     return ereport(ERROR)
                         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                         .errmsg("check constraints for domains cannot be marked NO INHERIT")
+                        .errposition(parser_errposition_src(source, constr.location))
                         .finish(errloc(986, "DefineDomain"))
                         .map(|()| unreachable!());
                 }
             }
             other => {
                 /* All other constraint types are errors for domains. */
-                return Err(domain_constraint_kind_error(other));
+                return Err(domain_constraint_kind_error(
+                    other,
+                    parser_errposition_src(source, constr.location),
+                ));
             }
         }
     }
@@ -3712,7 +3767,7 @@ pub fn DefineDomain<'mcx>(
 
 /// The `default:` error arms of the `DefineDomain` constraint switch
 /// (typecmds.c:993-1045) — the unsupported constraint kinds for a domain.
-fn domain_constraint_kind_error(contype: ConstrType) -> PgError {
+fn domain_constraint_kind_error(contype: ConstrType, cursorpos: i32) -> PgError {
     use types_nodes::ddlnodes::{
         CONSTR_ATTR_DEFERRABLE, CONSTR_ATTR_DEFERRED, CONSTR_ATTR_ENFORCED, CONSTR_ATTR_IMMEDIATE,
         CONSTR_ATTR_NOT_DEFERRABLE, CONSTR_ATTR_NOT_ENFORCED, CONSTR_EXCLUSION, CONSTR_FOREIGN,
@@ -3748,6 +3803,7 @@ fn domain_constraint_kind_error(contype: ConstrType) -> PgError {
     ereport(ERROR)
         .errcode(code)
         .errmsg(msg)
+        .errposition(cursorpos)
         .finish(errloc(0, "DefineDomain"))
         .expect_err("ereport(ERROR) always yields an Err")
 }
@@ -4779,6 +4835,13 @@ pub fn init_seams() {
     // ATExecChangeOwner (tablecmds.c) changes a relation's row type owner via
     // this seam during ALTER TABLE ... OWNER TO; the body lives here.
     backend_commands_tablecmds_seams::alter_type_owner_internal::set(AlterTypeOwnerInternal);
+
+    // RenameConstraint (tablecmds.c) OBJECT_DOMCONSTRAINT branch resolves the
+    // domain type OID + checkDomainOwner via this seam (parse-type/typecmds
+    // would cycle into tablecmds); the body lives here.
+    backend_commands_tablecmds_seams::rename_constraint_domain_typid::set(
+        rename_constraint_domain_typid_seam,
+    );
 
     // ProcessUtilitySlow dispatch target (utility.c) for CREATE DOMAIN — decode
     // the `CreateDomainStmt` and run the ported `DefineDomain` body.

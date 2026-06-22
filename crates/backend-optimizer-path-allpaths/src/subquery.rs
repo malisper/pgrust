@@ -471,8 +471,8 @@ pub fn set_cte_pathlist<'mcx>(
     // outer root's arena (convert_subquery_pathkeys matches TLEs by
     // resno/ressortgroupref/resjunk; the expr is interned for completeness).
     // Collect first (borrowing the run), then intern (borrowing root mutably).
-    struct PendingTle {
-        expr: types_nodes::primnodes::Expr,
+    struct PendingTle<'mcx> {
+        expr: types_nodes::primnodes::Expr<'mcx>,
         resno: types_core::primitive::AttrNumber,
         ressortgroupref: Index,
         resorigtbl: types_core::primitive::Oid,

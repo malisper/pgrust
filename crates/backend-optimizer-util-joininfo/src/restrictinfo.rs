@@ -40,7 +40,7 @@ fn is_opclause(node: &Expr) -> bool {
 
 /// `((OpExpr *) clause)->args` for an opclause.
 #[inline]
-fn opclause_args(clause: &Expr) -> &Vec<Expr> {
+fn opclause_args<'a, 'mcx>(clause: &'a Expr<'mcx>) -> &'a Vec<Expr<'mcx>> {
     match clause {
         Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => &o.args,
         _ => unreachable!("opclause_args on non-OpExpr"),
@@ -50,10 +50,10 @@ fn opclause_args(clause: &Expr) -> &Vec<Expr> {
 /// `make_restrictinfo`
 ///
 /// Build a RestrictInfo node containing the given subexpression.
-pub fn make_restrictinfo(
-    mcx: Mcx<'_>,
+pub fn make_restrictinfo<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    clause: Expr,
+    clause: Expr<'mcx>,
     is_pushed_down: bool,
     has_clone: bool,
     is_clone: bool,
@@ -103,11 +103,11 @@ pub fn make_restrictinfo(
 /// `make_plain_restrictinfo`
 ///
 /// Common code for the main entry points and the recursive cases.
-pub fn make_plain_restrictinfo(
-    _mcx: Mcx<'_>,
+pub fn make_plain_restrictinfo<'mcx>(
+    _mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    clause: Expr,
-    orclause: Option<Expr>,
+    clause: Expr<'mcx>,
+    orclause: Option<Expr<'mcx>>,
     is_pushed_down: bool,
     has_clone: bool,
     is_clone: bool,
@@ -228,10 +228,10 @@ pub fn make_plain_restrictinfo(
 /// `RinfoId` (the C cast of the `make_plain_restrictinfo` result to
 /// `RestrictInfo *`); the recursive arms return `Expr` via
 /// [`make_sub_restrictinfos_expr`].
-fn make_sub_restrictinfos(
-    mcx: Mcx<'_>,
+fn make_sub_restrictinfos<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    clause: Expr,
+    clause: Expr<'mcx>,
     is_pushed_down: bool,
     has_clone: bool,
     is_clone: bool,
@@ -259,7 +259,7 @@ fn make_sub_restrictinfos(
     // through `SubPlan::clone_in`.
     let args = match &clause {
         Expr::BoolExpr(b) => {
-            let mut v: Vec<Expr> = Vec::with_capacity(b.args.len());
+            let mut v: Vec<Expr<'mcx>> = Vec::with_capacity(b.args.len());
             for a in b.args.iter() {
                 v.push(a.clone_in(mcx)?);
             }
@@ -267,7 +267,7 @@ fn make_sub_restrictinfos(
         }
         _ => unreachable!(),
     };
-    let mut orlist: Vec<Expr> = Vec::with_capacity(args.len());
+    let mut orlist: Vec<Expr<'mcx>> = Vec::with_capacity(args.len());
     for arg in args {
         orlist.push(make_sub_restrictinfos_expr(
             mcx,
@@ -308,10 +308,10 @@ fn make_sub_restrictinfos(
 /// returns the rebuilt bare AND clause (no RestrictInfo above it).
 ///
 /// [`RinfoRef`]: types_nodes::primnodes::RinfoRef
-fn make_sub_restrictinfos_expr(
-    mcx: Mcx<'_>,
+fn make_sub_restrictinfos_expr<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    clause: Expr,
+    clause: Expr<'mcx>,
     is_pushed_down: bool,
     has_clone: bool,
     is_clone: bool,
@@ -320,7 +320,7 @@ fn make_sub_restrictinfos_expr(
     required_relids: Relids,
     incompatible_relids: Relids,
     outer_relids: Relids,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     // Deep-copy each child via `Expr::clone_in` (the derived `Vec<Expr>::clone`
     // panics on a context-allocated `SubPlan`/`SubLink`/`Aggref` arm); see the
     // note in `make_sub_restrictinfos`. The copies are made into the long-lived
@@ -329,7 +329,7 @@ fn make_sub_restrictinfos_expr(
     if is_orclause(&clause) {
         let args = match &clause {
             Expr::BoolExpr(b) => {
-                let mut v: Vec<Expr> = Vec::with_capacity(b.args.len());
+                let mut v: Vec<Expr<'mcx>> = Vec::with_capacity(b.args.len());
                 for a in b.args.iter() {
                     v.push(a.clone_in(mcx)?);
                 }
@@ -337,7 +337,7 @@ fn make_sub_restrictinfos_expr(
             }
             _ => unreachable!(),
         };
-        let mut orlist: Vec<Expr> = Vec::with_capacity(args.len());
+        let mut orlist: Vec<Expr<'mcx>> = Vec::with_capacity(args.len());
         for arg in args {
             orlist.push(make_sub_restrictinfos_expr(
                 mcx,
@@ -372,7 +372,7 @@ fn make_sub_restrictinfos_expr(
     } else if is_andclause(&clause) {
         let args = match &clause {
             Expr::BoolExpr(b) => {
-                let mut v: Vec<Expr> = Vec::with_capacity(b.args.len());
+                let mut v: Vec<Expr<'mcx>> = Vec::with_capacity(b.args.len());
                 for a in b.args.iter() {
                     v.push(a.clone_in(mcx)?);
                 }
@@ -380,7 +380,7 @@ fn make_sub_restrictinfos_expr(
             }
             _ => unreachable!(),
         };
-        let mut andlist: Vec<Expr> = Vec::with_capacity(args.len());
+        let mut andlist: Vec<Expr<'mcx>> = Vec::with_capacity(args.len());
         for arg in args {
             andlist.push(make_sub_restrictinfos_expr(
                 mcx,

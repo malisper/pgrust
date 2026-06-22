@@ -76,7 +76,7 @@ use types_scan::scankey::{
 seam_core::seam!(
     /// `makeBoolConst(value, isnull)` (makefuncs.c): a boolean `Const`.
     /// Owner: `backend-nodes-core/src/makefuncs.rs::make_bool_const`.
-    pub fn make_bool_const(value: bool, isnull: bool) -> Const
+    pub fn make_bool_const(value: bool, isnull: bool) -> Const<'static>
 );
 
 seam_core::seam!(
@@ -111,7 +111,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `make_andclause(list_make2(a, b))` (clauses.c): a two-clause `BoolExpr`
     /// `AND`. Owner: `backend-nodes-core/src/makefuncs.rs::make_andclause`.
-    pub fn make_andclause(a: Expr, b: Expr) -> Expr
+    pub fn make_andclause<'mcx>(a: Expr<'mcx>, b: Expr<'mcx>) -> Expr<'mcx>
 );
 
 seam_core::seam!(
@@ -156,7 +156,7 @@ seam_core::seam!(
         constlen: i32,
         constvalue: NodeDatum<'mcx>,
         constbyval: bool,
-    ) -> PgResult<Const>
+    ) -> PgResult<Const<'mcx>>
 );
 
 seam_core::seam!(
@@ -165,15 +165,15 @@ seam_core::seam!(
     /// Called here as `make_opclause(oproid, BOOLOID, false, elemExpr,
     /// constExpr, InvalidOid, rng_collation)`. Owner:
     /// `backend-nodes-core/src/makefuncs.rs::make_opclause`.
-    pub fn make_opclause(
+    pub fn make_opclause<'mcx>(
         opno: Oid,
         opresulttype: Oid,
         opretset: bool,
-        leftop: Expr,
-        rightop: Expr,
+        leftop: Expr<'mcx>,
+        rightop: Expr<'mcx>,
         opcollid: Oid,
         inputcollid: Oid,
-    ) -> Expr
+    ) -> Expr<'mcx>
 );
 
 /// `elem_contained_by_range_support` body (rangetypes.c:2251): the support fn
@@ -185,8 +185,8 @@ seam_core::seam!(
 pub fn elem_contained_by_range_support<'mcx>(
     mcx: Mcx<'mcx>,
     root: Option<&PlannerInfo>,
-    fcall: &FuncExpr,
-) -> PgResult<Option<Expr>> {
+    fcall: &FuncExpr<'mcx>,
+) -> PgResult<Option<Expr<'mcx>>> {
     // Assert(list_length(fexpr->args) == 2);
     // leftop = linitial(fexpr->args); rightop = lsecond(fexpr->args);
     debug_assert_eq!(fcall.args.len(), 2);
@@ -202,8 +202,8 @@ pub fn elem_contained_by_range_support<'mcx>(
 pub fn range_contains_elem_support<'mcx>(
     mcx: Mcx<'mcx>,
     root: Option<&PlannerInfo>,
-    fcall: &FuncExpr,
-) -> PgResult<Option<Expr>> {
+    fcall: &FuncExpr<'mcx>,
+) -> PgResult<Option<Expr<'mcx>>> {
     // Assert(list_length(fexpr->args) == 2);
     // leftop = linitial(fexpr->args); rightop = lsecond(fexpr->args);
     debug_assert_eq!(fcall.args.len(), 2);
@@ -227,10 +227,10 @@ pub fn elem_contained_by_range_support_simplify<'mcx>(
     _result_type: Oid,
     _result_collid: Oid,
     _input_collid: Oid,
-    args: &[Expr],
+    args: &[Expr<'mcx>],
     _funcvariadic: bool,
     _estimate: bool,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     // Assert(list_length(fexpr->args) == 2);
     debug_assert_eq!(args.len(), 2);
     let leftop = &args[0];
@@ -247,10 +247,10 @@ pub fn range_contains_elem_support_simplify<'mcx>(
     _result_type: Oid,
     _result_collid: Oid,
     _input_collid: Oid,
-    args: &[Expr],
+    args: &[Expr<'mcx>],
     _funcvariadic: bool,
     _estimate: bool,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     // Assert(list_length(fexpr->args) == 2);
     debug_assert_eq!(args.len(), 2);
     let leftop = &args[0];
@@ -265,9 +265,9 @@ pub fn range_contains_elem_support_simplify<'mcx>(
 pub fn find_simplified_clause<'mcx>(
     mcx: Mcx<'mcx>,
     root: Option<&PlannerInfo>,
-    range_expr: &Expr,
-    elem_expr: &Expr,
-) -> PgResult<Option<Expr>> {
+    range_expr: &Expr<'_>,
+    elem_expr: &Expr<'mcx>,
+) -> PgResult<Option<Expr<'mcx>>> {
     // can't do anything unless the range is a non-null constant
     // if (!IsA(rangeExpr, Const) || ((Const *) rangeExpr)->constisnull) return NULL;
     let Expr::Const(range_const) = range_expr else {
@@ -427,7 +427,7 @@ pub fn find_simplified_clause<'mcx>(
 #[allow(clippy::too_many_arguments)]
 pub fn build_bound_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    elem_expr: Expr,
+    elem_expr: Expr<'mcx>,
     val: NodeDatum<'mcx>,
     is_lower_bound: bool,
     is_inclusive: bool,
@@ -436,7 +436,7 @@ pub fn build_bound_expr<'mcx>(
     elem_byvalue: bool,
     opfamily: Oid,
     rng_collation: Oid,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     // Identify the comparison operator to use. C's local `strategy` is `int16`;
     // the `BT*StrategyNumber` macros are small positive constants.
     let strategy: i16 = (if is_lower_bound {

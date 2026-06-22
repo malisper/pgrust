@@ -257,7 +257,7 @@ fn domain_check_mcx() -> Mcx<'static> {
 /// parser-coerce's `COERCE_NODE_CONTEXT` / makefuncs' `CONST_VALUE_CONTEXT`),
 /// which keeps the planned node valid for the cache's lifetime. `ctx` is unused
 /// — the durable backend context subsumes the C "plan into ctx" detail.
-pub fn plan_check_expr(conbin: &str, _ctx: DomainCtxHandle) -> PgResult<Expr> {
+pub fn plan_check_expr(conbin: &str, _ctx: DomainCtxHandle) -> PgResult<Expr<'static>> {
     // The node reader / const-folder allocate their intermediate graph — and the
     // escaping planned `Expr`'s `PgBox`/`PgVec` children — in this durable
     // backend-lifetime context, so they remain valid after this seam returns.
@@ -269,7 +269,7 @@ pub fn plan_check_expr(conbin: &str, _ctx: DomainCtxHandle) -> PgResult<Expr> {
     // The stored `conbin` of a domain CHECK is always an expression node. Clone
     // it out as an owned `Expr` (deep copy into the global heap, independent of
     // `scratch`).
-    let expr: Expr = node
+    let expr: Expr<'static> = node
         .as_expr()
         .ok_or_else(|| {
             PgError::error("domain CHECK constraint conbin did not parse to an expression node")

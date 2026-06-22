@@ -66,12 +66,12 @@ const STATS_EXT_EXPRESSIONS: i8 = b'e' as i8;
 /// variant in this model but is not handled by the generic
 /// [`expression_tree_walker`](backend_nodes_core::nodefuncs::expression_tree_walker),
 /// so the PHV test is done here and the walker recurses into the rest.
-fn contain_placeholder(node: &Expr) -> bool {
+fn contain_placeholder(node: &Expr<'_>) -> bool {
     if node.is_placeholdervar() {
         return true;
     }
     let mut found = false;
-    backend_nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr| {
+    backend_nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr<'_>| {
         if contain_placeholder(child) {
             found = true;
             return true; // abort
@@ -84,7 +84,7 @@ fn contain_placeholder(node: &Expr) -> bool {
 /// `strip_all_phvs_mutator(node)` (selfuncs.c) — replace every `PlaceHolderVar`
 /// with its contained `phexpr`, recursively. Operates on an owned [`Expr`]
 /// (matching the C mutator returning a fresh `Node *`).
-fn strip_all_phvs_mutator(node: Expr) -> Expr {
+fn strip_all_phvs_mutator<'mcx>(node: Expr<'mcx>) -> Expr<'mcx> {
     if let Expr::PlaceHolderVar(phv) = node {
         let inner = phv
             .phexpr
@@ -101,9 +101,9 @@ fn strip_all_phvs_mutator(node: Expr) -> Expr {
 /// present. Returns an owned [`Expr`] (a clone of `node` when nothing changed).
 fn strip_all_phvs_deep<'mcx>(
     root: &PlannerInfo,
-    node: &Expr,
+    node: &Expr<'mcx>,
     mcx: Mcx<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let last_ph_id = root.glob.as_ref().map(|g| g.last_ph_id).unwrap_or(0);
     if last_ph_id == 0 {
         return node.clone_in(mcx);
@@ -245,7 +245,7 @@ fn examine_expression_stats<'mcx, 'run>(
     let outer_join_rels = root.outer_join_rels.clone();
     if rel_seams::relids_overlap::call(varnos, &outer_join_rels) {
         let none: Relids = None;
-        node = nf::remove_nulling_relids::call(node, &outer_join_rels, &none);
+        node = nf::remove_nulling_relids::call(mcx, node, &outer_join_rels, &none);
     }
 
     // Snapshot the per-rel index + stat lists (immutable reads) so we can match
@@ -567,14 +567,28 @@ fn examine_cte_subroot<'mcx, 'run, 'a>(
     //
     // levelsup = rte->ctelevelsup; cteroot = root;
     // while (levelsup-- > 0) { cteroot = cteroot->parent_root; ... }
+    //
+    // C's `cteroot->parent_root` is a back-pointer that lives for the whole
+    // planning run, so this walk always completes. In this owned PlannerInfo
+    // model the subroot does NOT retain its `parent_root` after the CTE's own
+    // create_plan finished (it was moved back to restore the parent — see
+    // plan_sublink_subquery; PlannerInfo is not `Clone`). So when selectivity
+    // for a side-reference to a sibling CTE is re-estimated from inside the
+    // referencing CTE's subroot at a *later* point (e.g. top-level join cost
+    // estimation reaching down through subroot->parse), the parent_root chain
+    // is severed and we cannot reach the level that owns the CTE's plan_id.
+    // This is a stats-only path: C itself punts with empty vardata when the
+    // subroot isn't available yet (`if (subroot == NULL) return;`). Treat a
+    // severed parent_root chain the same way — punt (no stats refinement),
+    // which yields the correct plan, never a spurious "bad levelsup" error.
     let mut cteroot: &PlannerInfo = root;
     let mut levelsup = rte.ctelevelsup;
     while levelsup > 0 {
         levelsup -= 1;
-        cteroot = cteroot.parent_root.as_deref().ok_or_else(|| {
-            // shouldn't happen
-            PgError::error(alloc::format!("bad levelsup for CTE \"{ctename}\""))
-        })?;
+        cteroot = match cteroot.parent_root.as_deref() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
     }
 
     // ndx = index of the matching CTE in cteroot->parse->cteList.
@@ -821,7 +835,7 @@ pub(crate) fn get_restriction_variable<'mcx, 'run>(
     root: &mut PlannerInfo,
     args: &[NodeId],
     var_relid: i32,
-) -> PgResult<Option<(VariableStatData, Expr, bool)>> {
+) -> PgResult<Option<(VariableStatData, Expr<'mcx>, bool)>> {
     // Fail if not a binary opclause (probably shouldn't happen).
     if args.len() != 2 {
         return Ok(None);
@@ -851,7 +865,7 @@ pub(crate) fn get_restriction_variable<'mcx, 'run>(
 
 /// `estimate_expression_value(root, node)` over an arena node handle — fold the
 /// node to a `Const` if possible (the ported clauses.c folder).
-fn estimate_other<'mcx>(mcx: Mcx<'mcx>, root: &PlannerInfo, node: NodeId) -> PgResult<Expr> {
+fn estimate_other<'mcx>(mcx: Mcx<'mcx>, root: &PlannerInfo, node: NodeId) -> PgResult<Expr<'mcx>> {
     // copyObject shape: a bare `.clone()` recurses into the panicking `Expr::clone`
     // arm when the operand carries a SubPlan/SubLink/Aggref (a correlated scalar
     // subselect on the non-Var side), so deep-copy through `clone_in`.
@@ -933,30 +947,25 @@ fn search_statrelattinh<'mcx>(
     syscache::search_statrelattinh::call(mcx, relid, attnum, inherit)
 }
 
-/// `statext_expressions_load(statOid, inh, pos)` — load the per-expression
-/// `pg_statistic` tuple for an extended-statistics expression (unported owner).
+/// `statext_expressions_load(statOid, inh, pos)` (extended_stats.c) — load the
+/// `pos`-th per-expression `pg_statistic` tuple for an extended-statistics
+/// object's EXPRESSIONS stats. Delegated to the syscache owner, which reads the
+/// `stxdexpr` `pg_statistic[]` array off `STATEXTDATASTXOID` and rebuilds a
+/// standalone (copied) `pg_statistic` tuple from its `pos`-th element. The
+/// returned tuple is paired with [`StatsTupleFreeFunc::ReleaseDummy`].
 fn statext_expressions_load<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     stat_oid: Oid,
     inh: bool,
     pos: usize,
 ) -> PgResult<Option<StatsTuple>> {
-    let _ = (stat_oid, inh, pos);
-    panic!(
-        "selfuncs: statext_expressions_load is unported — loading a per-expression pg_statistic \
-         tuple for an extended-statistics object (statistics/extended_stats.c) has no owner; \
-         reached only after an equal() match against an EXPRESSIONS stat"
-    )
+    syscache::statext_expressions_load::call(mcx, stat_oid, inh, pos)
 }
 
-/// C `ReleaseDummy(tuple)` = `pfree(tuple)`; only applied to a copied tuple from
-/// `statext_expressions_load`, whose owner is unported (so unreachable).
+/// C `ReleaseDummy(tuple)` = `pfree(tuple)` — frees a copied tuple produced by
+/// [`statext_expressions_load`]; delegated to the syscache owner that minted it.
 fn release_dummy_stats_tuple(stats_tuple: StatsTuple) {
-    let _ = stats_tuple;
-    panic!(
-        "selfuncs: ReleaseDummy on a statext_expressions_load tuple is unreachable — its producer \
-         is unported, so no ReleaseDummy-tagged statsTuple can be created"
-    )
+    syscache::release_dummy_stats_tuple::call(stats_tuple);
 }
 
 /// `getRTEPermissionInfo(root->parse->rteperminfos, rte)->checkAsUser` — the
@@ -1036,7 +1045,7 @@ pub fn seam_get_restriction_variable<'mcx, 'run>(
     root: &mut PlannerInfo,
     args: &[NodeId],
     var_relid: i32,
-) -> PgResult<Option<(VariableStatData, Expr, bool)>> {
+) -> PgResult<Option<(VariableStatData, Expr<'mcx>, bool)>> {
     get_restriction_variable(mcx, run, root, args, var_relid)
 }
 

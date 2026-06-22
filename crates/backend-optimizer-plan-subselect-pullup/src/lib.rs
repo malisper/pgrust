@@ -101,8 +101,8 @@ pub fn init_seams() {
 fn convert_VALUES_to_ANY<'mcx>(
     mcx: Mcx<'mcx>,
     _root: &PlannerInfo,
-    sublink: &SubLink,
-) -> PgResult<Option<Expr>> {
+    sublink: &SubLink<'mcx>,
+) -> PgResult<Option<Expr<'mcx>>> {
     // `testexpr = (Node *) sublink->testexpr`, `values = (Query *) sublink->subselect`.
     let testexpr = match sublink.testexpr.as_deref() {
         Some(t) => t,
@@ -232,7 +232,7 @@ fn convert_VALUES_to_ANY<'mcx>(
 fn convert_testexpr<'mcx>(
     mcx: Mcx<'mcx>,
     testexpr: &Node<'mcx>,
-    subst_nodes: &[Expr],
+    subst_nodes: &[Expr<'mcx>],
 ) -> PgResult<Node<'mcx>> {
     match testexpr.as_expr() {
         // Deep-copy via clone_in before mutating (the derived `Expr::clone`
@@ -256,7 +256,11 @@ fn convert_testexpr<'mcx>(
 /// substituted node is deep-copied via `clone_in` (C: `copyObject(lfirst(...))`),
 /// which can allocate / OOM — and the derived `Expr::clone` panics on an
 /// owned-subtree subst node (a SubLink/SubPlan).
-fn convert_testexpr_mutator(node: Expr, subst_nodes: &[Expr], mcx: Mcx<'_>) -> PgResult<Expr> {
+fn convert_testexpr_mutator<'mcx>(
+    node: Expr<'mcx>,
+    subst_nodes: &[Expr<'mcx>],
+    mcx: Mcx<'mcx>,
+) -> PgResult<Expr<'mcx>> {
     if let Expr::Param(param) = &node {
         if param.paramkind == ParamKind::PARAM_SUBLINK {
             // paramid is 1-based; out-of-range is a hard internal error in C.
@@ -279,7 +283,7 @@ fn convert_testexpr_mutator(node: Expr, subst_nodes: &[Expr], mcx: Mcx<'_>) -> P
     // infallible `expression_tree_mutator` recursion is safe. Any descendant
     // PARAM_SUBLINK is handled by the recursive call's `clone_in` arm above.
     let mut caught: Option<PgError> = None;
-    let mut f = |child: Expr| match convert_testexpr_mutator(child, subst_nodes, mcx) {
+    let mut f = |child: Expr<'mcx>| match convert_testexpr_mutator(child, subst_nodes, mcx) {
         Ok(e) => e,
         Err(err) => {
             if caught.is_none() {
@@ -298,7 +302,7 @@ fn convert_testexpr_mutator(node: Expr, subst_nodes: &[Expr], mcx: Mcx<'_>) -> P
 /// A throwaway node used only to satisfy the infallible
 /// `expression_tree_mutator` signature when a child mutation has already failed;
 /// the error is propagated immediately after, so this value is never observed.
-fn child_placeholder() -> Expr {
+fn child_placeholder<'mcx>() -> Expr<'mcx> {
     Expr::CaseTestExpr(types_nodes::primnodes::CaseTestExpr {
         typeId: types_core::primitive::InvalidOid,
         typeMod: -1,
@@ -316,7 +320,7 @@ fn child_placeholder() -> Expr {
 fn generate_subquery_vars<'mcx>(
     tlist: &[types_nodes::primnodes::TargetEntry<'mcx>],
     varno: Index,
-) -> PgResult<alloc::vec::Vec<Expr>> {
+) -> PgResult<alloc::vec::Vec<Expr<'mcx>>> {
     let mut result = alloc::vec::Vec::new();
     for tent in tlist.iter() {
         if tent.resjunk {

@@ -58,6 +58,106 @@ pub(crate) fn tsquery_rewrite_run_seam(command: String) -> PgResult<TsRewriteRes
     res
 }
 
+/// `TSVECTOROID` (pg_type.dat).
+const TSVECTOROID: types_core::Oid = 3614;
+
+/// `exec_stat_query(sql)` seam body — the `ts_stat(query[, weights])` SPI cursor
+/// driver (`ts_stat_sql`, tsvector_op.c:2574). Runs `sql` through a read-only SPI
+/// cursor, validates it returns exactly one `tsvector`-coercible column, and
+/// returns each non-null result tsvector datum's verbatim varlena image (the
+/// `SPI_getbinval(..., 1, &isnull)` material `ts_accum` consumes).
+pub(crate) fn exec_stat_query_seam(sql: &[u8]) -> PgResult<Vec<Vec<u8>>> {
+    let query = String::from_utf8(sql.to_vec())
+        .map_err(|_| ereport(ERROR).errmsg("ts_stat: query is not valid UTF-8").into_error())?;
+    // SPI_connect();
+    SPI_connect()?;
+    let res = run_stat_cursor(&query);
+    // SPI_finish();
+    SPI_finish()?;
+    res
+}
+
+fn run_stat_cursor(command: &str) -> PgResult<Vec<Vec<u8>>> {
+    // if ((plan = SPI_prepare(query, 0, NULL)) == NULL)
+    //     elog(ERROR, "SPI_prepare(\"%s\") failed", query);
+    let plan = match prepare::spi_prepare(command.as_bytes(), &[])? {
+        Some(p) => p,
+        None => {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("SPI_prepare(\"{command}\") failed"))
+                .into_error());
+        }
+    };
+
+    // if ((portal = SPI_cursor_open(NULL, plan, NULL, NULL, true)) == NULL)
+    let portal = spi_cursor_open(plan).map_err(|e| {
+        let _ = prepare::spi_freeplan(plan);
+        e
+    })?;
+
+    // SPI_cursor_fetch(portal, true, 100); then the one-tsvector-column type
+    // check on SPI_tuptable->tupdesc (== portal->tupDesc for a one-select portal).
+    let (natts, col1_type, _col2_type) = portal_result_shape(&portal);
+
+    let mut rows: Vec<Vec<u8>> = Vec::new();
+    let fetch_result = (|| -> PgResult<()> {
+        // if (SPI_tuptable == NULL || tupdesc->natts != 1 ||
+        //     !IsBinaryCoercible(SPI_gettypeid(tupdesc, 1), TSVECTOROID))
+        //     ereport(ERROR, "ts_stat query must return one tsvector column");
+        let coercible = natts == 1
+            && backend_parser_coerce_seams::is_binary_coercible::call(col1_type, TSVECTOROID)?;
+        if !coercible {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("ts_stat query must return one tsvector column")
+                .into_error());
+        }
+
+        // while (SPI_processed > 0) { for each row: ts_accum(getbinval(.,1)); fetch }
+        loop {
+            let batch = stat_cursor_fetch_rows(&portal)?;
+            let n = batch.len();
+            for col in batch {
+                if let Some(bytes) = col {
+                    rows.push(bytes);
+                }
+            }
+            if (n as i64) < FETCH_COUNT {
+                break;
+            }
+        }
+        Ok(())
+    })();
+
+    // SPI_cursor_close(portal); SPI_freeplan(plan);
+    let _ = portalmem::portal_drop::call(&portal, false);
+    let _ = prepare::spi_freeplan(plan);
+
+    fetch_result?;
+    Ok(rows)
+}
+
+/// `SPI_cursor_fetch(portal, true, 100)` reading the single `tsvector` column of
+/// each fetched row (`SPI_getbinval(vals[i], tupdesc, 1, &isnull)`): `None` for a
+/// SQL NULL column (C: `if (!isnull) ts_accum(...)`), else the verbatim varlena
+/// image.
+fn stat_cursor_fetch_rows(portal: &Portal) -> PgResult<Vec<Option<Vec<u8>>>> {
+    let receiver = create_spi_dest_receiver();
+    let _nfetched =
+        pquery::portal_run_fetch(portal, FetchDirection::FETCH_FORWARD, FETCH_COUNT, receiver)?;
+    let (_columns, raw_rows) = take_spi_raw_result(receiver);
+
+    let mut rows: Vec<Option<Vec<u8>>> = Vec::with_capacity(raw_rows.len());
+    for raw in &raw_rows {
+        let col = match raw.first() {
+            Some(c) if !c.isnull => c.byref.clone(),
+            _ => None,
+        };
+        rows.push(col);
+    }
+    Ok(rows)
+}
+
 fn run_cursor(command: &str) -> PgResult<TsRewriteResult> {
     // if ((plan = SPI_prepare(buf, 0, NULL)) == NULL)
     //     elog(ERROR, "SPI_prepare(\"%s\") failed", buf);

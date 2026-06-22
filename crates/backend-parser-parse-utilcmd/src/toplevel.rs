@@ -464,13 +464,19 @@ pub fn transformRuleStmt<'mcx>(
         .map(|n| n.clone_in(mcx))
         .transpose()?;
     let mut where_clause: Option<Node<'mcx>> = {
-        let mut e = backend_parser_clause::transformWhereClause(
+        let e = backend_parser_clause::transformWhereClause(
             mcx,
             &mut pstate,
             where_clause_in,
             EXPR_KIND_WHERE,
             "WHERE",
         )?;
+        // Bring the parser-arena `'static` qual into `mcx` for the in-place
+        // collation pass and the `'mcx` Node wrap (`Expr` is invariant).
+        let mut e: Option<types_nodes::primnodes::Expr<'mcx>> = match e {
+            Some(expr) => Some(expr.clone_in(mcx)?),
+            None => None,
+        };
         // We have to fix its collations too.
         if let Some(expr) = e.as_mut() {
             backend_parser_parse_collate::assign_expr_collations(Some(&pstate), expr)?;

@@ -79,7 +79,7 @@ use crate::{from_collapse_limit, join_collapse_limit, JoinTreeItem, JtId, JtNode
 ///
 /// `make_ands_implicit(NULL) -> NIL`, an `AND` BoolExpr -> its args, a constant
 /// TRUE -> NIL, anything else -> a one-element list — exactly the C semantics.
-fn quals_implicit_and(mcx: mcx::Mcx<'_>, quals: Option<&Node>) -> Vec<Expr> {
+fn quals_implicit_and<'mcx>(mcx: mcx::Mcx<'mcx>, quals: Option<&Node>) -> Vec<Expr<'mcx>> {
     // C views `(List *) f->quals` by pointer; the owned model stores the qual
     // conjuncts as owned `Expr` values, so deep-copy out. The derived
     // `Expr::clone()` panics on owned-subtree variants (SubLink/SubPlan/Aggref)
@@ -170,9 +170,9 @@ fn quals_implicit_and(mcx: mcx::Mcx<'_>, quals: Option<&Node>) -> Vec<Expr> {
 /// them to the appropriate restrictinfo/joininfo lists, add `SpecialJoinInfo`
 /// nodes for outer joins, and return the "joinlist" structure describing the
 /// join-order decisions for `make_one_rel`.
-pub fn deconstruct_jointree(
+pub fn deconstruct_jointree<'mcx>(
     root: &mut PlannerInfo,
-    run: &PlannerRun<'_>,
+    run: &PlannerRun<'mcx>,
 ) -> types_error::PgResult<Vec<JoinlistNode>> {
     // After this point, no more PlaceHolderInfos may be made, because
     // make_outerjoininfo requires all active placeholders to be present in
@@ -244,7 +244,7 @@ pub fn deconstruct_jointree(
 /// Indices of `item_list` sorted by `post_order` — C's bottom-up
 /// `deconstruct_distribute` iteration order (`foreach(lc, item_list)` over the
 /// depth-first-append list).
-fn post_order_indices(item_list: &[JoinTreeItem]) -> Vec<JtId> {
+fn post_order_indices(item_list: &[JoinTreeItem<'_>]) -> Vec<JtId> {
     let mut order: Vec<JtId> = (0..item_list.len()).collect();
     order.sort_by_key(|&i| item_list[i].post_order);
     order
@@ -261,13 +261,13 @@ pub fn new_join_domain(root: &mut PlannerInfo) -> usize {
 /// FromExpr (the only jointree node reachable as a bare `&FromExpr` rather than
 /// through a `NodePtr`). Behaviourally identical to the `IsA(jtnode, FromExpr)`
 /// arm of `deconstruct_recurse`.
-fn deconstruct_recurse_fromexpr(
+fn deconstruct_recurse_fromexpr<'mcx>(
     root: &mut PlannerInfo,
-    run: &PlannerRun<'_>,
+    run: &PlannerRun<'mcx>,
     f: &types_nodes::rawnodes::FromExpr<'_>,
     parent_domain: usize,
     parent_jtitem: Option<JtId>,
-    item_list: &mut Vec<JoinTreeItem>,
+    item_list: &mut Vec<JoinTreeItem<'mcx>>,
     post_counter: &mut usize,
 ) -> (Vec<JoinlistNode>, JtId) {
     // Reserve this node's arena slot now (pre-order) so children can name us as
@@ -335,13 +335,13 @@ fn deconstruct_recurse_fromexpr(
 /// each jointree node (depth-first) to `item_list` and returns the joinlist for
 /// this node. `jtnode` is read but never mutated (a borrow into the resolved
 /// jointree tree).
-fn deconstruct_recurse(
+fn deconstruct_recurse<'mcx>(
     root: &mut PlannerInfo,
-    run: &PlannerRun<'_>,
+    run: &PlannerRun<'mcx>,
     jtnode: &Node,
     parent_domain: usize,
     parent_jtitem: Option<JtId>,
-    item_list: &mut Vec<JoinTreeItem>,
+    item_list: &mut Vec<JoinTreeItem<'mcx>>,
     post_counter: &mut usize,
 ) -> (Vec<JoinlistNode>, JtId) {
     // Reserve this node's arena slot now (pre-order) so children can name us as
@@ -680,10 +680,10 @@ pub fn mark_rels_nulled_by_join(root: &mut PlannerInfo, ojrelid: i32, lower_rels
 ///
 /// Process one jointree node in phase 2: distribute its quals to the appropriate
 /// restriction/join lists, and add `SpecialJoinInfo` entries for outer joins.
-fn deconstruct_distribute(
+fn deconstruct_distribute<'mcx>(
     root: &mut PlannerInfo,
-    run: &PlannerRun<'_>,
-    item_list: &mut Vec<JoinTreeItem>,
+    run: &PlannerRun<'mcx>,
+    item_list: &mut Vec<JoinTreeItem<'mcx>>,
     jti: JtId,
 ) -> types_error::PgResult<()> {
     // Move the node kind out of the item (C reads `j->quals`/`f->quals` by
@@ -812,11 +812,11 @@ fn deconstruct_distribute(
 /// relation's baserestrictinfo (via `distribute_quals_to_rels`), assigning a
 /// successively higher security level per sublist. In inheritance cases only the
 /// parent's quals are considered here; child quals are handled at path creation.
-fn process_security_barrier_quals(
+fn process_security_barrier_quals<'mcx>(
     root: &mut PlannerInfo,
-    run: &PlannerRun<'_>,
+    run: &PlannerRun<'mcx>,
     rti: i32,
-    item_list: &mut Vec<JoinTreeItem>,
+    item_list: &mut Vec<JoinTreeItem<'mcx>>,
     jti: JtId,
 ) -> types_error::PgResult<()> {
     // rte = root->simple_rte_array[rti]; gather its securityQuals (each element
@@ -866,10 +866,10 @@ fn process_security_barrier_quals(
 /// — if this join commutes with others per outer-join identity 3 — generate qual
 /// variants with different nullingrels labelings and distribute each at the
 /// correct join level.
-fn deconstruct_distribute_oj_quals(
+fn deconstruct_distribute_oj_quals<'mcx>(
     root: &mut PlannerInfo,
-    run: &PlannerRun<'_>,
-    item_list: &mut Vec<JoinTreeItem>,
+    run: &PlannerRun<'mcx>,
+    item_list: &mut Vec<JoinTreeItem<'mcx>>,
     jti: JtId,
 ) -> types_error::PgResult<()> {
     // The jtitem stores a *copy* of the SpecialJoinInfo made at the time the
@@ -1055,10 +1055,10 @@ fn del_member(a: Relids, x: i32) -> Relids {
 /// `remove_nulling_relids((Node *) quals, removable, except)` applied over an
 /// implicit-AND `List *` of quals: map it element-wise over the conjunct list.
 /// The per-Expr work is `eqext::remove_nulling_relids`.
-fn remove_nulling_relids_exprs(mcx: mcx::Mcx<'_>, quals: &[Expr], removable: &Relids, except: &Relids) -> Vec<Expr> {
+fn remove_nulling_relids_exprs<'mcx>(mcx: mcx::Mcx<'mcx>, quals: &[Expr<'mcx>], removable: &Relids, except: &Relids) -> Vec<Expr<'mcx>> {
     quals
         .iter()
-        .map(|q| eqext::remove_nulling_relids::call(clone_qual_expr(mcx, q), bms::relids_copy::call(removable), bms::relids_copy::call(except)))
+        .map(|q| eqext::remove_nulling_relids::call(mcx, clone_qual_expr(mcx, q), bms::relids_copy::call(removable), bms::relids_copy::call(except)))
         .collect()
 }
 
@@ -1072,7 +1072,7 @@ fn remove_nulling_relids_exprs(mcx: mcx::Mcx<'_>, quals: &[Expr], removable: &Re
 /// node is dropped much later (with the postponed-OJ / nulling-relids qual
 /// lists). A local context freed on return would leave those children dangling,
 /// so the eventual drop frees against an already-freed context (use-after-free).
-fn clone_qual_expr(mcx: mcx::Mcx<'_>, expr: &Expr) -> Expr {
+fn clone_qual_expr<'mcx>(mcx: mcx::Mcx<'mcx>, expr: &Expr) -> Expr<'mcx> {
     expr.clone_in(mcx)
         .unwrap_or_else(|e| panic!("clone_qual_expr: clone_in: {e:?}"))
 }
@@ -1082,11 +1082,12 @@ fn clone_qual_expr(mcx: mcx::Mcx<'_>, expr: &Expr) -> Expr {
 /// `add_nulling_relids_expr` seam in this crate's ext-seams (the rewrite-core
 /// owner works over `&mut Node`, model mismatch — loud-panic until that seam is
 /// installed; only reached for outer-join clone quals).
-fn add_nulling_relids_exprs(mcx: mcx::Mcx<'_>, quals: &[Expr], target: &Relids, added: &Relids) -> Vec<Expr> {
+fn add_nulling_relids_exprs<'mcx>(mcx: mcx::Mcx<'mcx>, quals: &[Expr<'mcx>], target: &Relids, added: &Relids) -> Vec<Expr<'mcx>> {
     quals
         .iter()
         .map(|q| {
             initext::add_nulling_relids_expr::call(
+                mcx,
                 clone_qual_expr(mcx, q),
                 bms::relids_copy::call(target),
                 bms::relids_copy::call(added),
@@ -1099,11 +1100,11 @@ fn add_nulling_relids_exprs(mcx: mcx::Mcx<'_>, quals: &[Expr], target: &Relids, 
 ///
 /// Apply `distribute_qual_to_rels` to each element of an AND'ed list of clauses.
 #[allow(clippy::too_many_arguments)]
-pub fn distribute_quals_to_rels(
+pub fn distribute_quals_to_rels<'mcx>(
     root: &mut PlannerInfo,
-    run: &PlannerRun<'_>,
-    clauses: &[Expr],
-    item_list: &mut Vec<JoinTreeItem>,
+    run: &PlannerRun<'mcx>,
+    clauses: &[Expr<'mcx>],
+    item_list: &mut Vec<JoinTreeItem<'mcx>>,
     jti: JtId,
     sjinfo: Option<&SpecialJoinInfo>,
     security_level: u32,

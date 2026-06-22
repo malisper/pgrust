@@ -130,7 +130,7 @@ struct PullupReplaceVarsContext<'mcx> {
     wrap_option: ReplaceWrapOption,
     /// `Node **rv_cache` — cache of the modified expressions, indexed
     /// `0 ..= length(targetlist)` (PHV dedup, copies = `Expr::clone_in`).
-    rv_cache: Vec<Option<Expr>>,
+    rv_cache: Vec<Option<Expr<'mcx>>>,
 }
 
 // ===========================================================================
@@ -1014,7 +1014,7 @@ fn clone_targetlist<'mcx>(
 }
 
 /// `palloc0((list_length(tlist) + 1) * sizeof(Node *))` — indexes 0..=len.
-fn rv_cache_new(tlist_len: usize) -> Vec<Option<Expr>> {
+fn rv_cache_new<'mcx>(tlist_len: usize) -> Vec<Option<Expr<'mcx>>> {
     let mut v = Vec::new();
     v.resize_with(tlist_len + 1, || None);
     v
@@ -1063,19 +1063,24 @@ fn pull_up_simple_union_all<'mcx>(
     // int rtoffset = list_length(root->parse->rtable);
     let rtoffset = parse.rtable.len() as i32;
 
-    // Take the subquery out of the RTE so we can own + adjust it. (The C keeps
-    // `rte->subquery` live and `copyObject(subquery->rtable)`s only the rtable;
-    // here we move the whole owned subquery out, mutate its rtable in place, and
-    // never put it back — the appendrel parent RTE no longer needs the subtree.)
-    let mut subquery = parse.rtable[(varno - 1) as usize]
+    // C: `Query *subquery = rte->subquery;` — the appendrel parent RTE keeps its
+    // `subquery` live; later planner stages (`extract_lateral_references` for a
+    // LATERAL UNION ALL) call `pull_vars_of_level((Node *) rte->subquery, 1)` to
+    // find the cross-level lateral Vars, so we MUST NOT null it out. Work on a
+    // deep copy (copyObject) for the rtable/perminfo/setOperations mutations and
+    // leave `rte->subquery` in place.
+    let mut subquery: Query<'mcx> = parse.rtable[(varno - 1) as usize]
         .subquery
-        .take()
-        .expect("RTE_SUBQUERY with NULL subquery");
+        .as_deref()
+        .expect("RTE_SUBQUERY with NULL subquery")
+        .clone_in(mcx)?;
     let rte_lateral = parse.rtable[(varno - 1) as usize].lateral;
 
     // Make a modifiable copy of the subquery's rtable, so we can adjust
-    // upper-level Vars in it. (We already own the subquery; move its rtable out
-    // into our working list — the subquery itself is discarded afterwards.)
+    // upper-level Vars in it. C: `rtable = copyObject(subquery->rtable);`. We own
+    // the (cloned) `subquery`, so move its rtable out into our working list — the
+    // cloned `subquery` itself is discarded afterwards, while the original stays
+    // attached to the RTE.
     let mut rtable: PgVec<'mcx, RangeTblEntry<'mcx>> =
         core::mem::replace(&mut subquery.rtable, PgVec::new_in(mcx));
 
@@ -1748,7 +1753,9 @@ pub(crate) fn build_virtual_generated_columns_tlist<'mcx>(
                 &relation,
                 (i + 1) as i32,
             )?;
-            let defexpr = PgBox::into_inner(defbox);
+            // The seam returns the generation expr in the parser/rewrite arena
+            // ('static); localize into the run `mcx` for the in-place remap.
+            let defexpr = PgBox::into_inner(defbox).clone_in(mcx)?;
 
             // ChangeVarNodes(defexpr, 1, rt_index, 0) — the generation
             // expression's Vars reference rt_index 1 (build_column_default emits
@@ -2062,7 +2069,7 @@ fn pull_up_constant_function<'mcx>(
 /// `makeTargetEntry((Expr *) expr, resno, resname, resjunk)` (makefuncs.c).
 fn make_target_entry<'mcx>(
     mcx: Mcx<'mcx>,
-    expr: Expr,
+    expr: Expr<'mcx>,
     resno: AttrNumber,
     resname: Option<&str>,
     resjunk: bool,
@@ -2628,10 +2635,10 @@ fn pullup_replace_vars_opt<'mcx>(
 fn pullup_replace_vars_opt_expr<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    node: Option<mcx::PgBox<'mcx, types_nodes::primnodes::Expr>>,
+    node: Option<mcx::PgBox<'mcx, types_nodes::primnodes::Expr<'mcx>>>,
     rvcontext: &mut PullupReplaceVarsContext<'mcx>,
     outer_has_sublinks: &mut Option<bool>,
-) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::primnodes::Expr>>> {
+) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::primnodes::Expr<'mcx>>>> {
     match node {
         None => Ok(None),
         Some(n) => {
@@ -2694,7 +2701,8 @@ fn replace_vars_in_translated_vars<'mcx>(
         let newnode =
             pullup_replace_vars(mcx, root, Node::mk_expr(mcx, expr)?, rvcontext, outer_has_sublinks)?;
         if let Some(e) = newnode.into_expr() {
-            *root.node_mut(id) = e;
+            // Re-intern the rewritten node into the planner arena ('static).
+            *root.node_mut(id) = e.erase_lifetime();
         } else {
             return Err(types_error::PgError::error(
                 "pullup_replace_vars: translated_vars element is not an expression",
@@ -2911,7 +2919,7 @@ fn pullup_replace_vars_callback<'mcx>(
     root: &mut PlannerInfo,
     rcon: &mut PullupReplaceVarsContext<'mcx>,
     var: &Var,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let varattno = var.varattno;
     let varlevelsup = var.varlevelsup;
 
@@ -2958,11 +2966,14 @@ fn pullup_replace_vars_callback<'mcx>(
             let wrap = compute_wrap(mcx, root, rcon, var, &newnode)?;
             if wrap {
                 let inner = newnode.into_expr().unwrap_or_else(|| unreachable!());
+                // The placeholder builder interns into the planner arena ('static);
+                // erase the input and re-localize the PHV into the run `mcx`.
                 let phv = placeholder::make_placeholder_expr::call(
                     root,
-                    inner,
+                    inner.erase_lifetime(),
                     pathrelids_make_singleton(rcon.varno),
-                );
+                )
+                .clone_in(mcx)?;
                 newnode = Node::mk_place_holder_var(mcx, phv)?;
                 // Cache it if possible.
                 if varattno >= types_core::primitive::InvalidAttrNumber && varattno <= tlist_len {
@@ -3299,7 +3310,7 @@ fn offset_var_nodes_in_append_rel_list<'mcx>(
         let mut node = Node::mk_expr(mcx, subroot.node(id).clone_in(mcx)?)?;
         OffsetVarNodes(&mut node, offset, sublevels_up, mcx);
         if let Some(e) = node.into_expr() {
-            *subroot.node_mut(id) = e;
+            *subroot.node_mut(id) = e.erase_lifetime();
         }
     }
     Ok(())
@@ -3326,7 +3337,7 @@ fn increment_var_sublevels_up_in_append_rel_list<'mcx>(
         let mut node = Node::mk_expr(mcx, subroot.node(id).clone_in(mcx)?)?;
         IncrementVarSublevelsUp(&mut node, delta, min_sublevels_up, mcx)?;
         if let Some(e) = node.into_expr() {
-            *subroot.node_mut(id) = e;
+            *subroot.node_mut(id) = e.erase_lifetime();
         }
     }
     Ok(())

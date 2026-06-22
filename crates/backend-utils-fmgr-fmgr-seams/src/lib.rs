@@ -200,10 +200,10 @@ seam_core::seam!(
     /// owner deep-copies the node via `Expr::clone_in` (a bare derived `.clone()`
     /// panics on an Aggref, whose args are a context-allocated TargetEntry list),
     /// which is an allocating, fallible step.
-    pub fn fmgr_info_set_expr<'mcx>(
+    pub fn fmgr_info_set_expr<'mcx, 'e>(
         mcx: mcx::Mcx<'mcx>,
         finfo: &mut types_core::fmgr::FmgrInfo,
-        expr: &types_nodes::primnodes::Expr,
+        expr: &types_nodes::primnodes::Expr<'e>,
     ) -> PgResult<()>
 );
 

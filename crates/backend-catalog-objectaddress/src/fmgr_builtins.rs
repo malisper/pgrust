@@ -218,6 +218,55 @@ fn fc_pg_identify_object(
     Ok(ret_record(fcinfo, rec))
 }
 
+/// `pg_identify_object_as_address(classid oid, objid oid, objsubid int4)
+/// -> record(type text, object_names text[], object_args text[])`
+/// (objectaddress.c 4365).
+fn fc_pg_identify_object_as_address(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    /// `_text` (text[]) element-type-array OID.
+    const TEXTARRAYOID: Oid = 1009;
+
+    let classid = arg_oid(fcinfo, 0);
+    let objid = arg_oid(fcinfo, 1);
+    let objsubid = arg_i32(fcinfo, 2);
+
+    let m = scratch_mcx();
+    let row =
+        crate::fmgr_sql::pg_identify_object_as_address(m.mcx(), classid, objid, objsubid)?;
+
+    // type (text, never NULL)
+    let (c0, n0) = text_col(m.mcx(), row.type_.as_deref())?;
+    // object_names / object_args (text[]; strlist_to_textarray, or empty array)
+    let name_elems: Vec<Option<&[u8]>> = row
+        .object_names
+        .iter()
+        .map(|o| o.as_deref().map(|s| s.as_bytes()))
+        .collect();
+    let arg_elems: Vec<Option<&[u8]>> = row
+        .object_args
+        .iter()
+        .map(|o| o.as_deref().map(|s| s.as_bytes()))
+        .collect();
+    let c1 = DatumV::ByRef(
+        backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(m.mcx(), &name_elems)?,
+    );
+    let c2 = DatumV::ByRef(
+        backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(m.mcx(), &arg_elems)?,
+    );
+
+    let coltypes = [TEXTOID, TEXTARRAYOID, TEXTARRAYOID];
+    let values = [c0, c1, c2];
+    let nulls = [n0, false, false];
+    let rec = backend_utils_fmgr_funcapi_seams::record_from_values::call(
+        m.mcx(),
+        &coltypes,
+        &values,
+        &nulls,
+    )?;
+    Ok(ret_record(fcinfo, rec))
+}
+
 /// `pg_get_acl(classid oid, objid oid, objsubid int4) -> aclitem[]`
 /// (objectaddress.c). Returns the object's ACL array, or NULL.
 fn fc_pg_get_acl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
@@ -307,6 +356,16 @@ pub fn register_objectaddress_builtins() {
             true,
             false,
             fc_pg_identify_object,
+        ),
+        // pg_identify_object_as_address: oid '3382', proargtypes 'oid oid int4',
+        // prorettype 'record'; provolatile 's', proisstrict default 't', not retset.
+        builtin(
+            3382,
+            "pg_identify_object_as_address",
+            3,
+            true,
+            false,
+            fc_pg_identify_object_as_address,
         ),
         // pg_get_acl: oid '6385', proargtypes 'oid oid int4',
         // prorettype '_aclitem'; provolatile 's', proisstrict default 't', not retset.

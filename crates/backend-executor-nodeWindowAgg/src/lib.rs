@@ -4081,7 +4081,7 @@ fn reset_expr_context<'mcx>(
 // --- ExecInitWindowAgg sub-helpers --------------------------------------
 
 fn init_qual_from_plan<'mcx>(
-    qual: &Option<PgVec<'mcx, types_nodes::primnodes::Expr>>,
+    qual: &Option<PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>>,
     parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> {
@@ -4092,7 +4092,7 @@ fn init_qual_from_plan<'mcx>(
 }
 
 fn init_qual_from_list<'mcx>(
-    list: &Option<PgVec<'mcx, types_nodes::primnodes::Expr>>,
+    list: &Option<PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>>,
     parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> {
@@ -4103,7 +4103,7 @@ fn init_qual_from_list<'mcx>(
 }
 
 fn init_expr_opt<'mcx>(
-    expr: &Option<PgBox<'mcx, types_nodes::primnodes::Expr>>,
+    expr: &Option<PgBox<'mcx, types_nodes::primnodes::Expr<'mcx>>>,
     parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> {

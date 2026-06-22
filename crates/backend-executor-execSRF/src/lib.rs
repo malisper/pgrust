@@ -76,13 +76,17 @@ mod unnest;
 mod control_srf;
 mod multirange_unnest;
 mod tsvector_unnest;
+mod ts_parse;
+mod ts_stat;
 mod pg_get_keywords;
 mod pg_tablespace_databases;
 mod pg_listening_channels;
 mod pg_get_multixact_members;
 mod pg_get_catalog_foreign_keys;
 mod pg_partition_tree;
+mod pg_cursor;
 mod pg_event_trigger_dropped_objects;
+mod pg_event_trigger_ddl_commands;
 mod pg_get_publication_tables;
 mod pg_lock_status;
 mod pg_prepared_xact;
@@ -90,6 +94,9 @@ mod pg_snapshot_xip;
 mod aclexplode;
 mod pg_stat_get_io;
 mod pg_stat_get_slru;
+mod pg_stat_get_recovery_prefetch;
+mod pg_stat_get_activity;
+mod pg_stat_get_backend_idset;
 mod pgstat_composite_srf;
 mod pg_mcv_list_items;
 mod shmem_numa_srf;
@@ -107,6 +114,7 @@ pub fn init_seams() {
     seams::exec_make_table_function_result::set(ExecMakeTableFunctionResult);
     seams::exec_init_function_result_set::set(ExecInitFunctionResultSet);
     seams::exec_make_function_result_set::set(ExecMakeFunctionResultSet);
+    seams::restart_set_expr_state::set(RestartSetExprState);
     seams::is_scalar_record_function::set(json_record::is_scalar_record_function);
     seams::invoke_scalar_record_function::set(json_record::invoke_scalar_record_function);
     // The executor-frame `fmgrtab` analogue for the int4/int8 generate_series
@@ -179,6 +187,17 @@ pub fn init_seams() {
     // "char"[])` row per WordEntry (its decode core is
     // `backend-utils-adt-tsvector-core::op::tsvector_unnest`).
     tsvector_unnest::register_tsvector_unnest();
+    // `ts_token_type(*)` / `ts_parse(*)` (wparser.c) — the materialize-mode SRFs
+    // emitting one `(tokid, alias, description)` / `(tokid, token)` row per
+    // parser token-type descriptor / tokenized lexeme (cores
+    // `backend-tsearch-parse::tt_storage_list` / `::prs_tokenize`).
+    ts_parse::register_ts_parse();
+    // `ts_stat(query[, weights])` (tsvector_op.c) — the materialize-mode SRFs
+    // emitting one `(word text, ndoc int4, nentry int4)` row per stat-tree node
+    // (cores `backend-utils-adt-tsvector-core::op::ts_stat_sql` /
+    // `ts_setup_firstcall` / `ts_process_call`; the SPI cursor walk is the
+    // `exec_stat_query` seam installed by `backend-executor-spi`).
+    ts_stat::register_ts_stat();
     // `pg_get_keywords()` (OID 1686) — the materialize-mode SRF emitting one
     // `(word text, catcode "char", barelabel bool, catdesc text, baredesc text)`
     // row per grammar keyword (its render core is
@@ -228,6 +247,12 @@ pub fn init_seams() {
     // `pg_event_trigger_dropped_objects` (OID 3566) — the `sql_drop`
     // event-trigger SRF listing the command's dropped objects.
     pg_event_trigger_dropped_objects::register_pg_event_trigger_dropped_objects();
+    // `pg_event_trigger_ddl_commands` (OID 4568) — the `ddl_command_end`
+    // event-trigger SRF listing the DDL commands the firing command ran.
+    pg_event_trigger_ddl_commands::register_pg_event_trigger_ddl_commands();
+    // `pg_cursor()` (OID 2511) — the `pg_cursors` view's underlying SRF, listing
+    // every open cursor (portal) of the current session.
+    pg_cursor::register_pg_cursor();
     // `pg_get_publication_tables(VARIADIC text[])` (OID 6119) — the published
     // tables (column lists + row filters) of one or more publications.
     pg_get_publication_tables::register_pg_get_publication_tables();
@@ -250,6 +275,15 @@ pub fn init_seams() {
     // substrate (pgstat_fetch_stat_io/slru/wal/archiver/replslot/subscription).
     pg_stat_get_io::register_pg_stat_get_io();
     pg_stat_get_slru::register_pg_stat_get_slru();
+    // `pg_stat_get_recovery_prefetch()` (OID 6248) — the single-row
+    // `pg_stat_recovery_prefetch` view over the XLogPrefetchStats shmem counters.
+    pg_stat_get_recovery_prefetch::register_pg_stat_get_recovery_prefetch();
+    // `pg_stat_get_activity(int4)` (OID 2022) — the `pg_stat_activity` view's
+    // 31-column backing SRF over the localBackendStatusTable snapshot.
+    pg_stat_get_activity::register_pg_stat_get_activity();
+    // `pg_stat_get_backend_idset()` (OID 1936) — the value-per-call SRF emitting
+    // each backend's proc_number.
+    pg_stat_get_backend_idset::register_pg_stat_get_backend_idset();
     pgstat_composite_srf::register_pgstat_composite_srfs();
     // `pg_options_to_table(text[])` (OID 2289) and `pg_prepared_statement()` (OID
     // 2510) — the materialize-mode system SRFs whose `(mcx, fcinfo)` bodies drive
@@ -487,7 +521,7 @@ fn init_sexpr<'mcx>(
 /// the [`SetExprState`] for a function in a range-table function (FunctionScan /
 /// ROWS FROM).
 fn ExecInitTableFunctionResult<'mcx>(
-    expr: &Expr,
+    expr: &Expr<'mcx>,
     _econtext: EcxtId,
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -523,12 +557,12 @@ fn ExecInitTableFunctionResult<'mcx>(
 /// `args` carries `ExprState` by value (positional), so we surface any NULL cell
 /// loudly (an SRF call argument list never contains a NULL expression).
 fn init_expr_list<'mcx>(
-    args: &[Expr],
+    args: &[Expr<'mcx>],
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<mcx::PgVec<'mcx, types_nodes::execexpr::ExprState<'mcx>>> {
     let _ = parent;
-    let refs: Vec<Option<&Expr>> = args.iter().map(Some).collect();
+    let refs: Vec<Option<&Expr<'mcx>>> = args.iter().map(Some).collect();
     let states =
         backend_executor_execExpr_seams::exec_init_expr_list_no_parent::call(&refs, estate)?;
     let mut out = mcx::PgVec::new_in(estate.es_query_cxt);
@@ -1130,7 +1164,7 @@ fn exec_eval_func_args<'mcx>(
 /// `ExecInitFunctionResultSet(expr, econtext, parent)` (execSRF.c:443) — prepare
 /// a targetlist SRF for execution (nodeProjectSet.c).
 fn ExecInitFunctionResultSet<'mcx>(
-    expr: &Expr,
+    expr: &Expr<'mcx>,
     _econtext: EcxtId,
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1452,6 +1486,53 @@ fn ExecMakeFunctionResultSet<'mcx>(
 
         return Ok((result, result_isnull, this_isdone));
     }
+}
+
+/// `RestartSetExprState(fcache)` — reset a [`SetExprState`] that may have been
+/// abandoned mid value-per-call series (e.g. a tSRF cut short by an enclosing
+/// LIMIT), so a subsequent rescan re-evaluates it from the start.
+///
+/// This is the owned-model equivalent of the cleanup C performs through the
+/// `ExprContext` shutdown callback that `init_MultiFuncCall` registers on
+/// `rsi->econtext`. In C, `ExecReScan` calls `ReScanExprContext(node->
+/// ps_ExprContext)` before the node-specific rescan, which fires
+/// `shutdown_MultiFuncCall` for every SRF that left a `FuncCallContext` in
+/// `flinfo->fn_extra`; that resets `fn_extra` to NULL so the next call is a
+/// fresh `SRF_IS_FIRSTCALL()`. The owned model cannot register that bare-`fn`
+/// callback (the cross-call `fn_extra` lives on the owned call frame, which the
+/// callback cannot name — see `init_MultiFuncCall`), so the rescanning node
+/// (nodeProjectSet) drives the same teardown directly through this function for
+/// each of its SRF elements.
+///
+/// It mirrors `shutdown_MultiFuncCall` (tear down any leftover multi-call
+/// context bound to `fn_extra`), ends any partially-drained materialize-mode
+/// `funcResultStore`, and clears `setArgsValid` so the next call re-evaluates the
+/// function arguments. A SetExprState that ran to completion (`fn_extra` already
+/// NULL, no `funcResultStore`, `setArgsValid` false) is left untouched.
+pub fn RestartSetExprState<'mcx>(fcache: &mut SetExprState<'mcx>) -> PgResult<()> {
+    // Tear down any leftover value-per-call cross-call context: the C ExprContext
+    // shutdown callback (`shutdown_MultiFuncCall`) unbinds `flinfo->fn_extra` and
+    // deletes the SRF multi-call context. `end_MultiFuncCall` performs exactly
+    // that teardown off the owned `fn_extra` channel.
+    if let Some(fcinfo) = fcache.fcinfo.as_deref_mut() {
+        if fcinfo.fn_extra.is_some() {
+            backend_utils_fmgr_funcapi_seams::end_MultiFuncCall::call(fcinfo)?;
+        }
+    }
+
+    // End any partially-drained materialize-mode tuplestore (C frees it when the
+    // store is exhausted in ExecMakeFunctionResultSet; an abandoned one must be
+    // released here so the rescan starts clean).
+    if let Some(store) = fcache.funcResultStore.take() {
+        backend_utils_sort_storage_seams::tuplestore_end::call(store);
+    }
+    fcache.funcResultSlot = None;
+
+    // Forget any half-collected arguments so the next call re-evaluates them
+    // (C: setArgsValid is only meaningful while a series is in flight).
+    fcache.setArgsValid = false;
+
+    Ok(())
 }
 
 // ===========================================================================

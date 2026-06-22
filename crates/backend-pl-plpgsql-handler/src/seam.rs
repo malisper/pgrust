@@ -32,57 +32,11 @@ const T_EVENT_TRIGGER_DATA: u32 = 443;
 /// control-flow effect.
 pub fn pg_bindtextdomain() {}
 
-/// `DefineCustomEnumVariable("plpgsql.variable_conflict", …)` — register the
-/// custom GUC. The custom-GUC registration substrate (`guc.c`
-/// `DefineCustom*Variable` + the `config_enum_entry` table) is not yet ported;
-/// the compile-time default (`PLPGSQL_RESOLVE_ERROR`) the compiler reads already
-/// matches, so the variable is correct without registration.
-pub fn define_custom_enum_variable_variable_conflict() {
-    panic!(
-        "seam not wired: DefineCustomEnumVariable(\"plpgsql.variable_conflict\") (pl_handler.c) — \
-         custom-GUC registration substrate (guc.c) not yet ported"
-    );
-}
-
-/// `DefineCustomBoolVariable("plpgsql.print_strict_params", …)`.
-pub fn define_custom_bool_variable_print_strict_params() {
-    panic!(
-        "seam not wired: DefineCustomBoolVariable(\"plpgsql.print_strict_params\") (pl_handler.c) — \
-         custom-GUC registration substrate (guc.c) not yet ported"
-    );
-}
-
-/// `DefineCustomBoolVariable("plpgsql.check_asserts", …)`.
-pub fn define_custom_bool_variable_check_asserts() {
-    panic!(
-        "seam not wired: DefineCustomBoolVariable(\"plpgsql.check_asserts\") (pl_handler.c) — \
-         custom-GUC registration substrate (guc.c) not yet ported"
-    );
-}
-
-/// `DefineCustomStringVariable("plpgsql.extra_warnings", …)`.
-pub fn define_custom_string_variable_extra_warnings() {
-    panic!(
-        "seam not wired: DefineCustomStringVariable(\"plpgsql.extra_warnings\") (pl_handler.c) — \
-         custom-GUC registration substrate (guc.c) not yet ported"
-    );
-}
-
-/// `DefineCustomStringVariable("plpgsql.extra_errors", …)`.
-pub fn define_custom_string_variable_extra_errors() {
-    panic!(
-        "seam not wired: DefineCustomStringVariable(\"plpgsql.extra_errors\") (pl_handler.c) — \
-         custom-GUC registration substrate (guc.c) not yet ported"
-    );
-}
-
-/// `MarkGUCPrefixReserved("plpgsql")` (guc.c).
-pub fn mark_guc_prefix_reserved(_prefix: &str) {
-    panic!(
-        "seam not wired: MarkGUCPrefixReserved(\"plpgsql\") (pl_handler.c) — \
-         GUC prefix-reservation substrate (guc.c) not yet ported"
-    );
-}
+// The custom-GUC registration (`DefineCustomEnumVariable` /
+// `DefineCustomBoolVariable` / `DefineCustomStringVariable` /
+// `MarkGUCPrefixReserved`) is now ported: `crate::register_custom_gucs` drives
+// `backend_utils_misc_guc::custom::*` directly with the handler's storage
+// accessors + the extra_warnings/extra_errors check/assign hooks.
 
 /// `RegisterXactCallback(plpgsql_xact_cb, NULL)` (xact.c). The callback
 /// `plpgsql_xact_cb` lives in `pl_exec.c` and is not yet ported; registering a
@@ -226,7 +180,7 @@ pub fn compile_for_call(
     // `InvalidOid` and the compile body errors (C: "could not determine actual
     // type for polymorphic function") exactly as in PG when no call expr exists.
     let resolved_rettype = resolved_rettype_from_call(fcinfo);
-    let resolved_argtypes = resolved_argtypes_from_call(fcinfo);
+    let call_expr = call_expr_from_fcinfo(fcinfo);
 
     match compile_proc_from_row(
         funcoid,
@@ -235,7 +189,7 @@ pub fn compile_for_call(
         fn_input_collation,
         /* for_validator = */ false,
         resolved_rettype,
-        resolved_argtypes,
+        call_expr,
     ) {
         Ok(func) => func,
         Err(e) => propagate(e),
@@ -253,37 +207,32 @@ fn resolved_rettype_from_call(fcinfo: &FunctionCallInfoBaseData) -> Oid {
     }
 }
 
-/// `get_fn_expr_argtype(fcinfo->flinfo, argnum)` per input argument — the
-/// per-argument leg of `plpgsql_resolve_polymorphic_argtypes`'s non-validator
-/// branch. Returns the concrete type of each call argument read off
-/// `fcinfo->flinfo->fn_expr` (the `FuncExpr`/`OpExpr` argument list); an empty
-/// vec when no field-bearing call node is present, in which case the compile
-/// body keeps the declared types (and errors if any is polymorphic).
-///
-/// The full `resolve_polymorphic_argtypes` two-pass deduction (deriving e.g.
-/// `anyarray` from a sibling `anyelement`) is not reproduced here: the compile
-/// body only needs each *input* argument's concrete type, and
-/// `get_fn_expr_argtype` reads the declared/coerced type the parser already
-/// pinned onto every actual argument of the call expression, which is the
-/// concrete type for each polymorphic input. OUT-only polymorphic positions do
-/// not appear as PL/pgSQL argument variables.
-fn resolved_argtypes_from_call(fcinfo: &FunctionCallInfoBaseData) -> Vec<Oid> {
-    let flinfo = match fcinfo.flinfo.as_deref() {
-        Some(f) => f,
-        None => return Vec::new(),
-    };
-    // No field-bearing call node => nothing to resolve from.
-    let has_call_node = matches!(
-        flinfo.fn_expr.as_deref(),
-        Some(types_fmgr::fmgr::FnExpr::External(ext)) if ext.node.is_some()
-    );
-    if !has_call_node {
-        return Vec::new();
+/// `fcinfo->flinfo->fn_expr` projected to the funcapi `CallExpr` carrier the
+/// full `resolve_polymorphic_argtypes` resolver reads. This is the
+/// `call_expr` argument `cfunc_resolve_polymorphic_argtypes` (funccache.c)
+/// passes to `resolve_polymorphic_argtypes`: the call's `FuncExpr`/`OpExpr`
+/// node, from which the resolver reads each *input* argument's actual type
+/// (`get_call_expr_argtype`) to deduce every polymorphic position — both IN and
+/// OUT. Returns `None` when no field-bearing call node is present (the validator
+/// / no-call-expr case), in which case the compile body keeps the declared types
+/// (and errors if any input is polymorphic, exactly as C does when `call_expr`
+/// is unavailable).
+fn call_expr_from_fcinfo(
+    fcinfo: &FunctionCallInfoBaseData,
+) -> Option<backend_utils_fmgr_funcapi::polymorphic::CallExpr> {
+    let flinfo = fcinfo.flinfo.as_deref()?;
+    match flinfo.fn_expr.as_deref() {
+        Some(types_fmgr::fmgr::FnExpr::External(ext)) => {
+            // C carries the field-bearing call node in `fn_expr`; the erased
+            // carrier holds the real expression node the resolver downcasts to
+            // read argument types. A tag-only carrier (`node == None`) cannot
+            // supply argument types, so there is no call expression to resolve
+            // from (matches C's `InvalidOid` fall-through).
+            let erased = ext.node.clone()?;
+            Some(backend_utils_fmgr_funcapi::polymorphic::CallExpr::from_erased(erased))
+        }
+        _ => None,
     }
-    let nargs = flinfo.fn_nargs as usize;
-    (0..nargs)
-        .map(|i| backend_utils_fmgr_core::get_fn_expr_argtype(Some(flinfo), i as i32))
-        .collect()
 }
 
 /// Shared body of the call-handler / validator compile: project the `pg_proc`
@@ -297,7 +246,7 @@ fn compile_proc_from_row(
     fn_input_collation: Oid,
     for_validator: bool,
     resolved_rettype: Oid,
-    resolved_argtypes: Vec<Oid>,
+    call_expr: Option<backend_utils_fmgr_funcapi::polymorphic::CallExpr>,
 ) -> PgResult<types_plpgsql::PLpgSQL_function> {
     use backend_pl_plpgsql_comp::ProcCompileFacts;
     use types_plpgsql::PLpgSQL_trigtype;
@@ -311,6 +260,43 @@ fn compile_proc_from_row(
         .ok_or_else(|| {
             PgError::error(format!("cache lookup failed for function {funcoid}"))
         })?;
+
+    // cfunc_resolve_polymorphic_argtypes (funccache.c): in the non-validator
+    // case resolve every polymorphic argument position — IN *and* OUT — from the
+    // call's FuncExpr via the full `resolve_polymorphic_argtypes` two-pass
+    // deduction (deriving e.g. `anyarray`/`anycompatiblearray` OUT positions from
+    // their sibling IN actuals). `get_func_arg_info` returns all argument types
+    // (OUT included) keyed positionally with `argmodes`, so the resolved array is
+    // length-matched to the declared `argtypes` the compile body consumes. The
+    // validator (`for_validator`) path leaves `resolved_argtypes` empty; the
+    // compile body substitutes the integer family itself.
+    let resolved_argtypes: Vec<Oid> = if for_validator {
+        Vec::new()
+    } else {
+        let mut argtypes: Vec<Oid> = row.argtypes.iter().copied().collect();
+        let argmodes: Vec<u8> = row.argmodes.iter().copied().collect();
+        let argmodes_opt = if argmodes.is_empty() {
+            None
+        } else {
+            Some(argmodes.as_slice())
+        };
+        match backend_utils_fmgr_funcapi::polymorphic::resolve_polymorphic_argtypes(
+            &mut argtypes,
+            argmodes_opt,
+            call_expr.as_ref(),
+        ) {
+            // Fully resolved: hand the concrete per-position types to the compile
+            // body (which copies them into the declared polymorphic slots).
+            Ok(true) => argtypes,
+            // Could not determine (no usable call expression / unresolvable):
+            // leave `resolved_argtypes` empty so the compile body's
+            // `plpgsql_resolve_polymorphic_argtypes` raises the C
+            // "could not determine actual argument type for polymorphic
+            // function" error when a declared input is polymorphic.
+            Ok(false) => Vec::new(),
+            Err(e) => return Err(e),
+        }
+    };
 
     // fn_is_trigger arm (the C `switch (function->fn_is_trigger)`).
     let fn_is_trigger = if is_dml_trigger {
@@ -520,7 +506,7 @@ fn validate_test_compile(
         /* resolved_rettype = */ types_core::InvalidOid,
         // Validator has no call expression; the compile body's forValidator
         // branch substitutes the int4 family for any polymorphic argument.
-        /* resolved_argtypes = */ Vec::new(),
+        /* call_expr = */ None,
     )?;
     Ok(())
 }

@@ -167,13 +167,13 @@ pub fn ExplainTargetRel<'mcx>(
         | ntag::T_SampleScan
         | ntag::T_IndexScan
         | ntag::T_IndexOnlyScan
+        | ntag::T_BitmapHeapScan
         | ntag::T_TidScan
         | ntag::T_TidRangeScan
         | ntag::T_ForeignScan
         | ntag::T_CustomScan
         | ntag::T_ModifyTable => {
-            // Assert(rte->rtekind == RTE_RELATION);  (C also covers
-            // BitmapHeapScan, which the Node enum does not yet model.)
+            // Assert(rte->rtekind == RTE_RELATION);
             objectname = lsyscache::relation::get_rel_name(mcx, relid)?;
             if verbose {
                 let nspid = lsyscache::relation::get_rel_namespace(relid)?;

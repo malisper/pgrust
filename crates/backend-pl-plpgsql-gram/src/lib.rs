@@ -29,7 +29,7 @@
 mod mem;
 mod parser;
 
-pub use parser::{plpgsql_yyparse, Parser};
+pub use parser::{plpgsql_yyparse, plpgsql_yyparse_with_lineno, Parser};
 
 /// No inward seams: the compiler depends on this crate directly and calls
 /// [`plpgsql_yyparse`]. (The gram→comp builder edge is broken through

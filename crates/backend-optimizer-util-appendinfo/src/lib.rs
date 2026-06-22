@@ -92,6 +92,15 @@ struct AdjustContext<'a, 'mcx> {
     /// scan-join target translation path (which can carry a UNION-ALL whole-row
     /// Var) threads the live run.
     run: Option<&'a PlannerRun<'mcx>>,
+    /// Long-lived planner-arena `Mcx` for the deep-copy (`clone_in`) of a non-Var
+    /// translated_var (C: `copyObject(list_nth(appinfo->translated_vars, …))` into
+    /// `CurrentMemoryContext` = `root->planner_cxt`). The `run`-threaded callers
+    /// derive this from `run.mcx()`; the `run`-less restrictinfo-list path
+    /// (`adjust_restrictinfo` -> `generate_join_implied_equalities_broken`)
+    /// supplies it directly. A non-Var translated_var (e.g. an expression-index
+    /// EC member `(ff + 2) + 1`) is a perfectly normal case the run-less path can
+    /// reach, so a context `Mcx` must always be available for the copy.
+    clone_mcx: Option<Mcx<'mcx>>,
     /// First error raised inside the mutator (the C `elog(ERROR)` longjmp).
     err: Option<PgError>,
     /// Fresh nodes to intern after the walk (the mutator needs `&PlannerInfo`
@@ -265,11 +274,11 @@ fn make_inh_translation_list(
 
 /// `adjust_appendrel_attrs(root, node, nappinfos, appinfos)` (appendinfo.c) —
 /// copy `node` translating parent Vars/rtindexes to the corresponding child.
-pub fn adjust_appendrel_attrs(
+pub fn adjust_appendrel_attrs<'mcx>(
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'mcx>,
     appinfos: &[AppendRelInfo],
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     adjust_appendrel_attrs_run(None, root, node, appinfos)
 }
 
@@ -282,16 +291,42 @@ pub fn adjust_appendrel_attrs(
 pub fn adjust_appendrel_attrs_run<'mcx>(
     run: Option<&PlannerRun<'mcx>>,
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'mcx>,
     appinfos: &[AppendRelInfo],
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
+    adjust_appendrel_attrs_inner(run, None, root, node, appinfos)
+}
+
+/// `adjust_appendrel_attrs` with an explicit long-lived planner-arena [`Mcx`]
+/// (no [`PlannerRun`]) for the non-Var translated_var deep-copy. The run-less
+/// restrictinfo-list path (`adjust_restrictinfo` ->
+/// `generate_join_implied_equalities_broken`) already carries the planner-run
+/// `mcx`; thread it so an expression-index EC member (`(ff + 2) + 1`) translates
+/// faithfully (C `copyObject` into `CurrentMemoryContext`) instead of erroring.
+pub fn adjust_appendrel_attrs_in<'mcx>(
+    clone_mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    node: Expr<'mcx>,
+    appinfos: &[AppendRelInfo],
+) -> PgResult<Expr<'mcx>> {
+    adjust_appendrel_attrs_inner(None, Some(clone_mcx), root, node, appinfos)
+}
+
+fn adjust_appendrel_attrs_inner<'mcx>(
+    run: Option<&PlannerRun<'mcx>>,
+    clone_mcx: Option<Mcx<'mcx>>,
+    root: &mut PlannerInfo,
+    node: Expr<'mcx>,
+    appinfos: &[AppendRelInfo],
+) -> PgResult<Expr<'mcx>> {
     debug_assert!(!appinfos.is_empty());
-    let mut pending: Vec<Expr> = Vec::new();
+    let mut pending: Vec<Expr<'mcx>> = Vec::new();
     let result = {
         let mut ctx = AdjustContext {
             root,
             appinfos,
             run,
+            clone_mcx,
             err: None,
             _phantom: core::marker::PhantomData,
         };
@@ -312,11 +347,11 @@ pub fn adjust_appendrel_attrs_run<'mcx>(
 /// the owned lifetime-free [`Expr`] value tree (the value analogue of the C
 /// copy-and-mutate). On a translation error it records into `context.err` and
 /// returns the partially-built node (the driver surfaces the error).
-fn adjust_appendrel_attrs_mutator(
-    node: Expr,
-    context: &mut AdjustContext<'_, '_>,
-    pending: &mut Vec<Expr>,
-) -> Expr {
+fn adjust_appendrel_attrs_mutator<'mcx>(
+    node: Expr<'mcx>,
+    context: &mut AdjustContext<'_, 'mcx>,
+    pending: &mut Vec<Expr<'mcx>>,
+) -> Expr<'mcx> {
     let appinfos = context.appinfos;
 
     match node.expr_tag() {
@@ -361,16 +396,45 @@ fn adjust_appendrel_attrs_mutator(
                     // deep-copy through `clone_in` into the planner-run context
                     // when one is threaded (that path always threads `run`).
                     let src = context.root.node(handle);
-                    let newnode = match (src.as_var().is_some(), context.run) {
-                        (true, _) => src.clone(),
-                        (false, Some(run)) => match src.clone_in(run.mcx()) {
+                    // The Var case rebuilds the (lifetime-free) `Var` directly so
+                    // the result is `'mcx`-valued; the non-Var case (targetlist /
+                    // scan-join path, which always threads `run`) deep-copies into
+                    // the run's `'mcx` context via `clone_in` (the derived
+                    // `Expr::clone` panics on an owned-subtree child such as a
+                    // SubPlan-bearing PHV).
+                    // A Var translated_var rebuilds the (lifetime-free) `Var`
+                    // directly; a non-Var (targetlist/scan-join PHV, or an
+                    // expression-index EC member like `(ff + 2) + 1`) is
+                    // deep-copied via `clone_in` into the long-lived planner arena
+                    // — C's `copyObject(list_nth(translated_vars, …))` into
+                    // `CurrentMemoryContext` (= `root->planner_cxt`). The arena
+                    // `Mcx` comes from the threaded `run` when present, else from
+                    // the explicit `clone_mcx` the run-less restrictinfo path
+                    // supplies; a derived `Expr::clone` would panic on an
+                    // owned-subtree child (e.g. a SubPlan-bearing PHV).
+                    let arena_mcx = context
+                        .run
+                        .map(|run| run.mcx())
+                        .or(context.clone_mcx);
+                    let newnode: Expr<'mcx> = match (src.as_var(), arena_mcx) {
+                        (Some(v), _) => Expr::Var(v.clone()),
+                        (None, Some(mcx)) => match src.clone_in(mcx) {
                             Ok(n) => n,
                             Err(e) => {
                                 context.err = Some(e);
                                 return Expr::Var(var);
                             }
                         },
-                        (false, None) => src.clone(),
+                        (None, None) => {
+                            // No arena `Mcx` available — genuinely a bug (every
+                            // path that can carry a non-Var translated_var threads
+                            // either a `run` or a `clone_mcx`).
+                            context.err = Some(PgError::error(
+                                "adjust_appendrel_attrs: non-Var translated_var \
+                                 reached without a threaded PlannerRun or clone Mcx",
+                            ));
+                            return Expr::Var(var);
+                        }
                     };
                     if let Expr::Var(mut newvar) = newnode {
                         newvar.varreturningtype = var.varreturningtype;
@@ -440,11 +504,20 @@ fn adjust_appendrel_attrs_mutator(
                         };
 
                         // fields = copyObject(appinfo->translated_vars);
-                        let mut fields: Vec<Expr> = Vec::with_capacity(appinfo.translated_vars.len());
+                        // Deep-copy into the run's `'mcx` context (this whole-row
+                        // RowExpr branch always has a threaded `run`).
+                        let mut fields: Vec<Expr<'mcx>> =
+                            Vec::with_capacity(appinfo.translated_vars.len());
                         for &handle in appinfo.translated_vars.iter() {
                             // Per the C comment, inheritance dummy NULLs cannot
                             // occur here; a NULL handle would be a planner bug.
-                            fields.push(context.root.node(handle).clone());
+                            match context.root.node(handle).clone_in(run.mcx()) {
+                                Ok(n) => fields.push(n),
+                                Err(e) => {
+                                    context.err = Some(e);
+                                    return Expr::Var(var);
+                                }
+                            }
                         }
 
                         // rte = rt_fetch(appinfo->parent_relid, parse->rtable);
@@ -603,13 +676,13 @@ fn adjust_restrictinfo(
     // context would dangle). A derived `.clone()` panics on an owned-subtree
     // child such as a `SubLink`/`SubPlan` correlated-subquery operand.
     let clause_expr = root.node(newinfo.clause).clone_in(mcx)?;
-    let new_clause = adjust_appendrel_attrs(root, clause_expr, appinfos)?;
+    let new_clause = adjust_appendrel_attrs_in(mcx, root, clause_expr, appinfos)?;
     newinfo.clause = root.alloc_node(new_clause);
 
     // and the modified version, if an OR clause.
     if let Some(orclause_id) = newinfo.orclause {
         let or_expr = root.node(orclause_id).clone_in(mcx)?;
-        let new_or = adjust_appendrel_attrs(root, or_expr, appinfos)?;
+        let new_or = adjust_appendrel_attrs_in(mcx, root, or_expr, appinfos)?;
         newinfo.orclause = Some(root.alloc_node(new_or));
     }
 
@@ -642,19 +715,37 @@ fn adjust_restrictinfo(
 /// `adjust_appendrel_attrs_multilevel(root, node, childrel, parentrel)`
 /// (appendinfo.c) — apply Var translations down through (possibly multiple)
 /// inheritance levels.
-pub fn adjust_appendrel_attrs_multilevel(
+pub fn adjust_appendrel_attrs_multilevel<'mcx>(
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'mcx>,
     childrel: RelId,
     parentrel: RelId,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
+    adjust_appendrel_attrs_multilevel_run(None, root, node, childrel, parentrel)
+}
+
+/// `adjust_appendrel_attrs_multilevel` with the live [`PlannerRun`] threaded so
+/// the leaf single-level translation can deep-copy a non-Var translated_var
+/// (e.g. an expression-index EC member like `(ff + 2) + 1`) into the planner-run
+/// arena via `clone_in`, matching C's `copyObject(list_nth(translated_vars,…))`.
+/// The plain [`adjust_appendrel_attrs_multilevel`] entry forwards with
+/// `run == None` (planner/createplan/partitioning callers whose nodes never
+/// resolve to a non-Var translated_var). The equivclass `add_child_*_equivalences`
+/// path threads `Some(run)` so expression-index members translate faithfully.
+pub fn adjust_appendrel_attrs_multilevel_run<'mcx>(
+    run: Option<&PlannerRun<'mcx>>,
+    root: &mut PlannerInfo,
+    node: Expr<'mcx>,
+    childrel: RelId,
+    parentrel: RelId,
+) -> PgResult<Expr<'mcx>> {
     let mut node = node;
     // Recurse if immediate parent is not the top parent.
     let immediate_parent = root.rel(childrel).parent;
     if immediate_parent != Some(parentrel) {
         match immediate_parent {
             Some(p) => {
-                node = adjust_appendrel_attrs_multilevel(root, node, p, parentrel)?;
+                node = adjust_appendrel_attrs_multilevel_run(run, root, node, p, parentrel)?;
             }
             None => {
                 return Err(PgError::error("childrel is not a child of parentrel"));
@@ -664,7 +755,7 @@ pub fn adjust_appendrel_attrs_multilevel(
     // Now translate for this child.
     let child_relids = root.rel(childrel).relids.clone();
     let appinfos = find_appinfos_by_relids(root, &child_relids)?;
-    adjust_appendrel_attrs(root, node, &appinfos)
+    adjust_appendrel_attrs_run(run, root, node, &appinfos)
 }
 
 /// `(List *) adjust_appendrel_attrs_multilevel(root, (Node *) restrictlist,
@@ -1306,7 +1397,7 @@ fn rel_name_or_unknown(_root: &PlannerInfo, relid: Oid) -> String {
 
 /// `makeNullConst(consttype, consttypmod, constcollid)` (makefuncs.c) over the
 /// value tree (no `Mcx` needed: a null `Const` never inspects `constvalue`).
-fn make_null_const(consttype: Oid, consttypmod: i32, constcollid: Oid) -> PgResult<Const> {
+fn make_null_const<'mcx>(consttype: Oid, consttypmod: i32, constcollid: Oid) -> PgResult<Const<'mcx>> {
     let (typ_len, typ_byval) = lsyscache::get_typlenbyval::call(consttype)?;
     Ok(Const {
         consttype,
@@ -1448,11 +1539,11 @@ pub fn init_seams() {
     // (find_appinfos_by_relids over the child's relids).
     use backend_optimizer_path_equivclass_ext_seams as eq_ext;
     eq_ext::adjust_appendrel_attrs::set(seam_adjust_appendrel_attrs);
-    eq_ext::adjust_appendrel_attrs_multilevel::set(|root, node, child_rel, top_parent| {
+    eq_ext::adjust_appendrel_attrs_multilevel::set(|run, root, node, child_rel, top_parent| {
         let parentrel = top_parent.ok_or_else(|| {
             PgError::error("adjust_appendrel_attrs_multilevel: top_parent is NULL")
         })?;
-        adjust_appendrel_attrs_multilevel(root, node, child_rel, parentrel)
+        adjust_appendrel_attrs_multilevel_run(Some(run), root, node, child_rel, parentrel)
     });
     eq_ext::adjust_restrictlist_multilevel::set(adjust_restrictlist_multilevel);
 }
@@ -1460,12 +1551,12 @@ pub fn init_seams() {
 /// `adjust_appendrel_attrs(root, (Node *) node, nappinfos, appinfos)` — the
 /// single-expression equivclass/allpaths consumer. The seam carries the child
 /// rels as `Vec<RelId>`; resolve their AppendRelInfos and translate.
-fn seam_adjust_appendrel_attrs(
-    run: &PlannerRun<'_>,
+fn seam_adjust_appendrel_attrs<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'mcx>,
     child_rels: Vec<RelId>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let mut appinfos: Vec<AppendRelInfo> = Vec::with_capacity(child_rels.len());
     for cr in child_rels {
         let relids = root.rel(cr).relids.clone();
@@ -1493,8 +1584,8 @@ fn seam_adjust_appendrel_attrs_restrictlist(
 /// expression node (build_child_join_reltarget's per-expr translation).
 fn seam_adjust_appendrel_attrs_node(
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'static>,
     appinfos: &[AppendRelInfo],
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     adjust_appendrel_attrs(root, node, appinfos)
 }

@@ -94,7 +94,7 @@ pub fn build_column_default<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     attrno: i32,
-) -> PgResult<Option<PgBox<'mcx, Expr>>> {
+) -> PgResult<Option<PgBox<'mcx, Expr<'mcx>>>> {
     let rd_att = &rel.rd_att;
     let att_tup = rd_att.attr((attrno - 1) as usize);
     let atttype = att_tup.atttypid;
@@ -154,7 +154,10 @@ pub fn build_column_default<'mcx>(
     let coerced = backend_parser_coerce::coerce_to_target_type(
         mcx,
         None, // no UNKNOWN params here
-        expr,
+        // The coerce entry operates in the parser-arena notional `'static`; the
+        // `'mcx`-built default is erased in and the result re-interned into `mcx`
+        // below (`Expr` is invariant, so these are the sanctioned boundary moves).
+        expr.erase_lifetime(),
         exprtype,
         atttype,
         atttypmod,
@@ -176,7 +179,7 @@ pub fn build_column_default<'mcx>(
         .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
     };
 
-    Ok(Some(mcx::alloc_in(mcx, coerced)?))
+    Ok(Some(mcx::alloc_in(mcx, coerced.clone_in(mcx)?)?))
 }
 
 /// The catalog default / type default seams return a `Node`; in our split model
@@ -826,7 +829,10 @@ fn expand_generated_columns_internal<'mcx>(
     for i in 0..natts {
         let attr = tupdesc.attr(i);
         if attr.attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
-            let mut defexpr = build_generation_expression(mcx, rel, (i + 1) as i32)?;
+            // build_generation_expression returns at the arena `'static`; bring
+            // it into `mcx` for the in-place ChangeVarNodes walk (`Expr` invariant).
+            let mut defexpr: Expr<'mcx> =
+                build_generation_expression(mcx, rel, (i + 1) as i32)?.clone_in(mcx)?;
             // ChangeVarNodes(defexpr, 1, rt_index, 0)
             let mut defnode = Node::mk_expr(mcx, defexpr)?;
             ChangeVarNodes(&mut defnode, 1, rt_index, 0, mcx);
@@ -860,10 +866,10 @@ fn expand_generated_columns_internal<'mcx>(
 /// generated columns in a standalone expression (not part of a query).
 pub fn expand_generated_columns_in_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    node: Option<Expr>,
+    node: Option<Expr<'static>>,
     rel: &Relation<'mcx>,
     rt_index: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     let Some(node) = node else {
         return Ok(None);
     };
@@ -876,6 +882,10 @@ pub fn expand_generated_columns_in_expr<'mcx>(
     if !has_virtual {
         return Ok(Some(node));
     }
+
+    // Bring the parser-arena `'static` node into `mcx` for the `Node`-walk;
+    // the result is re-erased to `'static` at the return (sanctioned boundary).
+    let node: Expr<'mcx> = node.clone_in(mcx)?;
 
     // rte = makeNode(RangeTblEntry); eref name doesn't matter.
     let mut rte = RangeTblEntry::new_in(mcx);
@@ -894,7 +904,7 @@ pub fn expand_generated_columns_in_expr<'mcx>(
     let out = wrapped
         .into_expr()
         .unwrap_or_else(|| unreachable!("expand_generated_columns_internal keeps an Expr an Expr"));
-    Ok(Some(out))
+    Ok(Some(out.erase_lifetime()))
 }
 
 /// `build_generation_expression(rel, attrno)` — build the generation expression
@@ -903,7 +913,7 @@ pub fn build_generation_expression<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     attrno: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let rd_att = &rel.rd_att;
     let att_tup = rd_att.attr((attrno - 1) as usize);
     let attcollid = att_tup.attcollation;
@@ -932,7 +942,9 @@ pub fn build_generation_expression<'mcx>(
         defexpr = Expr::CollateExpr(ce);
     }
 
-    Ok(defexpr)
+    // Re-erase to the arena `'static` the seam contract expects (the generation
+    // expression is interned into the relcache/arena; `Expr` is invariant).
+    Ok(defexpr.erase_lifetime())
 }
 
 // ===========================================================================

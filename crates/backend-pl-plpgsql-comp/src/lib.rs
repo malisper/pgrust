@@ -24,6 +24,18 @@ mod mem;
 pub mod rowtupdesc_table;
 mod seam;
 
+/// The custom-GUC assign-hook targets (`plpgsql_variable_conflict` /
+/// `plpgsql_print_strict_params` / `plpgsql_extra_warnings` /
+/// `plpgsql_extra_errors`): the compiler's per-backend copies of the
+/// `pl_handler.c` GUC globals it reads while assembling a function. The handler
+/// (the layer above) writes these through its GUC assign hooks. Exposed so the
+/// handler's `DefineCustom*Variable` assign hooks update the values the compiler
+/// actually reads.
+pub use seam::{
+    set_plpgsql_extra_errors, set_plpgsql_extra_warnings, set_plpgsql_print_strict_params,
+    set_plpgsql_variable_conflict,
+};
+
 use core::cell::RefCell;
 
 use types_core::Oid;
@@ -2102,9 +2114,32 @@ fn parse_function_body(src: &str) -> PgResult<Box<PLpgSQL_stmt_block>> {
     // drop the "internal query" framing on success).  `plpgsql_yyparse` returns
     // the same `PgError` it would have raised; run the transpose on it before
     // propagating, mirroring the C error-context callback.
-    backend_pl_plpgsql_gram::plpgsql_yyparse(scanner).map_err(|e| {
-        comp_seams::function_parse_error_transpose::call(src, e)
-            .unwrap_or_else(|fallback| fallback)
+    backend_pl_plpgsql_gram::plpgsql_yyparse_with_lineno(scanner).map_err(|(e, latest_lineno)| {
+        // `plpgsql_compile_error_callback` (pl_comp.c): first try to relocate the
+        // body-relative cursor position into the original CREATE FUNCTION / DO
+        // text. If `function_parse_error_transpose` reports a syntax-error
+        // position (C `return true`), the callback returns without adding any
+        // "near line N" context. Otherwise — the common case for a *semantic*
+        // compile error with no cursor position (e.g. "too many parameters
+        // specified for RAISE") — it falls back to an
+        // `errcontext("compilation of PL/pgSQL function \"%s\" near line %d", …)`.
+        //
+        // The value-form transpose returns the error unchanged exactly when it
+        // would have returned C-false (no original cursor/internal position), so
+        // detect that by checking whether the error carried a position before the
+        // transpose.
+        let had_position =
+            e.cursor_position.unwrap_or(0) > 0 || e.internal_position.unwrap_or(0) > 0;
+        let e = comp_seams::function_parse_error_transpose::call(src, e)
+            .unwrap_or_else(|fallback| fallback);
+        if !had_position {
+            if let Some(funcname) = plpgsql_error_funcname() {
+                return e.with_context(format!(
+                    "compilation of PL/pgSQL function \"{funcname}\" near line {latest_lineno}"
+                ));
+            }
+        }
+        e
     })
 }
 

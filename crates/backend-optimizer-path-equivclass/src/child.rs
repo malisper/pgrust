@@ -80,6 +80,7 @@ pub fn add_child_rel_equivalences<'mcx>(
                     ec_seam::adjust_appendrel_attrs::call(run, root, parent_expr, alloc::vec![appinfo])?
                 } else {
                     ec_seam::adjust_appendrel_attrs_multilevel::call(
+                        run,
                         root,
                         parent_expr,
                         child_rel,
@@ -167,6 +168,7 @@ pub fn add_child_join_rel_equivalences<'mcx>(
                         root.rel(parent_joinrel).reloptkind == RELOPT_OTHER_JOINREL
                     );
                     ec_seam::adjust_appendrel_attrs_multilevel::call(
+                        run,
                         root,
                         parent_expr,
                         child_joinrel,

@@ -331,7 +331,7 @@ fn assign_query_collations_walker_node<'mcx>(
 /// `assign_expr_collations`.
 fn assign_query_collations_walker_expr<'mcx>(
     pstate: Option<&ParseState<'mcx>>,
-    expr: &mut Expr,
+    expr: &mut Expr<'mcx>,
 ) -> PgResult<()> {
     let mut context = AssignCollationsContext::fresh(pstate);
     assign_collations_walker_expr(expr, &mut context)
@@ -346,9 +346,9 @@ fn assign_query_collations_walker_expr<'mcx>(
 /// `query_tree_walker` hands each `TargetEntry` *node* (not its bare expr) to
 /// the walker, so this arm is reached for every target-list member; processing
 /// only `te.expr` would skip the eager throw entirely.
-fn assign_targetentry_collations<'p, 'mcx, 'te>(
+fn assign_targetentry_collations<'p, 'mcx>(
     pstate: Option<&'p ParseState<'mcx>>,
-    te: &mut types_nodes::primnodes::TargetEntry<'te>,
+    te: &mut types_nodes::primnodes::TargetEntry<'mcx>,
 ) -> PgResult<()> {
     // Fresh top-level context, matching `assign_expr_collations(pstate, tle)`.
     let mut loccontext = AssignCollationsContext::fresh(pstate);
@@ -369,7 +369,10 @@ fn assign_targetentry_collations<'p, 'mcx, 'te>(
 /// `assign_list_collations()` (parse_collate.c:154): mark all nodes in a list of
 /// expressions with collation info, processing each independently (they do not
 /// have to share a common collation).
-pub fn assign_list_collations(pstate: Option<&ParseState<'_>>, exprs: &mut [Expr]) -> PgResult<()> {
+pub fn assign_list_collations<'mcx>(
+    pstate: Option<&ParseState<'mcx>>,
+    exprs: &mut [Expr<'mcx>],
+) -> PgResult<()> {
     for node in exprs.iter_mut() {
         let mut context = AssignCollationsContext::fresh(pstate);
         assign_collations_walker_expr(node, &mut context)?;
@@ -383,7 +386,10 @@ pub fn assign_list_collations(pstate: Option<&ParseState<'_>>, exprs: &mut [Expr
 /// Exported for utility commands that process expressions without building a
 /// complete `Query`. Should be applied after `transformExpr()` plus any
 /// expression-modifying operations such as `coerce_to_boolean()`.
-pub fn assign_expr_collations(pstate: Option<&ParseState<'_>>, expr: &mut Expr) -> PgResult<()> {
+pub fn assign_expr_collations<'mcx>(
+    pstate: Option<&ParseState<'mcx>>,
+    expr: &mut Expr<'mcx>,
+) -> PgResult<()> {
     // initialize context for tree walk
     let mut context = AssignCollationsContext::fresh(pstate);
     // and away we go
@@ -394,9 +400,9 @@ pub fn assign_expr_collations(pstate: Option<&ParseState<'_>>, expr: &mut Expr) 
 /// `expr` independently (its own fresh per-level context, exactly as the public
 /// entry does) but inherit the parent context's walker arena so a `None`-pstate
 /// walk keeps its arena across the re-entry.
-fn assign_expr_collations_ctx(
-    parent: &AssignCollationsContext<'_, '_>,
-    expr: &mut Expr,
+fn assign_expr_collations_ctx<'mcx>(
+    parent: &AssignCollationsContext<'_, 'mcx>,
+    expr: &mut Expr<'mcx>,
 ) -> PgResult<()> {
     let mut context = parent.fresh_child();
     assign_collations_walker_expr(expr, &mut context)
@@ -404,9 +410,9 @@ fn assign_expr_collations_ctx(
 
 /// `assign_list_collations()` re-entered from inside an ongoing walk (same
 /// arena-inheritance rationale as [`assign_expr_collations_ctx`]).
-fn assign_list_collations_ctx(
-    parent: &AssignCollationsContext<'_, '_>,
-    exprs: &mut [Expr],
+fn assign_list_collations_ctx<'mcx>(
+    parent: &AssignCollationsContext<'_, 'mcx>,
+    exprs: &mut [Expr<'mcx>],
 ) -> PgResult<()> {
     for node in exprs.iter_mut() {
         let mut context = parent.fresh_child();
@@ -423,7 +429,7 @@ fn assign_list_collations_ctx(
 /// `assign_expr_collations(None, expr)` apart from threading the walker arena.
 pub fn assign_expr_collations_in<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    expr: &mut Expr,
+    expr: &mut Expr<'mcx>,
 ) -> PgResult<()> {
     let mut context = AssignCollationsContext::fresh_in(None, Some(mcx));
     assign_collations_walker_expr(expr, &mut context)
@@ -449,9 +455,9 @@ fn assign_expr_collations_node<'mcx>(
 /// `none_ok` permits returning [`InvalidOid`] when no common collation can be
 /// identified; otherwise an error is thrown for a conflict of implicit
 /// collations.
-pub fn select_common_collation(
-    pstate: Option<&ParseState<'_>>,
-    exprs: &mut [Expr],
+pub fn select_common_collation<'mcx>(
+    pstate: Option<&ParseState<'mcx>>,
+    exprs: &mut [Expr<'mcx>],
     none_ok: bool,
 ) -> PgResult<Oid> {
     // initialize context for tree walk
@@ -582,9 +588,9 @@ fn assign_collations_walker<'mcx>(
 /// `assign_collations_walker()` (parse_collate.c:255), expression switch — the
 /// recursive guts over an embedded `Expr`. Bubbles its computed state into
 /// `context` via [`merge_collation_state`].
-fn assign_collations_walker_expr(
-    expr: &mut Expr,
-    context: &mut AssignCollationsContext<'_, '_>,
+fn assign_collations_walker_expr<'mcx>(
+    expr: &mut Expr<'mcx>,
+    context: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
     let mut loccontext = context.fresh_child();
 
@@ -927,7 +933,7 @@ fn recurse_children<'mcx>(
 /// `Node::Expr` by the in-place `Node` walker), mutating each and merging into
 /// `loccontext`.
 fn recurse_expr_children<'mcx>(
-    expr: &mut Expr,
+    expr: &mut Expr<'mcx>,
     loccontext: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
     // Wrap the Expr into an opaque `Node` (allocated in the query mcx, recovered
@@ -947,9 +953,9 @@ fn recurse_expr_children<'mcx>(
 /// The `T_List` arm of `assign_collations_walker` (parse_collate.c:528-540) plus
 /// the C "invoked directly on a List" entry (parse_collate.c:219): walk each
 /// element, bubbling collation state up from the list elements into `context`.
-fn assign_collations_list_walker(
-    exprs: &mut [Expr],
-    context: &mut AssignCollationsContext<'_, '_>,
+fn assign_collations_list_walker<'mcx>(
+    exprs: &mut [Expr<'mcx>],
+    context: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
     for expr in exprs.iter_mut() {
         assign_collations_walker_expr(expr, context)?;
@@ -1037,9 +1043,9 @@ fn merge_collation_state(
 /// other or with regular args; we handle this by applying
 /// [`assign_expr_collations`] to the resjunk ones rather than passing down our
 /// `loccontext`.
-fn assign_aggregate_collations(
-    aggref: &mut Aggref,
-    loccontext: &mut AssignCollationsContext<'_, '_>,
+fn assign_aggregate_collations<'mcx>(
+    aggref: &mut Aggref<'mcx>,
+    loccontext: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
     // Plain aggregates have no direct args
     debug_assert!(aggref.aggdirectargs.is_empty());
@@ -1066,9 +1072,9 @@ fn assign_aggregate_collations(
 /// Direct arguments contribute normally to the aggregate's own collation, while
 /// aggregated arguments contribute only when the aggregate is designed to have
 /// exactly one aggregated argument (single aggregated arg and non-variadic).
-fn assign_ordered_set_collations(
-    aggref: &mut Aggref,
-    loccontext: &mut AssignCollationsContext<'_, '_>,
+fn assign_ordered_set_collations<'mcx>(
+    aggref: &mut Aggref<'mcx>,
+    loccontext: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
     // Merge sort collations to parent only if there can be only one
     let merge_sort_collations = aggref.args.len() == 1
@@ -1101,9 +1107,9 @@ fn assign_ordered_set_collations(
 /// args, and force the choice of collation down into the sort column (via a
 /// `RelabelType`, matching `makeRelabelType`) so the sort happens with the
 /// chosen collation.
-fn assign_hypothetical_collations(
-    aggref: &mut Aggref,
-    loccontext: &mut AssignCollationsContext<'_, '_>,
+fn assign_hypothetical_collations<'mcx>(
+    aggref: &mut Aggref<'mcx>,
+    loccontext: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
     // Merge sort collations to parent only if there can be only one
     let merge_sort_collations = aggref.args.len() == 1

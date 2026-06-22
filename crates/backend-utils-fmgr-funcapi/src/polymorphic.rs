@@ -62,7 +62,10 @@ impl CallExpr {
     pub fn from_node<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node<'mcx>) -> PgResult<Self> {
         let tag = node.tag().0;
         let erased = match node.as_expr() {
-            Some(e) => Some(types_core::fmgr::FnExprErased::new(e.clone_in(mcx)?)),
+            Some(e) => Some(types_core::fmgr::FnExprErased::from_node_erased::<
+                types_nodes::primnodes::Expr,
+                types_nodes::primnodes::Expr,
+            >(e.clone_in(mcx)?)),
             None => None,
         };
         Ok(Self {
@@ -71,7 +74,7 @@ impl CallExpr {
     }
 
     /// The erased owned `Expr` behind this call expression, if any.
-    fn expr(&self) -> Option<&types_nodes::primnodes::Expr> {
+    fn expr(&self) -> Option<&types_nodes::primnodes::Expr<'static>> {
         self.external
             .node
             .as_ref()

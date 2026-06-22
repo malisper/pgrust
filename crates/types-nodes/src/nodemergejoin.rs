@@ -62,7 +62,7 @@ pub struct MergeJoin<'mcx> {
     /// `bool skip_mark_restore` — can we skip mark/restore calls?
     pub skip_mark_restore: bool,
     /// `List *mergeclauses` — mergeclauses as `OpExpr` expression trees.
-    pub mergeclauses: Vec<Expr>,
+    pub mergeclauses: Vec<Expr<'mcx>>,
     /// `Oid *mergeFamilies` — per-clause OIDs of btree opfamilies.
     pub mergeFamilies: Vec<Oid>,
     /// `Oid *mergeCollations` — per-clause OIDs of collations.
@@ -80,7 +80,13 @@ impl MergeJoin<'_> {
         Ok(MergeJoin {
             join: self.join.clone_in(mcx)?,
             skip_mark_restore: self.skip_mark_restore,
-            mergeclauses: self.mergeclauses.clone(),
+            mergeclauses: {
+                let mut out = alloc::vec::Vec::with_capacity(self.mergeclauses.len());
+                for e in self.mergeclauses.iter() {
+                    out.push(e.clone_in(mcx)?);
+                }
+                out
+            },
             mergeFamilies: self.mergeFamilies.clone(),
             mergeCollations: self.mergeCollations.clone(),
             mergeReversals: self.mergeReversals.clone(),

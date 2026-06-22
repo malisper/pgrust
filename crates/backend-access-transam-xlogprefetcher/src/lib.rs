@@ -417,6 +417,42 @@ pub fn XLogPrefetchResetStats() {
     s.skip_rep.store(0, Relaxed);
 }
 
+/// The 10 column values of `pg_stat_recovery_prefetch`
+/// (xlogprefetcher.c:823), read atomically from `SharedStats`. `reset_time` is
+/// a `TimestampTz`; the gauges are plain `i32`. Mirrors the `pg_atomic_read_u64`
+/// reads in `pg_stat_get_recovery_prefetch`.
+pub struct XLogPrefetchStatsSnapshot {
+    pub reset_time: i64,
+    pub prefetch: i64,
+    pub hit: i64,
+    pub skip_init: i64,
+    pub skip_new: i64,
+    pub skip_fpw: i64,
+    pub skip_rep: i64,
+    pub wal_distance: i32,
+    pub block_distance: i32,
+    pub io_depth: i32,
+}
+
+/// Read the `SharedStats` counters for `pg_stat_get_recovery_prefetch`
+/// (xlogprefetcher.c:823). Each field is read with the same `pg_atomic_read_u64`
+/// / plain-load semantics as the C SRF (`Relaxed` here).
+pub fn XLogPrefetchReadStats() -> XLogPrefetchStatsSnapshot {
+    let s = shared_stats();
+    XLogPrefetchStatsSnapshot {
+        reset_time: s.reset_time.load(Relaxed) as i64,
+        prefetch: s.prefetch.load(Relaxed) as i64,
+        hit: s.hit.load(Relaxed) as i64,
+        skip_init: s.skip_init.load(Relaxed) as i64,
+        skip_new: s.skip_new.load(Relaxed) as i64,
+        skip_fpw: s.skip_fpw.load(Relaxed) as i64,
+        skip_rep: s.skip_rep.load(Relaxed) as i64,
+        wal_distance: s.wal_distance.load(Relaxed),
+        block_distance: s.block_distance.load(Relaxed),
+        io_depth: s.io_depth.load(Relaxed),
+    }
+}
+
 /// `XLogPrefetchShmemInit(void)` (xlogprefetcher.c:314).
 ///
 /// The first call is the C `!found` arm (initialize every field); later calls

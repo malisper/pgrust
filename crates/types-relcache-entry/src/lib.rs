@@ -218,6 +218,7 @@ impl OwnedTupleDesc {
                 attcompression: a.attcompression,
                 attnotnull: a.attnotnull,
                 atthasdef: a.atthasdef,
+                atthasmissing: a.atthasmissing,
                 attndims: a.attndims,
                 attidentity: a.attidentity,
                 attgenerated: a.attgenerated,
@@ -410,6 +411,13 @@ pub struct OwnedAttr {
     /// `pg_attrdef` (and thus an entry in `rd_att->constr->defval`). Read by
     /// `build_column_default` to decide whether to fetch the column default.
     pub atthasdef: bool,
+    /// `bool atthasmissing` — this column has a "missing" value stored outside
+    /// the heap (`pg_attribute.attmissingval`, populated by the fast-default
+    /// `ATExecAddColumn` path). Read by `getmissingattr` (heaptuple.c) — via the
+    /// derived `CompactAttribute.atthasmissing` — to substitute the missing
+    /// value when deforming a stored tuple that physically lacks this trailing
+    /// column.
+    pub atthasmissing: bool,
     /// `int16 attndims` — number of array dimensions declared for the column.
     pub attndims: i16,
     /// `char attidentity` — one of the `ATTRIBUTE_IDENTITY_*` constants, or

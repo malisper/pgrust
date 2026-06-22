@@ -31,17 +31,17 @@ struct FuncDetail<'mcx> {
 pub fn ParseFuncOrColumn<'mcx>(
     pstate: &mut ParseState<'mcx>,
     funcname: &[PgString<'_>],
-    mut fargs: Vec<Expr>,
-    last_srf: Option<&Expr>,
+    mut fargs: Vec<Expr<'static>>,
+    last_srf: Option<&Expr<'_>>,
     fn_: Option<&FuncCall<'mcx>>,
     proc_call: bool,
     location: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     let mcx = pstate_mcx(pstate);
 
     let is_column = fn_.is_none();
     let agg_order_len = fn_.map(|f| f.agg_order.len()).unwrap_or(0);
-    let mut agg_filter: Option<Expr> = None;
+    let mut agg_filter: Option<Expr<'static>> = None;
     let over_present = fn_.map(|f| f.over.is_some()).unwrap_or(false);
     let agg_within_group = fn_.map(|f| f.agg_within_group).unwrap_or(false);
     let agg_star = fn_.map(|f| f.agg_star).unwrap_or(false);
@@ -137,9 +137,12 @@ pub fn ParseFuncOrColumn<'mcx>(
     // context-allocated. For a scalar argument no copy is taken at all, so the
     // panicking `Clone` is never reached. Materialized here (before `fargs` is
     // re-ordered/mutated below) so the borrow ends immediately.
-    let first_arg: Option<Expr> = if could_be_projection {
+    let first_arg: Option<Expr<'static>> = if could_be_projection {
         match fargs.first() {
-            Some(e) => Some(e.clone_in(mcx)?),
+            // Deep-copy into the parser arena (`mcx`); the produced function/agg
+            // node tree carries the parser arena's `'static` notional lifetime
+            // (the convention `make_const`/coerce produce), so erase here.
+            Some(e) => Some(e.clone_in(mcx)?.erase_lifetime()),
             None => None,
         }
     } else {
@@ -152,7 +155,7 @@ pub fn ParseFuncOrColumn<'mcx>(
         // path below also consumes `first_arg`, and the borrow checker can't see
         // the two are mutually exclusive.
         let fa = match &first_arg {
-            Some(e) => Some(e.clone_in(mcx)?),
+            Some(e) => Some(e.clone_in(mcx)?.erase_lifetime()),
             None => None,
         };
         let retval = ParseComplexProjection(pstate, funcname[0].as_str(), fa, location)?;
@@ -704,7 +707,7 @@ pub fn ParseFuncOrColumn<'mcx>(
     }
 
     // build the appropriate output structure.
-    let retval: Expr;
+    let retval: Expr<'static>;
     if matches!(fdresult, FuncDetailCode::Normal | FuncDetailCode::Procedure) {
         let funcexpr = FuncExpr {
             funcid,
@@ -934,7 +937,7 @@ fn ordered_set_direct_args_error(
 
 /// Re-stamp the named-notation argument positions returned by `func_get_detail`
 /// onto our owned `fargs`.
-fn apply_named_arg_positions(fargs: &mut [Expr], argnumbers: &Option<Vec<i32>>) {
+fn apply_named_arg_positions(fargs: &mut [Expr<'_>], argnumbers: &Option<Vec<i32>>) {
     let Some(numbers) = argnumbers else {
         return;
     };
@@ -950,7 +953,7 @@ fn apply_named_arg_positions(fargs: &mut [Expr], argnumbers: &Option<Vec<i32>>) 
 /// `exprLocation((Node *) list)` over a `List *` of exprs (the variadic-array
 /// list location). Mirrors `exprLocation`'s list handling: the earliest member
 /// location.
-fn expr_location_list(list: &[Expr]) -> PgResult<i32> {
+fn expr_location_list(list: &[Expr<'_>]) -> PgResult<i32> {
     let mut loc = -1i32;
     for e in list {
         let l = exprLocation(Some(e))?;
@@ -984,16 +987,19 @@ fn clone_node_ptr_vec<'mcx>(
 fn transform_where_clause_filter<'mcx>(
     pstate: &mut ParseState<'mcx>,
     af: &Node<'mcx>,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     let mcx = pstate_mcx(pstate);
     let clause = af.clone_in(mcx)?;
-    backend_parser_clause_seams::transform_where_clause::call(
+    // The FILTER clause is built in the parser arena (`mcx`); erase to the parser
+    // arena's `'static` notional lifetime to match the produced agg/window node.
+    Ok(backend_parser_clause_seams::transform_where_clause::call(
         mcx,
         pstate,
         Some(clause),
         ParseExprKind::EXPR_KIND_FILTER,
         "FILTER",
-    )
+    )?
+    .map(|e| e.erase_lifetime()))
 }
 
 // ===========================================================================
@@ -1007,7 +1013,7 @@ fn transform_where_clause_filter<'mcx>(
 fn func_get_detail<'mcx>(
     mcx: Mcx<'mcx>,
     funcname: &[PgString<'_>],
-    fargs: &[Expr],
+    fargs: &[Expr<'_>],
     fargnames: &[PgString<'_>],
     nargs: i32,
     argtypes: &[Oid],
@@ -1228,7 +1234,7 @@ fn internal_error_owned(msg: String) -> PgError {
 /// Port target: `unify_hypothetical_args` (parse_func.c:1740).
 fn unify_hypothetical_args<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    fargs: &mut [Expr],
+    fargs: &mut [Expr<'static>],
     num_aggregated_args: i32,
     actual_arg_types: &mut [Oid],
     declared_arg_types: &[Oid],
@@ -1311,9 +1317,9 @@ fn unify_hypothetical_args<'mcx>(
 fn ParseComplexProjection<'mcx>(
     pstate: &mut ParseState<'mcx>,
     funcname: &str,
-    first_arg: Option<Expr>,
+    first_arg: Option<Expr<'static>>,
     location: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     let mcx = pstate_mcx(pstate);
 
     let first_arg = match first_arg {
@@ -1337,7 +1343,7 @@ fn ParseComplexProjection<'mcx>(
 
     // Else use get_expr_result_tupdesc(); a RECORD Var needs expandRecordVariable.
     // get_expr_result_tupdesc takes Option<&Node> (C: (Node *) first_arg).
-    let first_arg_node = Node::mk_expr(mcx, first_arg.clone())?;
+    let first_arg_node = Node::mk_expr(mcx, first_arg.clone_in(mcx)?)?;
     let tupdesc = if let Some(var) = first_arg.expect_var() {
         if var.vartype == RECORDOID {
             let var = var.clone();

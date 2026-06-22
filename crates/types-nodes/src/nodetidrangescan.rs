@@ -20,7 +20,7 @@ pub struct TidRangeScan<'mcx> {
     pub scan: Scan<'mcx>,
     /// `List *tidrangequals` — qual(s) involving CTID op something. `None` is
     /// the C `NIL`.
-    pub tidrangequals: Option<PgVec<'mcx, Expr>>,
+    pub tidrangequals: Option<PgVec<'mcx, Expr<'mcx>>>,
 }
 
 impl TidRangeScan<'_> {

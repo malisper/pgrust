@@ -143,7 +143,7 @@ fn ItemPointerDec(pointer: &mut ItemPointerData) {
 /// The `qual_index`-th cell of `node->tidrangequals`, expected to be an
 /// `OpExpr`. `None` if the index is out of range (the C `lfirst` would not run
 /// past the list).
-fn qual_cell<'a, 'mcx>(node: &'a TidRangeScan<'mcx>, qual_index: usize) -> Option<&'a Expr> {
+fn qual_cell<'a, 'mcx>(node: &'a TidRangeScan<'mcx>, qual_index: usize) -> Option<&'a Expr<'mcx>> {
     node.tidrangequals.as_ref().and_then(|q| q.get(qual_index))
 }
 

@@ -175,14 +175,14 @@ fn ccontext_rank(c: CoercionContext) -> i32 {
 pub fn coerce_to_target_type<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: Option<&mut ParseState<'_>>,
-    expr: Expr,
+    expr: Expr<'static>,
     exprtype: Oid,
     targettype: Oid,
     targettypmod: i32,
     ccontext: CoercionContext,
     cformat: CoercionForm,
     location: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     if !can_coerce_type(1, &[exprtype], &[targettype], ccontext)? {
         return Ok(None);
     }
@@ -199,7 +199,9 @@ pub fn coerce_to_target_type<'mcx>(
     let result = coerce_type(
         mcx,
         pstate,
-        Some(stripped.clone_in(mcx)?),
+        // Interned into the query `mcx` (which outlives parse analysis); erase to
+        // the coercion seam's `'static` at this arena-intern boundary.
+        Some(stripped.clone_in(mcx)?.erase_lifetime()),
         exprtype,
         targettype,
         targettypmod,
@@ -295,14 +297,14 @@ fn exprs_identical(a: &Expr, b: &Expr) -> bool {
 pub fn coerce_type<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: Option<&mut ParseState<'_>>,
-    node: Option<Expr>,
+    node: Option<Expr<'static>>,
     inputTypeId: Oid,
     targetTypeId: Oid,
     targetTypeMod: i32,
     ccontext: CoercionContext,
     cformat: CoercionForm,
     location: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     if targetTypeId == inputTypeId || node.is_none() {
         // no conversion needed
         return Ok(node);
@@ -437,7 +439,9 @@ pub fn coerce_type<'mcx>(
         } else {
             let result = coerce_to_domain(
                 mcx,
-                node.clone_in(mcx)?,
+                // Interned into the query `mcx`; erase to the coercion `'static`
+                // boundary (the value outlives parse analysis).
+                node.clone_in(mcx)?.erase_lifetime(),
                 baseTypeId,
                 baseTypeMod,
                 targetTypeId,
@@ -572,13 +576,13 @@ fn coerce_node_mcx() -> Mcx<'static> {
 fn coerce_unknown_const<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: Option<&mut ParseState<'_>>,
-    node: Expr,
+    node: Expr<'static>,
     targetTypeId: Oid,
     targetTypeMod: i32,
     ccontext: CoercionContext,
     cformat: CoercionForm,
     location: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     let con = node.expect_into_const();
 
     // baseTypeMod starts at targetTypeMod, base resolved by domain chain.
@@ -774,7 +778,7 @@ pub fn can_coerce_type(
 /// location, hideInputCoercion)` (parse_coerce.c).
 pub fn coerce_to_domain<'mcx>(
     mcx: Mcx<'mcx>,
-    arg: Expr,
+    arg: Expr<'static>,
     baseTypeId: Oid,
     baseTypeMod: i32,
     typeId: Oid,
@@ -782,7 +786,7 @@ pub fn coerce_to_domain<'mcx>(
     cformat: CoercionForm,
     location: i32,
     hideInputCoercion: bool,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     debug_assert!(OidIsValid(baseTypeId));
 
     // If it isn't a domain, return the node as it was passed in.
@@ -827,14 +831,14 @@ pub fn coerce_to_domain<'mcx>(
 /// location, hideInputCoercion)` (parse_coerce.c).
 fn coerce_type_typmod<'mcx>(
     mcx: Mcx<'mcx>,
-    node: Expr,
+    node: Expr<'static>,
     targetTypeId: Oid,
     targetTypMod: i32,
     ccontext: CoercionContext,
     cformat: CoercionForm,
     location: i32,
     hideInputCoercion: bool,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // Skip coercion if already done.
     if targetTypMod == exprTypmod(Some(&node))? {
         return Ok(node);
@@ -931,7 +935,7 @@ fn node_tag_int(node: &Expr) -> i32 {
 /// targetTypMod, ccontext, cformat, location)` (parse_coerce.c).
 fn build_coercion_expression<'mcx>(
     mcx: Mcx<'mcx>,
-    node: Expr,
+    node: Expr<'static>,
     pathtype: CoercionPathType,
     funcId: Oid,
     targetTypeId: Oid,
@@ -939,7 +943,7 @@ fn build_coercion_expression<'mcx>(
     ccontext: CoercionContext,
     cformat: CoercionForm,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let mut nargs = 0i32;
 
     if OidIsValid(funcId) {
@@ -964,7 +968,7 @@ fn build_coercion_expression<'mcx>(
     match pathtype {
         CoercionPathType::Func => {
             debug_assert!(OidIsValid(funcId));
-            let mut args: Vec<Expr> = vec![node];
+            let mut args: Vec<Expr<'static>> = vec![node];
 
             if nargs >= 2 {
                 let cons = make_const(
@@ -977,7 +981,7 @@ fn build_coercion_expression<'mcx>(
                     false,
                     true,
                 )?;
-                args.push(Expr::Const(cons));
+                args.push(Expr::Const(cons).erase_lifetime());
             }
             if nargs == 3 {
                 let isexplicit = ccontext == CoercionContext::COERCION_EXPLICIT;
@@ -991,7 +995,7 @@ fn build_coercion_expression<'mcx>(
                     false,
                     true,
                 )?;
-                args.push(Expr::Const(cons));
+                args.push(Expr::Const(cons).erase_lifetime());
             }
 
             let mut fexpr =
@@ -1000,7 +1004,7 @@ fn build_coercion_expression<'mcx>(
             if let Some(fe) = fexpr.as_funcexpr_mut() {
                 fe.location = location;
             }
-            Ok(fexpr)
+            Ok(fexpr.erase_lifetime())
         }
         CoercionPathType::Arraycoerce => {
             // Look through any domain over the source array type.
@@ -1053,7 +1057,7 @@ fn build_coercion_expression<'mcx>(
                 // acoerce->location = location;
                 location,
             };
-            Ok(Expr::ArrayCoerceExpr(acoerce))
+            Ok(Expr::ArrayCoerceExpr(acoerce).erase_lifetime())
         }
         CoercionPathType::Coerceviaio => {
             debug_assert!(!OidIsValid(funcId));
@@ -1065,7 +1069,7 @@ fn build_coercion_expression<'mcx>(
                 // iocoerce->location = location;
                 location,
             };
-            Ok(Expr::CoerceViaIO(iocoerce))
+            Ok(Expr::CoerceViaIO(iocoerce).erase_lifetime())
         }
         other => Err(types_error::PgError::error(format!(
             "unsupported pathtype {} in build_coercion_expression",
@@ -1085,13 +1089,13 @@ fn build_coercion_expression<'mcx>(
 fn coerce_record_to_complex<'mcx>(
     mcx: Mcx<'mcx>,
     mut pstate: Option<&mut ParseState<'_>>,
-    node: Expr,
+    node: Expr<'static>,
     targetTypeId: Oid,
     ccontext: CoercionContext,
     cformat: CoercionForm,
     location: i32,
-) -> PgResult<Expr> {
-    let args: Vec<Expr> = if let Some(re) = node.as_rowexpr() {
+) -> PgResult<Expr<'static>> {
+    let args: Vec<Expr<'static>> = if let Some(re) = node.as_rowexpr() {
         // RowExpr is RECORD; needn't worry about dropped columns.
         re.args.clone()
     } else if let Some(v) = node.as_var() {
@@ -1121,7 +1125,7 @@ fn coerce_record_to_complex<'mcx>(
     let tupdesc = typcache::lookup_rowtype_tupdesc::call(mcx, baseTypeId, baseTypeMod)?;
 
     let natts = tupdesc.attrs.len();
-    let mut newargs: Vec<Expr> = Vec::new();
+    let mut newargs: Vec<Expr<'static>> = Vec::new();
     let mut ucolno = 1i32;
     let mut arg_idx = 0usize;
 
@@ -1130,7 +1134,7 @@ fn coerce_record_to_complex<'mcx>(
 
         if attr.attisdropped {
             // Fill in NULL for dropped columns (type doesn't matter).
-            newargs.push(Expr::Const(make_null_const(mcx, INT4OID, -1, InvalidOid)?));
+            newargs.push(Expr::Const(make_null_const(mcx, INT4OID, -1, InvalidOid)?).erase_lifetime());
             continue;
         }
 
@@ -1201,7 +1205,7 @@ fn coerce_record_to_complex<'mcx>(
         rowexpr.row_format = COERCE_IMPLICIT_CAST;
         return coerce_to_domain(
             mcx,
-            Expr::RowExpr(rowexpr),
+            Expr::RowExpr(rowexpr).erase_lifetime(),
             baseTypeId,
             baseTypeMod,
             targetTypeId,
@@ -1212,7 +1216,7 @@ fn coerce_record_to_complex<'mcx>(
         );
     }
 
-    Ok(Expr::RowExpr(rowexpr))
+    Ok(Expr::RowExpr(rowexpr).erase_lifetime())
 }
 
 fn record_cast_error<'mcx>(
@@ -1220,7 +1224,7 @@ fn record_cast_error<'mcx>(
     targetTypeId: Oid,
     location: i32,
     _detail: Option<&str>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let _ = (pstate, location);
     Err(types_error::PgError::error(format!(
         "cannot cast type {} to {}",
@@ -1253,11 +1257,10 @@ fn record_cast_error_detail(
 pub fn coerce_to_boolean<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: Option<&mut ParseState<'_>>,
-    node: Expr,
+    node: Expr<'static>,
     constructName: &str,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     use backend_nodes_core::nodefuncs::expr_location;
-
     let inputTypeId = exprType(Some(&node))?;
     let mut node = node;
     let mut pstate = pstate;
@@ -1315,18 +1318,23 @@ pub fn coerce_to_boolean<'mcx>(
 pub fn coerce_to_specific_type_typmod<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: Option<&mut ParseState<'_>>,
-    node: Expr,
+    node: Expr<'static>,
     targetTypeId: Oid,
     targetTypmod: i32,
     constructName: &str,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
+    use backend_nodes_core::nodefuncs::expr_location;
     let inputTypeId = exprType(Some(&node))?;
     let mut node = node;
+    let mut pstate = pstate;
+    // C: parser_errposition(pstate, exprLocation(node)) — capture the original
+    // node's location up front (the node is consumed by coerce_to_target_type).
+    let node_location = expr_location(Some(&node))?;
 
     if inputTypeId != targetTypeId {
         let newnode = coerce_to_target_type(
             mcx,
-            pstate,
+            pstate.as_deref_mut(),
             node,
             inputTypeId,
             targetTypeId,
@@ -1338,21 +1346,31 @@ pub fn coerce_to_specific_type_typmod<'mcx>(
         match newnode {
             Some(n) => node = n,
             None => {
+                let cursorpos = match pstate.as_deref() {
+                    Some(ps) => parser_errposition::call(ps, node_location)?,
+                    None => 0,
+                };
                 return Err(types_error::PgError::error(format!(
                     "argument of {constructName} must be type {}, not type {}",
                     format_type_be(targetTypeId)?,
                     format_type_be(inputTypeId)?
                 ))
-                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+                .with_cursor_position(cursorpos));
             }
         }
     }
 
     if expression_returns_set(Some(&node)) {
+        let cursorpos = match pstate.as_deref() {
+            Some(ps) => parser_errposition::call(ps, expr_location(Some(&node))?)?,
+            None => 0,
+        };
         return Err(types_error::PgError::error(format!(
             "argument of {constructName} must not return a set"
         ))
-        .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
+        .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+        .with_cursor_position(cursorpos));
     }
 
     Ok(node)
@@ -1363,10 +1381,10 @@ pub fn coerce_to_specific_type_typmod<'mcx>(
 pub fn coerce_to_specific_type<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: Option<&mut ParseState<'_>>,
-    node: Expr,
+    node: Expr<'static>,
     targetTypeId: Oid,
     constructName: &str,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     coerce_to_specific_type_typmod(mcx, pstate, node, targetTypeId, -1, constructName)
 }
 
@@ -1379,10 +1397,12 @@ pub fn coerce_null_to_domain<'mcx>(
     collation: Oid,
     typlen: i32,
     typbyval: bool,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let baseTypeId = lsyscache::get_base_type_and_typmod::call(typid)?.0;
     let baseTypeMod = resolve_base_typmod(typid, typmod)?;
-    let mut result = Expr::Const(make_const(
+    // The null `Const` is built in the query `mcx` (which outlives parse
+    // analysis); erase to the seam's `'static` at this arena-intern boundary.
+    let mut result: Expr<'static> = Expr::Const(make_const(
         mcx,
         baseTypeId,
         baseTypeMod,
@@ -1391,7 +1411,8 @@ pub fn coerce_null_to_domain<'mcx>(
         TupleDatum::ByVal(0),
         true,
         typbyval,
-    )?);
+    )?)
+    .erase_lifetime();
     if typid != baseTypeId {
         result = coerce_to_domain(
             mcx,
@@ -1567,10 +1588,10 @@ fn select_common_type_from_oids(nargs: i32, typeids: &[Oid], noerror: bool) -> P
 pub fn coerce_to_common_type<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: Option<&mut ParseState<'_>>,
-    node: Expr,
+    node: Expr<'static>,
     targetTypeId: Oid,
     context: &str,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let inputTypeId = exprType(Some(&node))?;
     if inputTypeId == targetTypeId {
         return Ok(node); // no work
@@ -2805,14 +2826,14 @@ fn seam_check_valid_internal_signature(
 /// non-NULL result (the caller has verified the coercion is possible).
 fn seam_coerce_type<'mcx>(
     pstate: Option<&mut ParseState<'mcx>>,
-    node: Expr,
+    node: Expr<'static>,
     input_type_id: Oid,
     target_type_id: Oid,
     target_type_mod: i32,
     ccontext: CoercionContext,
     cformat: CoercionForm,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     coerce_type(
         coerce_node_mcx(),
         pstate,
@@ -2860,18 +2881,18 @@ fn seam_enforce_generic_type_consistency(
 // which a transient context freed on return would dangle.
 fn seam_coerce_to_boolean<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    node: Expr,
+    node: Expr<'static>,
     construct_name: &str,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     coerce_to_boolean(coerce_node_mcx(), Some(pstate), node, construct_name)
 }
 
 fn seam_coerce_to_specific_type<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    node: Expr,
+    node: Expr<'static>,
     target_type_id: Oid,
     construct_name: &str,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     coerce_to_specific_type(
         coerce_node_mcx(),
         Some(pstate),
@@ -2883,18 +2904,18 @@ fn seam_coerce_to_specific_type<'mcx>(
 
 fn seam_coerce_to_common_type<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    node: Expr,
+    node: Expr<'static>,
     target_type_id: Oid,
     context: &str,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     coerce_to_common_type(coerce_node_mcx(), Some(pstate), node, target_type_id, context)
 }
 
 fn seam_coerce_to_common_type_no_pstate<'mcx>(
-    node: Expr,
+    node: Expr<'static>,
     target_type_id: Oid,
     context: &str,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     coerce_to_common_type(coerce_node_mcx(), None, node, target_type_id, context)
 }
 
@@ -2908,14 +2929,14 @@ fn seam_select_common_type<'mcx>(
 
 fn seam_coerce_to_target_type<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    expr: Expr,
+    expr: Expr<'static>,
     exprtype: Oid,
     targettype: Oid,
     targettypmod: i32,
     ccontext: CoercionContext,
     cformat: CoercionForm,
     location: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     coerce_to_target_type(
         coerce_node_mcx(),
         Some(pstate),

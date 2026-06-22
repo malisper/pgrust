@@ -56,13 +56,19 @@ pub(crate) fn init_seams() {
 /// re-stamped to the parent relation's varno. The catalog read (stxkeys +
 /// raw stxexprs text) is the syscache projection; the node-vocabulary transforms
 /// (which plancat cannot reach without a `planner -> plancat` cycle) run here.
-fn get_stat_ext_keys_exprs(
+fn get_stat_ext_keys_exprs<'run>(
+    run_mcx: mcx::Mcx<'run>,
     root: &mut PlannerInfo,
     stat_oid: Oid,
     varno: i32,
 ) -> PgResult<(Vec<i32>, Vec<NodeId>)> {
     // htup = SearchSysCache1(STATEXTOID, statOid);
     // if (!HeapTupleIsValid(htup)) elog(ERROR, "cache lookup failed ...");
+    // The decode/const-fold runs in a transient `scratch` context; the surviving
+    // expression nodes are deep-cloned into the durable planner-run arena
+    // (`run_mcx`) before interning — `alloc_node` only `erase_lifetime`s, so a
+    // node left in `scratch` is freed here and would be a UAF when the arena
+    // entry is later dropped (with `PlannerInfo`).
     let scratch = mcx::MemoryContext::new("get_stat_ext_keys_exprs");
     let mcx = scratch.mcx();
     let (keys, exprs_text) =
@@ -98,13 +104,15 @@ fn get_stat_ext_keys_exprs(
                 mcx, expr,
             )?;
         backend_nodes_core::nodefuncs::fix_opfuncids(&mut folded)?;
-        ids.push(root.alloc_node(folded));
+        ids.push(root.alloc_node(folded.clone_in(run_mcx)?));
     }
 
     // if (varno != 1) ChangeVarNodes((Node *) exprs, 1, varno, 0);  — restamp the
     // Vars, which the catalog stores with varno == 1, to the parent relation.
+    // `run_mcx`: the re-stamp re-clones the arena node into the given mcx and
+    // writes it back, so it must use the durable planner-run arena.
     if varno != 1 {
-        plancat_ext::change_var_nodes::call(root, &ids, 1, varno);
+        plancat_ext::change_var_nodes::call(run_mcx, root, &ids, 1, varno);
     }
 
     Ok((keys, ids))
@@ -165,13 +173,18 @@ fn get_stat_ext_data_kinds(
 /// subqueries, so the only part of `eval_const_expressions` that needs `root`
 /// (the sublink/Param machinery) cannot fire. Returns the implicit-AND clause
 /// items interned into the planner (`root`) arena, with Vars stamped to `varno`.
-fn process_check_constraint(
+fn process_check_constraint<'run>(
+    run_mcx: mcx::Mcx<'run>,
     root: &mut PlannerInfo,
     ccbin: &str,
     varno: i32,
 ) -> PgResult<Vec<NodeId>> {
-    // The node-tree decode + transforms run in a transient context; the final
-    // clause Exprs are cloned into the durable planner arena via `alloc_node`.
+    // The node-tree decode + transforms run in a transient context (`workcx`); the
+    // final clause Exprs must be deep-cloned into the durable planner-run arena
+    // (`run_mcx`) BEFORE interning. `alloc_node` only `erase_lifetime`s the node —
+    // it does not copy the node's `PgVec`/`PgBox` allocations — so a node left in
+    // `workcx` is freed when this function returns, and the later drop of the
+    // `node_arena` entry (when `PlannerInfo` drops) would deallocate freed memory.
     let workcx = mcx::MemoryContext::new("process_check_constraint");
     let mcx = workcx.mcx();
 
@@ -196,16 +209,19 @@ fn process_check_constraint(
     // implicit-AND list of independent clauses.
     let items = backend_nodes_core::makefuncs::make_ands_implicit(canon);
 
-    // Intern each clause into the durable planner arena.
+    // Intern each clause into the durable planner arena, deep-cloning into
+    // `run_mcx` first so the node's backing allocations outlive `workcx`.
     let mut ids: Vec<NodeId> = Vec::with_capacity(items.len());
     for e in items {
-        ids.push(root.alloc_node(e));
+        ids.push(root.alloc_node(e.clone_in(run_mcx)?));
     }
 
     // if (varno != 1) ChangeVarNodes(cexpr, 1, varno, 0);  — restamp the Vars,
-    // which `stringToNode` decoded with the catalog's varno == 1.
+    // which `stringToNode` decoded with the catalog's varno == 1. Pass `run_mcx`:
+    // `change_var_nodes` re-clones the arena node into the given mcx and writes it
+    // back, so it must use the durable planner-run arena, not the transient one.
     if varno != 1 {
-        plancat_ext::change_var_nodes::call(root, &ids, 1, varno);
+        plancat_ext::change_var_nodes::call(run_mcx, root, &ids, 1, varno);
     }
 
     Ok(ids)
@@ -218,7 +234,8 @@ fn process_check_constraint(
 /// caller still holds it open under its lock); re-open by OID with `NoLock`
 /// (lock already held by `get_relation_info`), read everything the C reads off
 /// the relcache entry, and close before returning.
-fn set_relation_partition_info(
+fn set_relation_partition_info<'run>(
+    run_mcx: mcx::Mcx<'run>,
     root: &mut PlannerInfo,
     rel: RelId,
     relid: Oid,
@@ -229,6 +246,18 @@ fn set_relation_partition_info(
     // PartitionDirectory's pinned descriptor) is interned into a lifetime-free
     // store (`root.node_arena`, `root.part_schemes`, `glob.partition_directory`)
     // before the context drops.
+    //
+    // CRITICAL: any node tree interned into `root.node_arena` (via `alloc_node`,
+    // which `erase_lifetime`s the node but does NOT deep-copy its allocations)
+    // must have its backing allocations in a context that outlives the whole
+    // `PlannerInfo`, NOT this transient `relcx`. The node_arena entries are
+    // dropped when `PlannerInfo` drops (end of `standard_planner`), and dropping
+    // an `Expr` deallocates its `PgVec`/`PgBox` fields against their owning mcx;
+    // if those lived in `relcx` (freed here when `relcx` drops) that is a UAF /
+    // double-free. So partexprs/partition_qual must be cloned into `run_mcx` (the
+    // durable planner-run arena, the same context `PlannerInfo` lives in) before
+    // interning — exactly as `get_relation_info` does for index exprs/predicates
+    // via `run.mcx()`. The relcache *reads* still use the transient `relcx`.
     let relcx = mcx::MemoryContext::new("set_relation_partition_info");
     let mcx = relcx.mcx();
 
@@ -343,10 +372,12 @@ fn set_relation_partition_info(
     }
 
     // set_baserel_partition_key_exprs(relation, rel);
-    set_baserel_partition_key_exprs(mcx, root, rel, &relation)?;
+    // Pass both the transient `mcx` (for relcache reads) and the durable
+    // `run_mcx` (the context the interned partexpr nodes must live in).
+    set_baserel_partition_key_exprs(mcx, run_mcx, root, rel, &relation)?;
 
     // set_baserel_partition_constraint(relation, rel);
-    set_baserel_partition_constraint_inner(mcx, root, rel, &relation)?;
+    set_baserel_partition_constraint_inner(mcx, run_mcx, root, rel, &relation)?;
 
     // table_close(relation, NoLock) — the open above was a fresh pin; release it.
     relation.close(NoLock)?;
@@ -432,8 +463,9 @@ fn find_partition_scheme<'mcx>(
 
 /// `set_baserel_partition_key_exprs(relation, rel)` (plancat.c:2592) — build
 /// `rel->partexprs` (and allocate the empty `rel->nullable_partexprs`).
-fn set_baserel_partition_key_exprs<'mcx>(
+fn set_baserel_partition_key_exprs<'mcx, 'run>(
     mcx: Mcx<'mcx>,
+    run_mcx: Mcx<'run>,
     root: &mut PlannerInfo,
     rel: RelId,
     relation: &types_rel::Relation<'mcx>,
@@ -483,9 +515,19 @@ fn set_baserel_partition_key_exprs<'mcx>(
                 PgError::error("wrong number of partition key expressions")
             })?;
             // copyObject: clone the relcache expr into the lifetime-free arena.
-            let id = root.alloc_node(src.clone());
+            // Clone into `run_mcx` (the durable planner-run arena), NOT the
+            // transient `mcx`/`relcx`: `alloc_node` `erase_lifetime`s the node
+            // into `root.node_arena` (which is dropped only when `PlannerInfo`
+            // drops), so the node's backing allocations must outlive the planner
+            // run. A derived `.clone()` (or a `clone_in(mcx)`) would leave the
+            // FuncExpr's `args` `PgVec` in `relcx`, freed when this function
+            // returns — dropping the arena `Expr` later then deallocates freed
+            // memory (UAF/double-free).
+            let id = root.alloc_node(src.clone_in(run_mcx)?);
             // Re-stamp the expression with the given varno (relid 1 -> varno).
-            plancat_ext::change_var_nodes::call(root, &[id], 1, varno as i32);
+            // `run_mcx`: `change_var_nodes` re-clones the arena node into the given
+            // mcx and writes it back, so it must use the durable planner-run arena.
+            plancat_ext::change_var_nodes::call(run_mcx, root, &[id], 1, varno as i32);
             expr_idx += 1;
             id
         };
@@ -510,7 +552,12 @@ fn set_baserel_partition_key_exprs<'mcx>(
 /// installed ext-seam form (re-opens the relation by OID, since the seam does
 /// not carry the open handle). Used by `get_relation_constraints` when
 /// `include_partition` and the rel is a partition.
-fn set_baserel_partition_constraint(root: &mut PlannerInfo, rel: RelId, relid: Oid) -> PgResult<()> {
+fn set_baserel_partition_constraint<'run>(
+    run_mcx: mcx::Mcx<'run>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    relid: Oid,
+) -> PgResult<()> {
     // if (rel->partition_qual) /* already done */ return;
     if !root.rel(rel).partition_qual.is_empty() {
         return Ok(());
@@ -522,7 +569,7 @@ fn set_baserel_partition_constraint(root: &mut PlannerInfo, rel: RelId, relid: O
     let relation =
         backend_access_common_relation_seams::relation_open::call(mcx, relid, NoLock)?;
 
-    set_baserel_partition_constraint_inner(mcx, root, rel, &relation)?;
+    set_baserel_partition_constraint_inner(mcx, run_mcx, root, rel, &relation)?;
 
     relation.close(NoLock)?;
     Ok(())
@@ -531,8 +578,9 @@ fn set_baserel_partition_constraint(root: &mut PlannerInfo, rel: RelId, relid: O
 /// Shared body of `set_baserel_partition_constraint` (plancat.c:2660) over an
 /// already-open relation — called both from `set_relation_partition_info` (which
 /// holds the relation open) and the standalone ext-seam.
-fn set_baserel_partition_constraint_inner<'mcx>(
+fn set_baserel_partition_constraint_inner<'mcx, 'run>(
     mcx: Mcx<'mcx>,
+    run_mcx: Mcx<'run>,
     root: &mut PlannerInfo,
     rel: RelId,
     relation: &types_rel::Relation<'mcx>,
@@ -559,14 +607,21 @@ fn set_baserel_partition_constraint_inner<'mcx>(
         let expr = node
             .into_expr()
             .ok_or_else(|| PgError::error("set_baserel_partition_constraint: qual is not an Expr"))?;
+        // Const-fold in the transient `mcx`, then re-clone into the durable
+        // `run_mcx` before interning: `alloc_node` only `erase_lifetime`s the
+        // node, so its backing allocations must outlive the `PlannerInfo` (which
+        // owns `node_arena`). Leaving `folded` in `relcx` (freed when the caller
+        // returns) is a UAF when the arena `Expr` is later dropped.
         let folded = super::expression_planner(mcx, expr)?;
-        let id = root.alloc_node(folded);
+        let id = root.alloc_node(folded.clone_in(run_mcx)?);
         qual_ids.push(id);
     }
 
     // if (rel->relid != 1) ChangeVarNodes((Node *) partconstr, 1, rel->relid, 0);
+    // `run_mcx`: re-stamp re-clones the arena node into the given mcx, so it must
+    // be the durable planner-run arena (not the transient relcache-read context).
     if varno != 1 {
-        plancat_ext::change_var_nodes::call(root, &qual_ids, 1, varno as i32);
+        plancat_ext::change_var_nodes::call(run_mcx, root, &qual_ids, 1, varno as i32);
     }
 
     // rel->partition_qual = partconstr;

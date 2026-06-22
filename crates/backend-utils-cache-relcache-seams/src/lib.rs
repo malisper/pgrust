@@ -499,7 +499,7 @@ seam_core::seam!(
     pub fn relation_get_dummy_index_expressions<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         index: &types_rel::Relation<'mcx>,
-    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr>>>
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>>>
 );
 seam_core::seam!(
     /// `rel->rd_rel->relowner`.
@@ -902,7 +902,7 @@ seam_core::seam!(
     pub fn relation_get_index_expressions<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         rel: &types_rel::Relation<'mcx>,
-    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::Expr>>>
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::Expr<'mcx>>>>
 );
 
 seam_core::seam!(
@@ -916,7 +916,7 @@ seam_core::seam!(
     pub fn relation_get_index_predicate<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         rel: &types_rel::Relation<'mcx>,
-    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::Expr>>>
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, types_nodes::Expr<'mcx>>>>
 );
 
 seam_core::seam!(
@@ -1168,6 +1168,26 @@ seam_core::seam!(
         relid: types_core::primitive::Oid,
         attnum: types_core::primitive::AttrNumber,
         attnullability: i8,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Poke the live relcache entry's missing-value state for one column to
+    /// match a just-written `pg_attribute.atthasmissing` / `attmissingval`
+    /// (StoreAttrMissingVal, catalog/heap.c). In C this becomes visible via the
+    /// `CatalogTupleUpdate` -> `CacheInvalidateHeapTuple` relcache rebuild; the
+    /// owned relcache does not rebuild a live entry in-transaction, so — exactly
+    /// as [`set_relcache_attnullability`] does for the not-null flag — the
+    /// missing value is poked directly onto the cached `RelationData`'s
+    /// `rd_att->constr->missing[attnum-1]` (am_present = true, am_value = image)
+    /// and the per-attribute `atthasmissing` flag (full attr + compact attr) so
+    /// the in-transaction missing-attr deform substitutes it. `image` is the
+    /// single missing-value element's lifetime-free image. `Err` if the entry is
+    /// absent.
+    pub fn set_relcache_attmissing(
+        relid: types_core::primitive::Oid,
+        attnum: types_core::primitive::AttrNumber,
+        image: types_tuple::heaptuple::MissingValueImage,
     ) -> types_error::PgResult<()>
 );
 

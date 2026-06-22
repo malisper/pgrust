@@ -361,7 +361,7 @@ fn transformFrameOffset<'mcx>(
     clause: Option<&Node<'mcx>>,
 ) -> PgResult<(Option<Node<'mcx>>, Oid)> {
     let constructName: &str;
-    let node: Expr;
+    let node: Expr<'static>;
     let mut inRangeFunc = InvalidOid; /* default result */
 
     /* Quick exit if no offset expression */
@@ -485,7 +485,7 @@ fn transformFrameOffset<'mcx>(
     /* Disallow variables in frame offsets */
     crate::checkExprIsVarFree(pstate, &node, constructName)?;
 
-    Ok((Some(Node::mk_expr(mcx, node)?), inRangeFunc))
+    Ok((Some(Node::mk_expr(mcx, node.clone_in(mcx)?)?), inRangeFunc))
 }
 
 // ===========================================================================
@@ -499,8 +499,8 @@ fn resolve_unique_index_expr<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     infer: &InferClause<'mcx>,
-) -> PgResult<Vec<Expr>> {
-    let mut result: Vec<Expr> = Vec::new();
+) -> PgResult<Vec<Expr<'static>>> {
+    let mut result: Vec<Expr<'static>> = Vec::new();
 
     for ielem_node in infer.indexElems.iter() {
         let ielem: &IndexElem = match ielem_node.node_tag() {
@@ -601,11 +601,11 @@ pub fn transformOnConflictArbiter<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     onConflictClause: &OnConflictClause<'mcx>,
-) -> PgResult<(Vec<Expr>, Option<Expr>, Oid)> {
+) -> PgResult<(Vec<Expr<'static>>, Option<Expr<'static>>, Oid)> {
     let infer = onConflictClause.infer.as_deref();
 
-    let mut arbiterExpr: Vec<Expr> = Vec::new();
-    let mut arbiterWhere: Option<Expr> = None;
+    let mut arbiterExpr: Vec<Expr<'static>> = Vec::new();
+    let mut arbiterWhere: Option<Expr<'static>> = None;
     let mut constraint: Oid = InvalidOid;
 
     if onConflictClause.action == ONCONFLICT_UPDATE && infer.is_none() {
@@ -682,13 +682,25 @@ pub fn transformOnConflictArbiter<'mcx>(
                 )?;
             constraint = constraint_oid;
 
-            let perminfo = pstate
+            /*
+             * The target nsitem's perminfo (p_perminfo) is, in this owned model,
+             * a separate copy from the canonical pstate.p_rteperminfos entry that
+             * becomes qry.rteperminfos. We must mutate the canonical entry, indexed
+             * by the target RTE's perminfoindex (mirrors transformInsertStmt's
+             * insertedCols marking), so the SELECT requirement reaches the executor.
+             */
+            let perminfoindex = pstate
                 .p_target_nsitem
-                .as_deref_mut()
-                .and_then(|nsi| nsi.p_perminfo.as_deref_mut())
-                .ok_or_else(|| {
-                    crate::elog_error("transformOnConflictArbiter: target nsitem has no perminfo")
-                })?;
+                .as_deref()
+                .and_then(|ns| ns.p_rte.as_deref())
+                .map(|r| r.perminfoindex)
+                .unwrap_or(0);
+            if perminfoindex == 0 {
+                return Err(crate::elog_error(
+                    "transformOnConflictArbiter: target nsitem has no perminfo",
+                ));
+            }
+            let perminfo = &mut pstate.p_rteperminfos[(perminfoindex - 1) as usize];
 
             /* Make sure the rel as a whole is marked for SELECT access */
             perminfo.requiredPerms |= ACL_SELECT;

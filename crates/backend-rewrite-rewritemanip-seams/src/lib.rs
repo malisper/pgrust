@@ -71,9 +71,9 @@ seam_core::seam!(
     /// `init_seams()` when it lands — until then a call panics loudly.
     pub fn map_variable_attnos_expr_list<'mcx>(
         mcx: Mcx<'mcx>,
-        exprs: mcx::PgVec<'mcx, types_nodes::primnodes::Expr>,
+        exprs: mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>,
         attmap: &[types_core::primitive::AttrNumber],
-    ) -> PgResult<(mcx::PgVec<'mcx, types_nodes::primnodes::Expr>, bool)>
+    ) -> PgResult<(mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>, bool)>
 );
 
 seam_core::seam!(

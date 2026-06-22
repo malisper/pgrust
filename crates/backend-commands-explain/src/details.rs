@@ -201,7 +201,19 @@ pub fn show_instrumentation_count(
     } else {
         instr.nfiltered1
     };
-    let nloops = instr.nloops;
+    // C calls `InstrEndLoop(planstate->instrument)` once at the top of
+    // `ExplainNode`, folding the current in-progress cycle into the totals
+    // (`nloops += 1` for a node that produced rows but was never loop-ended —
+    // the common single-scan EXPLAIN ANALYZE case) *before* reading any
+    // counter. Our owned model borrows the instrument immutably, so the
+    // cost block (walk.rs) replicates that fold locally; replicate the same
+    // `nloops` fold here so the divisor matches (otherwise `nloops == 0` makes
+    // `Rows Removed by Filter` print 0 even when rows were filtered).
+    let nloops = if instr.running {
+        instr.nloops + 1.0
+    } else {
+        instr.nloops
+    };
 
     // In text mode, suppress zero counts.
     if nfiltered > 0.0 || es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT {

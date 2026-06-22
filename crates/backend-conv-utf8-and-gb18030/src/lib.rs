@@ -30,6 +30,7 @@ mod tables;
 use backend_utils_mb_conv_string_helpers::{
     check_encoding_conversion_args, ConversionResult, LocalToUtf, UtfToLocal,
 };
+use backend_utils_mb_conv_string_helpers::make_conversion_builtin;
 use types_error::PgResult;
 use types_wchar::encoding::{pg_enc, PG_GB18030, PG_UTF8};
 
@@ -198,6 +199,11 @@ const UTF8_RANGES: &[(u32, u32, u32)] = &[
     (0x10000, 0x10ffff, 0x90308130),
 ];
 
-/// Wires this crate's seams. It declares none of its own, so this is a no-op
-/// kept for the uniform `seams-init` startup convention.
-pub fn init_seams() {}
+/// Registers this crate's ported conversion procedures as fmgr builtins so
+/// their `pg_proc` OIDs resolve to the in-process Rust bodies (no `dlopen`).
+pub fn init_seams() {
+    backend_utils_fmgr_core::register_builtins_native([
+        make_conversion_builtin(4368, "gb18030_to_utf8", gb18030_to_utf8),
+        make_conversion_builtin(4369, "utf8_to_gb18030", utf8_to_gb18030),
+    ]);
+}

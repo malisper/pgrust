@@ -237,6 +237,12 @@ pub fn init_seams() {
         ExecGetUpdatedCols(estate, rri, mcx)
     });
 
+    // `ExecGetAllUpdatedCols(relinfo, estate)` (execUtils.c): the seam adapts
+    // arg order to the owner's `ExecGetAllUpdatedCols(estate, rel_info, mcx)`.
+    backend_executor_execUtils_seams::exec_get_all_updated_cols::set(|mcx, estate, rri| {
+        ExecGetAllUpdatedCols(estate, rri, mcx)
+    });
+
     // `ExecGetCommonSlotOps(planstates, nplans)` (execUtils.c): the seam carries
     // the child `PlanState`s as `PlanStateNode` boxes (the C `PlanState **`),
     // so the shim re-borrows each node's `PlanState` head before delegating.

@@ -96,7 +96,7 @@ pub struct DomainConstraintState {
     /// Planned CHECK `Expr *` (`None` for NOT NULL constraints) — the real owned
     /// expression value, ready for the executor's `EEOP_DOMAIN_CHECK` to
     /// `ExecInitExprRec` over.
-    pub check_expr: Option<Expr>,
+    pub check_expr: Option<Expr<'static>>,
     /// Compiled `ExprState *` (only set by `prep_domain_constraints`).
     pub check_exprstate: ExprStateHandle,
 }

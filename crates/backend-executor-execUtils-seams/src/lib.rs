@@ -313,6 +313,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecGetAllUpdatedCols(relinfo, estate)` (execUtils.c): the union of the
+    /// UPDATE target columns (`ExecGetUpdatedCols`) and the generated columns
+    /// recomputed by the update (`ExecGetExtraUpdatedCols`), each shifted by
+    /// `FirstLowInvalidHeapAttributeNumber`. The trigger firing path
+    /// (`TriggerEnabled`'s column-specific `tgattr` check, plus
+    /// `tg_updatedcols`) consults this. Returns a copy in `mcx`; `None` is the
+    /// C empty/NULL set. Reads the range table / recomputes generated columns,
+    /// so fallible.
+    pub fn exec_get_all_updated_cols<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
+seam_core::seam!(
     /// `ExecGetAllNullSlot(estate, relInfo)` (execUtils.c): return the result
     /// relation's lazily-created all-NULL slot (`ri_AllNullSlot`), creating and
     /// caching it (`ExecInitExtraTupleSlot` + `ExecStoreAllNullTuple`) on first

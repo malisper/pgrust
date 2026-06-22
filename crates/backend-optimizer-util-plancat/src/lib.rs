@@ -164,14 +164,14 @@ fn clamp_width_est(tuple_width: i64) -> i32 {
 
 /// `makeVar(varno, varattno, vartype, vartypmod, varcollid, varlevelsup)`
 /// (makefuncs.c) — build a `Var` `Expr` value.
-fn make_var(
+fn make_var<'mcx>(
     varno: i32,
     varattno: AttrNumber,
     vartype: Oid,
     vartypmod: i32,
     varcollid: Oid,
     varlevelsup: Index,
-) -> Expr {
+) -> Expr<'mcx> {
     Expr::Var(Var {
         varno,
         varattno,
@@ -449,10 +449,10 @@ pub fn get_relation_info<'mcx>(
             info.indexprs = ext::get_index_expressions::call(run.mcx(), root, indexoid)?;
             info.indpred = ext::get_index_predicate::call(run.mcx(), root, indexoid)?;
             if !info.indexprs.is_empty() && varno != 1 {
-                info.indexprs = ext::change_var_nodes::call(root, &info.indexprs, 1, varno as i32);
+                info.indexprs = ext::change_var_nodes::call(run.mcx(), root, &info.indexprs, 1, varno as i32);
             }
             if !info.indpred.is_empty() && varno != 1 {
-                info.indpred = ext::change_var_nodes::call(root, &info.indpred, 1, varno as i32);
+                info.indpred = ext::change_var_nodes::call(run.mcx(), root, &info.indpred, 1, varno as i32);
             }
 
             // Build targetlist using the completed indexprs data.
@@ -499,7 +499,7 @@ pub fn get_relation_info<'mcx>(
 
     root.rel_mut(rel).indexlist = indexinfos;
 
-    let statlist = get_relation_statistics(root, rel, relation_object_id)?;
+    let statlist = get_relation_statistics(run, root, rel, relation_object_id)?;
     root.rel_mut(rel).statlist = statlist;
 
     // Grab foreign-table info using the relcache.
@@ -533,7 +533,7 @@ pub fn get_relation_info<'mcx>(
 
     // Collect info about relation's partitioning scheme, if any.
     if inhparent && relkind == RELKIND_PARTITIONED_TABLE {
-        ext::set_relation_partition_info::call(root, rel, relation_object_id)?;
+        ext::set_relation_partition_info::call(run.mcx(), root, rel, relation_object_id)?;
     }
 
     // `table_close(relation, NoLock)` — a single unpin. The `relation` guard's
@@ -748,7 +748,7 @@ pub fn infer_arbiter_indexes<'mcx>(
         // Expression attributes (if any) must match.
         let mut idx_exprs = idx.idx_exprs.clone();
         if !idx_exprs.is_empty() && varno != 1 {
-            idx_exprs = ext::change_var_nodes::call(root, &idx_exprs, 1, varno as i32);
+            idx_exprs = ext::change_var_nodes::call(run.mcx(), root, &idx_exprs, 1, varno as i32);
         }
 
         let mut matched = true;
@@ -785,7 +785,7 @@ pub fn infer_arbiter_indexes<'mcx>(
         // Partial index: predicate must be implied by the ON CONFLICT WHERE.
         let mut pred_exprs = idx.idx_predicate.clone();
         if !pred_exprs.is_empty() && varno != 1 {
-            pred_exprs = ext::change_var_nodes::call(root, &pred_exprs, 1, varno as i32);
+            pred_exprs = ext::change_var_nodes::call(run.mcx(), root, &pred_exprs, 1, varno as i32);
         }
         let arbiter_where = onconflict.arbiter_where.clone();
         if !predtest::predicate_implied_by::call(root, &pred_exprs, &arbiter_where, false) {
@@ -989,7 +989,8 @@ fn rint(x: f64) -> f64 {
 /// `get_relation_constraints(root, relationObjectId, rel, include_noinherit,
 /// include_notnull, include_partition)` (plancat.c) — the relation's applicable
 /// constraint expressions, canonicalized and Var-stamped to `rel->relid`.
-fn get_relation_constraints(
+fn get_relation_constraints<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     relation_object_id: Oid,
     rel: RelId,
@@ -1013,7 +1014,8 @@ fn get_relation_constraints(
         }
         // stringToNode + eval_const_expressions + canonicalize_qual +
         // ChangeVarNodes + make_ands_implicit, appended to result.
-        let mut items = ext::process_check_constraint::call(root, &chk.ccbin, varno as i32)?;
+        let mut items =
+            ext::process_check_constraint::call(run.mcx(), root, &chk.ccbin, varno as i32)?;
         result.append(&mut items);
     }
 
@@ -1037,7 +1039,7 @@ fn get_relation_constraints(
 
     // Add partitioning constraints, if requested.
     if include_partition && ext::relation_is_partition::call(relation_object_id)? {
-        ext::set_baserel_partition_constraint::call(root, rel, relation_object_id)?;
+        ext::set_baserel_partition_constraint::call(run.mcx(), root, rel, relation_object_id)?;
         let mut pq = root.rel(rel).partition_qual.clone();
         result.append(&mut pq);
     }
@@ -1132,6 +1134,7 @@ pub fn relation_excluded_by_constraints<'mcx>(
 
     let relid = rte::rte_relid::call(run, root, rti);
     let constraint_pred = get_relation_constraints(
+        run,
         root,
         relid,
         rel,
@@ -1310,7 +1313,8 @@ fn build_index_tlist(
 
 /// `get_relation_statistics(rel, relation)` (plancat.c) — the relation's
 /// extended-statistics metadata (`StatisticExtInfo`s) as arena node handles.
-fn get_relation_statistics(
+fn get_relation_statistics<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     relation_object_id: Oid,
@@ -1323,7 +1327,8 @@ fn get_relation_statistics(
         // Build the covered-column keys + const-folded expressions (the
         // SearchSysCache1(STATEXTOID) + eval_const_expressions + fix_opfuncids +
         // ChangeVarNodes body).
-        let (key_attnums, exprs) = ext::get_stat_ext_keys_exprs::call(root, stat_oid, varno as i32)?;
+        let (key_attnums, exprs) =
+            ext::get_stat_ext_keys_exprs::call(run.mcx(), root, stat_oid, varno as i32)?;
         let mut keys: Relids = None;
         for &k in key_attnums.iter() {
             keys = bms::relids_add_member::call(keys.take(), k);
@@ -1770,7 +1775,7 @@ fn seam_relation_excluded_by_constraints<'mcx>(
     }
 }
 
-fn seam_get_function_rows(funcid: Oid, node: &Expr) -> PgResult<f64> {
+fn seam_get_function_rows<'mcx>(funcid: Oid, node: &Expr<'mcx>) -> PgResult<f64> {
     // The clauses-seams contract passes the SRF node by value (`&Expr`) without a
     // PlannerInfo. plancat's `get_function_rows` body consults `pg_proc.prorows`
     // and a `SupportRequestRows` support function; with no `root` and no arena
@@ -1782,7 +1787,7 @@ fn seam_get_function_rows(funcid: Oid, node: &Expr) -> PgResult<f64> {
 /// C: read `pg_proc.prorows`, asserting `proretset`; the `prosupport` path runs
 /// a `SupportRequestRows` support function (unported tree-wide; mirror-and-panic
 /// — unreachable for current query paths where `prosupport == InvalidOid`).
-fn seam_get_function_rows_by_node(funcid: Oid, node: &Expr) -> PgResult<f64> {
+fn seam_get_function_rows_by_node<'mcx>(funcid: Oid, node: &Expr<'mcx>) -> PgResult<f64> {
     let form = syscache_seams::proc_cost_rows::call(funcid)?;
     debug_assert!(form.proretset);
     if form.prosupport != InvalidOid {

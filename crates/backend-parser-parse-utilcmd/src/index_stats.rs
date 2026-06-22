@@ -68,8 +68,14 @@ pub fn transformIndexStmt<'mcx>(
     // take care of the where clause
     if stmt.whereClause.is_some() {
         let clause = stmt.whereClause.take().map(|n| mcx::PgBox::into_inner(n));
-        let mut where_expr =
+        let where_expr =
             transformWhereClause(mcx, &mut pstate, clause, EXPR_KIND_INDEX_PREDICATE, "WHERE")?;
+        // Bring the parser-arena `'static` qual into `mcx` for the in-place
+        // collation pass and the `'mcx` Node wrap (`Expr` is invariant).
+        let mut where_expr: Option<types_nodes::primnodes::Expr<'mcx>> = match where_expr {
+            Some(e) => Some(e.clone_in(mcx)?),
+            None => None,
+        };
         // we have to fix its collations too
         if let Some(e) = where_expr.as_mut() {
             assign_expr_collations(Some(&pstate), e)?;
@@ -129,7 +135,13 @@ fn transform_index_elem_expr<'mcx>(
 
     // Now do parse transformation of the expression.
     let expr = ielem.expr.take().map(|n| mcx::PgBox::into_inner(n));
-    let mut t = transformExpr(pstate, expr, EXPR_KIND_INDEX_EXPRESSION)?;
+    let t = transformExpr(pstate, expr, EXPR_KIND_INDEX_EXPRESSION)?;
+    // Bring the parser-arena `'static` result into `mcx` for the in-place
+    // collation pass and the `'mcx` Node wrap (`Expr` is invariant).
+    let mut t: Option<types_nodes::primnodes::Expr<'mcx>> = match t {
+        Some(e) => Some(e.clone_in(mcx)?),
+        None => None,
+    };
 
     // We have to fix its collations too.
     if let Some(e) = t.as_mut() {
@@ -215,7 +227,13 @@ fn transform_stats_elem_expr<'mcx>(
     }
     // Now do parse transformation of the expression.
     let expr = selem.expr.take().map(|n| mcx::PgBox::into_inner(n));
-    let mut t = transformExpr(pstate, expr, EXPR_KIND_STATS_EXPRESSION)?;
+    let t = transformExpr(pstate, expr, EXPR_KIND_STATS_EXPRESSION)?;
+    // Bring the parser-arena `'static` result into `mcx` for the in-place
+    // collation pass and the `'mcx` Node wrap (`Expr` is invariant).
+    let mut t: Option<types_nodes::primnodes::Expr<'mcx>> = match t {
+        Some(e) => Some(e.clone_in(mcx)?),
+        None => None,
+    };
 
     // We have to fix its collations too.
     if let Some(e) = t.as_mut() {

@@ -395,7 +395,7 @@ fn pull_varattnos_walker(node: &Node, context: &mut PullVarattnosContext) -> boo
 /// returned list); a bare `phv.clone()` would recurse into the panicking
 /// `Expr::clone` arm.
 struct PullVarsContext<'mcx> {
-    vars: Vec<Expr>,
+    vars: Vec<Expr<'mcx>>,
     sublevels_up: i32,
     mcx: mcx::Mcx<'mcx>,
 }
@@ -404,7 +404,11 @@ struct PullVarsContext<'mcx> {
 /// (and PlaceHolderVars) referencing the specified query level. The cloned
 /// `Var`/`PlaceHolderVar` `Expr`s are returned (the seam interns them into the
 /// arena and hands back `NodeId`s).
-pub fn pull_vars_of_level<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node, levelsup: i32) -> PgResult<Vec<Expr>> {
+pub fn pull_vars_of_level<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: &Node,
+    levelsup: i32,
+) -> PgResult<Vec<Expr<'mcx>>> {
     let mut context = PullVarsContext {
         vars: Vec::new(),
         sublevels_up: levelsup,
@@ -429,7 +433,11 @@ pub fn pull_vars_of_level<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node, levelsup: i32)
 /// by `pull_vars_walker`'s `T_Query` arm only for *nested* sub-queries reached
 /// during the walk). Installs the `pull_vars_of_level_query` seam for
 /// `extract_lateral_references`' `RTE_SUBQUERY` arm.
-pub fn pull_vars_of_level_query<'mcx>(mcx: mcx::Mcx<'mcx>, query: &types_nodes::copy_query::Query, levelsup: i32) -> PgResult<Vec<Expr>> {
+pub fn pull_vars_of_level_query<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    query: &types_nodes::copy_query::Query,
+    levelsup: i32,
+) -> PgResult<Vec<Expr<'mcx>>> {
     let mut context = PullVarsContext {
         vars: Vec::new(),
         sublevels_up: levelsup,
@@ -681,7 +689,7 @@ pub const PVC_RECURSE_PLACEHOLDERS: i32 = 0x0020;
 
 /// `pull_var_clause_context` (var.c:58-62).
 struct PullVarClauseContext<'mcx> {
-    varlist: Vec<Expr>,
+    varlist: Vec<Expr<'mcx>>,
     flags: i32,
     /// Memory context for deep-copying collected nodes (`Aggref`/`WindowFunc`/
     /// `GroupingFunc` carry context-allocated children that a plain `.clone()`
@@ -697,7 +705,11 @@ struct PullVarClauseContext<'mcx> {
 /// per the `PVC_*` flag bits; `GroupingFunc` is treated like `Aggref`;
 /// `CurrentOfExpr` is ignored. Upper-level vars/aggrefs/PHVs should not be seen.
 /// Returns a list of the (cloned) nodes found. Does not examine subqueries.
-pub fn pull_var_clause<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node, flags: i32) -> PgResult<Vec<Expr>> {
+pub fn pull_var_clause<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: &Node,
+    flags: i32,
+) -> PgResult<Vec<Expr<'mcx>>> {
     // Assert that caller has not specified inconsistent flags.
     debug_assert_ne!(
         flags & (PVC_INCLUDE_AGGREGATES | PVC_RECURSE_AGGREGATES),
@@ -726,7 +738,7 @@ pub fn pull_var_clause<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node, flags: i32) -> Pg
 }
 
 /// `pull_var_clause_walker` (var.c:672).
-fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bool {
+fn pull_var_clause_walker<'mcx>(node: &Node, context: &mut PullVarClauseContext<'mcx>) -> bool {
     if context.err.is_some() {
         return true;
     }
@@ -799,7 +811,21 @@ fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bo
                     panic!("Upper-level PlaceHolderVar found where not expected");
                 }
                 if context.flags & PVC_INCLUDE_PLACEHOLDERS != 0 {
-                    context.varlist.push(Expr::PlaceHolderVar(phv.clone()));
+                    // Deep-clone the PlaceHolderVar into the result context
+                    // (`context.mcx`) rather than a derived `phv.clone()`: the PHV
+                    // carries a `phexpr` subtree of context-allocated children, and
+                    // the returned `Vec<Expr<'mcx>>` outlives the input `node`'s
+                    // arena. A shallow clone would leave those by-ref children
+                    // dangling once the source is dropped — the gather-grouping UAF
+                    // (b2a48345e) the `Expr<'mcx>` lifetime now makes a compile
+                    // error. `node_expr_clone` routes through `Expr::clone_in`.
+                    match node_expr_clone(node, context.mcx) {
+                        Ok(c) => context.varlist.push(c),
+                        Err(e) => {
+                            context.err = Some(e);
+                            return true;
+                        }
+                    }
                     return false;
                 } else if context.flags & PVC_RECURSE_PLACEHOLDERS != 0 {
                     // fall through to recurse into the placeholder's expression
@@ -817,7 +843,7 @@ fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bo
 /// on arms known to be `Node::Expr`. Uses `Expr::clone_in` (not a plain
 /// `.clone()`) because `Aggref`/`WindowFunc`/`GroupingFunc` carry
 /// context-allocated children whose derived `.clone()` panics.
-fn node_expr_clone<'mcx>(node: &Node, mcx: mcx::Mcx<'mcx>) -> PgResult<Expr> {
+fn node_expr_clone<'mcx>(node: &Node, mcx: mcx::Mcx<'mcx>) -> PgResult<Expr<'mcx>> {
     match node.as_expr() {
         Some(e) => e.clone_in(mcx),
         None => unreachable!("node_expr_clone on non-Expr node"),
@@ -1081,7 +1107,12 @@ pub fn init_seams() {
     // init-subselect-ext stub crate declares it (it cannot name a whole parse
     // `Node`); var.c is the real owner and installs it here.
     use backend_optimizer_plan_init_subselect_ext_seams as isub;
-    isub::pull_vars_of_level_node::set(|mcx, node, levelsup| pull_vars_of_level(mcx, node, levelsup));
+    // The seam returns the pulled vars at the planner arena's notional `'static`
+    // (they are interned via the caller's `mcx`); erase the `'mcx`-cloned results
+    // at this arena-intern boundary.
+    isub::pull_vars_of_level_node::set(|mcx, node, levelsup| {
+        pull_vars_of_level(mcx, node, levelsup)
+    });
     // The RTE_SUBQUERY arm walks `rte->subquery` (an owned `Query`, not a `Node`)
     // through the sibling `_query` seam (same owner, var.c).
     isub::pull_vars_of_level_query::set(|mcx, query, levelsup| {
@@ -1130,7 +1161,7 @@ fn pull_var_clause_result_mcx() -> mcx::Mcx<'static> {
 
 /// `pull_var_clause((Node *) node, flags)` (var.c) — the equivclass-ext seam
 /// over a single rootless `&Expr`.
-fn seam_eqext_pull_var_clause(node: &Expr, flags: i32) -> Vec<Expr> {
+fn seam_eqext_pull_var_clause(node: &Expr, flags: i32) -> Vec<Expr<'static>> {
     // Wrap the `&Expr` as a `Node` for the Node-based walker. A bare
     // `Expr::clone` panics on an `Aggref` (context-allocated `TargetEntry`
     // args); `node_expr_wrapper` deep-copies via the non-panicking `clone_in`,
@@ -1146,9 +1177,9 @@ fn seam_eqext_pull_var_clause(node: &Expr, flags: i32) -> Vec<Expr> {
 /// `pull_var_clause((Node *) exprs, flags)` (var.c) over a `List` — run the walk
 /// over each expression and concatenate, matching the C single call over the
 /// whole list (the per-element order is preserved).
-fn seam_eqext_pull_var_clause_list(nodes: &[Expr], flags: i32) -> Vec<Expr> {
+fn seam_eqext_pull_var_clause_list(nodes: &[Expr], flags: i32) -> Vec<Expr<'static>> {
     let mcx = pull_var_clause_result_mcx();
-    let mut out: Vec<Expr> = Vec::new();
+    let mut out: Vec<Expr<'static>> = Vec::new();
     for node in nodes.iter() {
         let wrapped = node_expr_wrapper(node, mcx);
         out.extend(pull_var_clause(mcx, &wrapped, flags).unwrap_or_default());

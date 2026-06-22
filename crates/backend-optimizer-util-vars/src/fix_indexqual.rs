@@ -34,12 +34,12 @@ const INDEX_VAR: i32 = -3;
 /// carries: `index.indexprs` is a list of [`types_pathnodes::NodeId`] expression
 /// handles, and `index.rel` is a [`types_pathnodes::RelId`] whose `relid` (the
 /// underlying RT index) the simple-column case cross-checks against.
-pub fn fix_indexqual_operand(
+pub fn fix_indexqual_operand<'mcx>(
     root: &PlannerInfo,
-    node: Expr,
+    node: Expr<'mcx>,
     index: &IndexOptInfo,
     indexcol: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     debug_assert!(indexcol >= 0 && indexcol < index.ncolumns);
 
     // Remove any PlaceHolderVar wrapping of the indexkey.

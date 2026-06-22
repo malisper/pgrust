@@ -1189,9 +1189,9 @@ fn get_rule_sortgroupclause<'mcx>(
     tlist: &[types_nodes::primnodes::TargetEntry<'mcx>],
     force_colno: bool,
     context: &mut DeparseContext<'mcx>,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     let tle = get_sortgroupref_tle(sortref, tlist)?;
-    let expr_opt: Option<Expr> = match tle.expr.as_deref() {
+    let expr_opt: Option<Expr<'mcx>> = match tle.expr.as_deref() {
         Some(e) => Some(e.clone_in(mcx)?),
         None => None,
     };

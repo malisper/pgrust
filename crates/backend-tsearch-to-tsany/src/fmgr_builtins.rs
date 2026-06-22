@@ -255,6 +255,38 @@ fn fc_websearch_to_tsquery(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Da
 }
 
 // ---------------------------------------------------------------------------
+// ts_match_tt / ts_match_tq (tsvector_op.c:2243/2265) — text @@ {text,tsquery}.
+//
+// These convert the left `text` argument to a tsvector (the current-config
+// `to_tsvector`) before delegating to `ts_match_vq`. `ts_match_tt` additionally
+// converts its right `text` argument through `plainto_tsquery`. Both conversions
+// (`DirectFunctionCall1(to_tsvector, ...)` / `DirectFunctionCall1(plainto_tsquery,
+// ...)`) live in this crate, so we drive the typed cores directly.
+// ---------------------------------------------------------------------------
+
+fn ts_match_bytes_bool(vector_img: &[u8], query_img: &[u8]) -> PgResult<bool> {
+    backend_utils_adt_tsvector_core::op::ts_match_vq(vector_img, query_img)
+}
+
+fn fc_ts_match_tt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let text0 = arg_text(fcinfo, 0).to_vec();
+    let text1 = arg_text(fcinfo, 1).to_vec();
+    // vector = to_tsvector(text0); query = plainto_tsquery(text1).
+    let vector = crate::to_tsvector::to_tsvector(&text0)?;
+    let m = scratch_mcx();
+    let query = crate::to_tsquery::plainto_tsquery(m.mcx(), &text1)?;
+    Ok(Datum::from_bool(ts_match_bytes_bool(&vector, &query)?))
+}
+
+fn fc_ts_match_tq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let text0 = arg_text(fcinfo, 0).to_vec();
+    // query = PG_GETARG_TSQUERY(1): the full header-ful tsquery varlena image.
+    let query = arg_varlena_full(fcinfo, 1).to_vec();
+    let vector = crate::to_tsvector::to_tsvector(&text0)?;
+    Ok(Datum::from_bool(ts_match_bytes_bool(&vector, &query)?))
+}
+
+// ---------------------------------------------------------------------------
 // get_current_ts_config
 // ---------------------------------------------------------------------------
 
@@ -455,6 +487,10 @@ pub fn register_to_tsany_builtins() {
         builtin(5007, "websearch_to_tsquery_byid", 2, fc_websearch_to_tsquery_byid),
         builtin(5009, "websearch_to_tsquery", 1, fc_websearch_to_tsquery),
         builtin(3759, "get_current_ts_config", 0, fc_get_current_ts_config),
+        // text @@ {text,tsquery} (tsvector_op.c) — convert the left text to a
+        // tsvector (and ts_match_tt's right text to a tsquery) then ts_match_vq.
+        builtin(3760, "ts_match_tt", 2, fc_ts_match_tt),
+        builtin(3761, "ts_match_tq", 2, fc_ts_match_tq),
         // ts_headline (text) — wparser.c
         builtin(3743, "ts_headline_byid_opt", 4, fc_ts_headline_byid_opt),
         builtin(3744, "ts_headline_byid", 3, fc_ts_headline_byid),

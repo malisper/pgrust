@@ -1189,7 +1189,7 @@ pub fn find_var_for_subquery_tle(
     root: &PlannerInfo,
     rel: RelId,
     tle: NodeId,
-) -> Option<types_nodes::primnodes::Expr> {
+) -> Option<types_nodes::primnodes::Expr<'static>> {
     let tle_info = nf::targetentry_info::call(root, tle);
     // If the TLE is resjunk, it's certainly not visible to the outer query.
     if tle_info.resjunk {
@@ -1306,7 +1306,7 @@ pub fn make_pathkeys_for_sortclauses_extended(
                 None,
                 &bms_make_singleton(root.group_rtindex),
             );
-            sortkey = nf::remove_nulling_relids::call(sortkey, &singleton, &None);
+            sortkey = nf::remove_nulling_relids::call(mcx, sortkey, &singleton, &None);
         }
 
         let pathkey = make_pathkey_from_sortop(
@@ -1374,7 +1374,11 @@ fn singleton_relids(x: i32) -> Relids {
 ///   used to generate / derived from an EC). Called before EC merging completes,
 ///   so the links aren't necessarily canonical (use
 ///   [`update_mergeclause_eclasses`] before using them).
-pub fn initialize_mergeclause_eclasses(root: &mut PlannerInfo, restrictinfo: RinfoId) {
+pub fn initialize_mergeclause_eclasses<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    restrictinfo: RinfoId,
+) {
     // Should be a mergeclause ... with links not yet set.
     {
         let rinfo = root.rinfo(restrictinfo);
@@ -1383,13 +1387,23 @@ pub fn initialize_mergeclause_eclasses(root: &mut PlannerInfo, restrictinfo: Rin
         debug_assert!(rinfo.right_ec.is_none());
     }
 
-    // Working context for the transient deep copies of the operands. They are
-    // fed by value into `get_eclass_for_sort_expr`, which re-allocates them into
-    // the planner arena (`alloc_node` copies the value), so a function-scoped
-    // context is correct. `clone_in` is required because the derived `Expr::clone`
-    // panics on an owned-subtree child.
-    let work_ctx = mcx::MemoryContext::new("initialize_mergeclause_eclasses");
-    let work_mcx = work_ctx.mcx();
+    // Deep-copy the operands into the LONG-LIVED planner arena (`run.mcx()`), NOT
+    // a function-scoped throwaway `MemoryContext`. `get_eclass_for_sort_expr`
+    // re-interns the operand `Expr` into `node_arena` via `alloc_node`, which
+    // `erase_lifetime`-MOVES the node into the arena WITHOUT re-homing its
+    // children's allocators (a by-reference `Const.constvalue`'s `Vec<u8, Mcx>`,
+    // or an owned-subtree `Box<_, Mcx>`, keeps the `mcx` it was cloned in). The
+    // interned node lives as long as the `PlannerInfo` (`node_arena` drops with
+    // it), so cloning into a context freed at this function's return leaves those
+    // child pointers dangling — the eventual `node_arena` drop then deallocates
+    // against an already-freed context (use-after-free / SIGSEGV in
+    // `Mcx::deallocate`). This bit any merge-equality clause whose operand
+    // carries a by-reference `Const` (e.g. `(... || ...)::name`), surfacing on
+    // type_sanity / join / update. `clone_in` (not the derived `Expr::clone`,
+    // which panics on an owned-subtree child) into the planner arena is the
+    // faithful stand-in for C's `CurrentMemoryContext` (= `root->planner_cxt`),
+    // matching `make_pathkey_from_sortinfo`'s threaded-mcx clone.
+    let work_mcx = mcx;
 
     // clause = restrictinfo->clause, an OpExpr; read opno/inputcollid + operands.
     let clause_id = root.rinfo(restrictinfo).clause;
@@ -1975,10 +1989,13 @@ fn mcx_collect(
 /// already-freed context (use-after-free / segfault in `Mcx::deallocate`). The
 /// planner arena outlives the whole planner run, satisfying the `clone_in`
 /// `'static`-erasure invariant.
-fn clone_sortkey_expr(
-    mcx: mcx::Mcx<'_>,
+fn clone_sortkey_expr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     expr: &types_nodes::primnodes::Expr,
-) -> types_nodes::primnodes::Expr {
+) -> types_nodes::primnodes::Expr<'mcx> {
+    // Deep-clone into the planner-run arena carried by `mcx`; the result is
+    // `'mcx`-bound so it can be threaded through the mcx-taking mutators
+    // (`remove_nulling_relids`) and eclass lookup.
     expr.clone_in(mcx)
         .unwrap_or_else(|e| panic!("clone_sortkey_expr: {e:?}"))
 }

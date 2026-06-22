@@ -429,7 +429,9 @@ fn transform_parameter_default<'mcx>(
     )?;
 
     // assign_expr_collations(pstate, def);
-    let mut def = def;
+    // Bring the parser-arena `'static` coerced default into `mcx` for the
+    // in-place collation pass and the `'mcx` node wrap below (invariant `Expr`).
+    let mut def: types_nodes::primnodes::Expr<'mcx> = def.clone_in(mcx)?;
     backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut def)?;
 
     // Wrap the cooked Expr as a Node for the var-clause check and serialization.
@@ -1181,10 +1183,10 @@ pub(crate) fn node_vec_to_pgvec<'mcx>(
 /// (`Option<NodePtr>`) a `Query` carries.
 pub(crate) fn opt_expr_to_node<'mcx>(
     mcx: Mcx<'mcx>,
-    e: Option<types_nodes::primnodes::Expr>,
+    e: Option<types_nodes::primnodes::Expr<'static>>,
 ) -> PgResult<Option<NodePtr<'mcx>>> {
     match e {
-        Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?)),
+        Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?)),
         None => Ok(None),
     }
 }
@@ -1194,10 +1196,10 @@ pub(crate) fn opt_expr_to_node<'mcx>(
 /// (`havingQual`/`limitOffset`/`limitCount`/`mergeJoinCondition`) carries.
 pub(crate) fn opt_expr_to_box<'mcx>(
     mcx: Mcx<'mcx>,
-    e: Option<types_nodes::primnodes::Expr>,
-) -> PgResult<Option<PgBox<'mcx, types_nodes::primnodes::Expr>>> {
+    e: Option<types_nodes::primnodes::Expr<'static>>,
+) -> PgResult<Option<PgBox<'mcx, types_nodes::primnodes::Expr<'mcx>>>> {
     match e {
-        Some(expr) => Ok(Some(mcx::alloc_in(mcx, expr)?)),
+        Some(expr) => Ok(Some(mcx::alloc_in(mcx, expr.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }

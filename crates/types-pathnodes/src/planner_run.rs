@@ -764,7 +764,7 @@ mod tests {
         // can recognize it after resolution).
         let mut r = ResultPlan::default();
         r.plan.plan_node_id = 42;
-        let plan = Node::mk_result(run.mcx(), r);
+        let plan = Node::mk_result(run.mcx(), r).unwrap();
 
         let subroot = crate::PlannerInfo::default();
         let id = run.intern_subplan(plan, subroot, crate::PathId(7));

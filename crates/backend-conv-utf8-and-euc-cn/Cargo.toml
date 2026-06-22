@@ -13,5 +13,6 @@ crate-type = ["rlib"]
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-mb-conv-string-helpers = { path = "../backend-utils-mb-conv-string-helpers" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 types-wchar = { path = "../types-wchar" }
 types-error = { path = "../types-error" }

@@ -44,7 +44,11 @@ fn relids_to_expr_relids(r: &Relids) -> ExprRelids {
 /// `phrels` is the syntactic location (as a set of relids) to attribute to the
 /// expression. The caller is responsible for adjusting phlevelsup and
 /// phnullingrels. Touches only `root->glob`.
-pub fn make_placeholder_expr(root: &mut PlannerInfo, expr: Expr, phrels: Relids) -> PlaceHolderVar {
+pub fn make_placeholder_expr(
+    root: &mut PlannerInfo,
+    expr: Expr<'static>,
+    phrels: Relids,
+) -> PlaceHolderVar<'static> {
     let glob = root
         .glob
         .as_mut()
@@ -63,7 +67,10 @@ pub fn make_placeholder_expr(root: &mut PlannerInfo, expr: Expr, phrels: Relids)
 
 /// `find_placeholder_info`
 ///		Fetch (or, if missing, create) the PlaceHolderInfo for the given PHV.
-pub fn find_placeholder_info(root: &mut PlannerInfo, phv: &PlaceHolderVar) -> PgResult<PhInfoId> {
+pub fn find_placeholder_info<'a>(
+    root: &mut PlannerInfo,
+    phv: &PlaceHolderVar<'a>,
+) -> PgResult<PhInfoId> {
     // If this ever isn't true, we'd need to look in parent lists.
     debug_assert!(phv.phlevelsup == 0);
 
@@ -88,7 +95,11 @@ pub fn find_placeholder_info(root: &mut PlannerInfo, phv: &PlaceHolderVar) -> Pg
 
     // ph_var = copyObject(phv) with phnullingrels forced empty (placeholder.c
     // convention: the PlaceHolderInfo represents the initially-calculated state).
-    let mut ph_var = phv.clone();
+    // copyObject(phv): the PHV is interned into the planner-run arena (the
+    // PlaceHolderInfo lives for the run), so erase the (input-lifetime) clone to
+    // the arena's notional 'static at this sanctioned intern boundary.
+    let mut ph_var =
+        types_nodes::primnodes::placeholdervar_into_static(phv.clone());
     ph_var.phnullingrels = ExprRelids { words: Vec::new() };
 
     let phexpr = ph_var
@@ -161,9 +172,9 @@ pub fn find_placeholder_info(root: &mut PlannerInfo, phv: &PlaceHolderVar) -> Pg
 /// record that a PlaceHolderVar's value is needed at `where_needed`. Homed here
 /// (the joininfo unit ports `find_placeholder_info`); consumed by
 /// `add_vars_to_targetlist` / `add_vars_to_attr_needed` in init-subselect.
-pub fn phinfo_add_needed(
+pub fn phinfo_add_needed<'a>(
     root: &mut PlannerInfo,
-    phv: &PlaceHolderVar,
+    phv: &PlaceHolderVar<'a>,
     where_needed: &Relids,
 ) -> PgResult<()> {
     let phinfo_id = find_placeholder_info(root, phv)?;
@@ -297,7 +308,7 @@ fn find_placeholders_in_quals(
 /// `find_placeholders_in_expr`
 ///		Find all PlaceHolderVars in the given expression, and create
 ///		PlaceHolderInfo entries for them.
-fn find_placeholders_in_expr(root: &mut PlannerInfo, expr: &Expr) -> PgResult<()> {
+fn find_placeholders_in_expr(root: &mut PlannerInfo, expr: &Expr<'_>) -> PgResult<()> {
     // pull_var_clause does more than we need, but it's convenient.
     let vars = ext_seam::pull_var_clause_expr::call(
         expr,

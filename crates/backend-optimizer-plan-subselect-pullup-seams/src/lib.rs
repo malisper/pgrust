@@ -70,8 +70,8 @@ seam_core::seam!(
     pub fn convert_VALUES_to_ANY<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &types_pathnodes::PlannerInfo,
-        sublink: &types_nodes::primnodes::SubLink,
-    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr>>
+        sublink: &types_nodes::primnodes::SubLink<'mcx>,
+    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr<'mcx>>>
 );
 
 seam_core::seam!(

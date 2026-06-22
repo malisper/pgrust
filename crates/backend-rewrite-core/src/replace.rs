@@ -73,15 +73,16 @@ pub struct ReplaceRteVariablesContext {
 }
 
 /// `replace_rte_variables_callback` — given a matching `Var` (and the live
-/// context), produce its replacement expression. The result is a lifetime-free
-/// [`Expr`] (every substitute rewriteManip.c builds is an `Expr`-tree value).
-pub type ReplaceRteVariablesCallbackDyn =
-    dyn FnMut(&Var, &mut ReplaceRteVariablesContext) -> PgResult<Expr>;
+/// context), produce its replacement expression. The substitute is an `Expr`-tree
+/// value built into the rewrite arena `'mcx` (every substitute rewriteManip.c
+/// builds is an `Expr`-tree value).
+pub type ReplaceRteVariablesCallbackDyn<'mcx> =
+    dyn FnMut(&Var, &mut ReplaceRteVariablesContext) -> PgResult<Expr<'mcx>>;
 
 fn replace_rte_variables_mutator<'mcx>(
     node: &mut Node<'mcx>,
     context: &mut ReplaceRteVariablesContext,
-    callback: &mut (dyn FnMut(&Var, &mut ReplaceRteVariablesContext) -> PgResult<Expr> + '_),
+    callback: &mut (dyn FnMut(&Var, &mut ReplaceRteVariablesContext) -> PgResult<Expr<'mcx>> + '_),
     mcx: Mcx<'mcx>,
 ) -> PgResult<bool> {
     match node.node_tag() {
@@ -186,7 +187,7 @@ pub fn replace_rte_variables<'mcx>(
     node: &mut Node<'mcx>,
     target_varno: i32,
     sublevels_up: i32,
-    callback: &mut (dyn FnMut(&Var, &mut ReplaceRteVariablesContext) -> PgResult<Expr> + '_),
+    callback: &mut (dyn FnMut(&Var, &mut ReplaceRteVariablesContext) -> PgResult<Expr<'mcx>> + '_),
     outer_has_sublinks: &mut Option<bool>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
@@ -458,10 +459,10 @@ pub fn map_variable_attnos<'mcx>(
 /// `found_whole_row`. The input vector is consumed and returned mutated.
 pub fn map_variable_attnos_expr_list<'mcx>(
     mcx: Mcx<'mcx>,
-    exprs: PgVec<'mcx, Expr>,
+    exprs: PgVec<'mcx, Expr<'mcx>>,
     attmap: &[i16],
-) -> PgResult<(PgVec<'mcx, Expr>, bool)> {
-    let mut out: PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, exprs.len())?;
+) -> PgResult<(PgVec<'mcx, Expr<'mcx>>, bool)> {
+    let mut out: PgVec<'mcx, Expr<'mcx>> = mcx::vec_with_capacity_in(mcx, exprs.len())?;
     let mut found_whole_row = false;
     for owned in exprs.into_iter() {
         // Wrap each list element as a Node::Expr, map it in place (mirroring the
@@ -563,7 +564,7 @@ pub fn ReplaceVarFromTargetList<'mcx>(
     nomatch_option: ReplaceVarsNoMatchOption,
     nomatch_varno: i32,
     mcx: Mcx<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     if var.varattno == INVALID_ATTR_NUMBER {
         // Must expand whole-tuple reference into RowExpr.
         let mut colnames: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
@@ -697,7 +698,7 @@ fn no_match<'mcx>(
     nomatch_option: ReplaceVarsNoMatchOption,
     nomatch_varno: i32,
     mcx: Mcx<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     match nomatch_option {
         ReplaceVarsNoMatchOption::ReportError => Err(elog_error(format!(
             "could not find replacement targetlist entry for attno {}",
@@ -721,12 +722,16 @@ fn no_match<'mcx>(
                 vartyplen as i32,
                 vartypbyval,
             )?;
-            Ok(e)
+            // `coerce_null_to_domain` returns the substitute under the parser-
+            // coerce seam's `'static` arena-intern convention; re-localize the
+            // (self-contained Const/CoerceToDomain) node into the rewrite arena
+            // `'mcx` so the substitute matches the rewrite tree it is spliced into.
+            e.clone_in(mcx)
         }
     }
 }
 
-fn node_into_expr(node: Node) -> PgResult<Expr> {
+fn node_into_expr<'mcx>(node: Node<'mcx>) -> PgResult<Expr<'mcx>> {
     match node.into_expr() {
         Some(e) => Ok(e),
         None => Err(elog_error(

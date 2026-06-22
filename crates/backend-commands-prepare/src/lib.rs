@@ -502,7 +502,7 @@ fn EvaluateParams<'mcx>(
         .as_ref()
         .map(|s| s.as_str())
         .unwrap_or("");
-    let mut params_work: mcx::PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, num_params as usize)?;
+    let mut params_work: mcx::PgVec<'mcx, Expr<'mcx>> = mcx::vec_with_capacity_in(mcx, num_params as usize)?;
     let mut i: i32 = 0;
     while i < num_params {
         let expected_type_id = param_types[i as usize];

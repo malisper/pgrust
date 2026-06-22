@@ -29,10 +29,14 @@ use crate::util::{
 /// Deep-copy a slice of `Expr` into `mcx` via `Expr::clone_in` (C copyObject).
 /// The derived `Expr::clone` panics on an owned-subtree child
 /// (`Aggref`/`SubLink`/`SubPlan`).
-fn clone_exprs_in(exprs: &[Expr], mcx: Mcx<'_>) -> Result<Vec<Expr>, types_error::PgError> {
+/// Deep-copy each `Expr` into `mcx`, then erase to the planner arena's notional
+/// `'static` (the sanctioned arena-intern boundary): the clones live in the
+/// planner-run `mcx`, which the OR-grouping uses at the arena (`'static`) level
+/// alongside `root.node(..)`-resolved clause nodes.
+fn clone_exprs_in(exprs: &[Expr<'_>], mcx: Mcx<'_>) -> Result<Vec<Expr<'static>>, types_error::PgError> {
     let mut out = Vec::with_capacity(exprs.len());
     for e in exprs {
-        out.push(e.clone_in(mcx)?);
+        out.push(e.clone_in(mcx)?.erase_lifetime());
     }
     Ok(out)
 }
@@ -184,11 +188,11 @@ pub fn group_similar_or_args(
     root: &mut PlannerInfo,
     rel: RelId,
     rinfo: RinfoId,
-) -> Result<Vec<Expr>, types_error::PgError> {
+) -> Result<Vec<Expr<'static>>, types_error::PgError> {
     let relid = root.rel(rel).relid;
 
     let orclause_id = root.rinfo(rinfo).orclause.expect("RestrictInfo without orclause");
-    let orargs: Vec<Expr> = clone_exprs_in(
+    let orargs: Vec<Expr<'static>> = clone_exprs_in(
         &root
             .node(orclause_id)
             .as_boolexpr()
@@ -314,7 +318,7 @@ pub fn group_similar_or_args(
     matches.sort_by(or_arg_index_match_cmp_group);
 
     // Group similar clauses into single sub-restrictinfos.
-    let mut result: Vec<Expr> = Vec::new();
+    let mut result: Vec<Expr<'static>> = Vec::new();
     let mut group_start = 0usize;
     let mut i = 1usize;
     while i <= n {
@@ -326,8 +330,13 @@ pub fn group_similar_or_args(
             || matches[i].indexnum == -1;
         if is_boundary {
             if i - group_start == 1 {
-                // One clause in group: add it "as is".
-                result.push(orargs[matches[group_start].argindex as usize].clone_in(mcx)?);
+                // One clause in group: add it "as is". The arena clone is interned
+                // into the planner-run `mcx`; erase to the arena's `'static`.
+                result.push(
+                    orargs[matches[group_start].argindex as usize]
+                        .clone_in(mcx)?
+                        .erase_lifetime(),
+                );
             } else {
                 // Two or more clauses: create a nested OR. `rargs` holds the arm
                 // RestrictInfo handles (as C keeps the RestrictInfo* nodes);
@@ -336,9 +345,11 @@ pub fn group_similar_or_args(
                 let mut args: Vec<Expr> = Vec::new();
                 let mut rargs: Vec<Expr> = Vec::new();
                 for j in group_start..i {
-                    let arg = orargs[matches[j].argindex as usize].clone_in(mcx)?;
-                    args.push(orarg_clause(root, &arg).clone_in(mcx)?);
-                    rargs.push(arg);
+                    // The `orargs` element is an arena (`'static`) OR-arm; borrow it
+                    // for `orarg_clause` and deep-copy into `mcx` for the new OR node.
+                    let arg = &orargs[matches[j].argindex as usize];
+                    args.push(orarg_clause(root, arg).clone_in(mcx)?);
+                    rargs.push(arg.clone_in(mcx)?);
                 }
                 let or_args_node = make_orclause(args);
                 let or_rargs_node = make_orclause(rargs);
@@ -386,7 +397,7 @@ pub fn group_similar_or_args(
 
 /// Peel a single `RelabelType` above an operand (eval_const_expressions ensures
 /// at most one), mirroring `group_similar_or_args`'s relabel handling.
-fn peel_relabel(op: &Expr) -> &Expr {
+fn peel_relabel<'a, 'mcx>(op: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     if let Some(rt) = op.as_relabeltype() {
         if let Some(arg) = rt.arg.as_deref() {
             return arg;
@@ -514,7 +525,7 @@ pub fn generate_bitmap_or_paths<'mcx>(
         let mut pathlist_ok = true;
 
         // Group similar OR-clause arguments.
-        let original_args: Vec<Expr> = clone_exprs_in(
+        let original_args: Vec<Expr<'static>> = clone_exprs_in(
             &root
                 .node(root.rinfo(rinfo).orclause.expect("orclause"))
                 .as_boolexpr()
@@ -539,7 +550,7 @@ pub fn generate_bitmap_or_paths<'mcx>(
             if is_andclause(orarg_clause(root, orarg)) {
                 // C reads ((BoolExpr *) orarg)->args, whose elements are
                 // themselves RestrictInfo* arms.
-                let andargs_nodes: Vec<Expr> =
+                let andargs_nodes: Vec<Expr<'static>> =
                     clone_exprs_in(&orarg_clause(root, orarg).as_boolexpr().unwrap().args, mcx)?;
                 let mut andargs: Vec<RinfoId> = Vec::new();
                 for a in &andargs_nodes {
@@ -609,7 +620,7 @@ pub fn generate_bitmap_or_paths<'mcx>(
 fn orarg_to_rinfo(
     mcx: Mcx<'_>,
     root: &mut PlannerInfo,
-    orarg: &Expr,
+    orarg: &Expr<'_>,
 ) -> Result<RinfoId, types_error::PgError> {
     if let Expr::RestrictInfo(r) = orarg {
         Ok(RinfoId::from(*r))
@@ -625,7 +636,7 @@ fn orarg_to_rinfo(
 /// [`Expr::RestrictInfo`] handle, dereference it to the wrapped
 /// `RestrictInfo.clause`; otherwise the arg is itself the clause (C's
 /// `IsA(arg, RestrictInfo) ? argrinfo->clause : arg`).
-fn orarg_clause<'a>(root: &'a PlannerInfo, orarg: &'a Expr) -> &'a Expr {
+fn orarg_clause<'a>(root: &'a PlannerInfo, orarg: &'a Expr<'static>) -> &'a Expr<'static> {
     if let Expr::RestrictInfo(r) = orarg {
         root.node(root.rinfo(RinfoId::from(*r)).clause)
     } else {
@@ -636,11 +647,11 @@ fn orarg_clause<'a>(root: &'a PlannerInfo, orarg: &'a Expr) -> &'a Expr {
 /// Owned-clone variant of [`orarg_clause`] for callers that need to release the
 /// `&PlannerInfo` borrow before taking `&mut PlannerInfo`. Returns the arm's
 /// underlying clause node (deref'ing an [`Expr::RestrictInfo`] handle).
-pub fn orarg_clause_owned(
-    mcx: Mcx<'_>,
+pub fn orarg_clause_owned<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &PlannerInfo,
-    orarg: &Expr,
-) -> Result<Option<Expr>, types_error::PgError> {
+    orarg: &Expr<'static>,
+) -> Result<Option<Expr<'mcx>>, types_error::PgError> {
     // Deep-copy via `clone_in` (C copyObject); a derived `Expr::clone` panics on
     // an owned-subtree child (`Aggref`/`SubLink`/`SubPlan`).
     Ok(Some(orarg_clause(root, orarg).clone_in(mcx)?))
@@ -648,14 +659,14 @@ pub fn orarg_clause_owned(
 
 /// Is this grouped OR arm itself an OR clause (a sub-OR `BoolExpr`)? Looks
 /// through the arm's `RestrictInfo` handle to its underlying clause.
-fn orarg_is_or_clause(root: &PlannerInfo, orarg: &Expr) -> bool {
+fn orarg_is_or_clause(root: &PlannerInfo, orarg: &Expr<'static>) -> bool {
     use types_nodes::primnodes::BoolExprType;
     matches!(orarg_clause(root, orarg).as_boolexpr(), Some(b) if b.boolop == BoolExprType::OR_EXPR)
 }
 
 /// Structural equality of two `Expr` lists (for the "grouping changed the args"
 /// test in `generate_bitmap_or_paths`). Uses node-level `equal`.
-fn exprs_eq(a: &[Expr], b: &[Expr]) -> bool {
+fn exprs_eq(a: &[Expr<'_>], b: &[Expr<'_>]) -> bool {
     if a.len() != b.len() {
         return false;
     }

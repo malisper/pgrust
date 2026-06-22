@@ -614,6 +614,13 @@ fn proc_pid(procno: ProcNumber) -> i32 {
     with_proc_by_number(procno, |p| p.pid)
 }
 
+fn proc_wait_event_info(procno: ProcNumber) -> u32 {
+    // `UINT32_ACCESS_ONCE(GetPGProcByNumber(procno)->wait_event_info)`
+    // (pgstatfuncs.c pg_stat_get_activity). The single-word read carries no
+    // lock; the volatile access-once is modeled by the plain field read.
+    with_proc_by_number(procno, |p| p.wait_event_info)
+}
+
 fn proc_is_regular_backend(procno: ProcNumber) -> bool {
     with_proc_by_number(procno, |p| p.isRegularBackend)
 }
@@ -1163,6 +1170,7 @@ pub(crate) fn install() {
     seams::proc_pgxactoff::set(proc_pgxactoff);
     seams::proc_global_status_flags::set(proc_global_status_flags);
     seams::proc_pid::set(proc_pid);
+    seams::proc_wait_event_info::set(proc_wait_event_info);
     // `GetPGProcByNumber(owner)->pid` (storage/proc.h), the AIO `pg_get_aios()`
     // SRF's owner-pid lookup; same PGPROC->pid mapping as `proc_pid`.
     backend_storage_aio_funcs_seams::proc_pid_by_number::set(|owner| Ok(proc_pid(owner)));

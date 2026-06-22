@@ -353,7 +353,7 @@ fn exec_push_expr_setup_steps<'mcx>(
 fn exec_create_expr_setup_steps<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
-    node: &Expr,
+    node: &Expr<'mcx>,
 ) -> PgResult<()> {
     let mut info = ExprSetupInfo::default();
     expr_setup_walker(node, &mut info);
@@ -409,7 +409,7 @@ pub(crate) fn exec_create_expr_setup_steps_list<'mcx>(
 /// (`resv`, a [`ResultCellId`] into `state`'s arena).
 pub(crate) fn exec_init_expr_rec<'mcx>(
     mcx: Mcx<'mcx>,
-    node: &Expr,
+    node: &Expr<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
 ) -> PgResult<()> {
@@ -1211,11 +1211,19 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                     let e = &rowexpr.args[i];
                     let etype = backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?.typid;
                     if etype != att.atttypid {
-                        return Err(types_error::PgError::error("ROW() column has wrong type")
-                            .with_detail(format!(
-                                "ROW() column has type {} instead of type {}",
-                                etype, att.atttypid
-                            )));
+                        // C: ereport(ERROR, errcode(ERRCODE_DATATYPE_MISMATCH),
+                        //     errmsg("ROW() column has type %s instead of type %s",
+                        //            format_type_be(exprType(e)), format_type_be(att->atttypid)));
+                        let got = backend_utils_adt_format_type_seams::format_type_be_owned::call(
+                            etype,
+                        )?;
+                        let want = backend_utils_adt_format_type_seams::format_type_be_owned::call(
+                            att.atttypid,
+                        )?;
+                        return Err(types_error::PgError::error(format!(
+                            "ROW() column has type {got} instead of type {want}"
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
                     }
                     // Evaluate column expr into its workspace cell.
                     let cell = new_result_cell(mcx, state)?;
@@ -1810,17 +1818,10 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         }
         etag::T_SubPlan => {
             let subplan = node.expect_subplan();
-            // `Expr::SubPlan` carries a `Box<SubPlan<'static>>` (the lifetime-free
-            // Expr enum erases the arena lifetime); the SubPlan tree is allocated
-            // in the EState per-query context, so reinstate the compiler's `'mcx`
-            // to thread it (same lifetime-erasure precedent as the Opaque
-            // carriers in this crate).
-            let sub: &types_nodes::primnodes::SubPlan<'mcx> = unsafe {
-                core::mem::transmute::<
-                    &types_nodes::primnodes::SubPlan<'static>,
-                    &types_nodes::primnodes::SubPlan<'mcx>,
-                >(&subplan.0)
-            };
+            // `Expr::SubPlan` now carries `Box<SubPlan<'mcx>>` (the `'mcx`-threaded
+            // Expr enum); the SubPlan tree is the same `'mcx` arena, so it is
+            // borrowed directly (the former `'static`→`'mcx` transmute is gone).
+            let sub: &types_nodes::primnodes::SubPlan<'mcx> = &subplan.0;
             crate::execExpr_func_subscript::exec_init_sub_plan_expr(mcx, sub, state, resv)
         }
         etag::T_AlternativeSubPlan => panic!(
@@ -2074,8 +2075,8 @@ fn sysvar_opcode_for<'mcx>(state: &mut ExprState<'mcx>, vrt: VrtKind) -> ExprEva
 
 /// `ExecInitExpr(node, parent)` (execExpr.c) — compile one expression tree into
 /// an executable [`ExprState`] in the EState's per-query context.
-pub fn exec_init_expr<'mcx>(
-    node: &Expr,
+pub fn exec_init_expr<'mcx, 'e>(
+    node: &Expr<'e>,
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
@@ -2085,9 +2086,17 @@ pub fn exec_init_expr<'mcx>(
     // `EEOP_GROUPING_FUNC` etc. — call `parent.as_agg_state()`, an enum method),
     // whose address is not yet stable while this node is still being built. So
     // `parent` is back-filled by `ExecInitNode` (`PlanStateNode::stamp_expr_parents`)
-    // right after the node is boxed; the head is unused here.
-    let _ = parent;
+    // right after the node is boxed for the back-link; but its `sub_plan_ids`
+    // head field IS reachable here, so any expression SubPlan compiled below is
+    // drained into it at the end (the C `state->parent->subPlan = lappend(...)`).
     let mcx = estate.es_query_cxt;
+
+    // C aliases the caller's `node` pointer; the owned model clones it into the
+    // per-query context (`'mcx`) up front and drives both `state.expr` and the
+    // opcode-emission recursion off that `'mcx` copy — so the input `node` only
+    // needs to be valid for the call (an independent `'e`), matching C's read-only
+    // use of the passed expression (a plan-tree node the executor only reads).
+    let node: &Expr<'mcx> = &*mcx::leak_in(mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
 
     let mut state = make_expr_state();
     // C `state->expr = node` — retain the original expression on the ExprState
@@ -2108,17 +2117,25 @@ pub fn exec_init_expr<'mcx>(
     expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
     exec_ready_expr(&mut state)?;
 
+    // C `state->parent->subPlan = lappend(...)`: drain SubPlans compiled in this
+    // expression into the parent head (see `drain_found_subplan_ids`).
+    drain_found_subplan_ids(mcx, parent, &mut state)?;
+
     mcx::alloc_in(mcx, state)
 }
 
 /// `ExecInitExprWithParams(node, ext_params)` (execExpr.c).
-pub fn exec_init_expr_with_params<'mcx>(
-    node: &Expr,
+pub fn exec_init_expr_with_params<'mcx, 'e>(
+    node: &Expr<'e>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let _ = econtext;
     let mcx = estate.es_query_cxt;
+
+    // Clone the read-only input into `'mcx` and drive the opcode recursion off
+    // that copy (see `exec_init_expr`); the input `node` only needs `'e`.
+    let node: &Expr<'mcx> = &*mcx::leak_in(mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
 
     let mut state = make_expr_state();
     state.ext_params = 0;
@@ -2132,10 +2149,38 @@ pub fn exec_init_expr_with_params<'mcx>(
     mcx::alloc_in(mcx, state)
 }
 
+/// Drain the SubPlan-discovery channel from a freshly compiled `ExprState` into
+/// the parent `PlanState` head's `sub_plan_ids` — the owned-model equivalent of
+/// C's `state->parent->subPlan = lappend(state->parent->subPlan, sstate)` (run at
+/// SubPlan-init time, deferred here to the compile entry point where the parent
+/// head is reachable). Preserves discovery order across multiple ExprStates of
+/// the same node. No-op when the ExprState compiled no expression SubPlans.
+pub(crate) fn drain_found_subplan_ids<'mcx>(
+    mcx: Mcx<'mcx>,
+    parent: &mut PlanStateData<'mcx>,
+    state: &mut ExprState<'mcx>,
+) -> PgResult<()> {
+    let Some(ids) = state.found_subplan_ids.take() else {
+        return Ok(());
+    };
+    if ids.is_empty() {
+        return Ok(());
+    }
+    if parent.sub_plan_ids.is_none() {
+        parent.sub_plan_ids = Some(mcx::vec_with_capacity_in(mcx, ids.len())?);
+    }
+    let v = parent.sub_plan_ids.as_mut().expect("just initialized");
+    v.try_reserve(ids.len()).map_err(|_| mcx.oom(0))?;
+    for id in ids {
+        v.push(id);
+    }
+    Ok(())
+}
+
 /// `ExecInitQual(qual, parent)` (execExpr.c) — compile an implicitly-ANDed qual
 /// list into a single [`ExprState`]; empty qual → `None` (always-true).
 pub fn exec_init_qual<'mcx>(
-    qual: Option<&[Expr]>,
+    qual: Option<&[Expr<'mcx>]>,
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
@@ -2144,8 +2189,15 @@ pub fn exec_init_qual<'mcx>(
     // enum method `parent.as_agg_state()`) is back-filled by `ExecInitNode`
     // (`PlanStateNode::stamp_expr_parents`) once the node's enum is boxed and
     // address-stable. See `exec_init_expr`.
-    let _ = parent;
-    exec_init_qual_no_parent(qual, estate)
+    let mcx = estate.es_query_cxt;
+    let mut state = match exec_init_qual_no_parent(qual, estate)? {
+        None => return Ok(None),
+        Some(s) => s,
+    };
+    // C `state->parent->subPlan = lappend(...)`: drain SubPlans compiled in this
+    // qual into the parent head (see `drain_found_subplan_ids`).
+    drain_found_subplan_ids(mcx, parent, &mut state)?;
+    Ok(Some(state))
 }
 
 /// `ExecInitQual(qual, NULL)` (execExpr.c) — the parent-less variant of
@@ -2154,7 +2206,7 @@ pub fn exec_init_qual<'mcx>(
 /// that points at `estate` either way), so this compiles the identical program;
 /// kept as a distinct entry to mirror the C `ExecInitQual(qual, NULL)` shape.
 pub fn exec_init_qual_no_parent<'mcx>(
-    qual: Option<&[Expr]>,
+    qual: Option<&[Expr<'mcx>]>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     let qual = match qual {
@@ -2218,8 +2270,8 @@ pub fn exec_init_qual_no_parent<'mcx>(
 /// fix_opfuncids — an implicit-AND qual list folds each top-level element
 /// independently), then compiled by the parent-less [`exec_init_qual_no_parent`]
 /// (which sets `EEO_FLAG_IS_QUAL`, so `ExecQual` semantics apply: NULL → FALSE).
-pub fn exec_prepare_qual<'mcx>(
-    qual: Option<&[Expr]>,
+pub fn exec_prepare_qual<'a, 'mcx>(
+    qual: Option<&[Expr<'a>]>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     // MemoryContextSwitchTo(estate->es_query_cxt) is implicit: the compile in
@@ -2232,11 +2284,16 @@ pub fn exec_prepare_qual<'mcx>(
     let mcx = estate.es_query_cxt;
 
     // qual = (List *) expression_planner((Expr *) qual);
-    let mut planned: Vec<Expr> = Vec::with_capacity(qual.len());
+    //
+    // The `expression_planner_value` VALUE seam plans into `mcx` but is typed with
+    // the planner's notional `'static` erasure; re-clone the planned result back
+    // into the query context (`mcx`) so it is properly typed `Expr<'mcx>` for the
+    // compile below (`exec_init_expr_rec` threads the node tree as `'mcx`).
+    let mut planned: Vec<Expr<'mcx>> = Vec::with_capacity(qual.len());
     for q in qual {
-        let owned = q.clone_in(mcx)?;
-        planned
-            .push(backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, owned)?);
+        let owned = q.clone_in(mcx)?.erase_lifetime();
+        let pl = backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, owned)?;
+        planned.push(pl.clone_in(mcx)?);
     }
 
     // ExecInitQual(qual, NULL);
@@ -2245,7 +2302,7 @@ pub fn exec_prepare_qual<'mcx>(
 
 /// `ExecInitExprList(nodes, parent)` (execExpr.c).
 pub fn exec_init_expr_list<'mcx>(
-    nodes: &[Option<&Expr>],
+    nodes: &[Option<&Expr<'mcx>>],
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgVec<'mcx, Option<ExprState<'mcx>>>> {
@@ -2270,7 +2327,7 @@ pub fn exec_init_expr_list<'mcx>(
 /// `PlanState` (the C `ExecInitExprList(exprlist, NULL)`), so nothing in the
 /// transient eval state links into the permanent plan tree and JIT is disabled.
 pub fn exec_init_expr_list_no_parent<'mcx>(
-    nodes: &[Option<&Expr>],
+    nodes: &[Option<&Expr<'mcx>>],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgVec<'mcx, Option<ExprState<'mcx>>>> {
     let mcx = estate.es_query_cxt;
@@ -2309,8 +2366,8 @@ pub fn exec_init_expr_list_no_parent<'mcx>(
 /// SQL-function inlining), reached over the deps-less `expression_planner_value`
 /// VALUE seam (installed by the planner unit) so the executor does not depend on
 /// the optimizer owner directly.
-pub fn exec_prepare_expr<'mcx>(
-    node: &Expr,
+pub fn exec_prepare_expr<'a, 'mcx>(
+    node: &Expr<'a>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mcx = estate.es_query_cxt;
@@ -2322,9 +2379,13 @@ pub fn exec_prepare_expr<'mcx>(
     // node) + fix_opfuncids). The owning seam consumes the Expr by value and
     // returns the planned Expr allocated in `mcx`, so we clone the borrowed
     // `node` into the query context first.
-    let owned = node.clone_in(mcx)?;
+    // The VALUE seam plans into `mcx` but is typed with the planner's notional
+    // `'static` erasure; re-clone the planned result back into the query context
+    // so it is properly typed `Expr<'mcx>` for the compile below.
+    let owned = node.clone_in(mcx)?.erase_lifetime();
     let planned =
-        backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, owned)?;
+        backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, owned)?
+            .clone_in(mcx)?;
 
     // result = ExecInitExpr(node, NULL);  — the parent-less compile.
     exec_init_expr_no_parent(&planned, estate)
@@ -2346,7 +2407,7 @@ pub fn exec_prepare_expr<'mcx>(
 /// AND-clause with `ExecInitExpr` (NOT `ExecInitQual`), so the `IS_QUAL` flag is
 /// left clear — `ExecCheck` treats a NULL result as TRUE.
 pub fn exec_prepare_check<'mcx>(
-    qual: &[Expr],
+    qual: &[Expr<'mcx>],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     // MemoryContextSwitchTo(estate->es_query_cxt) is implicit: the compile in
@@ -2358,11 +2419,14 @@ pub fn exec_prepare_check<'mcx>(
     let mcx = estate.es_query_cxt;
 
     // qual = (List *) expression_planner((Expr *) qual);
-    let mut planned: Vec<Expr> = Vec::with_capacity(qual.len());
+    //
+    // Re-clone each planned element back into the query context (`mcx`); the VALUE
+    // seam is typed with the planner's notional `'static` erasure.
+    let mut planned: Vec<Expr<'mcx>> = Vec::with_capacity(qual.len());
     for q in qual {
-        let owned = q.clone_in(mcx)?;
-        planned
-            .push(backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, owned)?);
+        let owned = q.clone_in(mcx)?.erase_lifetime();
+        let pl = backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, owned)?;
+        planned.push(pl.clone_in(mcx)?);
     }
 
     // ExecInitCheck(qual, NULL): make_ands_explicit(qual) then
@@ -2378,7 +2442,7 @@ pub fn exec_prepare_check<'mcx>(
 /// program; kept as a distinct entry to mirror the C `ExecInitExpr(node, NULL)`
 /// call sites and to make the parent-less contract explicit).
 pub fn exec_init_expr_no_parent<'mcx>(
-    node: &Expr,
+    node: &Expr<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mcx = estate.es_query_cxt;
@@ -2410,7 +2474,7 @@ pub fn exec_init_expr_no_parent<'mcx>(
 /// domain-constraint registry owns it inside the same `mcx` bundle).
 pub fn compile_standalone_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    node: &Expr,
+    node: &Expr<'mcx>,
 ) -> PgResult<ExprState<'mcx>> {
     let mut state = make_expr_state();
     state.ext_params = 0;
@@ -2433,7 +2497,7 @@ pub fn compile_standalone_expr<'mcx>(
 /// `parent` head pointer is not threaded; only `es_link` is set, which is all
 /// the window-API argument evaluators (`WinGetFuncArg*`) need.
 pub fn exec_init_expr_no_parent_box<'mcx>(
-    node: &Expr,
+    node: &Expr<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     // C `ExecInitExpr(node, state->parent)`: a parent IS present, so a nested
@@ -2465,7 +2529,7 @@ pub fn exec_init_expr_no_parent_box<'mcx>(
 /// `ExprState` and returns them in the `WindowFuncExprState.args` shape
 /// (`Option<PgVec<PgBox<ExprState>>>`). `None` for an empty list (the C NIL).
 pub fn exec_init_expr_list_for_window<'mcx>(
-    nodes: &[Option<&Expr>],
+    nodes: &[Option<&Expr<'mcx>>],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>>> {
     if nodes.is_empty() {
@@ -2483,8 +2547,8 @@ pub fn exec_init_expr_list_for_window<'mcx>(
 }
 
 /// `ExecPrepareExprList(exprList, estate)` (execExpr.c).
-pub fn exec_prepare_expr_list<'mcx>(
-    expr_list: &[Expr],
+pub fn exec_prepare_expr_list<'a, 'mcx>(
+    expr_list: &[Expr<'a>],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>> {
     let mcx = estate.es_query_cxt;
@@ -2683,7 +2747,13 @@ pub fn exec_build_projection_info<'mcx>(
     // `slot` argument). Already a pool SlotId.
     let slot = planstate.ps_ResultTupleSlot;
 
-    exec_build_projection_info_impl(estate, target_list, econtext, slot, input_desc)
+    let mcx = estate.es_query_cxt;
+    let mut proj =
+        exec_build_projection_info_impl(estate, target_list, econtext, slot, input_desc)?;
+    // C `state->parent->subPlan = lappend(...)`: drain SubPlans compiled in the
+    // projection target list into the parent head (see `drain_found_subplan_ids`).
+    drain_found_subplan_ids(mcx, planstate, &mut proj.pi_state)?;
+    Ok(proj)
 }
 
 /// `ExecBuildUpdateProjection(targetList, evalTargetList, targetColnos, relDesc,
@@ -3315,11 +3385,11 @@ pub fn eval_const_test(
 /// here from `init_seams`, exactly as `eval_const_test` is installed onto the
 /// predtest seam crate.
 pub fn evaluate_expr_fallback(
-    mut expr: Expr,
+    expr: Expr<'static>,
     result_type: types_core::Oid,
     result_typmod: i32,
     result_collation: types_core::Oid,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // estate = CreateExecutorState();  — a throwaway executor state with its own
     // per-query memory context (the owned-model equivalent of CreateExecutorState
     // rooting an "ExecutorState" context under CurrentMemoryContext). The seam
@@ -3328,6 +3398,10 @@ pub fn evaluate_expr_fallback(
     let mcx = cx.mcx();
     let mut estate = EStateData::new_in(mcx);
 
+    // The seam hands the expression in at the planner's notional `'static`; clone
+    // it into this throwaway EState's per-query arena (`mcx`) to compile it, since
+    // `exec_init_expr_no_parent` threads the node tree as `'mcx` (Expr is invariant).
+    let mut expr = expr.clone_in(mcx)?;
     // fix_opfuncids((Node *) expr);  — make sure any opfuncids are filled in.
     backend_nodes_core::nodefuncs::fix_opfuncids(&mut expr)?;
 
@@ -3379,7 +3453,10 @@ pub fn evaluate_expr_fallback(
     drop(exprstate);
     drop(estate);
 
-    Ok(Expr::Const(result))
+    // `make_const` re-homed the by-reference image into the backend-lifetime
+    // const-value context (the `Const` carries `Datum<'static>`), so the result
+    // outlives this throwaway EState; erase to the seam's `'static` return.
+    Ok(Expr::Const(result).erase_lifetime())
 }
 
 thread_local! {

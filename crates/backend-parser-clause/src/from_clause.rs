@@ -365,7 +365,7 @@ fn transformJoinUsingClause<'mcx>(
     pstate: &mut ParseState<'mcx>,
     left_vars: &[Var],
     right_vars: &[Var],
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     /*
      * We cheat a little bit here by building an untransformed operator tree
      * whose leaves are the already-transformed Vars.  This requires collusion
@@ -440,7 +440,7 @@ fn transformJoinOnClause<'mcx>(
     pstate: &mut ParseState<'mcx>,
     quals: Node<'mcx>,
     my_namespace: &mut [ParseNamespaceItem<'mcx>],
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     /*
      * The namespace that the join expression should see is just the two
      * subtrees of the JOIN plus any outer references from upper pstate
@@ -642,7 +642,7 @@ fn transformRangeFunction<'mcx>(
                         ParseExprKind::EXPR_KIND_FROM_FUNCTION,
                     )?
                     .ok_or_else(|| elog_error("transformRangeFunction: transformExpr returned NULL"))?;
-                    let newfexpr_node = Node::mk_expr(mcx, newfexpr)?;
+                    let newfexpr_node = Node::mk_expr(mcx, newfexpr.clone_in(mcx)?)?;
 
                     /* nodeFunctionscan.c requires SRFs to be at top level */
                     check_srf_top_level(pstate, last_srf.as_ref(), &newfexpr_node)?;
@@ -671,7 +671,7 @@ fn transformRangeFunction<'mcx>(
             ParseExprKind::EXPR_KIND_FROM_FUNCTION,
         )?
         .ok_or_else(|| elog_error("transformRangeFunction: transformExpr returned NULL"))?;
-        let newfexpr_node = Node::mk_expr(mcx, newfexpr)?;
+        let newfexpr_node = Node::mk_expr(mcx, newfexpr.clone_in(mcx)?)?;
 
         /* nodeFunctionscan.c requires SRFs to be at top level */
         check_srf_top_level(pstate, last_srf.as_ref(), &newfexpr_node)?;
@@ -814,7 +814,11 @@ fn transformRangeTableFunc<'mcx>(
         ParseExprKind::EXPR_KIND_FROM_FUNCTION,
     )?
     .ok_or_else(|| elog_error("transformRangeTableFunc: rowexpr transformed to NULL"))?;
-    let mut rowexpr = coerce_to_specific_type(mcx, Some(pstate), row_t, TEXTOID, construct_name)?;
+    // Bring the parser-arena `'static` coerce result into `mcx` so the in-place
+    // collation assignment (which ties pstate and expr to one `'mcx`) and the
+    // `TableFunc<'mcx>` store share the arena lifetime (invariant `Expr`).
+    let mut rowexpr: Expr<'mcx> =
+        coerce_to_specific_type(mcx, Some(pstate), row_t, TEXTOID, construct_name)?.clone_in(mcx)?;
     assign_expr_collations(Some(pstate), &mut rowexpr)?;
     tf.rowexpr = Some(alloc_in(mcx, rowexpr)?);
 
@@ -829,8 +833,8 @@ fn transformRangeTableFunc<'mcx>(
         ParseExprKind::EXPR_KIND_FROM_FUNCTION,
     )?
     .ok_or_else(|| elog_error("transformRangeTableFunc: docexpr transformed to NULL"))?;
-    let mut docexpr =
-        coerce_to_specific_type(mcx, Some(pstate), doc_t, doc_type, construct_name)?;
+    let mut docexpr: Expr<'mcx> =
+        coerce_to_specific_type(mcx, Some(pstate), doc_t, doc_type, construct_name)?.clone_in(mcx)?;
     assign_expr_collations(Some(pstate), &mut docexpr)?;
     tf.docexpr = Some(alloc_in(mcx, docexpr)?);
 
@@ -894,21 +898,24 @@ fn transformRangeTableFunc<'mcx>(
         colcollations.push(lsyscache::get_typcollation::call(typid)?);
 
         // Transform the PATH and DEFAULT expressions.
-        let colexpr: Option<mcx::PgBox<'mcx, Expr>> = if let Some(ce) = rawc.colexpr.as_deref() {
+        let colexpr: Option<mcx::PgBox<'mcx, Expr<'mcx>>> = if let Some(ce) = rawc.colexpr.as_deref() {
             let t = transformExpr(
                 pstate,
                 Some(ce.clone_in(mcx)?),
                 ParseExprKind::EXPR_KIND_FROM_FUNCTION,
             )?
             .ok_or_else(|| elog_error("transformRangeTableFunc: colexpr transformed to NULL"))?;
-            let mut e = coerce_to_specific_type(mcx, Some(pstate), t, TEXTOID, construct_name)?;
+            // Bring the parser-arena `'static` coerce result into `mcx` (invariant
+            // `Expr`) for in-place collation assignment and the `'mcx` store.
+            let mut e: Expr<'mcx> =
+                coerce_to_specific_type(mcx, Some(pstate), t, TEXTOID, construct_name)?.clone_in(mcx)?;
             assign_expr_collations(Some(pstate), &mut e)?;
             Some(alloc_in(mcx, e)?)
         } else {
             None
         };
 
-        let coldefexpr: Option<mcx::PgBox<'mcx, Expr>> = if let Some(cde) = rawc.coldefexpr.as_deref() {
+        let coldefexpr: Option<mcx::PgBox<'mcx, Expr<'mcx>>> = if let Some(cde) = rawc.coldefexpr.as_deref() {
             let t = transformExpr(
                 pstate,
                 Some(cde.clone_in(mcx)?),
@@ -917,8 +924,9 @@ fn transformRangeTableFunc<'mcx>(
             .ok_or_else(|| {
                 elog_error("transformRangeTableFunc: coldefexpr transformed to NULL")
             })?;
-            let mut e =
-                coerce_to_specific_type_typmod(mcx, Some(pstate), t, typid, typmod, construct_name)?;
+            let mut e: Expr<'mcx> =
+                coerce_to_specific_type_typmod(mcx, Some(pstate), t, typid, typmod, construct_name)?
+                    .clone_in(mcx)?;
             assign_expr_collations(Some(pstate), &mut e)?;
             Some(alloc_in(mcx, e)?)
         } else {
@@ -978,8 +986,8 @@ fn transformRangeTableFunc<'mcx>(
             .ok_or_else(|| {
                 elog_error("transformRangeTableFunc: namespace uri transformed to NULL")
             })?;
-            let mut ns_uri =
-                coerce_to_specific_type(mcx, Some(pstate), t, TEXTOID, construct_name)?;
+            let mut ns_uri: Expr<'mcx> =
+                coerce_to_specific_type(mcx, Some(pstate), t, TEXTOID, construct_name)?.clone_in(mcx)?;
             assign_expr_collations(Some(pstate), &mut ns_uri)?;
             ns_uris.push(alloc_in(mcx, ns_uri)?);
 
@@ -1403,7 +1411,7 @@ fn transformJsonTableColumns<'mcx>(
         let typid: Oid;
         let typmod: i32;
         let mut typcoll: Oid = InvalidOid;
-        let colexpr: Option<Expr>;
+        let colexpr: Option<Expr<'mcx>>;
 
         match rawc.coltype {
             JsonTableColumnType::JTC_FOR_ORDINALITY => {
@@ -1458,14 +1466,18 @@ fn transformJsonTableColumns<'mcx>(
                 )?;
                 let jfe_node = Node::mk_json_func_expr(mcx, jfe)?;
 
-                let mut ce = transformExpr(
+                // Bring the parser-arena `'static` transform result into `mcx`
+                // (invariant `Expr`) for in-place collation assignment and the
+                // `'mcx` `colvalexprs` store below.
+                let mut ce: Expr<'mcx> = transformExpr(
                     pstate,
                     Some(jfe_node),
                     ParseExprKind::EXPR_KIND_FROM_FUNCTION,
                 )?
                 .ok_or_else(|| {
                     elog_error("transformJsonTableColumns: column transformed to NULL")
-                })?;
+                })?
+                .clone_in(mcx)?;
                 assign_expr_collations(Some(pstate), &mut ce)?;
 
                 typid = expr_type(Some(&ce))?;
@@ -1663,7 +1675,7 @@ fn transformJsonTable<'mcx>(
         ParseExprKind::EXPR_KIND_FROM_FUNCTION,
     )?
     .ok_or_else(|| elog_error("transformJsonTable: docexpr transformed to NULL"))?;
-    tf.docexpr = Some(alloc_in(mcx, docexpr)?);
+    tf.docexpr = Some(alloc_in(mcx, docexpr.clone_in(mcx)?)?);
 
     // Create the row-pattern plan (also fills tf->colvalexprs etc.).
     let plan = transformJsonTableColumns(
@@ -1804,7 +1816,7 @@ fn transformRangeTableSample<'mcx>(
      * assign collations now, because assign_query_collations() doesn't
      * examine any substructure of RTEs.
      */
-    let mut fargs: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    let mut fargs: PgVec<'mcx, Expr<'mcx>> = PgVec::new_in(mcx);
     for (larg, &argtype) in rts.args.iter().zip(tsm.parameterTypes.iter()) {
         let arg = transformExpr(
             pstate,
@@ -1812,7 +1824,8 @@ fn transformRangeTableSample<'mcx>(
             ParseExprKind::EXPR_KIND_FROM_FUNCTION,
         )?
         .ok_or_else(|| elog_error("transformRangeTableSample: transformExpr returned NULL"))?;
-        let mut arg = coerce_to_specific_type(mcx, Some(pstate), arg, argtype, "TABLESAMPLE")?;
+        let mut arg: Expr<'mcx> =
+            coerce_to_specific_type(mcx, Some(pstate), arg, argtype, "TABLESAMPLE")?.clone_in(mcx)?;
         assign_expr_collations(Some(pstate), &mut arg)?;
         fargs.try_reserve(1).map_err(|_| mcx.oom(0))?;
         fargs.push(arg);
@@ -1838,7 +1851,8 @@ fn transformRangeTableSample<'mcx>(
             ParseExprKind::EXPR_KIND_FROM_FUNCTION,
         )?
         .ok_or_else(|| elog_error("transformRangeTableSample: transformExpr returned NULL"))?;
-        let mut arg = coerce_to_specific_type(mcx, Some(pstate), arg, FLOAT8OID, "REPEATABLE")?;
+        let mut arg: Expr<'mcx> =
+            coerce_to_specific_type(mcx, Some(pstate), arg, FLOAT8OID, "REPEATABLE")?.clone_in(mcx)?;
         assign_expr_collations(Some(pstate), &mut arg)?;
         tablesample.repeatable = Some(alloc::boxed::Box::new(arg));
     } else {
@@ -2223,7 +2237,7 @@ fn transform_from_clause_item_join<'mcx>(
 
         /* Construct the generated JOIN ON clause */
         let quals = transformJoinUsingClause(mcx, pstate, &l_usingvars, &r_usingvars)?;
-        j.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, quals)?)?);
+        j.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, quals.clone_in(mcx)?)?)?);
     } else if j.quals.is_some() {
         /* User-written ON-condition; transform it */
         let quals_node = j
@@ -2232,7 +2246,7 @@ fn transform_from_clause_item_join<'mcx>(
             .unwrap()
             .clone_in(mcx)?;
         let quals = transformJoinOnClause(mcx, pstate, quals_node, &mut my_namespace)?;
-        j.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, quals)?)?);
+        j.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, quals.clone_in(mcx)?)?)?);
     } else {
         /* CROSS JOIN: no quals */
     }
@@ -2507,7 +2521,7 @@ fn buildMergedJoinVar<'mcx>(
      * case we insert a RelabelType.  We never need coerce_type_typmod.
      * `l_is_var` carries "the produced node IS the input Var" (C pointer id).
      */
-    let (l_node, l_is_var) = if l_colvar.vartype != outcoltype {
+    let (l_node, l_is_var): (Expr<'mcx>, bool) = if l_colvar.vartype != outcoltype {
         let coerced = coerce_type(
             mcx,
             Some(pstate),
@@ -2520,7 +2534,9 @@ fn buildMergedJoinVar<'mcx>(
             -1,
         )?
         .ok_or_else(|| elog_error("buildMergedJoinVar: coerce_type returned NULL"))?;
-        (coerced, false)
+        // coerce_type yields the parser-arena `'static`; bring it into `mcx` so
+        // it joins `make_relabel_type`/`Expr::Var` results at the arena lifetime.
+        (coerced.clone_in(mcx)?, false)
     } else if l_colvar.vartypmod != outcoltypmod {
         (
             make_relabel_type(
@@ -2536,7 +2552,7 @@ fn buildMergedJoinVar<'mcx>(
         (Expr::Var(l_colvar.clone()), true)
     };
 
-    let (r_node, r_is_var) = if r_colvar.vartype != outcoltype {
+    let (r_node, r_is_var): (Expr<'mcx>, bool) = if r_colvar.vartype != outcoltype {
         let coerced = coerce_type(
             mcx,
             Some(pstate),
@@ -2549,7 +2565,7 @@ fn buildMergedJoinVar<'mcx>(
             -1,
         )?
         .ok_or_else(|| elog_error("buildMergedJoinVar: coerce_type returned NULL"))?;
-        (coerced, false)
+        (coerced.clone_in(mcx)?, false)
     } else if r_colvar.vartypmod != outcoltypmod {
         (
             make_relabel_type(
@@ -2568,7 +2584,7 @@ fn buildMergedJoinVar<'mcx>(
     /*
      * Choose what to emit
      */
-    let (mut res_node, which): (Expr, MergedWhich) = match jointype {
+    let (mut res_node, which): (Expr<'mcx>, MergedWhich) = match jointype {
         JoinType::JOIN_INNER => {
             /* We can use either var; prefer non-coerced one if available. */
             if l_is_var {
@@ -2816,7 +2832,7 @@ fn nodes_ptr_eq<'n>(a: &Node<'n>, b: &Node<'n>) -> bool {
 }
 
 /// `(Node *) expr` viewed for `exprType`/etc. — wraps a borrowed [`Node::Expr`].
-fn node_as_expr<'a>(node: &'a Node<'_>) -> Option<&'a Expr> {
+fn node_as_expr<'a, 'mcx>(node: &'a Node<'mcx>) -> Option<&'a Expr<'mcx>> {
     node.as_expr()
 }
 
@@ -2997,7 +3013,7 @@ fn clone_namespace<'mcx>(
 
 /// Borrowed `Expr` view of the transformed func expr nodes for
 /// `assign_list_collations`, which mutates the `Expr`s in place.
-fn funcexprs_to_expr_vec<'mcx>(mcx: Mcx<'mcx>, funcexprs: &[NodePtr<'_>]) -> PgResult<Vec<Expr>> {
+fn funcexprs_to_expr_vec<'mcx>(mcx: Mcx<'mcx>, funcexprs: &[NodePtr<'_>]) -> PgResult<Vec<Expr<'mcx>>> {
     let mut v = Vec::with_capacity(funcexprs.len());
     for n in funcexprs.iter() {
         match n.as_expr() {
@@ -3012,7 +3028,7 @@ fn funcexprs_to_expr_vec<'mcx>(mcx: Mcx<'mcx>, funcexprs: &[NodePtr<'_>]) -> PgR
 fn store_back_funcexprs<'mcx>(
     mcx: Mcx<'mcx>,
     funcexprs: &mut [NodePtr<'mcx>],
-    exprs: Vec<Expr>,
+    exprs: Vec<Expr<'mcx>>,
 ) -> PgResult<()> {
     debug_assert_eq!(funcexprs.len(), exprs.len());
     for (slot, e) in funcexprs.iter_mut().zip(exprs.into_iter()) {

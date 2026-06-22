@@ -139,3 +139,21 @@ seam_core::seam!(
         object: &ObjectAddress,
     ) -> PgResult<types_catalog::pg_event_trigger::SqlDropObjectInfo>
 );
+
+seam_core::seam!(
+    /// The per-command descriptive-field computation
+    /// `pg_event_trigger_ddl_commands` (`event_trigger.c`) performs for one
+    /// `CollectedCommand` whose address is an ordinary object:
+    /// `getObjectIdentity(addr, true)`, `getObjectTypeDescription(addr, true)`,
+    /// and the namespace lookup. Owned by objectaddress (the identity / type /
+    /// `ObjectProperty` machinery lives there); `event_trigger.c`'s caller only
+    /// owns the `currentEventTriggerState->commandList` it iterates.
+    ///
+    /// `Ok(None)` mirrors the C `if (identity == NULL) continue;` (object
+    /// dropped in the same command). Otherwise `(identity, type, schema)` where
+    /// `schema` is `None` for a schema-less object class.
+    pub fn event_trigger_describe_command_object<'mcx>(
+        mcx: Mcx<'mcx>,
+        object: &ObjectAddress,
+    ) -> PgResult<Option<(String, String, Option<String>)>>
+);

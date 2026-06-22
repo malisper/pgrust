@@ -26,6 +26,10 @@ types-scan = { path = "../types-scan" }
 types-xml = { path = "../types-xml" }
 types-resowner = { path = "../types-resowner" }
 backend-executor-spi-seams = { path = "../backend-executor-spi-seams" }
+# ts_stat SPI cursor leg: the exec_stat_query seam (homed on the tsvector ext
+# seam crate) + the one-tsvector-column type check.
+backend-utils-adt-tsvector-ext-seams = { path = "../backend-utils-adt-tsvector-ext-seams" }
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-catalog-heap = { path = "../backend-catalog-heap" }

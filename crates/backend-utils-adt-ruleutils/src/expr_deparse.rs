@@ -88,6 +88,7 @@ const BOOLOID: u32 = 16;
 const INT4OID: u32 = 23;
 const TEXTOID: u32 = 25;
 const UNKNOWNOID: u32 = 705;
+const JSONBOID: u32 = 3802;
 const NUMERICOID: u32 = 1700;
 
 /// `utils/fmgroids.h` builtin-function OIDs referenced by `get_func_sql_syntax`.
@@ -336,7 +337,7 @@ fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx
 /// the live `'mcx` lifetime so the F2 ORDER-BY renderer can consult it.
 fn clone_tle_vec<'mcx>(
     mcx: Mcx<'mcx>,
-    v: &[types_nodes::primnodes::TargetEntry<'static>],
+    v: &[types_nodes::primnodes::TargetEntry<'_>],
 ) -> PgResult<PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>> {
     let mut out = PgVec::new_in(mcx);
     out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
@@ -585,6 +586,188 @@ fn get_json_path_spec(
     } else {
         let n = Node::mk_expr(mcx, path_spec.clone_in(mcx)?)?;
         get_rule_expr(&n, context, showimplicit)
+    }
+}
+
+/// `get_json_format(format, buf)` (ruleutils.c:11627) — parse back a JsonFormat
+/// node into a plain text buffer. 1:1 port.
+fn get_json_format(format: &types_nodes::primnodes::JsonFormat, buf: &mut String) {
+    use types_nodes::primnodes::JsonEncoding::*;
+    use types_nodes::primnodes::JsonFormatType::*;
+
+    if format.format_type == JS_FORMAT_DEFAULT {
+        return;
+    }
+
+    buf.push_str(if format.format_type == JS_FORMAT_JSONB {
+        " FORMAT JSONB"
+    } else {
+        " FORMAT JSON"
+    });
+
+    if format.encoding != JS_ENC_DEFAULT {
+        let encoding = match format.encoding {
+            JS_ENC_UTF16 => "UTF16",
+            JS_ENC_UTF32 => "UTF32",
+            _ => "UTF8",
+        };
+        buf.push_str(" ENCODING ");
+        buf.push_str(encoding);
+    }
+}
+
+/// `get_json_returning(returning, buf, json_format_by_default)`
+/// (ruleutils.c:11652) — parse back a JsonReturning structure into a plain text
+/// buffer. 1:1 port.
+fn get_json_returning(
+    mcx: Mcx<'_>,
+    returning: &types_nodes::primnodes::JsonReturning,
+    buf: &mut String,
+    json_format_by_default: bool,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonFormatType::{JS_FORMAT_JSON, JS_FORMAT_JSONB};
+
+    if !oid_is_valid(returning.typid) {
+        return Ok(());
+    }
+
+    let tname = format_type_with_typemod(mcx, returning.typid, returning.typmod)?;
+    buf.push_str(" RETURNING ");
+    buf.push_str(tname.as_str());
+
+    // returning->format is a NOT NULL field in C.
+    let format = returning
+        .format
+        .as_ref()
+        .ok_or_else(|| missing_field("JsonReturning.format"))?;
+
+    let default_format = if returning.typid == JSONBOID {
+        JS_FORMAT_JSONB
+    } else {
+        JS_FORMAT_JSON
+    };
+    if !json_format_by_default || format.format_type != default_format {
+        get_json_format(format, buf);
+    }
+    Ok(())
+}
+
+/// `get_json_constructor(ctor, context, showimplicit)` (ruleutils.c:11672) —
+/// parse back a JsonConstructorExpr node. 1:1 port.
+fn get_json_constructor(
+    ctor: &types_nodes::primnodes::JsonConstructorExpr,
+    context: &mut DeparseContext<'_>,
+    _showimplicit: bool,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonConstructorType::*;
+
+    if ctor.r#type == JSCTOR_JSON_OBJECTAGG {
+        return get_json_agg_constructor(ctor, context, "JSON_OBJECTAGG", true);
+    } else if ctor.r#type == JSCTOR_JSON_ARRAYAGG {
+        return get_json_agg_constructor(ctor, context, "JSON_ARRAYAGG", false);
+    }
+
+    let funcname = match ctor.r#type {
+        JSCTOR_JSON_OBJECT => "JSON_OBJECT",
+        JSCTOR_JSON_ARRAY => "JSON_ARRAY",
+        JSCTOR_JSON_PARSE => "JSON",
+        JSCTOR_JSON_SCALAR => "JSON_SCALAR",
+        JSCTOR_JSON_SERIALIZE => "JSON_SERIALIZE",
+        other => {
+            return Err(elog_error(format!("invalid JsonConstructorType {}", other as u32)))
+        }
+    };
+
+    str_(context, funcname)?;
+    ch_(context, b'(')?;
+
+    let is_json_object = ctor.r#type == JSCTOR_JSON_OBJECT;
+    for (curridx, arg) in ctor.args.iter().enumerate() {
+        if curridx > 0 {
+            let sep = if is_json_object && (curridx % 2) != 0 {
+                " : "
+            } else {
+                ", "
+            };
+            str_(context, sep)?;
+        }
+        get_rule_expr_e(arg, context, true)?;
+    }
+
+    let mut options = String::new();
+    get_json_constructor_options(context.buf.allocator(), ctor, &mut options)?;
+    str_(context, &options)?;
+    ch_(context, b')')?;
+    Ok(())
+}
+
+/// `get_json_constructor_options(ctor, buf)` (ruleutils.c:11738) — append the
+/// JSON constructor options (ABSENT/NULL ON NULL, WITH UNIQUE KEYS, RETURNING)
+/// into a plain text buffer. 1:1 port.
+fn get_json_constructor_options(
+    mcx: Mcx<'_>,
+    ctor: &types_nodes::primnodes::JsonConstructorExpr,
+    buf: &mut String,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonConstructorType::*;
+
+    if ctor.absent_on_null {
+        if ctor.r#type == JSCTOR_JSON_OBJECT || ctor.r#type == JSCTOR_JSON_OBJECTAGG {
+            buf.push_str(" ABSENT ON NULL");
+        }
+    } else if ctor.r#type == JSCTOR_JSON_ARRAY || ctor.r#type == JSCTOR_JSON_ARRAYAGG {
+        buf.push_str(" NULL ON NULL");
+    }
+
+    if ctor.unique {
+        buf.push_str(" WITH UNIQUE KEYS");
+    }
+
+    // Append RETURNING clause if needed; JSON() and JSON_SCALAR() don't support
+    // one.
+    if ctor.r#type != JSCTOR_JSON_PARSE && ctor.r#type != JSCTOR_JSON_SCALAR {
+        let returning = ctor
+            .returning
+            .as_ref()
+            .ok_or_else(|| missing_field("JsonConstructorExpr.returning"))?;
+        get_json_returning(mcx, returning, buf, true)?;
+    }
+    Ok(())
+}
+
+/// `get_json_agg_constructor(ctor, context, funcname, is_json_objectagg)`
+/// (ruleutils.c:11768) — parse back an aggregate JsonConstructorExpr node. 1:1
+/// port.
+fn get_json_agg_constructor(
+    ctor: &types_nodes::primnodes::JsonConstructorExpr,
+    context: &mut DeparseContext<'_>,
+    funcname: &str,
+    is_json_objectagg: bool,
+) -> PgResult<()> {
+    let mut options = String::new();
+    get_json_constructor_options(context.buf.allocator(), ctor, &mut options)?;
+
+    let func = ctor
+        .func
+        .as_deref()
+        .ok_or_else(|| missing_field("JsonConstructorExpr.func"))?;
+
+    match func {
+        Expr::Aggref(_) => get_agg_expr_helper(
+            func,
+            context,
+            func,
+            Some(funcname),
+            Some(&options),
+            is_json_objectagg,
+        ),
+        Expr::WindowFunc(_) => {
+            get_windowfunc_expr_helper(func, context, Some(funcname), Some(&options), is_json_objectagg)
+        }
+        other => Err(elog_error(format!(
+            "invalid JsonConstructorExpr underlying node type: {:?}",
+            core::mem::discriminant(other)
+        ))),
     }
 }
 
@@ -966,7 +1149,7 @@ fn get_xmltable(
 /// `Expr` enum (the parent passed to nested paren/coercion recursions is `expr`
 /// itself, threaded as an `&Expr`).
 fn get_rule_expr_e(
-    expr: &Expr,
+    expr: &Expr<'_>,
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
@@ -1635,18 +1818,101 @@ fn get_rule_expr_e(
                 str_(context, &opcbuf)?;
             }
         }
-        Expr::JsonValueExpr(_) => {
-            return Err(deferred("JsonValueExpr (get_json_format; JSON deparser family)"))
+        Expr::JsonValueExpr(jve) => {
+            // C `case T_JsonValueExpr:` (ruleutils.c:10488).
+            //   get_rule_expr((Node *) jve->raw_expr, context, false);
+            //   get_json_format(jve->format, context->buf);
+            if let Some(raw) = jve.raw_expr.as_deref() {
+                get_rule_expr_e(raw, context, false)?;
+            }
+            if let Some(format) = jve.format.as_ref() {
+                let mut tmp = String::new();
+                get_json_format(format, &mut tmp);
+                str_(context, &tmp)?;
+            }
         }
-        Expr::JsonConstructorExpr(_) => {
-            return Err(deferred(
-                "JsonConstructorExpr (get_json_constructor; JSON deparser family)",
-            ))
+        Expr::JsonConstructorExpr(ctor) => {
+            // C `case T_JsonConstructorExpr:` (ruleutils.c:10497).
+            get_json_constructor(ctor, context, false)?;
         }
-        Expr::JsonExpr(_) => {
-            return Err(deferred(
-                "JsonExpr (get_json_table / JSON_*_OP renderer; JSON deparser family)",
-            ))
+        Expr::JsonExpr(jexpr) => {
+            // C `case T_JsonExpr:` (ruleutils.c:10537).
+            use types_nodes::primnodes::JsonBehaviorType::{
+                JSON_BEHAVIOR_FALSE, JSON_BEHAVIOR_NULL,
+            };
+            use types_nodes::primnodes::JsonExprOp::{
+                JSON_EXISTS_OP, JSON_QUERY_OP, JSON_VALUE_OP,
+            };
+
+            let opname = match jexpr.op {
+                JSON_EXISTS_OP => "JSON_EXISTS(",
+                JSON_QUERY_OP => "JSON_QUERY(",
+                JSON_VALUE_OP => "JSON_VALUE(",
+                other => {
+                    return Err(elog_error(format!(
+                        "unrecognized JsonExpr op: {}",
+                        other as u32
+                    )))
+                }
+            };
+            str_(context, opname)?;
+
+            if let Some(fe) = jexpr.formatted_expr.as_deref() {
+                get_rule_expr_e(fe, context, showimplicit)?;
+            }
+
+            str_(context, ", ")?;
+
+            let path_spec = jexpr
+                .path_spec
+                .as_deref()
+                .ok_or_else(|| missing_field("JsonExpr.path_spec"))?;
+            get_json_path_spec(path_spec, context, showimplicit)?;
+
+            if !jexpr.passing_values.is_empty() {
+                str_(context, " PASSING ")?;
+                let mut needcomma = false;
+                let mcx = context.buf.allocator();
+                for (name, val) in jexpr.passing_names.iter().zip(jexpr.passing_values.iter()) {
+                    if needcomma {
+                        str_(context, ", ")?;
+                    }
+                    needcomma = true;
+
+                    get_rule_expr_e(val, context, showimplicit)?;
+                    let q = quote_identifier(mcx, name)?;
+                    str_(context, " AS ")?;
+                    str_(context, q.as_str())?;
+                }
+            }
+
+            // returning is a NOT NULL field in C.
+            let returning = jexpr
+                .returning
+                .as_ref()
+                .ok_or_else(|| missing_field("JsonExpr.returning"))?;
+            if jexpr.op != JSON_EXISTS_OP || returning.typid != BOOLOID {
+                let mut tmp = String::new();
+                get_json_returning(
+                    context.buf.allocator(),
+                    returning,
+                    &mut tmp,
+                    jexpr.op == JSON_QUERY_OP,
+                )?;
+                str_(context, &tmp)?;
+            }
+
+            get_json_expr_options(
+                jexpr,
+                context,
+                if jexpr.op != JSON_EXISTS_OP {
+                    JSON_BEHAVIOR_NULL
+                } else {
+                    JSON_BEHAVIOR_FALSE
+                },
+            )?;
+
+            ch_(context, b')')?;
         }
         // Planner-internal / not-in-scope expression nodes (PlaceHolderVar,
         // RestrictInfo, and any variant the deparser never legitimately walks):
@@ -2625,11 +2891,39 @@ fn get_windowfunc_expr_helper(
         }
         Ok(())
     } else {
-        // EXPLAIN case: scan the namespace stack for a matching WindowAgg plan
-        // node and print its winname — needs deparse_namespace.plan (#159).
-        Err(deferred(
-            "get_windowfunc_expr OVER (EXPLAIN WindowAgg namespace scan; deparse_namespace.plan / #159)",
-        ))
+        // EXPLAIN case: search the namespace stack for a matching WindowAgg
+        // node (probably it's always the first entry), and print winname.
+        // C: foreach(l, context->namespaces) { dpns; if (dpns->plan &&
+        //    IsA(dpns->plan, WindowAgg)) { wagg = ...; if (wagg->winref ==
+        //    wfunc->winref) { append quote_identifier(wagg->winname); break; } } }
+        let mut found = false;
+        // Resolve the winname first (immutable borrow of context.namespaces),
+        // then emit it, so the later &mut context append doesn't alias.
+        let mut winname: Option<PgString<'_>> = None;
+        for dpns in context.namespaces.iter() {
+            if let Some(plan) = dpns.plan.as_deref() {
+                if let Some(wagg) = plan.as_windowagg() {
+                    if wagg.winref == w.winref {
+                        found = true;
+                        if let Some(name) = wagg.winname.as_deref() {
+                            winname = Some(quote_identifier(mcx, name)?);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if found {
+            if let Some(q) = winname {
+                str_(context, q.as_str())?;
+            }
+            Ok(())
+        } else {
+            Err(elog_error(format!(
+                "could not find window clause for winref {}",
+                w.winref
+            )))
+        }
     }
 }
 
@@ -2768,7 +3062,7 @@ fn find_param_referent<'mcx>(
     mcx: Mcx<'mcx>,
     param: &types_nodes::primnodes::Param,
     context: &DeparseContext<'mcx>,
-) -> PgResult<Option<(Expr, usize)>> {
+) -> PgResult<Option<(Expr<'mcx>, usize)>> {
     use types_nodes::nodes::ntag;
     use types_nodes::primnodes::PARAM_EXEC;
 
@@ -3033,7 +3327,7 @@ fn get_subplan_expr(
 /// (c) `PARAM_EXTERN` whose outermost namespace supplies a function arg name —
 ///     render the (optionally qualified) argument name;
 /// (d) otherwise — `$N`.
-pub fn get_parameter(expr: &Expr, context: &mut DeparseContext<'_>) -> PgResult<()> {
+pub fn get_parameter<'mcx>(expr: &Expr<'_>, context: &mut DeparseContext<'mcx>) -> PgResult<()> {
     use types_nodes::primnodes::PARAM_EXTERN;
 
     let param = match expr {
@@ -3049,7 +3343,9 @@ pub fn get_parameter(expr: &Expr, context: &mut DeparseContext<'_>) -> PgResult<
         // is dpns.ancestors[ancestor_index]; clone it out before mutating dpns.
         let target = {
             let dpns = &context.namespaces[0];
-            mcx::alloc_in(mcx, dpns.ancestors[ancestor_index].clone_in(mcx)?)?
+            let cloned: types_nodes::nodes::Node<'mcx> =
+                dpns.ancestors[ancestor_index].clone_in(mcx)?;
+            mcx::alloc_in(mcx, cloned)?
         };
         let save = crate::push_ancestor_plan(mcx, &mut context.namespaces[0], ancestor_index, &target)?;
 
@@ -3689,13 +3985,13 @@ fn get_special_variable<'mcx>(node: &Node<'mcx>, context: &mut DeparseContext<'m
 /// `get_special_variable` (from `get_variable`, no callback_arg) and
 /// `get_agg_combine_expr` (from `get_agg_expr_helper`, callback_arg is the
 /// original Aggref whose combine split is being deparsed).
-enum RsvCallback<'a> {
+enum RsvCallback<'a, 'mcx> {
     SpecialVariable,
-    AggCombineExpr(&'a Expr),
+    AggCombineExpr(&'a Expr<'mcx>),
 }
 
-impl<'a> RsvCallback<'a> {
-    fn invoke<'mcx>(&self, node: &Node<'mcx>, context: &mut DeparseContext<'mcx>) -> PgResult<()> {
+impl<'a, 'mcx> RsvCallback<'a, 'mcx> {
+    fn invoke<'n>(&self, node: &Node<'n>, context: &mut DeparseContext<'n>) -> PgResult<()> {
         match self {
             RsvCallback::SpecialVariable => get_special_variable(node, context),
             RsvCallback::AggCombineExpr(original_aggref) => {
@@ -3713,7 +4009,7 @@ impl<'a> RsvCallback<'a> {
 fn resolve_special_varno<'mcx>(
     node: &Node<'mcx>,
     context: &mut DeparseContext<'mcx>,
-    callback: &RsvCallback<'_>,
+    callback: &RsvCallback<'_, '_>,
 ) -> PgResult<()> {
     // If it's not a Var, invoke the callback.
     let var = match node.as_var() {
@@ -4697,7 +4993,7 @@ fn get_simple_binary_op_name(op: &OpExpr) -> Option<u8> {
  * -------------------------------------------------------------------------- */
 
 /// `&Const` from an `&Expr` known to be a Const.
-fn expr_as_const<'a>(expr: &'a Expr) -> PgResult<&'a Const> {
+fn expr_as_const<'a, 'mcx>(expr: &'a Expr<'mcx>) -> PgResult<&'a Const<'mcx>> {
     match expr {
         Expr::Const(c) => Ok(c),
         _ => Err(elog_error("expected Const".to_string())),
@@ -4705,7 +5001,7 @@ fn expr_as_const<'a>(expr: &'a Expr) -> PgResult<&'a Const> {
 }
 
 /// `list_nth(args, n)` for a `Vec<Expr>` argument list.
-fn expr_arg(args: &[Expr], n: usize) -> PgResult<&Expr> {
+fn expr_arg<'a, 'mcx>(args: &'a [Expr<'mcx>], n: usize) -> PgResult<&'a Expr<'mcx>> {
     args.get(n).ok_or_else(|| elog_error(format!("argument index {n} out of range")))
 }
 

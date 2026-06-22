@@ -127,9 +127,9 @@ seam_core::seam!(
     /// `AppendRelInfo **appinfos`). Used by `build_child_join_reltarget`.
     pub fn adjust_appendrel_attrs_node(
         root: &mut PlannerInfo,
-        node: Expr,
+        node: Expr<'static>,
         appinfos: &[AppendRelInfo],
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 
 /* ---- costsize.c (size estimation) -------------------------------------- */
@@ -226,5 +226,5 @@ seam_core::seam!(
     /// `location = -1` (relnode.c `set_joinrel_partition_key_exprs`). `larg`/
     /// `rarg` are the partition-key expression handles; the owner builds the node
     /// and returns it for interning into `node_arena`.
-    pub fn make_coalesce_expr(larg: &Expr, rarg: &Expr) -> Expr
+    pub fn make_coalesce_expr(larg: &Expr<'static>, rarg: &Expr<'static>) -> Expr<'static>
 );

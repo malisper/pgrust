@@ -66,7 +66,7 @@ seam_core::seam!(
         root: &types_pathnodes::PlannerInfo,
         subqueryid: usize,
         colno: usize,
-    ) -> types_error::PgResult<types_nodes::primnodes::Expr>
+    ) -> types_error::PgResult<types_nodes::primnodes::Expr<'static>>
 );
 
 seam_core::seam!(

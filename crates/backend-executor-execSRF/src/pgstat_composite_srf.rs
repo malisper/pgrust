@@ -43,6 +43,8 @@ const PG_STAT_GET_ARCHIVER: Oid = 3195;
 const PG_STAT_GET_REPLICATION_SLOT: Oid = 6169;
 /// `pg_stat_get_subscription_stats(oid)` (OID 6231).
 const PG_STAT_GET_SUBSCRIPTION_STATS: Oid = 6231;
+/// `pg_stat_get_backend_wal(int4)` (OID 6313).
+const PG_STAT_GET_BACKEND_WAL: Oid = 6313;
 
 const INT8OID: Oid = 20;
 const TEXTOID: Oid = 25;
@@ -57,6 +59,7 @@ pub(crate) fn register_pgstat_composite_srfs() {
     register_srf(PG_STAT_GET_ARCHIVER, pg_stat_get_archiver);
     register_srf(PG_STAT_GET_REPLICATION_SLOT, pg_stat_get_replication_slot);
     register_srf(PG_STAT_GET_SUBSCRIPTION_STATS, pg_stat_get_subscription_stats);
+    register_srf(PG_STAT_GET_BACKEND_WAL, pg_stat_get_backend_wal);
 }
 
 /// The per-query memory context the SRF caller threads onto the executor frame.
@@ -91,13 +94,14 @@ fn cbuf_str(buf: &[u8]) -> &str {
 //  pg_stat_get_wal (pgstatfuncs.c:1700) — pg_stat_wal_build_tuple, 5 cols.
 // ===========================================================================
 
-fn pg_stat_get_wal<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
-    let mcx = srf_mcx(fcinfo);
-    // C: wal_stats = pgstat_fetch_stat_wal();
-    let wal_stats = backend_utils_activity_pgstat_wal::pgstat_fetch_stat_wal()?;
-    let wc = &wal_stats.wal_counters;
-    let reset_ts = wal_stats.stat_reset_timestamp;
-
+/// `pg_stat_wal_build_tuple(wal_counters, stat_reset_timestamp)`
+/// (pgstatfuncs.c:1627) — the shared helper for `pg_stat_get_wal()` and
+/// `pg_stat_get_backend_wal()` returning one 5-column tuple.
+fn pg_stat_wal_build_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    wc: &types_pgstat::activity_pgstat::PgStat_WalCounters,
+    reset_ts: types_core::primitive::TimestampTz,
+) -> PgResult<Datum<'mcx>> {
     let coltypes = [INT8OID, INT8OID, NUMERICOID, INT8OID, TIMESTAMPTZOID];
     let mut values: [Datum<'mcx>; 5] = [
         Datum::from_i64(wc.wal_records),
@@ -113,6 +117,45 @@ fn pg_stat_get_wal<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResul
         nulls[4] = true;
     }
     record_from_values::call(mcx, &coltypes, &values, &nulls)
+}
+
+fn pg_stat_get_wal<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
+    let mcx = srf_mcx(fcinfo);
+    // C: wal_stats = pgstat_fetch_stat_wal();
+    let wal_stats = backend_utils_activity_pgstat_wal::pgstat_fetch_stat_wal()?;
+    pg_stat_wal_build_tuple(mcx, &wal_stats.wal_counters, wal_stats.stat_reset_timestamp)
+}
+
+// ===========================================================================
+//  pg_stat_get_backend_wal (pgstatfuncs.c:1678) — WAL stats for a backend by
+//  pid, one composite row, or NULL when the pid is not a tracked backend.
+// ===========================================================================
+
+fn pg_stat_get_backend_wal<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
+    let mcx = srf_mcx(fcinfo);
+    // C: pid = PG_GETARG_INT32(0);
+    let pid = arg_i32(fcinfo, 0);
+
+    // C: backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL);
+    //    if (!backend_stats) PG_RETURN_NULL();
+    let backend_stats =
+        match backend_utils_activity_pgstat_backend::pgstat_fetch_stat_backend_by_pid(pid, None)? {
+            Some(b) => b,
+            None => {
+                fcinfo.isnull = true;
+                return Ok(Datum::null());
+            }
+        };
+
+    // C: bktype_stats = backend_stats->wal_counters;
+    //    return pg_stat_wal_build_tuple(bktype_stats, backend_stats->stat_reset_timestamp);
+    pg_stat_wal_build_tuple(
+        mcx,
+        &backend_stats.wal_counters,
+        backend_stats.stat_reset_timestamp,
+    )
 }
 
 // ===========================================================================
@@ -306,4 +349,14 @@ fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Oid {
         .expect("pgstat composite SRF: missing oid arg")
         .value
         .as_oid()
+}
+
+/// `PG_GETARG_INT32(i)`.
+fn arg_i32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
+    fcinfo
+        .args
+        .get(i)
+        .expect("pgstat composite SRF: missing int4 arg")
+        .value
+        .as_i32()
 }

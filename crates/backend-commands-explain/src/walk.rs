@@ -123,15 +123,21 @@ pub fn ExplainPrintPlan<'es, 'p>(
     // ModifyTable / Append nodes; `select_rtable_names_for_explain` then assigns
     // display names only to those (and suppresses unreferenced RTEs), so a Var
     // resolved to a referenced RTE gets its `alias.` prefix.
+    // ExplainPreScanNode leaves `*rels_used` NULL when no scan node adds a
+    // member (e.g. the whole plan collapsed to a dummy Result with One-Time
+    // Filter false). That NULL-vs-empty distinction is load-bearing: C's
+    // set_rtable_names names *every* RTE when rels_used is NULL, so a Var in the
+    // dummy Result's targetlist still gets its relation prefix
+    // (`f1.id`, `ss.unnest`). Preserve it by passing `None` (not an empty
+    // bitmapset, which would suppress all prefixes).
     let rels_used = explain_pre_scan_node(mcx, planstate, None)?;
-    let rels_used = match rels_used {
-        Some(b) => PgBox::into_inner(b),
-        None => types_nodes::bitmapset::Bitmapset {
-            words: PgVec::new_in(mcx),
-        },
-    };
+    let rels_used = rels_used.map(PgBox::into_inner);
     if let Some(rtable) = es.rtable.as_ref() {
-        let names = ruleutils_s::select_rtable_names_for_explain::call(mcx, rtable, &rels_used)?;
+        let names = ruleutils_s::select_rtable_names_for_explain::call(
+            mcx,
+            rtable,
+            rels_used.as_ref(),
+        )?;
         es.rtable_names = names;
     }
     // es->printed_subplans = NULL; (already None)
@@ -320,6 +326,15 @@ fn explain_pre_scan_node<'es, 'p>(
         for child in members {
             acc = explain_pre_scan_node(mcx, child, acc)?;
         }
+    }
+    // planstate_tree_walker (nodeFuncs.c:4777) walks a SubqueryScan's sub-plan
+    // via SubqueryScanState->subplan, which is NOT lefttree/righttree. Without
+    // this recursion the inner scan's scanrelid is never added to rels_used, so
+    // its RTE gets no display name and Vars resolving to it lose the alias prefix
+    // (e.g. window.sql's WindowAgg-under-SubqueryScan EXPLAINs dropped
+    // `empsalary.` on Window:/Sort Key: lines).
+    if let Some(subplan) = planstate.subquery_subplan_state() {
+        acc = explain_pre_scan_node(mcx, subplan, acc)?;
     }
 
     Ok(acc)
@@ -872,6 +887,26 @@ pub fn ExplainNode<'es, 'p>(
         show_plan_tlist(es, mcx, plan_node, ancestors)?;
     }
 
+    // unique join (explain.c:1935): for the three Join node types, emit
+    // `Inner Unique`. To avoid being too chatty in TEXT mode, C prints it only in
+    // non-TEXT formats, or in TEXT when VERBOSE and the join actually is
+    // inner-unique.
+    match plan_node.node_tag() {
+        ntag::T_NestLoop | ntag::T_MergeJoin | ntag::T_HashJoin => {
+            let inner_unique = match plan_node.node_tag() {
+                ntag::T_NestLoop => plan_node.expect_nestloop().join.inner_unique,
+                ntag::T_MergeJoin => plan_node.expect_mergejoin().join.inner_unique,
+                _ => plan_node.expect_hashjoin().join.inner_unique,
+            };
+            if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT
+                || (es.verbose && inner_unique)
+            {
+                fmt::ExplainPropertyBool("Inner Unique", inner_unique, es)?;
+            }
+        }
+        _ => {}
+    }
+
     // T_Result: `show_upper_qual(resconstantqual, "One-Time Filter")` runs
     // BEFORE the generic `Filter:` line (explain.c:2234). `show_upper_qual`
     // uses `useprefix = list_length(es->rtable) > 1 || es->verbose`.
@@ -881,7 +916,7 @@ pub fn ExplainNode<'es, 'p>(
             .and_then(|r| r.resconstantqual.as_ref())
             .filter(|q| !q.is_empty())
         {
-            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>> =
                 alloc::vec::Vec::with_capacity(rcq.len());
             for e in rcq.iter() {
                 exprs.push(e.clone_in(mcx)?);
@@ -920,7 +955,7 @@ pub fn ExplainNode<'es, 'p>(
         //                 planstate, ancestors, es). useprefix = rtable>1||verbose.
         let wagg = plan_node.expect_windowagg();
         if let Some(rc) = wagg.runConditionOrig.as_ref().filter(|q| !q.is_empty()) {
-            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>> =
                 alloc::vec::Vec::with_capacity(rc.len());
             for e in rc.iter() {
                 exprs.push(e.clone_in(mcx)?);
@@ -1041,6 +1076,39 @@ pub fn ExplainNode<'es, 'p>(
                 )?;
             }
         }
+        ntag::T_FunctionScan => {
+            // explain.c:2067-2087: verbose-only show_expression over the list of
+            // each RangeTblFunction's funcexpr, "Function Call"; then Filter.
+            if es.verbose {
+                let fs = plan_node.expect_functionscan();
+                let mut fexprs = PgVec::new_in(mcx);
+                if let Some(functions) = fs.functions.as_ref() {
+                    for rtfunc in functions.iter() {
+                        if let Some(fe) = rtfunc.funcexpr.as_ref() {
+                            fexprs.push(mcx::alloc_in(mcx, fe.clone_in(mcx)?)?);
+                        }
+                    }
+                }
+                let list_node = mcx::alloc_in(mcx, Node::mk_list(mcx, fexprs)?)?;
+                show_expression(
+                    es,
+                    mcx,
+                    plan_node,
+                    ancestors,
+                    &list_node,
+                    "Function Call",
+                )?;
+            }
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
+        }
         ntag::T_TableFuncScan => {
             // explain.c:2089-2095: verbose-only show_expression((Node *)
             //   scan->tablefunc, "Table Function Call", ...); then Filter.
@@ -1057,6 +1125,14 @@ pub fn ExplainNode<'es, 'p>(
                 )?;
             }
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_NestLoop => {
             // explain.c:2158: join.joinqual -> "Join Filter"; plan->qual -> "Filter".
@@ -1109,6 +1185,14 @@ pub fn ExplainNode<'es, 'p>(
             let tidcond = build_cond_list(mcx, ts.tidquals.as_ref(), false)?;
             show_scan_qual_owned(es, mcx, plan_node, ancestors, tidcond, "TID Cond")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_TidRangeScan => {
             // explain.c:2127: tidrangequals has AND semantics, so wrap a
@@ -1117,6 +1201,14 @@ pub fn ExplainNode<'es, 'p>(
             let tidcond = build_cond_list(mcx, trs.tidrangequals.as_ref(), true)?;
             show_scan_qual_owned(es, mcx, plan_node, ancestors, tidcond, "TID Cond")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_SampleScan => {
             // explain.c:2004: show_tablesample(((SampleScan *) plan)->tablesample,
@@ -1126,6 +1218,14 @@ pub fn ExplainNode<'es, 'p>(
                 show_tablesample(es, mcx, plan_node, ancestors, tsc)?;
             }
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_Agg | ntag::T_WindowAgg | ntag::T_Group | ntag::T_Result => {
             // explain.c:2197/2208/2215/2237: these upper plan nodes show their
@@ -1138,7 +1238,17 @@ pub fn ExplainNode<'es, 'p>(
         _ => {
             // The generic `Filter` leg (SeqScan / ValuesScan / CteScan /
             // NamedTuplestoreScan / WorkTableScan / SubqueryScan / Gather / etc).
+            // explain.c:2009-2021: `show_scan_qual(plan->qual, "Filter", ...)` then,
+            // if plan->qual, `show_instrumentation_count("Rows Removed by Filter", 1, ...)`.
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
     }
 
@@ -1467,7 +1577,16 @@ pub fn ExplainNode<'es, 'p>(
         .map(|v| !v.is_empty())
         .unwrap_or(false)
         || head.initPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
-    let has_sub = head.subPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+    // Owned model: expression SubPlans of this node are recorded as 1-based
+    // `plan_id`s on `head.sub_plan_ids` (the split of C's `PlanState.subPlan`);
+    // the display-only `SubPlanState` for each lives in `EState.es_initplan`
+    // (keyed by plan_id) and its child plan-state tree in `es_subplanstates`.
+    let has_sub = head
+        .sub_plan_ids
+        .as_ref()
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+        || head.subPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
     let has_outer = planstate.outer_plan_state().is_some();
     let has_inner = head.righttree.is_some();
     // Member-node children: Append/MergeAppend appendplans/mergeplans,
@@ -1546,9 +1665,14 @@ pub fn ExplainNode<'es, 'p>(
         }
     }
 
-    // subPlan-s.
+    // subPlan-s. Owned model: resolve each expression SubPlan's display-only
+    // `SubPlanState` from `EState.es_initplan` by the `plan_id`s recorded on
+    // `head.sub_plan_ids` (mirroring the InitPlan path above). The fallback to
+    // `head.subPlan` covers any direct-list case.
     if has_sub {
-        if let Some(subplans) = head.subPlan.as_ref() {
+        if let Some(ids) = head.sub_plan_ids.as_ref() {
+            ExplainSubPlansByInitPlanIds(es, mcx, ids, &child_ancestors, "SubPlan")?;
+        } else if let Some(subplans) = head.subPlan.as_ref() {
             ExplainSubPlans(es, mcx, subplans, &child_ancestors, "SubPlan")?;
         }
     }
@@ -1668,7 +1792,7 @@ fn show_scan_qual<'es, 'p>(
     // node = (Node *) make_ands_explicit(qual);
     // Deep-clone via clone_in: a qual may carry a SubPlan / Aggref child, on
     // which a bare derived `Expr::clone()` panics (clone-in convention).
-    let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+    let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>> =
         alloc::vec::Vec::with_capacity(qual.len());
     for e in qual.iter() {
         exprs.push(e.clone_in(mcx)?);
@@ -1866,7 +1990,7 @@ fn show_upper_qual<'es, 'p>(
     mcx: Mcx<'es>,
     plan_node: &Node<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
-    exprs: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+    exprs: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>>,
     qlabel: &str,
 ) -> PgResult<()> {
     if exprs.is_empty() {
@@ -1900,8 +2024,8 @@ fn show_upper_qual<'es, 'p>(
 /// Aggref children). Returns an empty vec for `None`.
 fn clone_expr_qual<'es>(
     mcx: Mcx<'es>,
-    qual: Option<&PgVec<'_, types_nodes::primnodes::Expr>>,
-) -> PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr>> {
+    qual: Option<&PgVec<'_, types_nodes::primnodes::Expr<'_>>>,
+) -> PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr<'es>>> {
     let mut out = alloc::vec::Vec::new();
     if let Some(q) = qual {
         out.reserve(q.len());
@@ -1921,13 +2045,13 @@ fn clone_expr_qual<'es>(
 /// list to that very clause).
 fn build_cond_list<'es>(
     mcx: Mcx<'es>,
-    quals: Option<&PgVec<'_, types_nodes::primnodes::Expr>>,
+    quals: Option<&PgVec<'_, types_nodes::primnodes::Expr<'_>>>,
     is_and: bool,
-) -> PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr>> {
+) -> PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr<'es>>> {
     let Some(quals) = quals.filter(|q| !q.is_empty()) else {
         return Ok(alloc::vec::Vec::new());
     };
-    let mut cloned: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+    let mut cloned: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>> =
         alloc::vec::Vec::with_capacity(quals.len());
     for e in quals.iter() {
         cloned.push(e.clone_in(mcx)?);
@@ -1954,7 +2078,7 @@ fn show_scan_qual_owned<'es, 'p>(
     mcx: Mcx<'es>,
     plan_node: &Node<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
-    exprs: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+    exprs: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>>,
     qlabel: &str,
 ) -> PgResult<()> {
     if exprs.is_empty() {
@@ -2323,6 +2447,27 @@ fn explain_scan_target_switch<'es, 'p>(
                 Ok(())
             } else {
                 fmt::ExplainPropertyText("Join Type", jointype_str, es)
+            }
+        }
+        ntag::T_SetOp => {
+            // explain.c:1763 — interpolate the set-operation command into the
+            // node name (TEXT) or emit it as a "Command" property.
+            use types_nodes::nodesetop::{
+                SETOPCMD_EXCEPT, SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL,
+            };
+            let setopcmd = match plan_node.expect_setop().cmd {
+                SETOPCMD_INTERSECT => "Intersect",
+                SETOPCMD_INTERSECT_ALL => "Intersect All",
+                SETOPCMD_EXCEPT => "Except",
+                SETOPCMD_EXCEPT_ALL => "Except All",
+                _ => "???",
+            };
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                es.str.try_push_str(" ")?;
+                es.str.try_push_str(setopcmd)?;
+                Ok(())
+            } else {
+                fmt::ExplainPropertyText("Command", setopcmd, es)
             }
         }
         _ => Ok(()),

@@ -110,10 +110,10 @@ fn ascend_mut(root: &mut PlannerInfo, levelsup: Index) -> &mut PlannerInfo {
 /// `IncrementVarSublevelsUp((Node *) expr, delta, min)`.
 fn increment_expr_sublevels<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    e: Expr,
+    e: Expr<'mcx>,
     delta: i32,
     min: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let mut node = Node::mk_expr(mcx, e)?;
     IncrementVarSublevelsUp(&mut node, delta, min, mcx)?;
     Ok(node
@@ -679,7 +679,9 @@ pub fn replace_nestloop_param_placeholdervar(
     let newphv = phv.clone_in(mcx)?;
     let id = root.alloc_nestloop_param(NestLoopParamNode {
         paramno: param.paramid,
-        paramval: Expr::PlaceHolderVar(newphv),
+        // Interned into the planner arena (curOuterParams); erase to the arena's
+        // notional 'static at this sanctioned arena-intern boundary.
+        paramval: Expr::PlaceHolderVar(newphv).erase_lifetime(),
     });
     root.curOuterParams.push(id);
 
@@ -751,7 +753,8 @@ pub fn process_subquery_nestloop_params(
                     let newphv = phv.clone_in(mcx)?;
                     let id = root.alloc_nestloop_param(NestLoopParamNode {
                         paramno: pitem.paramId,
-                        paramval: Expr::PlaceHolderVar(newphv),
+                        // Interned into the planner arena; erase at the boundary.
+                        paramval: Expr::PlaceHolderVar(newphv).erase_lifetime(),
                     });
                     root.curOuterParams.push(id);
                 }
@@ -864,7 +867,9 @@ pub fn identify_current_nestloop_params(
                         let ph_var = root.phinfo(phinfo).ph_var.clone_in(mcx)?;
                         // The ph_var has empty nullingrels, but that doesn't
                         // matter since we're about to overwrite phnullingrels.
-                        root.nestloop_param_mut(lc).paramval = Expr::PlaceHolderVar(ph_var);
+                        // Interned into the planner arena; erase at the boundary.
+                        root.nestloop_param_mut(lc).paramval =
+                            Expr::PlaceHolderVar(ph_var).erase_lifetime();
                     }
 
                     let nulling = get_placeholder_nulling_relids(root, phinfo);

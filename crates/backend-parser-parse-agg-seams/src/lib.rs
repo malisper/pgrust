@@ -27,11 +27,11 @@ seam_core::seam!(
     /// surface.
     pub fn transform_aggregate_call<'mcx>(
         pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
-        agg: types_nodes::primnodes::Aggref,
-        args: std::vec::Vec<types_nodes::primnodes::Expr>,
+        agg: types_nodes::primnodes::Aggref<'static>,
+        args: std::vec::Vec<types_nodes::primnodes::Expr<'static>>,
         aggorder: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>>,
         agg_distinct: bool,
-    ) -> types_error::PgResult<types_nodes::primnodes::Aggref>
+    ) -> types_error::PgResult<types_nodes::primnodes::Aggref<'static>>
 );
 
 seam_core::seam!(
@@ -45,9 +45,9 @@ seam_core::seam!(
     /// surface.
     pub fn transform_window_func_call<'mcx>(
         pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
-        wfunc: types_nodes::primnodes::WindowFunc,
+        wfunc: types_nodes::primnodes::WindowFunc<'static>,
         windef: types_nodes::rawnodes::WindowDef<'mcx>,
-    ) -> types_error::PgResult<types_nodes::primnodes::WindowFunc>
+    ) -> types_error::PgResult<types_nodes::primnodes::WindowFunc<'static>>
 );
 
 seam_core::seam!(
@@ -58,7 +58,7 @@ seam_core::seam!(
     pub fn transform_grouping_func<'mcx>(
         pstate: &mut ParseState<'mcx>,
         p: Node<'mcx>,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 
 seam_core::seam!(
@@ -87,9 +87,9 @@ seam_core::seam!(
 seam_core::seam!(
     /// `get_aggregate_argtypes(aggref, inputTypes)` (parse_agg.c) — the actual
     /// argument-type OIDs of an aggregate call.
-    pub fn get_aggregate_argtypes<'mcx>(
+    pub fn get_aggregate_argtypes<'mcx, 'a>(
         mcx: Mcx<'mcx>,
-        aggref: &Aggref,
+        aggref: &Aggref<'a>,
     ) -> PgResult<PgVec<'mcx, Oid>>
 );
 
@@ -108,7 +108,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `agg_args_support_sendreceive(aggref)` (parse_agg.c).
-    pub fn agg_args_support_sendreceive(aggref: &Aggref) -> PgResult<bool>
+    pub fn agg_args_support_sendreceive<'a>(aggref: &Aggref<'a>) -> PgResult<bool>
 );
 
 seam_core::seam!(
@@ -125,19 +125,19 @@ seam_core::seam!(
         transfn_oid: Oid,
         invtransfn_oid: Oid,
         build_invtrans: bool,
-    ) -> PgResult<(Expr, Option<Expr>)>
+    ) -> PgResult<(Expr<'static>, Option<Expr<'static>>)>
 );
 
 seam_core::seam!(
     /// `build_aggregate_serialfn_expr(serialfn_oid, &serialfnexpr)`
     /// (parse_agg.c).
-    pub fn build_aggregate_serialfn_expr(serialfn_oid: Oid) -> PgResult<Expr>
+    pub fn build_aggregate_serialfn_expr(serialfn_oid: Oid) -> PgResult<Expr<'static>>
 );
 
 seam_core::seam!(
     /// `build_aggregate_deserialfn_expr(deserialfn_oid, &deserialfnexpr)`
     /// (parse_agg.c).
-    pub fn build_aggregate_deserialfn_expr(deserialfn_oid: Oid) -> PgResult<Expr>
+    pub fn build_aggregate_deserialfn_expr(deserialfn_oid: Oid) -> PgResult<Expr<'static>>
 );
 
 seam_core::seam!(
@@ -149,5 +149,5 @@ seam_core::seam!(
         agg_result_type: Oid,
         agg_input_collation: Oid,
         finalfn_oid: Oid,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );

@@ -32,7 +32,7 @@ seam_core::seam!(
     /// inspections (no allocation); the bundling lets partition-key build read
     /// all three from one call. `Err` carries the C `elog(ERROR, "unrecognized
     /// node type")` for an unexpected tag.
-    pub fn expr_type_info(expr: &Expr) -> PgResult<ExprTypeInfo>
+    pub fn expr_type_info<'mcx>(expr: &Expr<'mcx>) -> PgResult<ExprTypeInfo>
 );
 
 seam_core::seam!(
@@ -49,7 +49,7 @@ seam_core::seam!(
     /// `(true, coercedTypmod)` with the coerced type modifier, or `(false, -1)`.
     /// Pure node inspection. Used by ruleutils' cast deparse to print the typmod
     /// on the target type name. `Err` carries an unexpected-node `elog(ERROR)`.
-    pub fn expr_is_length_coercion(expr: &Expr) -> PgResult<(bool, i32)>
+    pub fn expr_is_length_coercion<'mcx>(expr: &Expr<'mcx>) -> PgResult<(bool, i32)>
 );
 
 seam_core::seam!(
@@ -73,7 +73,7 @@ seam_core::seam!(
     /// (`get_base_element_type`). Returns `InvalidOid` out of range / for an
     /// unhandled node kind (the C fall-through). `Err` carries the
     /// `get_base_element_type` / `exprType` cache-lookup `ereport`.
-    pub fn get_call_expr_argtype_expr(expr: &Expr, argnum: i32) -> PgResult<Oid>
+    pub fn get_call_expr_argtype_expr<'mcx>(expr: &Expr<'mcx>, argnum: i32) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -95,7 +95,7 @@ seam_core::seam!(
     /// `IsA(expr, FuncExpr) ? ((FuncExpr *) expr)->funcvariadic : false`. Unlike
     /// the tag-only [`expr_variadic`] carrier (which cannot see `funcvariadic`),
     /// this reads the real flag off the node.
-    pub fn expr_variadic_expr(expr: &Expr) -> bool
+    pub fn expr_variadic_expr<'mcx>(expr: &Expr<'mcx>) -> bool
 );
 
 seam_core::seam!(
@@ -108,7 +108,7 @@ seam_core::seam!(
     /// `Const` or an external (`PARAM_EXTERN`) `Param`. Unlike the tag-only
     /// [`call_expr_arg_stable`] carrier (which cannot see the argument list),
     /// this reads the real arguments off the node.
-    pub fn call_expr_arg_stable_expr(expr: &Expr, argnum: i32) -> bool
+    pub fn call_expr_arg_stable_expr<'mcx>(expr: &Expr<'mcx>, argnum: i32) -> bool
 );
 
 seam_core::seam!(
@@ -148,7 +148,7 @@ seam_core::seam!(
     /// call uses (`FuncExpr.inputcollid` / `OpExpr.inputcollid` / …); a pure node
     /// inspection. Returns `InvalidOid` for a node kind that stores no input
     /// collation.
-    pub fn expr_input_collation_expr(expr: &Expr) -> Oid
+    pub fn expr_input_collation_expr<'mcx>(expr: &Expr<'mcx>) -> Oid
 );
 
 /* ======================================================================
@@ -159,7 +159,7 @@ seam_core::seam!(
  *    the element of `PlannerInfo::node_arena`).
  *  - `NodeId`+`&PlannerInfo`-keyed: the `TargetEntry` / `SortGroupClause`
  *    payload reads. Those node kinds are NOT representable by the current
- *    `node_arena: Vec<Expr>` model (`Expr` has no `TargetEntry` /
+ *    `node_arena: Vec<Expr<'static>>` model (`Expr` has no `TargetEntry` /
  *    `SortGroupClause` variant), so the inspection is delegated whole to the
  *    owner, which resolves the handle in its own (richer) node model.
  *
@@ -174,34 +174,34 @@ seam_core::seam!(
 seam_core::seam!(
     /// `exprCollation(node)` (nodeFuncs.c) — the collation of an expression node,
     /// over the arena `Expr` value. Pure read.
-    pub fn exprCollation(expr: &Expr) -> Oid
+    pub fn exprCollation<'mcx>(expr: &Expr<'mcx>) -> Oid
 );
 
 seam_core::seam!(
     /// `exprLocation(node)` (nodeFuncs.c) — the parse location of an expression
     /// node (or -1 if unknown), over the arena `Expr` value. Pure read.
     /// Installed by the nodeFuncs.c owner; until then a call panics.
-    pub fn exprLocation(expr: &Expr) -> i32
+    pub fn exprLocation<'mcx>(expr: &Expr<'mcx>) -> i32
 );
 
 seam_core::seam!(
     /// `equal(a, b)` (equalfuncs.c) — deep structural equality of two expression
     /// nodes, over the arena `Expr` value. `equal(NULL, NULL)` is true; this
     /// helper is only called with two present nodes.
-    pub fn equal(a: &Expr, b: &Expr) -> bool
+    pub fn equal<'a, 'b>(a: &Expr<'a>, b: &Expr<'b>) -> bool
 );
 
 seam_core::seam!(
     /// `copyObject(node)` (copyfuncs.c) — a deep copy of an expression node,
     /// over the arena `Expr` value (the C `copyObject(var)` in
     /// `find_var_for_subquery_tle`).
-    pub fn copyObject(expr: &Expr) -> Expr
+    pub fn copyObject<'mcx>(expr: &Expr<'mcx>) -> Expr<'mcx>
 );
 
 seam_core::seam!(
     /// `is_notclause(clause)` (nodes/makefuncs.h) — true iff `clause` is a
     /// `BoolExpr` with `boolop == NOT_EXPR`.
-    pub fn is_notclause(clause: &Expr) -> bool
+    pub fn is_notclause<'mcx>(clause: &Expr<'mcx>) -> bool
 );
 
 seam_core::seam!(
@@ -209,7 +209,7 @@ seam_core::seam!(
     /// `BoolExpr`. C returns `linitial(args)` — a borrowed pointer into the
     /// existing tree, never a copy — so we hand back a borrow tied to the input
     /// (a `.clone()` of a `SubLink`-bearing arg would hit its deep-copy guard).
-    pub fn get_notclausearg<'a>(notclause: &'a Expr) -> &'a Expr
+    pub fn get_notclausearg<'a, 'mcx>(notclause: &'a Expr<'mcx>) -> &'a Expr<'mcx>
 );
 
 seam_core::seam!(
@@ -220,11 +220,12 @@ seam_core::seam!(
     /// is taken BY VALUE: C mutates the passed tree in place, so the owner
     /// moves it into the mutator (a borrow would force a `.clone()` that panics
     /// on owned-subtree Exprs like `Aggref`).
-    pub fn remove_nulling_relids(
-        node: Expr,
+    pub fn remove_nulling_relids<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        node: Expr<'mcx>,
         removable_relids: &types_pathnodes::Relids,
         except_relids: &types_pathnodes::Relids,
-    ) -> Expr
+    ) -> Expr<'mcx>
 );
 
 seam_core::seam!(

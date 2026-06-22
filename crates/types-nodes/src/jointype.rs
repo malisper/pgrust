@@ -62,7 +62,7 @@ pub struct Join<'mcx> {
     pub inner_unique: bool,
     /// `List *joinqual` — JOIN quals (in addition to plan.qual). `None` = the C
     /// `NIL`.
-    pub joinqual: Option<PgVec<'mcx, Expr>>,
+    pub joinqual: Option<PgVec<'mcx, Expr<'mcx>>>,
 }
 
 impl Default for Join<'_> {

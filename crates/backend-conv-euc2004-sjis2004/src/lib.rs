@@ -20,11 +20,48 @@
 use backend_utils_error::PgResult;
 use backend_utils_mb::{check_encoding_conversion_args, report_invalid_encoding};
 use backend_utils_mb_conv_string_helpers::ConversionResult;
+use backend_utils_mb_conv_string_helpers::make_conversion_builtin;
 use common_wchar::pg_encoding_verifymbchar;
 use types_wchar::encoding::{pg_enc, PG_EUC_JIS_2004, PG_SHIFT_JIS_2004};
 
 /// Convention no-op: this crate installs no inward seams.
-pub fn init_seams() {}
+/// Bridge a fgram-typed conversion `PgResult` into the real
+/// `types_error::PgResult` the fmgr-builtin dispatcher expects. The
+/// `ConversionResult` payload is the shared real type; only the error
+/// universe differs, so map it by message + sqlstate.
+fn into_real(
+    r: PgResult<ConversionResult>,
+) -> types_error_real::PgResult<ConversionResult> {
+    r.map_err(|e| types_error_real::PgError::error(e.message().to_string()))
+}
+
+fn adapt_euc_jis_2004_to_shift_jis_2004(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    src: &[u8],
+    no_error: bool,
+) -> types_error_real::PgResult<ConversionResult> {
+    into_real(euc_jis_2004_to_shift_jis_2004(src_encoding, dest_encoding, src, no_error))
+}
+
+fn adapt_shift_jis_2004_to_euc_jis_2004(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    src: &[u8],
+    no_error: bool,
+) -> types_error_real::PgResult<ConversionResult> {
+    into_real(shift_jis_2004_to_euc_jis_2004(src_encoding, dest_encoding, src, no_error))
+}
+
+/// Register the ported conversion procedures as fmgr builtins so
+/// `fmgr_info` resolves their proc OIDs to the in-process Rust bodies
+/// instead of `dlopen`ing `$libdir/euc2004_sjis2004`.
+pub fn init_seams() {
+    backend_utils_fmgr_core::register_builtins_native([
+        make_conversion_builtin(4386, "euc_jis_2004_to_shift_jis_2004", adapt_euc_jis_2004_to_shift_jis_2004),
+        make_conversion_builtin(4387, "shift_jis_2004_to_euc_jis_2004", adapt_shift_jis_2004_to_euc_jis_2004),
+    ]);
+}
 
 /// `HIGHBIT` (mb/pg_wchar.h).
 const HIGHBIT: u8 = 0x80;
