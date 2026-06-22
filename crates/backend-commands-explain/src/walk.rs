@@ -122,15 +122,21 @@ pub fn ExplainPrintPlan<'es, 'p>(
     // ModifyTable / Append nodes; `select_rtable_names_for_explain` then assigns
     // display names only to those (and suppresses unreferenced RTEs), so a Var
     // resolved to a referenced RTE gets its `alias.` prefix.
+    // ExplainPreScanNode leaves `*rels_used` NULL when no scan node adds a
+    // member (e.g. the whole plan collapsed to a dummy Result with One-Time
+    // Filter false). That NULL-vs-empty distinction is load-bearing: C's
+    // set_rtable_names names *every* RTE when rels_used is NULL, so a Var in the
+    // dummy Result's targetlist still gets its relation prefix
+    // (`f1.id`, `ss.unnest`). Preserve it by passing `None` (not an empty
+    // bitmapset, which would suppress all prefixes).
     let rels_used = explain_pre_scan_node(mcx, planstate, None)?;
-    let rels_used = match rels_used {
-        Some(b) => PgBox::into_inner(b),
-        None => types_nodes::bitmapset::Bitmapset {
-            words: PgVec::new_in(mcx),
-        },
-    };
+    let rels_used = rels_used.map(PgBox::into_inner);
     if let Some(rtable) = es.rtable.as_ref() {
-        let names = ruleutils_s::select_rtable_names_for_explain::call(mcx, rtable, &rels_used)?;
+        let names = ruleutils_s::select_rtable_names_for_explain::call(
+            mcx,
+            rtable,
+            rels_used.as_ref(),
+        )?;
         es.rtable_names = names;
     }
     // es->printed_subplans = NULL; (already None)
