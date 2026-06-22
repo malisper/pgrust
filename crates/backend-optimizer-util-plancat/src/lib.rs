@@ -1482,7 +1482,7 @@ pub fn function_selectivity<'mcx>(
 ///       cost->per_tuple += procform->procost * cpu_operator_cost;
 ///   }
 pub fn add_function_cost(
-    _root: &PlannerInfo,
+    _root: Option<&PlannerInfo>,
     funcid: Oid,
     _node: Option<NodeId>,
 ) -> PgResult<(f64, f64)> {
@@ -1853,7 +1853,7 @@ fn call_support_rows_by_prosrc<'mcx>(
 }
 
 fn seam_add_function_cost(
-    root: &PlannerInfo,
+    root: Option<&PlannerInfo>,
     funcid: Oid,
     node: Option<NodeId>,
 ) -> (f64, f64) {

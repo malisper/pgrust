@@ -5908,7 +5908,7 @@ fn windowfunc_cost_impl<'mcx>(
 
     // add_function_cost(root, winfnoid, (Node *) wfunc): startup + per_tuple.
     let (mut startup, mut per_tuple) =
-        match backend_optimizer_util_plancat::add_function_cost(root, winfnoid, Some(wfunc)) {
+        match backend_optimizer_util_plancat::add_function_cost(Some(root), winfnoid, Some(wfunc)) {
             Ok(v) => v,
             Err(_) => (0.0, 0.0),
         };

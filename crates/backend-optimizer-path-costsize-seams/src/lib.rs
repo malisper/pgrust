@@ -243,8 +243,13 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `add_function_cost(root, funcid, node, &cost)` — accumulate `pg_proc.procost`.
-    /// Returns the `(startup, per_tuple)` to add.
-    pub fn add_function_cost(root: &PlannerInfo, funcid: Oid, node: Option<NodeId>) -> (Cost, Cost)
+    /// Returns the `(startup, per_tuple)` to add. `root` is `Option`: the C source
+    /// notes "in some usages root might be NULL, too" (plancat.c) — root is only
+    /// fed into a function's `SupportRequestCost` support fn (the rare cost-support
+    /// path); a function without one never dereferences root. The free-standing
+    /// `cost_qual_eval_expr` (rangetypes planner-support) costs an elemExpr with no
+    /// PlannerInfo and passes `None`.
+    pub fn add_function_cost(root: Option<&PlannerInfo>, funcid: Oid, node: Option<NodeId>) -> (Cost, Cost)
 );
 
 /* --- catalog / type-width reads (lsyscache.c) --------------------------- */

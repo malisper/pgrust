@@ -45,7 +45,7 @@ pub fn cost_qual_eval_walker(root: &PlannerInfo, node: types_pathnodes::NodeId) 
     // callback only ever fire at identifiable top-level call sites in practice,
     // and inline children are walked by-value, so recursion uses the by-`&Expr`
     // forms uniformly.
-    walk(cx.mcx(), root, root.node(node), &mut total);
+    walk(cx.mcx(), Some(root), root.node(node), &mut total);
     (total.startup, total.per_tuple)
 }
 
@@ -55,7 +55,18 @@ pub fn cost_qual_eval_walker(root: &PlannerInfo, node: types_pathnodes::NodeId) 
 /// `find_simplified_clause`) wants to cost before deciding to duplicate it.
 /// Mirrors [`cost_qual_eval_walker`] but takes the root `Expr` by reference
 /// instead of resolving it through a `NodeId`.
-pub fn cost_qual_eval_expr(root: &PlannerInfo, node: &Expr) -> (f64, f64) {
+///
+/// `root` is `Option`: C's `find_simplified_clause` runs inside
+/// `eval_const_expressions` where `root` may legitimately be NULL (the
+/// `estimate_expression_value` / const-fold entry paths), and the only root use
+/// in costing a free-standing elemExpr is the rare per-function
+/// `SupportRequestCost` (skipped when root is NULL, exactly as
+/// `add_function_cost` does — "in some usages root might be NULL, too",
+/// plancat.c). A free-standing elemExpr is never a `RestrictInfo` (those are
+/// built later by the planner) and any `SubLink`/`SubPlan` is excluded by the
+/// caller's `contain_subplans` guard, so the root-dereferencing arms are
+/// unreachable here.
+pub fn cost_qual_eval_expr(root: Option<&PlannerInfo>, node: &Expr) -> (f64, f64) {
     let mut total = QualCost {
         startup: 0.0,
         per_tuple: 0.0,
@@ -65,9 +76,15 @@ pub fn cost_qual_eval_expr(root: &PlannerInfo, node: &Expr) -> (f64, f64) {
     (total.startup, total.per_tuple)
 }
 
+/// `cost_qual_eval_expr` over a non-optional root (the `cost_qual_eval_node_expr`
+/// seam: restrictinfo.c / joininfo.c always supply a real `PlannerInfo`).
+pub fn cost_qual_eval_expr_with_root(root: &PlannerInfo, node: &Expr) -> (f64, f64) {
+    cost_qual_eval_expr(Some(root), node)
+}
+
 /// `cost_qual_eval_walker` over an in-memory `&Expr` (the recursion form). Mirrors
 /// the C `IsA` dispatch; `expression_tree_walker` drives the default recursion.
-fn walk<'mcx>(mcx: mcx::Mcx<'mcx>, root: &PlannerInfo, node: &Expr, total: &mut QualCost) {
+fn walk<'mcx>(mcx: mcx::Mcx<'mcx>, root: Option<&PlannerInfo>, node: &Expr, total: &mut QualCost) {
     let cpu_operator_cost = crate::cpu_operator_cost();
 
     match node {
@@ -79,6 +96,11 @@ fn walk<'mcx>(mcx: mcx::Mcx<'mcx>, root: &PlannerInfo, node: &Expr, total: &mut 
         // is borrowed immutably here we cannot persist the cache, but the
         // recomputed value is numerically identical, so the result is faithful.
         Expr::RestrictInfo(rref) => {
+            // A RestrictInfo is only ever costed through the arena entry
+            // (`cost_qual_eval_walker`), which always supplies a real root; the
+            // free-standing `cost_qual_eval_expr` (root == None) is never handed a
+            // RestrictInfo (those are built later by the planner).
+            let root = root.expect("cost_qual_eval: RestrictInfo requires a PlannerInfo root");
             let rinfo = root.rinfo(types_pathnodes::RinfoId::from(*rref));
             let eval = if rinfo.eval_cost.startup < 0.0 {
                 // For an OR clause, recurse into the marked-up tree so that we
@@ -88,7 +110,7 @@ fn walk<'mcx>(mcx: mcx::Mcx<'mcx>, root: &PlannerInfo, node: &Expr, total: &mut 
                     per_tuple: 0.0,
                 };
                 let inner = rinfo.orclause.unwrap_or(rinfo.clause);
-                walk(mcx, root, root.node(inner), &mut loc);
+                walk(mcx, Some(root), root.node(inner), &mut loc);
                 // If the RestrictInfo is marked pseudoconstant, it will be
                 // tested only once, so treat its cost as all startup cost.
                 if rinfo.pseudoconstant {

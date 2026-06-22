@@ -124,7 +124,7 @@ pub fn init_seams() {
     // `cost_qual_eval_node(&cost, (Node *) expr, root)` over a free-standing
     // `&Expr` (restrictinfo.c / joininfo.c). costsize.c owns it.
     backend_optimizer_util_joininfo_ext_seams::cost_qual_eval_node_expr::set(
-        crate::qualcost::cost_qual_eval_expr,
+        crate::qualcost::cost_qual_eval_expr_with_root,
     );
     // `cpu_operator_cost` (costsize.c GUC) — plancache reads it through the
     // planner-pc seam crate; planner.c (the rest of that crate's seams) is

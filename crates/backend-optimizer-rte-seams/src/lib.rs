@@ -581,7 +581,7 @@ pub fn init_seams() {
             if let Some(rtf) = (&**f).as_rangetblfunction() {
                 if let Some(e) = rtf.funcexpr.as_deref().and_then(|n| n.as_expr()) {
                     let (s, pt) =
-                        backend_optimizer_path_costsize::qualcost::cost_qual_eval_expr(root, e);
+                        backend_optimizer_path_costsize::qualcost::cost_qual_eval_expr(Some(root), e);
                     startup += s;
                     per_tuple += pt;
                 }
@@ -603,7 +603,7 @@ pub fn init_seams() {
         if let Some(tf) = rte.tablefunc.as_deref().and_then(|n| n.as_table_func()) {
             let mut add = |e: &types_nodes::primnodes::Expr| {
                 let (s, pt) =
-                    backend_optimizer_path_costsize::qualcost::cost_qual_eval_expr(root, e);
+                    backend_optimizer_path_costsize::qualcost::cost_qual_eval_expr(Some(root), e);
                 startup += s;
                 per_tuple += pt;
             };

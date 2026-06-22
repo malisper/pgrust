@@ -1079,7 +1079,7 @@ pub fn get_agg_clause_costs(
 #[inline]
 fn add_function_cost(root: &PlannerInfo, funcid: Oid, cost: &mut QualCost) {
     let (startup, per_tuple) =
-        backend_optimizer_path_costsize_seams::add_function_cost::call(root, funcid, None);
+        backend_optimizer_path_costsize_seams::add_function_cost::call(Some(root), funcid, None);
     cost.startup += startup;
     cost.per_tuple += per_tuple;
 }

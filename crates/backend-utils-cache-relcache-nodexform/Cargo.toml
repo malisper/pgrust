@@ -29,6 +29,7 @@ backend-utils-cache-relcache-nodexform-seams = { path = "../backend-utils-cache-
 # Outward seams.
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
+backend-access-spg-core-seams = { path = "../backend-access-spg-core-seams" }
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
 backend-optimizer-prep-prepqual-seams = { path = "../backend-optimizer-prep-prepqual-seams" }

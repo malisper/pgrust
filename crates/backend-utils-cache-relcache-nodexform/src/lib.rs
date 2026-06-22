@@ -451,6 +451,64 @@ fn index_expressions<'mcx>(
     Ok(Some(result))
 }
 
+/// `GetIndexInputType(index, indexcol)` (spgutils.c:120) — the EXPRESSION-key
+/// polymorphic branch, which the SP-GiST core defers to this owner seam because
+/// it needs `RelationGetIndexExpressions` + `exprType` + `getBaseType` (none
+/// reachable from the SP-GiST core).
+///
+/// The SP-GiST core has already handled the non-polymorphic and
+/// simple-(heap-)column cases; this is reached only when the index column
+/// `indexcol` is an expression column (`indkey[indexcol-1] == 0`). C:
+///
+/// ```c
+/// indexprs = RelationGetIndexExpressions(index);
+/// indexpr_item = list_head(indexprs);
+/// for (int i = 1; i <= indnkeyatts; i++)
+///     if (indkey.values[i-1] == 0) {
+///         if (indexpr_item == NULL) elog(ERROR, "wrong number of index expressions");
+///         if (i == indexcol) return getBaseType(exprType(lfirst(indexpr_item)));
+///         indexpr_item = lnext(indexprs, indexpr_item);
+///     }
+/// elog(ERROR, "wrong number of index expressions");
+/// ```
+fn get_index_input_type_expr(index_oid: Oid, indexcol: i16) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("GetIndexInputType index_expressions");
+    let mcx = scratch.mcx();
+
+    // indkey vector + indnkeyatts off the projected pg_index row.
+    let idxinfo = syscache_seam::search_pg_index_info::call(mcx, index_oid)?.ok_or_else(|| {
+        ereport(ERROR)
+            .errmsg_internal(format!("cache lookup failed for index {index_oid}"))
+            .into_error()
+    })?;
+    let indkey: alloc::vec::Vec<i16> = idxinfo.indkey.iter().copied().collect();
+    let indnkeyatts = idxinfo.indnkeyatts as i32;
+
+    // indexprs = RelationGetIndexExpressions(index); indexpr_item = list_head(..)
+    let exprs = index_expressions(mcx, index_oid)?;
+    let mut indexpr_iter = exprs.as_ref().map(|v| v.iter());
+
+    for i in 1..=indnkeyatts {
+        // indkey.values[i-1] == 0 ? (an expression column)
+        if indkey.get((i - 1) as usize).copied().unwrap_or(0) == 0 {
+            let Some(item) = indexpr_iter.as_mut().and_then(|it| it.next()) else {
+                return Err(ereport(ERROR)
+                    .errmsg_internal("wrong number of index expressions")
+                    .into_error());
+            };
+            if i == indexcol as i32 {
+                // getBaseType(exprType((Node *) lfirst(indexpr_item)))
+                let etype = backend_nodes_core::nodefuncs::expr_type(Some(item))?;
+                return lsyscache_seam::get_base_type::call(etype);
+            }
+        }
+    }
+
+    Err(ereport(ERROR)
+        .errmsg_internal("wrong number of index expressions")
+        .into_error())
+}
+
 /// `RelationGetIndexPredicate(relation)` (relcache.c:5210): decode the raw
 /// `pg_index.indpred` implicit-AND text, run it through `eval_const_expressions`,
 /// `canonicalize_qual(.., false)`, `make_ands_implicit`, then `fix_opfuncids`.
@@ -592,4 +650,7 @@ pub fn init_seams() {
     inward::index_raw_expressions::set(index_raw_expressions);
     inward::index_raw_predicate::set(index_raw_predicate);
     inward::dummy_index_expressions::set(dummy_index_expressions);
+    // `GetIndexInputType` EXPRESSION-key branch (spgutils.c) — owned here because
+    // it needs `RelationGetIndexExpressions` + `exprType` + `getBaseType`.
+    backend_access_spg_core_seams::get_index_input_type_expr::set(get_index_input_type_expr);
 }

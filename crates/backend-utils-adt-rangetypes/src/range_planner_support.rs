@@ -97,9 +97,13 @@ seam_core::seam!(
 seam_core::seam!(
     /// `cost_qual_eval_node(&cost, node, root)` (costsize.c): the
     /// `(startup, per_tuple)` evaluation cost of the expression. Owner:
-    /// `backend-optimizer-path-costsize` `&Expr` cost form. Only reached on the
-    /// both-bounds path, and only when a real `root` is available.
-    pub fn cost_qual_eval_expr(root: &PlannerInfo, node: &Expr) -> (f64, f64)
+    /// `backend-optimizer-path-costsize` `&Expr` cost form. Reached on the
+    /// both-bounds path. `root` is `Option`: C runs this with `req->root`, which
+    /// is legitimately NULL on the `eval_const_expressions` /
+    /// `estimate_expression_value` entry paths; a free-standing elemExpr never
+    /// dereferences root (it is not a `RestrictInfo`, and the caller already
+    /// excluded subplans), so the cost is computed faithfully with `None`.
+    pub fn cost_qual_eval_expr(root: Option<&PlannerInfo>, node: &Expr) -> (f64, f64)
 );
 
 seam_core::seam!(
@@ -345,26 +349,31 @@ pub fn find_simplified_clause<'mcx>(
         if contain_subplans::call(elem_expr)? {
             return Ok(None);
         }
-        // cost_qual_eval_node(&eval_cost, (Node *) elemExpr, root). C's
-        // `eval_const_expressions` entry passes a NULL root; we mirror that by
-        // declining when no PlannerInfo is available to cost the elemExpr
-        // (declining is always a valid planner answer — same exit C takes for an
-        // "expensive" elemExpr).
-        let Some(root) = root else {
-            return Ok(None);
-        };
+        // cost_qual_eval_node(&eval_cost, (Node *) elemExpr, root). C passes
+        // `req->root`, which may legitimately be NULL on the
+        // `eval_const_expressions` const-fold entry path; a free-standing elemExpr
+        // never dereferences root in costing (it is not a `RestrictInfo` and the
+        // subplan case was already excluded above), so the cost is computed
+        // faithfully with whatever `root` we have (`Some`/`None`).
         let (startup, per_tuple) = cost_qual_eval_expr::call(root, elem_expr);
         if startup + per_tuple > 10.0 * cpu_operator_cost::call() {
             return Ok(None);
         }
     }
 
-    // Okay, try to build boundary comparison expressions
+    // Okay, try to build boundary comparison expressions. The bound `val` word is
+    // the element's raw `Datum` (a pointer into the deserialized range image for a
+    // by-reference element such as `text`/`numeric`). C's `makeConst` detoasts and
+    // copies it into the Const's own context; the owned model must lift the bare
+    // word onto the canonical `Datum` lane (`ByVal` for a by-value subtype, a
+    // freshly-copied `ByRef` image for a by-reference one) so the resulting Const
+    // rides the correct fmgr lane at execution (a by-reference element handed as a
+    // bare `ByVal` pointer word dangles and trips the varlena-cmp by-ref lane).
     if !lower.infinite {
         lower_expr = build_bound_expr(
             mcx,
             elem_expr.clone(),
-            NodeDatum::from_usize(lower.val.as_usize()),
+            crate::range_bounds_compare::elem_word_to_canon(mcx, &rangetypcache, lower.val)?,
             true,
             lower.inclusive,
             elem_typcache.type_id,
@@ -386,7 +395,7 @@ pub fn find_simplified_clause<'mcx>(
             // by value, so we just clone the borrowed `elemExpr` for each bound
             // (the value model's deep `Clone` IS `copyObject`).
             elem_expr.clone(),
-            NodeDatum::from_usize(upper.val.as_usize()),
+            crate::range_bounds_compare::elem_word_to_canon(mcx, &rangetypcache, upper.val)?,
             false,
             upper.inclusive,
             elem_typcache.type_id,

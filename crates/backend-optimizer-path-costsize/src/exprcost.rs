@@ -498,7 +498,7 @@ pub fn cost_subplan_owned(
     // The owned testexpr is an Expr; cost_qual_eval_expr walks it (treating the
     // top-level AND as the implicit-AND clause list internally).
     let (mut sp_startup, mut sp_per_tuple) = match &subplan.testexpr {
-        Some(te) => crate::qualcost::cost_qual_eval_expr(root, te),
+        Some(te) => crate::qualcost::cost_qual_eval_expr(Some(root), te),
         None => (0.0, 0.0),
     };
 
