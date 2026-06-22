@@ -10043,6 +10043,7 @@ dependencies = [
  "backend-utils-misc-guc-funcs",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-more",
+ "backend-utils-misc-timeout",
  "backend-utils-mmgr-mcxt-seams",
  "backend-utils-mmgr-portalmem",
  "backend-utils-sort-storage-seams",
@@ -23166,6 +23167,7 @@ dependencies = [
  "backend-utils-misc-more-seams",
  "backend-utils-misc-superuser-seams",
  "backend-utils-misc-timeout-seams",
+ "common-config-info-seams",
  "common-path-seams",
  "common-username-seams",
  "libc",
@@ -23176,6 +23178,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-fmgr",
+ "types-misc-more2",
  "types-storage",
  "types-tuple",
 ]

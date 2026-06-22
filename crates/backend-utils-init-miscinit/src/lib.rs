@@ -835,6 +835,16 @@ pub fn init_seams() {
     // table (C: `fmgr_builtins[]`), so by-OID dispatch resolves them.
     fmgr_builtins::register_miscinit_builtins();
 
+    // `get_configdata(my_exec_path, &len)` (`common/config_info.c`): homed here
+    // next to the `port/path.c` `get_*_path` helpers it calls. `pg_config()`
+    // (`utils/misc/pg_config.c`) reaches it through this seam.
+    common_config_info_seams::get_configdata::set(|| {
+        let buf = backend_utils_init_small::globals::my_exec_path();
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let my_exec_path = String::from_utf8_lossy(&buf[..end]).into_owned();
+        crate::boot_paths::get_configdata(&my_exec_path)
+    });
+
     s::create_socket_lock_file::set(|socketfile, am_postmaster, socket_dir| {
         create_socket_lock_file(socketfile, am_postmaster, socket_dir)
     });

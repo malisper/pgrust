@@ -105,6 +105,7 @@ mod pg_mcv_list_items;
 mod shmem_numa_srf;
 mod pg_get_shmem_allocations_srf;
 mod pg_available_extensions;
+mod pg_config;
 mod pg_get_aios;
 mod pg_get_backend_memory_contexts;
 mod pg_get_wait_events;
@@ -352,6 +353,9 @@ pub fn init_seams() {
     // the pg_timezone_names / pg_timezone_abbrevs view SRFs over the IANA zone
     // catalog and the session timezone's abbreviations.
     pg_timezone::register_pg_timezone_srfs();
+    // pg_config() (OID 3400): the `pg_config` view SRF (get_configdata over the
+    // running executable's location).
+    pg_config::register_pg_config();
     // pg_available_extensions() (OID 3082) / pg_available_extension_versions()
     // (OID 3083): the control-file directory walk SRFs (the parse + version-graph
     // live in their extension.c owner).

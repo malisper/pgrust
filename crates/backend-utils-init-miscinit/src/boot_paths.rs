@@ -31,6 +31,18 @@ const MAXPGPATH: usize = 1024;
 const DEFAULT_PGBINDIR: &str = "/usr/local/pgsql/bin";
 const DEFAULT_PKGLIBDIR: &str = "/usr/local/pgsql/lib";
 const DEFAULT_PGSHAREDIR: &str = "/usr/local/pgsql/share";
+// The remaining configure-time install dirs (pg_config_paths.h). Defaults match
+// PostgreSQL's documented `--prefix=/usr/local/pgsql` layout; each is
+// overridable at build time via the matching `PGRUST_*` env var.
+const DEFAULT_SYSCONFDIR: &str = "/usr/local/pgsql/etc";
+const DEFAULT_INCLUDEDIR: &str = "/usr/local/pgsql/include";
+const DEFAULT_PKGINCLUDEDIR: &str = "/usr/local/pgsql/include";
+const DEFAULT_INCLUDEDIRSERVER: &str = "/usr/local/pgsql/include/server";
+const DEFAULT_LIBDIR: &str = "/usr/local/pgsql/lib";
+const DEFAULT_LOCALEDIR: &str = "/usr/local/pgsql/share/locale";
+const DEFAULT_DOCDIR: &str = "/usr/local/pgsql/share/doc";
+const DEFAULT_HTMLDIR: &str = "/usr/local/pgsql/share/doc";
+const DEFAULT_MANDIR: &str = "/usr/local/pgsql/share/man";
 
 #[inline]
 fn configured_pgbindir() -> &'static str {
@@ -45,6 +57,51 @@ fn configured_pkglibdir() -> &'static str {
 #[inline]
 fn configured_sharedir() -> &'static str {
     option_env!("PGRUST_PGSHAREDIR").unwrap_or(DEFAULT_PGSHAREDIR)
+}
+
+#[inline]
+fn configured_sysconfdir() -> &'static str {
+    option_env!("PGRUST_SYSCONFDIR").unwrap_or(DEFAULT_SYSCONFDIR)
+}
+
+#[inline]
+fn configured_includedir() -> &'static str {
+    option_env!("PGRUST_INCLUDEDIR").unwrap_or(DEFAULT_INCLUDEDIR)
+}
+
+#[inline]
+fn configured_pkgincludedir() -> &'static str {
+    option_env!("PGRUST_PKGINCLUDEDIR").unwrap_or(DEFAULT_PKGINCLUDEDIR)
+}
+
+#[inline]
+fn configured_includedirserver() -> &'static str {
+    option_env!("PGRUST_INCLUDEDIRSERVER").unwrap_or(DEFAULT_INCLUDEDIRSERVER)
+}
+
+#[inline]
+fn configured_libdir() -> &'static str {
+    option_env!("PGRUST_LIBDIR").unwrap_or(DEFAULT_LIBDIR)
+}
+
+#[inline]
+fn configured_localedir() -> &'static str {
+    option_env!("PGRUST_LOCALEDIR").unwrap_or(DEFAULT_LOCALEDIR)
+}
+
+#[inline]
+fn configured_docdir() -> &'static str {
+    option_env!("PGRUST_DOCDIR").unwrap_or(DEFAULT_DOCDIR)
+}
+
+#[inline]
+fn configured_htmldir() -> &'static str {
+    option_env!("PGRUST_HTMLDIR").unwrap_or(DEFAULT_HTMLDIR)
+}
+
+#[inline]
+fn configured_mandir() -> &'static str {
+    option_env!("PGRUST_MANDIR").unwrap_or(DEFAULT_MANDIR)
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +486,164 @@ fn get_pkglib_path(my_exec_path: &str) -> String {
 /// relocated install still finds its data files (timezonesets, the tzdb, etc.).
 pub fn get_share_path(my_exec_path: &str) -> String {
     make_relative_path(configured_sharedir(), configured_pgbindir(), my_exec_path)
+}
+
+/// `cleanup_path(path)` (`path.c`): a no-op on non-Windows builds (the body is
+/// entirely under `#ifdef WIN32`, where it runs `GetShortPathName` +
+/// `debackslash_path`). Kept as a named identity so the `get_configdata`
+/// transcription mirrors C call-for-call.
+#[inline]
+fn cleanup_path(path: String) -> String {
+    path
+}
+
+/// `get_etc_path(my_exec_path, ret_path)` (`path.c`):
+/// `make_relative_path(ret_path, SYSCONFDIR, PGBINDIR, my_exec_path)`.
+fn get_etc_path(my_exec_path: &str) -> String {
+    make_relative_path(configured_sysconfdir(), configured_pgbindir(), my_exec_path)
+}
+
+/// `get_include_path(my_exec_path, ret_path)` (`path.c`):
+/// `make_relative_path(ret_path, INCLUDEDIR, PGBINDIR, my_exec_path)`.
+fn get_include_path(my_exec_path: &str) -> String {
+    make_relative_path(configured_includedir(), configured_pgbindir(), my_exec_path)
+}
+
+/// `get_pkginclude_path(my_exec_path, ret_path)` (`path.c`):
+/// `make_relative_path(ret_path, PKGINCLUDEDIR, PGBINDIR, my_exec_path)`.
+fn get_pkginclude_path(my_exec_path: &str) -> String {
+    make_relative_path(configured_pkgincludedir(), configured_pgbindir(), my_exec_path)
+}
+
+/// `get_includeserver_path(my_exec_path, ret_path)` (`path.c`):
+/// `make_relative_path(ret_path, INCLUDEDIRSERVER, PGBINDIR, my_exec_path)`.
+fn get_includeserver_path(my_exec_path: &str) -> String {
+    make_relative_path(
+        configured_includedirserver(),
+        configured_pgbindir(),
+        my_exec_path,
+    )
+}
+
+/// `get_lib_path(my_exec_path, ret_path)` (`path.c`):
+/// `make_relative_path(ret_path, LIBDIR, PGBINDIR, my_exec_path)`.
+fn get_lib_path(my_exec_path: &str) -> String {
+    make_relative_path(configured_libdir(), configured_pgbindir(), my_exec_path)
+}
+
+/// `get_locale_path(my_exec_path, ret_path)` (`path.c`):
+/// `make_relative_path(ret_path, LOCALEDIR, PGBINDIR, my_exec_path)`.
+fn get_locale_path(my_exec_path: &str) -> String {
+    make_relative_path(configured_localedir(), configured_pgbindir(), my_exec_path)
+}
+
+/// `get_doc_path(my_exec_path, ret_path)` (`path.c`):
+/// `make_relative_path(ret_path, DOCDIR, PGBINDIR, my_exec_path)`.
+fn get_doc_path(my_exec_path: &str) -> String {
+    make_relative_path(configured_docdir(), configured_pgbindir(), my_exec_path)
+}
+
+/// `get_html_path(my_exec_path, ret_path)` (`path.c`):
+/// `make_relative_path(ret_path, HTMLDIR, PGBINDIR, my_exec_path)`.
+fn get_html_path(my_exec_path: &str) -> String {
+    make_relative_path(configured_htmldir(), configured_pgbindir(), my_exec_path)
+}
+
+/// `get_man_path(my_exec_path, ret_path)` (`path.c`):
+/// `make_relative_path(ret_path, MANDIR, PGBINDIR, my_exec_path)`.
+fn get_man_path(my_exec_path: &str) -> String {
+    make_relative_path(configured_mandir(), configured_pgbindir(), my_exec_path)
+}
+
+// ---------------------------------------------------------------------------
+// get_configdata (common/config_info.c)
+//
+// The build-flag columns (CONFIGURE/CC/CPPFLAGS/...) are rendered "not
+// recorded" exactly as C's `#ifndef VAL_*` fallback does: this tree has no
+// configure-captured `VAL_*` macros, so every one of them takes the fallback.
+// The 23-entry count and the BINDIR..VERSION ordering are transcribed
+// field-for-field from `get_configdata`.
+// ---------------------------------------------------------------------------
+
+/// `PG_VERSION` (`pg_config.h`) — the server major-version string used to render
+/// the `VERSION` config row (`"PostgreSQL " PG_VERSION`). Kept in sync with
+/// `crate::PG_VERSION`.
+const CONFIG_PG_VERSION: &str = crate::PG_VERSION;
+
+/// `get_configdata(my_exec_path, &configdata_len)` (`common/config_info.c`):
+/// build the 23 `(name, setting)` rows the `pg_config` program prints, derived
+/// from the running executable's location. Faithful field-for-field port.
+pub fn get_configdata(my_exec_path: &str) -> Vec<types_misc_more2::ConfigDataRow> {
+    use types_misc_more2::ConfigDataRow;
+
+    fn row(name: &str, setting: String) -> ConfigDataRow {
+        ConfigDataRow {
+            name: name.to_string(),
+            setting,
+        }
+    }
+
+    // C's "not recorded" fallback for every build-flag column (this tree
+    // captures no configure-time `VAL_*` macros). `_()` is gettext; the
+    // untranslated literal is what the C build emits.
+    const NOT_RECORDED: &str = "not recorded";
+
+    let mut data: Vec<ConfigDataRow> = Vec::with_capacity(23);
+
+    // BINDIR: strip the executable name off my_exec_path, then cleanup_path.
+    let mut bindir = my_exec_path.as_bytes().to_vec();
+    // C: lastsep = strrchr(path, '/'); if (lastsep) *lastsep = '\0';
+    if let Some(pos) = bindir.iter().rposition(|&b| b == b'/') {
+        bindir.truncate(pos);
+    }
+    let bindir = cleanup_path(String::from_utf8_lossy(&bindir).into_owned());
+    data.push(row("BINDIR", bindir));
+
+    data.push(row("DOCDIR", cleanup_path(get_doc_path(my_exec_path))));
+    data.push(row("HTMLDIR", cleanup_path(get_html_path(my_exec_path))));
+    data.push(row("INCLUDEDIR", cleanup_path(get_include_path(my_exec_path))));
+    data.push(row(
+        "PKGINCLUDEDIR",
+        cleanup_path(get_pkginclude_path(my_exec_path)),
+    ));
+    data.push(row(
+        "INCLUDEDIR-SERVER",
+        cleanup_path(get_includeserver_path(my_exec_path)),
+    ));
+    data.push(row("LIBDIR", cleanup_path(get_lib_path(my_exec_path))));
+    data.push(row("PKGLIBDIR", cleanup_path(get_pkglib_path(my_exec_path))));
+    data.push(row("LOCALEDIR", cleanup_path(get_locale_path(my_exec_path))));
+    data.push(row("MANDIR", cleanup_path(get_man_path(my_exec_path))));
+    data.push(row("SHAREDIR", cleanup_path(get_share_path(my_exec_path))));
+    data.push(row("SYSCONFDIR", cleanup_path(get_etc_path(my_exec_path))));
+
+    // PGXS: get_pkglib_path then strlcat "/pgxs/src/makefiles/pgxs.mk".
+    let mut pgxs = get_pkglib_path(my_exec_path);
+    pgxs.push_str("/pgxs/src/makefiles/pgxs.mk");
+    if pgxs.len() >= MAXPGPATH {
+        pgxs.truncate(MAXPGPATH - 1);
+    }
+    data.push(row("PGXS", cleanup_path(pgxs)));
+
+    // CONFIGURE: pstrdup(CONFIGURE_ARGS). This tree has no configure step, so
+    // the captured argument string is empty (matching a `CONFIGURE_ARGS ""`).
+    data.push(row("CONFIGURE", String::new()));
+
+    // The build-flag columns: every one takes C's `#ifndef VAL_*` fallback.
+    data.push(row("CC", NOT_RECORDED.to_string()));
+    data.push(row("CPPFLAGS", NOT_RECORDED.to_string()));
+    data.push(row("CFLAGS", NOT_RECORDED.to_string()));
+    data.push(row("CFLAGS_SL", NOT_RECORDED.to_string()));
+    data.push(row("LDFLAGS", NOT_RECORDED.to_string()));
+    data.push(row("LDFLAGS_EX", NOT_RECORDED.to_string()));
+    data.push(row("LDFLAGS_SL", NOT_RECORDED.to_string()));
+    data.push(row("LIBS", NOT_RECORDED.to_string()));
+
+    // VERSION: "PostgreSQL " PG_VERSION.
+    data.push(row("VERSION", format!("PostgreSQL {CONFIG_PG_VERSION}")));
+
+    debug_assert_eq!(data.len(), 23);
+    data
 }
 
 // ---------------------------------------------------------------------------
