@@ -1063,19 +1063,24 @@ fn pull_up_simple_union_all<'mcx>(
     // int rtoffset = list_length(root->parse->rtable);
     let rtoffset = parse.rtable.len() as i32;
 
-    // Take the subquery out of the RTE so we can own + adjust it. (The C keeps
-    // `rte->subquery` live and `copyObject(subquery->rtable)`s only the rtable;
-    // here we move the whole owned subquery out, mutate its rtable in place, and
-    // never put it back — the appendrel parent RTE no longer needs the subtree.)
-    let mut subquery = parse.rtable[(varno - 1) as usize]
+    // C: `Query *subquery = rte->subquery;` — the appendrel parent RTE keeps its
+    // `subquery` live; later planner stages (`extract_lateral_references` for a
+    // LATERAL UNION ALL) call `pull_vars_of_level((Node *) rte->subquery, 1)` to
+    // find the cross-level lateral Vars, so we MUST NOT null it out. Work on a
+    // deep copy (copyObject) for the rtable/perminfo/setOperations mutations and
+    // leave `rte->subquery` in place.
+    let mut subquery: Query<'mcx> = parse.rtable[(varno - 1) as usize]
         .subquery
-        .take()
-        .expect("RTE_SUBQUERY with NULL subquery");
+        .as_deref()
+        .expect("RTE_SUBQUERY with NULL subquery")
+        .clone_in(mcx)?;
     let rte_lateral = parse.rtable[(varno - 1) as usize].lateral;
 
     // Make a modifiable copy of the subquery's rtable, so we can adjust
-    // upper-level Vars in it. (We already own the subquery; move its rtable out
-    // into our working list — the subquery itself is discarded afterwards.)
+    // upper-level Vars in it. C: `rtable = copyObject(subquery->rtable);`. We own
+    // the (cloned) `subquery`, so move its rtable out into our working list — the
+    // cloned `subquery` itself is discarded afterwards, while the original stays
+    // attached to the RTE.
     let mut rtable: PgVec<'mcx, RangeTblEntry<'mcx>> =
         core::mem::replace(&mut subquery.rtable, PgVec::new_in(mcx));
 
