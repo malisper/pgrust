@@ -1871,7 +1871,7 @@ fn exec_br_ir_insert_triggers<'mcx>(
     for i in 0..numtriggers {
         // trigger = &trigdesc->triggers[i]; read the dispatch facts under an
         // immutable borrow (the firing call below needs &mut estate).
-        let (tgtype, tgenabled, tgoid, has_qual, tgnattr) = {
+        let (tgtype, tgenabled, tgoid, has_qual, tgnattr, tgisclone, tgname) = {
             let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[i];
             (
                 trig.tgtype,
@@ -1879,6 +1879,8 @@ fn exec_br_ir_insert_triggers<'mcx>(
                 trig.tgoid,
                 trig.tgqual.is_some(),
                 trig.tgnattr,
+                trig.tgisclone,
+                trig.tgname.as_str().to_string(),
             )
         };
 
@@ -1945,6 +1947,23 @@ fn exec_br_ir_insert_triggers<'mcx>(
                         rt.clone_in(mcx)?,
                         false,
                     )?;
+
+                    // After a tuple in a partition goes through a trigger, the user
+                    // could have changed the partition key enough that the tuple no
+                    // longer fits the partition.  Verify that.
+                    //   if (trigger->tgisclone &&
+                    //       !ExecPartitionCheck(relinfo, slot, estate, false))
+                    //       ereport(ERROR, "moving row to another partition ...");
+                    if tgisclone
+                        && !backend_executor_execMain_seams::exec_partition_check::call(
+                            estate, relinfo, slot, false,
+                        )?
+                    {
+                        return Err(partition_move_in_before_trigger_error(
+                            mcx, estate, relinfo, &tgname,
+                        )?);
+                    }
+
                     // signal tuple should be re-fetched if used.
                     newtuple = None;
                 }
@@ -1953,6 +1972,41 @@ fn exec_br_ir_insert_triggers<'mcx>(
     }
 
     Ok(true)
+}
+
+/// `ereport(ERROR, ...)` for trigger.c:2524 / 4221: a BEFORE FOR EACH ROW trigger
+/// on a partition modified the partition key so the row no longer fits the
+/// partition.  Builds the `errdetail` from the trigger name and the partition
+/// relation's schema-qualified name.
+fn partition_move_in_before_trigger_error<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    estate: &EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    tgname: &str,
+) -> PgResult<PgError> {
+    let rel = estate
+        .result_rel(relinfo)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("partition_move_in_before_trigger_error: ri_RelationDesc is NULL");
+    let relname = rel.name().to_string();
+    let nspoid = rel.rd_rel.relnamespace;
+    let nspname =
+        backend_utils_cache_lsyscache_seams::get_namespace_name::call(mcx, nspoid)?
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+    Ok(ereport(ERROR)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg(
+            "moving row to another partition during a BEFORE FOR EACH ROW trigger is not supported",
+        )
+        .errdetail(format!(
+            "Before executing trigger \"{}\", the row was to be in partition \"{}.{}\".",
+            tgname,
+            nspname,
+            relname,
+        ))
+        .into_error())
 }
 
 /// `check_modified_virtual_generated(tupdesc, tuple)` (trigger.c) — check
