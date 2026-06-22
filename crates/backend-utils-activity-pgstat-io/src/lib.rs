@@ -732,4 +732,26 @@ pub fn init_seams() {
             0,
         );
     });
+    // IOOP_REUSE (bufmgr.c:2470 GetVictimBuffer) — record `cnt` strategy-ring
+    // buffer reuses (a valid buffer already in the ring is recycled).
+    backend_storage_buffer_bufmgr_seams::count_io_op_reuse::set(|io_context, cnt| {
+        pgstat_count_io_op(
+            IOObject::IOOBJECT_RELATION,
+            io_context,
+            IOOp::IOOP_REUSE,
+            cnt as u32,
+            0,
+        );
+    });
+    // IOOP_WRITE (bufmgr.c:4394 FlushBuffer) — record `cnt` shared-buffer writes
+    // totalling `bytes` against the relation object in the given IO context.
+    backend_storage_buffer_bufmgr_seams::count_io_op_write::set(|io_context, cnt, bytes| {
+        pgstat_count_io_op(
+            IOObject::IOOBJECT_RELATION,
+            io_context,
+            IOOp::IOOP_WRITE,
+            cnt as u32,
+            bytes,
+        );
+    });
 }

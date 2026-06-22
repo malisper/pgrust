@@ -179,11 +179,20 @@ impl BufferManager {
     /// race), read `PageGetLSN` + clear `BM_JUST_DIRTIED` under the header lock,
     /// `XLogFlush(recptr)` for `BM_PERMANENT` buffers, the checksum copy +
     /// `smgrwrite`, then `TerminateBufferIO(buf, true, 0, true, false)`.
-    pub(crate) fn flush_buffer(&self, buf_id: usize) -> PgResult<()> {
+    pub(crate) fn flush_buffer(
+        &self,
+        buf_id: usize,
+        io_context: types_storage::buf::IOContext,
+    ) -> PgResult<()> {
         // StartBufferIO(buf, false, false): false if someone else flushed it.
         if !self.start_flush_io(buf_id)? {
             return Ok(());
         }
+
+        // io_start = pgstat_prepare_io_time(track_io_timing) (bufmgr.c:4365).
+        // The timing component is internal to pgstat; the count+bytes accounting
+        // (the seam below) is the stats fired by stats.sql's io_sum_*_writes.
+        let _ = io_context;
 
         let tag = self.desc_tag(buf_id);
 
@@ -236,6 +245,11 @@ impl BufferManager {
         // pgBufferUsage.shared_blks_written++ (bufmgr.c:4397).
         sb::count_buffer_write::call();
 
+        // pgstat_count_io_op_time(IOOBJECT_RELATION, io_context, IOOP_WRITE,
+        // io_start, 1, BLCKSZ) (bufmgr.c:4394) — record the shared-buffer write
+        // into pg_stat_io (the io_sum_shared_*_writes the stats test checks).
+        sb::count_io_op_write::call(io_context, 1, BLCKSZ as u64);
+
         // TerminateBufferIO(buf, true, 0, true, false): clear dirty unless the
         // page was re-dirtied during the write (BM_JUST_DIRTIED re-set); forget
         // the I/O from the resource owner (bufmgr.c:4403).
@@ -276,7 +290,8 @@ impl BufferManager {
         // Assert(BufferIsPinned(buffer)); Assert(LWLockHeldByMeInMode(
         // BufferDescriptorGetContentLock(bufHdr), LW_EXCLUSIVE)).
         let buf_id = self.buffer_to_buf_id_pub(buffer)?;
-        self.flush_buffer(buf_id)
+        // FlushBuffer(bufHdr, NULL, IOOBJECT_RELATION, IOCONTEXT_NORMAL).
+        self.flush_buffer(buf_id, types_storage::buf::IOContext::IOCONTEXT_NORMAL)
     }
 
     // -----------------------------------------------------------------------
@@ -329,7 +344,9 @@ impl BufferManager {
             backend_storage_lmgr_proc_seams::my_proc_number::call(),
         )?;
 
-        let flush = self.flush_buffer(buf_id);
+        // SyncOneBuffer() is only called by checkpointer and bgwriter, so
+        // IOContext will always be IOCONTEXT_NORMAL (bufmgr.c:3978).
+        let flush = self.flush_buffer(buf_id, types_storage::buf::IOContext::IOCONTEXT_NORMAL);
 
         lwlock::LWLockRelease(lock)?;
         flush?;
@@ -735,7 +752,7 @@ impl BufferManager {
                     LWLockMode::LW_SHARED,
                     backend_storage_lmgr_proc_seams::my_proc_number::call(),
                 )?;
-                let flush = self.flush_buffer(i);
+                let flush = self.flush_buffer(i, types_storage::buf::IOContext::IOCONTEXT_NORMAL);
                 lwlock::LWLockRelease(lock)?;
                 flush?;
                 // UnpinBuffer(bufHdr) — with-owner (bufmgr.c:5009).
@@ -820,7 +837,7 @@ impl BufferManager {
                     LWLockMode::LW_SHARED,
                     backend_storage_lmgr_proc_seams::my_proc_number::call(),
                 )?;
-                let flush = self.flush_buffer(i);
+                let flush = self.flush_buffer(i, types_storage::buf::IOContext::IOCONTEXT_NORMAL);
                 lwlock::LWLockRelease(lock)?;
                 flush?;
                 // UnpinBuffer(bufHdr) — with-owner (bufmgr.c:5106).
@@ -864,7 +881,7 @@ impl BufferManager {
                     LWLockMode::LW_SHARED,
                     backend_storage_lmgr_proc_seams::my_proc_number::call(),
                 )?;
-                let flush = self.flush_buffer(i);
+                let flush = self.flush_buffer(i, types_storage::buf::IOContext::IOCONTEXT_NORMAL);
                 lwlock::LWLockRelease(lock)?;
                 flush?;
                 // UnpinBuffer(bufHdr) — with-owner (bufmgr.c:5334).

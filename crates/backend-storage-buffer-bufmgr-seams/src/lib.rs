@@ -806,6 +806,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_count_io_op_time(IOOBJECT_RELATION, io_context, IOOP_WRITE,
+    /// io_start, 1, BLCKSZ)` (bufmgr.c:4394) — record `cnt` write operations
+    /// against the relation object totalling `bytes` bytes (plus elapsed time
+    /// when `track_io_timing` is on). Fired from `FlushBuffer` after the
+    /// `smgrwrite` of a dirty shared buffer. The `io_context` is `NORMAL` for the
+    /// checkpointer/bgwriter/`FlushOneBuffer` paths, or the strategy ring's
+    /// context for the `GetVictimBuffer` dirty-victim write-back. Owned by
+    /// pgstat; infallible, stats-only.
+    pub fn count_io_op_write(io_context: types_storage::buf::IOContext, cnt: u64, bytes: u64)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_io_op(IOOBJECT_RELATION, io_context, IOOP_REUSE, 1, 0)`
+    /// (bufmgr.c:2470) — record `cnt` strategy-ring buffer reuses against the
+    /// relation object. Fired from `GetVictimBuffer` when a valid buffer already
+    /// in the strategy ring is recycled (`from_ring` true). Owned by pgstat;
+    /// infallible, stats-only.
+    pub fn count_io_op_reuse(io_context: types_storage::buf::IOContext, cnt: u64)
+);
+
+seam_core::seam!(
     /// `pgstat_count_buffer_read(rel)` (bufmgr.c:1166) — bump the per-relation
     /// `pgstat_info->counts.blocks_fetched` for a block request on a relcache
     /// relation (counted on both hits and misses, but only when a relcache entry
