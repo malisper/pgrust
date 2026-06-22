@@ -499,7 +499,7 @@ pub fn exec_build_returning_projection<'mcx>(
 /// (`proj_slot` / `oc_ProjSlot`) only matters at `ExecProject` time, not during
 /// compilation.
 pub fn exec_build_on_conflict_set_projection<'mcx>(
-    _mtstate: &mut ModifyTableState<'mcx>,
+    mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     on_conflict_set: &[TargetEntry<'mcx>],
@@ -514,7 +514,7 @@ pub fn exec_build_on_conflict_set_projection<'mcx>(
         .as_ref()
         .expect("ExecBuildOnConflictSetProjection: ri_RelationDesc is NULL")
         .rd_att_clone_in(mcx)?;
-    let proj = execExpr_core::exec_build_update_projection_impl(
+    let mut proj = execExpr_core::exec_build_update_projection_impl(
         estate,
         on_conflict_set,
         true,
@@ -523,6 +523,14 @@ pub fn exec_build_on_conflict_set_projection<'mcx>(
         econtext,
         Some(proj_slot),
     )?;
+    // C `ExecBuildUpdateProjection(node->onConflictSet, true, ..., &mtstate->ps)`
+    // passes the ModifyTable PlanState as parent. With `evalTargetList = true` the
+    // ON CONFLICT SET target list is evaluated here, so a SubPlan in it (e.g.
+    // `ON CONFLICT DO UPDATE SET c = (SELECT ...)`) is appended to
+    // `mtstate->ps.subPlan` via `state->parent->subPlan = lappend(...)`. The owned
+    // spine defers this to a drain here (read by EXPLAIN to print the SubPlan under
+    // the ModifyTable/Insert node and by ExecReScan chgParam propagation).
+    execExpr_core::drain_found_subplan_ids(mcx, &mut mtstate.ps, &mut proj.pi_state)?;
     Ok(PgBox::into_inner(proj))
 }
 

@@ -1960,14 +1960,46 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 }
                 v
             };
-            let arg_states = crate::execExpr_core::exec_init_expr_list_for_window(
+            let mut arg_states = crate::execExpr_core::exec_init_expr_list_for_window(
                 arg_refs.as_slice(),
                 estate,
             )?;
-            let aggfilter_state = match wfunc.aggfilter.as_deref() {
+            let mut aggfilter_state = match wfunc.aggfilter.as_deref() {
                 None => None,
                 Some(f) => Some(crate::execExpr_core::exec_init_expr_no_parent_box(f, estate)?),
             };
+
+            // C compiles `wfunc->args` / `wfunc->aggfilter` with `state->parent`
+            // (the WindowAggState), so a SubPlan inside a window-function argument
+            // or FILTER clause appends to `winstate->subPlan` via
+            // `state->parent->subPlan = lappend(...)`. Here those inner expressions
+            // were compiled parent-less (`exec_init_expr_*_for_window` threads only
+            // `es_link`), so their `found_subplan_ids` would otherwise be dropped.
+            // Hoist each inner state's discovered SubPlan ids onto THIS ExprState's
+            // discovery channel so the enclosing WindowAgg projection compile (which
+            // drains into `winstate.ss.ps`) registers them on the WindowAggState
+            // head — read by EXPLAIN (SubPlan body under the WindowAgg node) and by
+            // ExecReScan chgParam propagation.
+            {
+                let mut hoist = |inner: &mut ExprState<'mcx>| {
+                    if let Some(ids) = inner.found_subplan_ids.take() {
+                        if !ids.is_empty() {
+                            state
+                                .found_subplan_ids
+                                .get_or_insert_with(Vec::new)
+                                .extend(ids);
+                        }
+                    }
+                };
+                if let Some(states) = arg_states.as_mut() {
+                    for s in states.iter_mut() {
+                        hoist(s);
+                    }
+                }
+                if let Some(f) = aggfilter_state.as_mut() {
+                    hoist(f);
+                }
+            }
 
             // makeNode(WindowFuncExprState); wfstate->wfunc = wfunc.
             let wfstate = types_nodes::nodewindowagg::WindowFuncExprState {
@@ -3120,7 +3152,7 @@ pub fn exec_build_update_projection<'mcx>(
     // resultRelInfo->ri_projectNew = ExecBuildUpdateProjection(subplan->targetlist,
     //     false /* subplan did the evaluation */, updateColnos, relDesc, econtext,
     //     ri_newTupleSlot, &mtstate->ps);
-    let proj = exec_build_update_projection_impl(
+    let mut proj = exec_build_update_projection_impl(
         estate,
         target_list,
         false,
@@ -3129,6 +3161,14 @@ pub fn exec_build_update_projection<'mcx>(
         econtext,
         new_tuple_slot,
     )?;
+
+    // C `ExecBuildUpdateProjection(subplan->targetlist, false, ..., &mtstate->ps)`
+    // passes the ModifyTable PlanState as parent. Even with `evalTargetList = false`
+    // (the subplan already evaluated the new-tuple expressions, so the projection is
+    // normally just Vars), C still appends any SubPlan discovered while compiling
+    // the target list to `mtstate->ps.subPlan`. Mirror that with a drain so the
+    // ModifyTable head registers it (EXPLAIN display + ExecReScan chgParam).
+    drain_found_subplan_ids(mcx, &mut mtstate.ps, &mut proj.pi_state)?;
 
     let rri = estate.result_rel_mut(result_rel_info);
     rri.ri_projectNew = Some(proj);
