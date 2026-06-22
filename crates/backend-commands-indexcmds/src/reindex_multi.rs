@@ -241,14 +241,14 @@ pub(crate) fn ReindexMultipleInternal<'mcx>(
         } else {
             let mut newparams = *params;
             newparams.options |= REINDEXOPT_REPORT_PROGRESS | REINDEXOPT_MISSING_OK;
-            backend_catalog_index_seams::reindex_relation::call(
+            let _ = backend_catalog_index_seams::reindex_relation::call(
                 mcx,
                 relid,
                 REINDEX_REL_PROCESS_TOAST | REINDEX_REL_CHECK_CONSTRAINTS,
                 newparams,
             )?;
 
-            // The installed reindex_relation seam maps the bool result to ();
+            // The VERBOSE "table ... was reindexed" INFO is emitted from inside
             // the VERBOSE "table ... was reindexed" INFO is emitted from inside
             // reindex_relation in C (table-level), and the per-relation INFO the
             // C ReindexMultipleInternal would emit on a true result is

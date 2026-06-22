@@ -1488,22 +1488,29 @@ fn ReindexTable<'mcx>(
     } else if (params.options & REINDEXOPT_CONCURRENTLY) != 0
         && lsyscache::get_rel_persistence::call(heap_oid)? != RELPERSISTENCE_TEMP_U8
     {
-        reindex_concurrently::ReindexRelationConcurrently(mcx, stmt, heap_oid, params)?;
+        let result =
+            reindex_concurrently::ReindexRelationConcurrently(mcx, stmt, heap_oid, params)?;
+        if !result {
+            ereport(types_error::NOTICE)
+                .errmsg(format!(
+                    "table \"{relname}\" has no indexes that can be reindexed concurrently"
+                ))
+                .finish(here("ReindexTable"))?;
+        }
     } else {
         let mut newparams = *params;
         newparams.options |= REINDEXOPT_REPORT_PROGRESS;
-        // reindex_relation returns whether any index was processed; the seam
-        // installed by catalog/index.c maps the bool to (). NOTICE on "no
-        // indexes to reindex" is emitted from inside reindex_relation in C; the
-        // installed seam preserves the rebuild but not the leaf NOTICE, which is
-        // immaterial to correctness.
-        let _ = relname;
-        index_seam::reindex_relation::call(
+        let result = index_seam::reindex_relation::call(
             mcx,
             heap_oid,
             REINDEX_REL_PROCESS_TOAST | REINDEX_REL_CHECK_CONSTRAINTS,
             newparams,
         )?;
+        if !result {
+            ereport(types_error::NOTICE)
+                .errmsg(format!("table \"{relname}\" has no indexes to reindex"))
+                .finish(here("ReindexTable"))?;
+        }
     }
     Ok(())
 }

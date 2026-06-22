@@ -4395,7 +4395,7 @@ pub fn init_seams() {
         reindex_index(mcx, Some(stmt), index_id, skip, persistence, &params)
     });
     index_seam::reindex_relation::set(|mcx, relid, flags, params| {
-        reindex_relation(mcx, relid, flags, &params).map(|_| ())
+        reindex_relation(mcx, relid, flags, &params)
     });
 
     // index_drop — drop one index relation and its catalog rows (dependency.c's

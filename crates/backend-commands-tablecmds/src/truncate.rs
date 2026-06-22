@@ -313,7 +313,7 @@ pub fn execute_truncate_guts<'mcx>(
 
             /* Reconstruct the indexes to match, and we're done. */
             let reindex_params = types_cluster::ReindexParams::default();
-            backend_catalog_index_seams::reindex_relation::call(
+            let _ = backend_catalog_index_seams::reindex_relation::call(
                 mcx,
                 heap_relid,
                 types_cluster::REINDEX_REL_PROCESS_TOAST,

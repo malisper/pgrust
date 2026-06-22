@@ -342,7 +342,7 @@ seam_core::seam!(
         relid: types_core::Oid,
         flags: i32,
         params: types_cluster::ReindexParams,
-    ) -> types_error::PgResult<()>
+    ) -> types_error::PgResult<bool>
 );
 seam_core::seam!(
     /// `reindex_index(stmt, indexId, skip_constraint_checks, persistence,
