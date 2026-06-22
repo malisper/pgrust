@@ -1353,6 +1353,209 @@ pub fn extension_file_exists(extension_name: &str) -> PgResult<bool> {
 }
 
 // ===========================================================================
+// pg_available_extensions (C 2334-2420) — data half
+// ===========================================================================
+
+/// One row of `pg_available_extensions`: `(name, default_version, comment)`.
+pub struct AvailableExtension {
+    pub name: String,
+    pub default_version: Option<String>,
+    pub comment: Option<String>,
+}
+
+/// `pg_available_extensions` (C 2334-2420), the data half: walk every control
+/// directory in [`get_extension_control_directories`], parse each primary
+/// `*.control` file once (first one wins by control-path order, exactly as C's
+/// `found_ext` de-dup), and project `(name, default_version, comment)`.
+///
+/// The fmgr `Datum`/tuplestore layer (the C `InitMaterializedSRF` +
+/// `tuplestore_putvalues`) lives in `backend-executor-execSRF` — this returns the
+/// idiomatic owned rows, mirroring how `show_all_settings` splits the GUC row
+/// projection (`pg_settings_rows`) from the executor-frame adapter.
+pub fn pg_available_extensions() -> PgResult<Vec<AvailableExtension>> {
+    let mut rows: Vec<AvailableExtension> = Vec::new();
+    let mut found_ext: Vec<String> = Vec::new();
+    let locations = get_extension_control_directories()?;
+
+    let scratch = mcx::MemoryContext::new("pg_available_extensions dir scan");
+    for location in &locations {
+        // A missing control directory is the silent ENOENT case (C does
+        // nothing); any other error is raised by list_dir.
+        let entries = match fd_seams::list_dir::call(scratch.mcx(), location, true)? {
+            None => continue,
+            Some(e) => e,
+        };
+
+        for de in entries.iter() {
+            let d_name = de.name.as_str();
+            if !is_extension_control_filename(d_name) {
+                continue;
+            }
+
+            // Extract extension name from 'name.control' filename.
+            let dot = match d_name.rfind('.') {
+                Some(d) => d,
+                None => continue,
+            };
+            let extname = &d_name[..dot];
+
+            // Ignore it if it's an auxiliary control file.
+            if extname.contains("--") {
+                continue;
+            }
+
+            // Ignore already-found names (not reachable by the path search).
+            if found_ext.iter().any(|n| n == extname) {
+                continue;
+            }
+            found_ext.push(extname.to_string());
+
+            // Read the primary control file from this directory.
+            let mut control = new_ExtensionControlFile(extname);
+            control.control_dir = Some(location.clone());
+            parse_extension_control_file(&mut control, None)?;
+
+            rows.push(AvailableExtension {
+                name: control.name,
+                default_version: control.default_version,
+                comment: control.comment,
+            });
+        }
+    }
+
+    Ok(rows)
+}
+
+// ===========================================================================
+// pg_available_extension_versions (C 2432-2611) — data half
+// ===========================================================================
+
+/// One row of `pg_available_extension_versions`: `(name, version, superuser,
+/// trusted, relocatable, schema, requires, comment)`. `requires` is the prereq
+/// extension list (the fmgr `name[]` array is built by the executor-frame
+/// adapter via `convert_requires_to_datum`).
+pub struct AvailableExtensionVersion {
+    pub name: String,
+    pub version: String,
+    pub superuser: bool,
+    pub trusted: bool,
+    pub relocatable: bool,
+    pub schema: Option<String>,
+    pub requires: Vec<String>,
+    pub comment: Option<String>,
+}
+
+/// `get_available_versions_for_extension` (C 2508-2611), the data half: extract
+/// the version-update graph from the script directory, and for each installable
+/// version (plus the non-directly-installable versions reachable from it via
+/// `find_install_path`) emit the per-version parameter row.
+fn get_available_versions_for_extension(
+    pcontrol: &ExtensionControlFile,
+    out: &mut Vec<AvailableExtensionVersion>,
+) -> PgResult<()> {
+    let mut evi_list = get_ext_ver_list(pcontrol)?;
+
+    // The installable vertices, snapshotted (the arena is mutated by the
+    // find_install_path Dijkstra passes below, but the vertex set is fixed).
+    let installable: Vec<usize> = (0..evi_list.len())
+        .filter(|&i| evi_list[i].installable)
+        .collect();
+
+    for evi_idx in installable {
+        let evi_name = evi_list[evi_idx].name.clone();
+
+        // Fetch parameters for this specific version (pcontrol is not changed).
+        let control = read_extension_aux_control_file(pcontrol, &evi_name)?;
+        out.push(AvailableExtensionVersion {
+            name: control.name.clone(),
+            version: evi_name,
+            superuser: control.superuser,
+            trusted: control.trusted,
+            relocatable: control.relocatable,
+            schema: control.schema.clone(),
+            requires: control.requires.clone(),
+            comment: control.comment.clone(),
+        });
+        let schema = control.schema.clone();
+        let comment = control.comment.clone();
+
+        // Find all non-directly-installable versions that would be installed
+        // starting from this version, and report them, inheriting the
+        // parameters that aren't changed in updates from this version.
+        let non_installable: Vec<usize> = (0..evi_list.len())
+            .filter(|&i| !evi_list[i].installable)
+            .collect();
+        for evi2_idx in non_installable {
+            let (start, _path) = find_install_path(&mut evi_list, evi2_idx);
+            if start != Some(evi_idx) {
+                continue;
+            }
+            let evi2_name = evi_list[evi2_idx].name.clone();
+            let control2 = read_extension_aux_control_file(pcontrol, &evi2_name)?;
+            out.push(AvailableExtensionVersion {
+                name: control2.name.clone(),
+                version: evi2_name,
+                superuser: control2.superuser,
+                trusted: control2.trusted,
+                relocatable: control2.relocatable,
+                // schema stays the same as the directly-installable version.
+                schema: schema.clone(),
+                requires: control2.requires.clone(),
+                // comment stays the same.
+                comment: comment.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// `pg_available_extension_versions` (C 2432-2501), the data half: walk every
+/// control directory, parse each primary `*.control` once (C `found_ext`
+/// de-dup), and emit each installable version's parameter row via
+/// [`get_available_versions_for_extension`].
+pub fn pg_available_extension_versions() -> PgResult<Vec<AvailableExtensionVersion>> {
+    let mut rows: Vec<AvailableExtensionVersion> = Vec::new();
+    let mut found_ext: Vec<String> = Vec::new();
+    let locations = get_extension_control_directories()?;
+
+    let scratch = mcx::MemoryContext::new("pg_available_extension_versions dir scan");
+    for location in &locations {
+        let entries = match fd_seams::list_dir::call(scratch.mcx(), location, true)? {
+            None => continue,
+            Some(e) => e,
+        };
+
+        for de in entries.iter() {
+            let d_name = de.name.as_str();
+            if !is_extension_control_filename(d_name) {
+                continue;
+            }
+            let dot = match d_name.rfind('.') {
+                Some(d) => d,
+                None => continue,
+            };
+            let extname = &d_name[..dot];
+            if extname.contains("--") {
+                continue;
+            }
+            if found_ext.iter().any(|n| n == extname) {
+                continue;
+            }
+            found_ext.push(extname.to_string());
+
+            let mut control = new_ExtensionControlFile(extname);
+            control.control_dir = Some(location.clone());
+            parse_extension_control_file(&mut control, None)?;
+
+            get_available_versions_for_extension(&control, &mut rows)?;
+        }
+    }
+
+    Ok(rows)
+}
+
+// ===========================================================================
 // InsertExtensionTuple (C 2192-2271)
 // ===========================================================================
 

@@ -9977,6 +9977,7 @@ dependencies = [
  "backend-catalog-pg-publication-seams",
  "backend-commands-async",
  "backend-commands-event-trigger",
+ "backend-commands-extension",
  "backend-commands-prepare",
  "backend-executor-execExpr-seams",
  "backend-executor-execSRF-seams",

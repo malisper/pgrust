@@ -132,6 +132,10 @@ backend-commands-prepare = { path = "../backend-commands-prepare" }
 # (ExprSingleResult) path, like the json_to_record family.
 backend-utils-misc-more = { path = "../backend-utils-misc-more" }
 backend-utils-adt-misc2 = { path = "../backend-utils-adt-misc2" }
+# pg_available_extensions() (OID 3082) / pg_available_extension_versions() (OID
+# 3083): the control-file directory walk + parse + version-graph live in their
+# extension.c owner; this crate drives them over the executor frame.
+backend-commands-extension = { path = "../backend-commands-extension" }
 # pg_event_trigger_dropped_objects() (OID 3566): the sql_drop SRF core lives in
 # its event_trigger.c owner; this crate drives it over the executor frame.
 backend-commands-event-trigger = { path = "../backend-commands-event-trigger" }
