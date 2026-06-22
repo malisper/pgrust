@@ -3257,7 +3257,29 @@ fn create_tablefuncscan_plan<'mcx>(
                 }
             }
         }
+        // C's T_TableFunc mutator also descends into `colvalexprs` (the per-column
+        // JsonExpr value expressions). For JSON_TABLE these wrap the PASSING Vars
+        // referenced by the column's jsonpath, so they too must have nestloop
+        // params replaced.
+        if let Some(v) = tablefunc.colvalexprs.as_mut() {
+            for o in v.iter_mut() {
+                if let Some(b) = o.as_deref_mut() {
+                    repl(b);
+                }
+            }
+        }
         if let Some(v) = tablefunc.ns_uris.as_mut() {
+            for b in v.iter_mut() {
+                repl(b);
+            }
+        }
+        // JSON_TABLE PASSING argument expressions can reference outer-relation
+        // Vars too (e.g. `PASSING x AS x` over a lateral generate_series). C
+        // walks the whole TableFunc node, whose T_TableFunc mutator arm includes
+        // `passingvalexprs`; replace nestloop params there as well, or the
+        // PASSING Var keeps its base-relation varno and execExpr compiles it as
+        // an EEOP_SCAN_VAR whose econtext has no scantuple under the nestloop.
+        if let Some(v) = tablefunc.passingvalexprs.as_mut() {
             for b in v.iter_mut() {
                 repl(b);
             }
