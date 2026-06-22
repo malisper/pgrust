@@ -622,6 +622,22 @@ fn dsm_backend_startup() {
 
 // `dsm_set_control_handle` is EXEC_BACKEND-only and not ported.
 
+/// Test-only: model a *fresh forked backend* for the cross-process DSA attach
+/// test. A real parallel worker is a fork(2) child: it inherits the
+/// postmaster's shared `dsm_control` mapping (so the leader's published
+/// `control_item[]` slots are visible) but starts with an EMPTY backend-local
+/// `dsm_segment_list` — it has attached nothing yet. After a raw `fork()` in a
+/// unit test the child instead inherits the parent's (copy-on-write)
+/// `DSM_SEGMENT_LIST`, which would make `dsm_attach`'s "can't attach the same
+/// segment more than once" cross-check fire spuriously. Clearing the list here
+/// reproduces the genuine fresh-worker starting state without touching the
+/// shared control segment. Gated behind `test-bringup` so it never enters the
+/// production surface.
+#[cfg(any(test, feature = "test-bringup"))]
+pub fn dsm_reset_backend_local_segment_list_for_fork() {
+    DSM_SEGMENT_LIST.with(|list| *list.borrow_mut() = None);
+}
+
 /// `dsm_estimate_size` — bytes to reserve in the main shared memory segment
 /// for DSM segments.
 pub fn dsm_estimate_size() -> usize {

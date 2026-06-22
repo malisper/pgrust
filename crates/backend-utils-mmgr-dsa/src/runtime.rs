@@ -1319,9 +1319,17 @@ fn get_segment_by_index(area: DsaAreaHandle, index: DsaSegmentIndex, mcx: mcx::M
                 a.high_segment_index = index;
             }
         });
+        // C (dsa.c:1817): the magic check reads `area->control->handle`
+        // *directly*, NOT via `dsa_get_handle()`. For an area created with
+        // `dsa_create_in_place` (e.g. `es_query_dsa`), `control->handle ==
+        // DSA_HANDLE_INVALID` is the normal, valid state; `dsa_get_handle`
+        // additionally asserts the handle is *not* invalid, so calling it here
+        // panicked a worker the moment it attached an on-demand (grown) segment
+        // of an in-place area — the parallel-hash / parallel-bitmap keystone.
+        let area_handle_val = with_area(area, |a| unsafe { control_at(a.control_base).handle });
         debug_assert_eq!(
             unsafe { header_at(mapped_address).magic },
-            DSA_SEGMENT_HEADER_MAGIC ^ dsa_get_handle(area) ^ index as u32
+            DSA_SEGMENT_HEADER_MAGIC ^ area_handle_val ^ index as u32
         );
     }
     debug_assert!(!unsafe { header_at(with_area(area, |a| a.segment_maps[index].mapped_address)).freed });

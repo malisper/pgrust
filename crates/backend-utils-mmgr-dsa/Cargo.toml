@@ -22,3 +22,8 @@ backend-utils-mmgr-freepage-seams = { path = "../backend-utils-mmgr-freepage-sea
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-mmgr-dsa-seams = { path = "../backend-utils-mmgr-dsa-seams" }
+
+[dev-dependencies]
+backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core", features = ["test-bringup"] }
+backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
+libc = "0.2"
