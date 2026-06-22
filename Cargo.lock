@@ -13955,6 +13955,7 @@ dependencies = [
  "backend-catalog-pg-class",
  "backend-catalog-pg-proc-seams",
  "backend-commands-createas-seams",
+ "backend-commands-define-seams",
  "backend-commands-functioncmds-seams",
  "backend-nodes-core",
  "backend-nodes-outfuncs",
@@ -23471,6 +23472,7 @@ name = "backend-utils-misc-guc-funcs"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-tupdesc",
+ "backend-commands-explain-seams",
  "backend-port-sysv-shmem-seams",
  "backend-storage-ipc-ipci-seams",
  "backend-tcop-postgres-seams",

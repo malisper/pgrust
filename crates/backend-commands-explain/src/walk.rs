@@ -191,17 +191,68 @@ pub fn ExplainPrintPlan<'es, 'p>(
     let ancestors: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
     ExplainNode(es, mcx, planstate, &ancestors, None, None)?;
 
-    // ExplainPrintSettings(es): only emits when es->settings (GUC source list,
-    // unported). Skipped for the structural slice; a SETTINGS plan would need
-    // the GUC machinery.
-    if es.settings {
-        panic!(
-            "ExplainPrintPlan: SETTINGS option needs get_explain_guc_options (GUC unported)"
-        );
-    }
+    // ExplainPrintSettings(es) (explain.c:689): print summary of modified
+    // settings affecting query planning.
+    ExplainPrintSettings(es)?;
 
     // The es->verbose queryId block reads pstmt->queryId, a field the trimmed
     // PlannedStmt does not carry; it is verbose-only and already gated out above.
+    Ok(())
+}
+
+/// `ExplainPrintSettings(es)` (explain.c:689) — print summary of modified
+/// settings affecting query planning.
+fn ExplainPrintSettings(es: &mut ExplainState<'_>) -> PgResult<()> {
+    use backend_commands_explain_seams as seams;
+
+    // bail out if information about settings not requested
+    if !es.settings {
+        return Ok(());
+    }
+
+    // request an array of relevant settings
+    let gucs = seams::get_explain_guc_options::call()?;
+
+    if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        fmt::ExplainOpenGroup("Settings", Some("Settings"), true, es)?;
+
+        for name in gucs.iter() {
+            let setting = seams::explain_get_config_option_by_name::call(name)?;
+            // ExplainPropertyText(conf->name, setting, es). A NULL setting maps
+            // to an empty string here (the non-text path always emits the key).
+            fmt::ExplainPropertyText(name, setting.as_deref().unwrap_or(""), es)?;
+        }
+
+        fmt::ExplainCloseGroup("Settings", Some("Settings"), true, es)?;
+    } else {
+        // In TEXT mode, print nothing if there are no options.
+        if gucs.is_empty() {
+            return Ok(());
+        }
+
+        let mut str = String::new();
+        for (i, name) in gucs.iter().enumerate() {
+            if i > 0 {
+                str.push_str(", ");
+            }
+            let setting = seams::explain_get_config_option_by_name::call(name)?;
+            match setting {
+                Some(s) => {
+                    str.push_str(name);
+                    str.push_str(" = '");
+                    str.push_str(&s);
+                    str.push('\'');
+                }
+                None => {
+                    str.push_str(name);
+                    str.push_str(" = NULL");
+                }
+            }
+        }
+
+        fmt::ExplainPropertyText("Settings", &str, es)?;
+    }
+
     Ok(())
 }
 

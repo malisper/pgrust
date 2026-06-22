@@ -140,3 +140,21 @@ seam_core::seam!(
         params: ParamListInfo,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `get_explain_guc_options(&num)` (guc.c:5337) — the names of the GUCs that
+    /// the SETTINGS option should print (source != PGC_S_DEFAULT, GUC_EXPLAIN,
+    /// visible, value != boot_val). Owned/installed by
+    /// `backend-utils-misc-guc-funcs` (the live GUC registry lives there);
+    /// `backend-commands-explain`'s `ExplainPrintSettings` calls it.
+    pub fn get_explain_guc_options() -> PgResult<Vec<String>>
+);
+
+seam_core::seam!(
+    /// `GetConfigOptionByName(name, NULL, missing_ok=true)` (guc.c:5438) — the
+    /// rendered current value of a named GUC (with units), or `None` when the
+    /// name is unknown. Owned/installed by `backend-utils-misc-guc-funcs`;
+    /// `backend-commands-explain`'s `ExplainPrintSettings` renders each setting
+    /// with it.
+    pub fn explain_get_config_option_by_name(name: &str) -> PgResult<Option<String>>
+);

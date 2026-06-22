@@ -51,6 +51,8 @@ backend-parser-parse-oper = { path = "../backend-parser-parse-oper" }
 backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
 backend-parser-agg = { path = "../backend-parser-agg" }
 backend-parser-small1 = { path = "../backend-parser-small1" }
+# defGetBoolean for the EXPLAIN (GENERIC_PLAN) option (transformExplainStmt).
+backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
 # errdetail_relkind_not_supported (the MERGE relkind-not-supported detail);
 # cycle-free (pg-class has no parser dep).

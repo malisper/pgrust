@@ -787,27 +787,55 @@ fn transformOptionalSelectInto<'mcx>(
 /// wrapping the `ExplainStmt`. The C edits `stmt->query` in place; we deep-copy
 /// the (borrowed) options and store the transformed inner `Query` back into a
 /// fresh `ExplainStmt` so the executor (`ExplainQuery`) reads the analyzed query.
+/// Project a `DefElem`-arg value node into the `def_get_boolean` seam's
+/// `DefElemArg` (mirrors the EXPLAIN driver's `def_elem_arg`).
+fn def_elem_arg(node: &Node<'_>) -> backend_commands_define_seams::DefElemArg {
+    use backend_commands_define_seams::DefElemArg;
+    match node.node_tag() {
+        ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
+        ntag::T_Float => DefElemArg::Float(String::from(node.expect_float().fval.as_str())),
+        ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
+        ntag::T_String => DefElemArg::String(String::from(node.expect_string().sval.as_str())),
+        ntag::T_A_Star => DefElemArg::AStar,
+        _ => panic!("transformExplainStmt def_elem_arg: unsupported option arg node {node:?}"),
+    }
+}
+
 fn transformExplainStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     stmt: &types_nodes::ddlnodes::ExplainStmt<'mcx>,
 ) -> PgResult<Query<'mcx>> {
-    // GENERIC_PLAN with no external paramref source accepts variable parameter
-    // definitions (like PREPARE). pstate->p_paramref_hook is always NULL on this
-    // path; the variable-parameter substrate (setup_parse_variable_parameters /
-    // check_variable_parameters) is the PREPARE follow-on. Reject loudly if
-    // GENERIC_PLAN is requested with no paramref hook.
+    // If we have no external source of parameter definitions, and the
+    // GENERIC_PLAN option is specified, then accept variable parameter
+    // definitions (similarly to PREPARE).
+    let mut generic_plan = false;
     if pstate.p_paramref_hook.is_none() {
         for opt in stmt.options.iter() {
             if let Some(d) = opt.as_defelem() {
                 if d.defname.as_ref().map(|s| s.as_str()) == Some("generic_plan") {
-                    panic!(
-                        "transformExplainStmt: EXPLAIN (GENERIC_PLAN) needs \
-                         setup_parse_variable_parameters / check_variable_parameters \
-                         (PREPARE variable-parameter substrate, unported)"
-                    );
+                    // generic_plan = defGetBoolean(opt);
+                    // (don't "break", as we want the last value.)
+                    let arg = d
+                        .arg
+                        .as_deref()
+                        .map(def_elem_arg);
+                    generic_plan = backend_commands_define_seams::def_get_boolean::call(
+                        "generic_plan".to_string(),
+                        arg,
+                    )?;
                 }
             }
+        }
+        if generic_plan {
+            // setup_parse_variable_parameters(pstate, &paramTypes, &numParams);
+            // The owned VarParamState is a shared growable Oid Vec, seeded empty
+            // (EXPLAIN supplies no fixed declared types); the
+            // variable_paramref_hook grows and resolves it in place.
+            let parstate = types_nodes::parsestmt::VarParamState::from_shared(
+                alloc::rc::Rc::new(core::cell::RefCell::new(alloc::vec::Vec::new())),
+            );
+            backend_parser_small1::setup_parse_variable_parameters(pstate, parstate);
         }
     }
 
@@ -817,6 +845,11 @@ fn transformExplainStmt<'mcx>(
         .as_deref()
         .expect("transformExplainStmt: ExplainStmt->query is NULL");
     let transformed = transformOptionalSelectInto(mcx, pstate, inner)?;
+
+    // make sure all is well with parameter types.
+    if generic_plan {
+        backend_parser_small1::check_variable_parameters(pstate, &transformed)?;
+    }
 
     // represent the command as a utility Query wrapping a fresh ExplainStmt that
     // carries the transformed inner Query (mirrors C's `stmt->query = <Query>`).

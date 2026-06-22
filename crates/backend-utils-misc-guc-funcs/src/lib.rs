@@ -1289,4 +1289,16 @@ pub fn init_seams() {
     // builtin table (C: their `fmgr_builtins[]` rows), so `fmgr_isbuiltin` and
     // by-OID dispatch resolve `current_setting` / `set_config`.
     fmgr_builtins::register_guc_funcs_builtins();
+
+    // `get_explain_guc_options(&num)` (guc.c:5337) — EXPLAIN (SETTINGS) reads
+    // the live GUC registry, which lives in this crate. The seam decl is owned
+    // by `backend-commands-explain-seams`; `ExplainPrintSettings` consumes it.
+    backend_commands_explain_seams::get_explain_guc_options::set(|| {
+        Ok(get_explain_guc_options())
+    });
+    // `GetConfigOptionByName(name, NULL, missing_ok=true)` (guc.c:5438) — render
+    // each printed setting's current value. SETTINGS always passes missing_ok.
+    backend_commands_explain_seams::explain_get_config_option_by_name::set(|name| {
+        config_option_value(name, true)
+    });
 }
