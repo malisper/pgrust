@@ -9,16 +9,27 @@ name = "backend_postmaster_bgwriter"
 path = "src/lib.rs"
 
 [dependencies]
+libc = "0.2"
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-startup = { path = "../types-startup" }
 types-pgstat = { path = "../types-pgstat" }
 types-storage = { path = "../types-storage" }
+types-signal = { path = "../types-signal" }
 
 # ereport/elog and the error-report helpers (grounded leaf).
 backend-utils-error = { path = "../backend-utils-error" }
-# ConfigReloadPending / ShutdownRequestPending + ProcessMainLoopInterrupts.
+# ConfigReloadPending / ShutdownRequestPending + ProcessMainLoopInterrupts +
+# the SignalHandlerForConfigReload / SignalHandlerForShutdownRequest installed
+# into this process' SIGHUP/SIGTERM slots.
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+# procsignal_sigusr1_handler_signal — the SIGUSR1 handler this process must
+# install so it absorbs ProcSignalBarriers (ALTER/DROP DATABASE SET TABLESPACE).
+backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
+# pqsignal(signo, handler) installer.
+port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+# unblock_signals() — restore UnBlockSig (postmaster forks us with BlockSig).
+backend-libpq-pqsignal-seams = { path = "../backend-libpq-pqsignal-seams" }
 
 # Real, fully-ported owners the bgwriter genuinely drives (no cycle — the
 # bgwriter is a top-level leaf process):

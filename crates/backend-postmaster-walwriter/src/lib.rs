@@ -186,14 +186,59 @@ pub fn WalWriterMain(startup_data: &StartupData) -> PgResult<()> {
     debug_assert!(matches!(startup_data, StartupData::None));
 
     // MyBackendType = B_WAL_WRITER; AuxiliaryProcessMainCommon().
-    //
-    // The pqsignal() block (SIGHUP -> SignalHandlerForConfigReload; SIGINT /
-    // SIGTERM -> SignalHandlerForShutdownRequest; SIGALRM / SIGPIPE / SIGUSR2 ->
-    // SIG_IGN; SIGUSR1 -> procsignal_sigusr1_handler; SIGCHLD -> SIG_DFL) and
-    // the sigprocmask(SIG_SETMASK, &UnBlockSig, NULL) are performed by the host
-    // auxiliary-process bootstrap.
     miscinit::set_my_backend_type_wal_writer::call();
     auxprocess::auxiliary_process_main_common::call()?;
+
+    // Properly accept or ignore signals that might be sent to us
+    // (walwriter.c:105-118). This was previously assumed to be done by the
+    // "host auxiliary-process bootstrap" — but nothing installs it, so the
+    // postmaster's inherited SIGUSR1/SIGTERM dispositions stayed in force and
+    // this process never ran `procsignal_sigusr1_handler` (absorbing
+    // ProcSignalBarriers) nor `SignalHandlerForShutdownRequest`. On cluster/DB
+    // teardown the walwriter therefore never ran `proc_exit(0)` → its
+    // `on_shmem_exit` chain → `CleanupProcSignalState` never fired → its
+    // procsignal slot kept `pss_pid != 0` at a stale finite
+    // `pss_barrierGeneration`, hanging the emitter of a `DROP DATABASE`
+    // (`WaitForProcSignalBarrier`) forever on this slot.
+    {
+        use types_signal::SigHandler;
+        let pqsignal = port_pqsignal_seams::pqsignal::call;
+        // pqsignal(SIGHUP, SignalHandlerForConfigReload);
+        fn config_reload(_sig: i32) {
+            interrupt::SignalHandlerForConfigReload();
+        }
+        pqsignal(libc::SIGHUP, SigHandler::Handler(config_reload));
+        // pqsignal(SIGINT, SignalHandlerForShutdownRequest);
+        // pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
+        fn shutdown_request(_sig: i32) {
+            interrupt::SignalHandlerForShutdownRequest();
+        }
+        pqsignal(libc::SIGINT, SigHandler::Handler(shutdown_request));
+        pqsignal(libc::SIGTERM, SigHandler::Handler(shutdown_request));
+        // SIGQUIT handler was already set up by InitPostmasterChild.
+        // pqsignal(SIGALRM, SIG_IGN);
+        pqsignal(libc::SIGALRM, SigHandler::Ignore);
+        // pqsignal(SIGPIPE, SIG_IGN);
+        pqsignal(libc::SIGPIPE, SigHandler::Ignore);
+        // pqsignal(SIGUSR1, procsignal_sigusr1_handler);
+        pqsignal(
+            libc::SIGUSR1,
+            SigHandler::Handler(
+                backend_storage_ipc_procsignal::procsignal_sigusr1_handler_signal,
+            ),
+        );
+        // pqsignal(SIGUSR2, SIG_IGN); /* not used */
+        pqsignal(libc::SIGUSR2, SigHandler::Ignore);
+        // Reset some signals that are accepted by postmaster but not here:
+        // pqsignal(SIGCHLD, SIG_DFL);
+        pqsignal(libc::SIGCHLD, SigHandler::Default);
+    }
+
+    // Unblock signals (they were blocked when the postmaster forked us)
+    // (walwriter.c:203, sigprocmask(SIG_SETMASK, &UnBlockSig, NULL)). Without
+    // this the SIGUSR1 that `EmitProcSignalBarrier` sends us stays pending and
+    // is never delivered to the handler installed above.
+    backend_libpq_pqsignal_seams::unblock_signals::call();
 
     // Create a memory context that we will do all our work in (so we can reset
     // it during error recovery and avoid memory leaks). The "Wal Writer"

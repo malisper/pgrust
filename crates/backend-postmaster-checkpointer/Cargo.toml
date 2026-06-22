@@ -9,6 +9,7 @@ name = "backend_postmaster_checkpointer"
 path = "src/lib.rs"
 
 [dependencies]
+libc = "0.2"
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
@@ -17,6 +18,15 @@ types-pgstat = { path = "../types-pgstat" }
 types-condvar = { path = "../types-condvar" }
 types-startup = { path = "../types-startup" }
 types-tuple = { path = "../types-tuple" }
+types-signal = { path = "../types-signal" }
+
+# procsignal_sigusr1_handler_signal — the SIGUSR1 handler this process must
+# install so it absorbs ProcSignalBarriers (ALTER/DROP DATABASE SET TABLESPACE).
+backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
+# pqsignal(signo, handler) installer.
+port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+# unblock_signals() — restore UnBlockSig (postmaster forks us with BlockSig).
+backend-libpq-pqsignal-seams = { path = "../backend-libpq-pqsignal-seams" }
 
 # ereport/elog and the error-report helpers.
 backend-utils-error = { path = "../backend-utils-error" }

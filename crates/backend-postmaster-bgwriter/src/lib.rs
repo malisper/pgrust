@@ -172,13 +172,59 @@ struct LoopState {
 pub fn BackgroundWriterMain(startup_data: &StartupData) -> PgResult<()> {
     debug_assert!(matches!(startup_data, StartupData::None));
 
-    // MyBackendType = B_BG_WRITER; AuxiliaryProcessMainCommon(). The pqsignal()
-    // block (SIGHUP/SIGINT/SIGTERM/SIGALRM/SIGPIPE/SIGUSR1/SIGUSR2) and the
-    // SIGCHLD reset are performed by the host's auxiliary-process bootstrap (it
-    // routes SignalHandlerForConfigReload / SignalHandlerForShutdownRequest /
-    // procsignal_sigusr1_handler), exactly as in the checkpointer port.
+    // MyBackendType = B_BG_WRITER; AuxiliaryProcessMainCommon().
     miscinit::set_my_backend_type_bg_writer::call();
     auxprocess::auxiliary_process_main_common::call()?;
+
+    // Properly accept or ignore signals that might be sent to us
+    // (bgwriter.c:100-115). This was previously assumed to be done by the
+    // "host auxiliary-process bootstrap" — but nothing installs it, so the
+    // postmaster's inherited SIGUSR1 disposition stayed in force and this
+    // process never ran `procsignal_sigusr1_handler`. That left
+    // `ProcSignalBarrierPending` unset, so `ProcessMainLoopInterrupts` never
+    // called `ProcessProcSignalBarrier` and the bgwriter's
+    // `pss_barrierGeneration` never advanced — hanging the emitter of an
+    // `ALTER/DROP DATABASE SET TABLESPACE` barrier (`movedb` ->
+    // `WaitForProcSignalBarrier`) forever on this slot.
+    {
+        use types_signal::SigHandler;
+        let pqsignal = port_pqsignal_seams::pqsignal::call;
+        // pqsignal(SIGHUP, SignalHandlerForConfigReload);
+        fn config_reload(_sig: i32) {
+            interrupt::SignalHandlerForConfigReload();
+        }
+        pqsignal(libc::SIGHUP, SigHandler::Handler(config_reload));
+        // pqsignal(SIGINT, SIG_IGN);
+        pqsignal(libc::SIGINT, SigHandler::Ignore);
+        // pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
+        fn shutdown_request(_sig: i32) {
+            interrupt::SignalHandlerForShutdownRequest();
+        }
+        pqsignal(libc::SIGTERM, SigHandler::Handler(shutdown_request));
+        // SIGQUIT handler was already set up by InitPostmasterChild.
+        // pqsignal(SIGALRM, SIG_IGN);
+        pqsignal(libc::SIGALRM, SigHandler::Ignore);
+        // pqsignal(SIGPIPE, SIG_IGN);
+        pqsignal(libc::SIGPIPE, SigHandler::Ignore);
+        // pqsignal(SIGUSR1, procsignal_sigusr1_handler);
+        pqsignal(
+            libc::SIGUSR1,
+            SigHandler::Handler(
+                backend_storage_ipc_procsignal::procsignal_sigusr1_handler_signal,
+            ),
+        );
+        // pqsignal(SIGUSR2, SIG_IGN);
+        pqsignal(libc::SIGUSR2, SigHandler::Ignore);
+        // Reset some signals that are accepted by postmaster but not here:
+        // pqsignal(SIGCHLD, SIG_DFL);
+        pqsignal(libc::SIGCHLD, SigHandler::Default);
+    }
+
+    // Unblock signals (they were blocked when the postmaster forked us)
+    // (bgwriter.c:213, sigprocmask(SIG_SETMASK, &UnBlockSig, NULL)). Without
+    // this the SIGUSR1 that `EmitProcSignalBarrier` sends us stays pending and
+    // is never delivered to the handler installed above.
+    backend_libpq_pqsignal_seams::unblock_signals::call();
 
     // Re-seed this (bgwriter) process' copy of the cluster-wide
     // TransamVariables / MultiXactState XID bounds from the control file's
