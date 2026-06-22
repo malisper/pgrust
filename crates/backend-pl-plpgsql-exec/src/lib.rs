@@ -4305,7 +4305,20 @@ pub fn plpgsql_exec_function(
             }
             PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
                 if !arg.isnull {
-                    seam::exec_move_row_from_datum(&mut estate, n, arg.value)?;
+                    // A composite call argument (e.g. a whole-row `tbl.*` passed to
+                    // a `tbl`-typed function parameter) is pass-by-reference: its
+                    // verbatim `HeapTupleHeader` varlena image rides in `arg.byref`
+                    // (the bare `value` word is `0` then). Thread the image through
+                    // so the REC target is built from the real tuple, mirroring the
+                    // by-ref scalar arg-store leg above — the bare-word-only path is
+                    // unreachable for a by-ref composite and would otherwise have no
+                    // tuple to deconstruct.
+                    seam::exec_move_row_from_datum_byref(
+                        &mut estate,
+                        n,
+                        arg.value,
+                        arg.byref.clone(),
+                    )?;
                 } else {
                     seam::exec_move_row_null(&mut estate, n)?;
                 }
