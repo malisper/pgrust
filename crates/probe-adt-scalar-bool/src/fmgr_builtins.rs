@@ -11,10 +11,12 @@
 //! dispatch resolves them. OIDs / nargs / strict / retset are transcribed
 //! exactly from `pg_proc.dat` (all are `proisstrict => 't'`, none retset).
 //!
-//! Not registered here: the moving-aggregate inverse / final functions
-//! (`bool_accum`, `bool_accum_inv`, `bool_alltrue`, `bool_anytrue`) take/return
-//! the `internal` `BoolAggState` pointer, which is not expressible at the fmgr
-//! boundary here.
+//! The moving-aggregate transition / inverse / final functions (`bool_accum`,
+//! `bool_accum_inv`, `bool_alltrue`, `bool_anytrue`) take/return the `internal`
+//! `BoolAggState` pointer; these ride the canonical
+//! `RefPayload::Internal(Box<dyn Any>)` arm (mirroring the `interval_avg_accum`
+//! / `numeric_avg_accum` families), so `bool_and`/`bool_or` work both as plain
+//! aggregates and in moving-window (`OVER (... ROWS ...)`) frames.
 
 use mcx::MemoryContext;
 use types_datum::Datum;
@@ -195,6 +197,125 @@ fn fc_hashboolextended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::Pg
 }
 
 // ---------------------------------------------------------------------------
+// bool_and / bool_or aggregate: the `internal` BoolAggState transition.
+//
+// The transition value crosses the fmgr boundary on the canonical
+// `RefPayload::Internal(Box<dyn Any>)` arm (mirroring `interval_avg_accum` /
+// `numeric_avg_accum`). `BoolAggState` is POD/Copy, so the box just carries the
+// struct — no per-aggregate MemoryContext is needed once the in-aggregate-context
+// check passes.
+// ---------------------------------------------------------------------------
+
+use crate::BoolAggState;
+
+/// `PG_ARGISNULL(i)`.
+#[inline]
+fn arg_isnull(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
+    fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true)
+}
+
+/// `PG_RETURN_NULL()`.
+#[inline]
+fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    fcinfo.set_result_null(true);
+    Datum::from_usize(0)
+}
+
+/// Take the `internal` `BoolAggState` out of `args[i]` (C `PG_GETARG_POINTER`).
+/// `None` is `PG_ARGISNULL(i)` (the first-call / empty-group case).
+fn take_bool_state(fcinfo: &mut FunctionCallInfoBaseData, i: usize) -> Option<Box<BoolAggState>> {
+    if arg_isnull(fcinfo, i) {
+        return None;
+    }
+    match fcinfo.take_ref_arg(i) {
+        Some(types_fmgr::boundary::RefPayload::Internal(b)) => Some(
+            b.downcast::<BoolAggState>().unwrap_or_else(|_| {
+                panic!("bool agg fn: args[{i}] internal state is not a BoolAggState")
+            }),
+        ),
+        Some(other) => panic!("bool agg fn: args[{i}] is not an internal state ({other:?})"),
+        None => None,
+    }
+}
+
+/// `PG_RETURN_POINTER(state)`.
+#[inline]
+fn ret_bool_state(fcinfo: &mut FunctionCallInfoBaseData, state: Box<BoolAggState>) -> Datum {
+    fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Internal(state));
+    Datum::from_usize(0)
+}
+
+/// Restore the `internal` `BoolAggState` into `args[0]` after a *final* function
+/// read it.  C's `PG_GETARG_POINTER(0)` does NOT consume the state: a finalfn
+/// only reads it, and the same live state must survive for the next sharing
+/// aggregate's finalfn and, in a moving window frame, for the next row's
+/// forward/inverse transition.
+#[inline]
+fn keep_bool_state(fcinfo: &mut FunctionCallInfoBaseData, state: Box<BoolAggState>) {
+    fcinfo.set_ref_arg(0, types_fmgr::boundary::RefPayload::Internal(state));
+}
+
+/// `bool_accum(internal, bool) -> internal` (oid 3496) — forward transition.
+fn fc_bool_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    // C `makeBoolAggState` calls `AggCheckCallContext`, which succeeds in BOTH
+    // nodeAgg and nodeWindowAgg (moving-aggregate) contexts. `bool_accum` is only
+    // ever wired as an aggregate transition function, so the call is always in
+    // aggregate context; pass a scratch context as the resolved agg context (the
+    // POD `BoolAggState` needs no real PG-context allocation — same as
+    // `interval_avg_accum`'s `unwrap_or_default`). The `None`-context "aggregate
+    // function called in non-aggregate context" branch is unreachable here.
+    let prev = take_bool_state(fcinfo, 0).map(|b| *b);
+    let value = if arg_isnull(fcinfo, 1) {
+        None
+    } else {
+        Some(arg_bool(fcinfo, 1))
+    };
+    let m = scratch_mcx();
+    let state = crate::bool_accum(Some(m.mcx()), prev, value)?;
+    Ok(ret_bool_state(fcinfo, alloc::boxed::Box::new(state)))
+}
+
+/// `bool_accum_inv(internal, bool) -> internal` (oid 3497) — inverse transition.
+fn fc_bool_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let prev = take_bool_state(fcinfo, 0).map(|b| *b);
+    let value = if arg_isnull(fcinfo, 1) {
+        None
+    } else {
+        Some(arg_bool(fcinfo, 1))
+    };
+    let state = crate::bool_accum_inv(prev, value)?;
+    Ok(ret_bool_state(fcinfo, alloc::boxed::Box::new(state)))
+}
+
+/// `bool_alltrue(internal) -> bool` (oid 3498) — `bool_and` / `every` final.
+fn fc_bool_alltrue(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let state = take_bool_state(fcinfo, 0);
+    let out = crate::bool_alltrue(state.as_deref().copied());
+    // C `PG_GETARG_POINTER(0)` does not consume the state; restore it so the
+    // moving-window inverse transition / next row keeps it.
+    if let Some(state) = state {
+        keep_bool_state(fcinfo, state);
+    }
+    match out {
+        Some(b) => Ok(ret_bool(b)),
+        None => Ok(ret_null(fcinfo)),
+    }
+}
+
+/// `bool_anytrue(internal) -> bool` (oid 3499) — `bool_or` final.
+fn fc_bool_anytrue(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let state = take_bool_state(fcinfo, 0);
+    let out = crate::bool_anytrue(state.as_deref().copied());
+    if let Some(state) = state {
+        keep_bool_state(fcinfo, state);
+    }
+    match out {
+        Some(b) => Ok(ret_bool(b)),
+        None => Ok(ret_null(fcinfo)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -204,12 +325,22 @@ fn builtin(
     nargs: i16,
     native: PgFnNative,
 ) -> (BuiltinFunction, PgFnNative) {
+    builtin_strict(foid, name, nargs, true, native)
+}
+
+fn builtin_strict(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    strict: bool,
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
     (
         BuiltinFunction {
             foid,
             name: name.into(),
             nargs,
-            strict: true,
+            strict,
             retset: false,
             func: None,
         },
@@ -240,6 +371,13 @@ pub fn register_probe_adt_scalar_bool_builtins() {
         // ---- aggregate transition functions ----
         builtin(2515, "booland_statefunc", 2, fc_booland_statefunc),
         builtin(2516, "boolor_statefunc", 2, fc_boolor_statefunc),
+        // ---- bool_and / bool_or moving-aggregate (internal BoolAggState) ----
+        // strict flags from builtin_canonical: accum/inv are non-strict (handle
+        // NULL state on first call); the finals are strict (NULL state → NULL).
+        builtin_strict(3496, "bool_accum", 2, false, fc_bool_accum),
+        builtin_strict(3497, "bool_accum_inv", 2, false, fc_bool_accum_inv),
+        builtin(3498, "bool_alltrue", 1, fc_bool_alltrue),
+        builtin(3499, "bool_anytrue", 1, fc_bool_anytrue),
         // ---- hash functions ----
         builtin(6417, "hashbool", 1, fc_hashbool),
         builtin(6418, "hashboolextended", 2, fc_hashboolextended),
