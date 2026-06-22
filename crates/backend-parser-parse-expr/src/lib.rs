@@ -6643,9 +6643,37 @@ fn analyze_one_exec_param_impl<'mcx>(
 /// raw-node locations; the A_Const literal carries one, and an already-typed
 /// `Node::Expr` defers to `exprLocation`. Other raw nodes report -1 (cursor 0).
 fn node_location(n: &Node<'_>) -> i32 {
+    // exprLocation (nodeFuncs.c): the raw-grammar node cases that aren't `Expr`
+    // variants must report their own `location` token. `(v.*)` in an UPDATE
+    // multi-assignment source arrives here as a raw `ColumnRef`, so the
+    // "source must be a sub-SELECT or ROW() expression" error needs its caret.
     match n.node_tag() {
         ntag::T_A_Const => n.expect_a_const().location,
         ntag::T_A_Expr => n.expect_a_expr().location,
+        ntag::T_ColumnRef => n.expect_columnref().location,
+        ntag::T_ParamRef => n.expect_paramref().location,
+        ntag::T_A_Indirection => {
+            // exprLocation recurses into the indirection's arg.
+            match n.expect_a_indirection().arg.as_deref() {
+                Some(arg) => node_location(arg),
+                None => -1,
+            }
+        }
+        ntag::T_TypeCast => {
+            let tc = n.expect_typecast();
+            let aloc = match tc.arg.as_deref() {
+                Some(arg) => node_location(arg),
+                None => -1,
+            };
+            // leftmostLoc(typecast->location, exprLocation(arg)).
+            if aloc < 0 {
+                tc.location
+            } else if tc.location < 0 || aloc < tc.location {
+                aloc
+            } else {
+                tc.location
+            }
+        }
         _ => match n.as_expr() {
             Some(e) => expr_location(Some(e)).unwrap_or(-1),
             None => -1,
