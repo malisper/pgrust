@@ -1053,15 +1053,28 @@ fn restrict_infos_logically_equal(root: &PlannerInfo, a: RinfoId, b: RinfoId) ->
         )
 }
 
+/// Which `RelOptInfo` clause list `add_non_redundant_clauses` keeps against. In
+/// C this is the `List **keep_rinfo_list` pointer (`&toKeep->baserestrictinfo`
+/// or `&toKeep->joininfo`); the port re-reads the live list from the keep rel
+/// each iteration so that clauses just distributed in this same loop are seen by
+/// later candidates (C passes the list by pointer precisely because
+/// `distribute_restrictinfo_to_rels()` mutates it mid-loop).
+#[derive(Clone, Copy)]
+enum KeepList {
+    Base,
+    Join,
+}
+
 /// `add_non_redundant_clauses(root, rinfo_candidates, &keep_rinfo_list,
 /// removed_relid)` (analyzejoins.c:1658) — distribute each non-redundant
 /// candidate RestrictInfo to its rels, skipping ones logically equal to a clause
-/// already in `keep_rinfo_list`.
+/// already in the keep rel's clause list.
 fn add_non_redundant_clauses<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
     rinfo_candidates: &[RinfoId],
-    keep_rinfo_list: &[RinfoId],
+    keep_rel: RelId,
+    keep_list: KeepList,
     _removed_relid: i32,
 ) -> PgResult<()> {
     for &rinfo_id in rinfo_candidates {
@@ -1074,7 +1087,15 @@ fn add_non_redundant_clauses<'mcx>(
         let cand_clause_relids = relids::copy(&root.rinfo(rinfo_id).clause_relids);
         let cand_parent_ec = root.rinfo(rinfo_id).parent_ec;
 
-        for &src_id in keep_rinfo_list {
+        // Re-read the live keep list each iteration: `distribute_restrictinfo_to_rels`
+        // appends to it, and (matching C's pass-by-pointer) later candidates must
+        // see clauses distributed earlier in this same loop.
+        let keep_rinfo_list: Vec<RinfoId> = match keep_list {
+            KeepList::Base => root.rel(keep_rel).baserestrictinfo.clone(),
+            KeepList::Join => root.rel(keep_rel).joininfo.clone(),
+        };
+
+        for &src_id in &keep_rinfo_list {
             if !relids::equal(&root.rinfo(src_id).clause_relids, &cand_clause_relids) {
                 continue;
             }
@@ -1264,13 +1285,28 @@ fn remove_self_join_rel<'mcx>(
         }
     }
 
-    // Add all non-redundant clauses to toKeep.
-    let keep_bri = root.rel(to_keep).baserestrictinfo.clone();
-    add_non_redundant_clauses(root, run, &binfo_candidates, &keep_bri, remove_relid)
-        .expect("add_non_redundant_clauses (base)");
-    let keep_jri = root.rel(to_keep).joininfo.clone();
-    add_non_redundant_clauses(root, run, &jinfo_candidates, &keep_jri, remove_relid)
-        .expect("add_non_redundant_clauses (join)");
+    // Add all non-redundant clauses to toKeep. The keep list is re-read live
+    // inside add_non_redundant_clauses (C passes `&toKeep->baserestrictinfo` /
+    // `&toKeep->joininfo` by pointer because distribute_restrictinfo_to_rels
+    // mutates it mid-loop).
+    add_non_redundant_clauses(
+        root,
+        run,
+        &binfo_candidates,
+        to_keep,
+        KeepList::Base,
+        remove_relid,
+    )
+    .expect("add_non_redundant_clauses (base)");
+    add_non_redundant_clauses(
+        root,
+        run,
+        &jinfo_candidates,
+        to_keep,
+        KeepList::Join,
+        remove_relid,
+    )
+    .expect("add_non_redundant_clauses (join)");
 
     // Arrange equivalence classes: replace remove_relid with keep_relid.
     let mut ei: i32 = -1;
