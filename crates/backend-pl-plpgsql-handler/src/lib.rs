@@ -854,7 +854,8 @@ pub fn init_seams() {
          parse_mode,
          parse_state,
          datum_snapshot: Vec<Option<backend_pl_plpgsql_exec_seams::EvalParamValue>>,
-         maxtuples| {
+         maxtuples,
+         read_only| {
             let mut resolve = |dno: i32| -> PgResult<backend_executor_spi::EvalParamValue> {
                 // setup_param_list reads estate->datums[dno]; the snapshot carries
                 // the value the caller (exec) read out of the live execstate.
@@ -877,6 +878,7 @@ pub fn init_seams() {
                 parse_mode,
                 parse_state,
                 maxtuples,
+                read_only,
                 &mut resolve,
             )?;
             Ok(backend_pl_plpgsql_exec_seams::EvalExprResult {

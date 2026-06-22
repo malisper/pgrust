@@ -37,6 +37,7 @@ use types_tuple::Datum as RichDatum;
 use crate::backbone::set_spi_processed;
 use crate::dest_spi::{create_spi_dest_receiver, take_spi_raw_result, RawCol};
 
+use backend_access_transam_xact_seams as xact_seams;
 use backend_executor_execMain as execmain;
 use backend_utils_cache_plancache as plancache;
 use backend_utils_cache_plancache_seams as plancache_seams;
@@ -112,6 +113,7 @@ pub fn spi_eval_expr(
     parsemode: RawParseMode,
     parse_state: PlpgsqlExprParseState,
     maxtuples: i64,
+    read_only: bool,
     resolve: &mut dyn FnMut(i32) -> PgResult<EvalParamValue>,
 ) -> PgResult<EvalResult> {
     // The prepare/exec working data lives in a private context (C's
@@ -133,9 +135,15 @@ pub fn spi_eval_expr(
     let param_li = build_param_list(&parse_state, &argtypes, resolve)?;
 
     // _SPI_execute_plan: GetCachedPlan + push the transaction snapshot + run to
-    // a DestSPI receiver, collecting the raw first row.
+    // a DestSPI receiver, collecting the raw first row. When not read-only (a
+    // VOLATILE function: estate->readonly_func == false), advance the command
+    // counter and the active snapshot's command id before the query (spi.c:2665)
+    // so the expression's SELECT sees the partial effects of the in-progress
+    // outer command — e.g. `UPDATE t SET a = vol_fn()` where vol_fn() reads `t`
+    // must observe rows already updated by this same UPDATE.
     let pushed = snapmgr::push_active_snapshot_transaction::call().is_ok();
-    let out = run_eval(mcx, source, &param_li, maxtuples);
+    let advance_cid = pushed && !read_only;
+    let out = run_eval(mcx, source, &param_li, maxtuples, advance_cid);
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
     }
@@ -317,6 +325,7 @@ fn run_eval<'mcx>(
     source: SourceHandle,
     param_li: &ParamListInfo,
     maxtuples: i64,
+    advance_cid: bool,
 ) -> PgResult<(u64, EvalRaw)> {
     let cplan = plancache::GetCachedPlan(source, param_li.clone(), ResourceOwner::NULL, None)?;
     let stmt_list = plancache_seams::cached_plan_stmt_list::call(mcx, CachedPlanHandle(cplan))?;
@@ -326,6 +335,14 @@ fn run_eval<'mcx>(
     let mut raw_rows: Vec<Vec<RawCol>> = Vec::new();
 
     for stmt in stmt_list.iter() {
+        // spi.c:2665 — when not read-only and the snapshot is under our control,
+        // advance the command counter before each command and update the active
+        // snapshot's command id, so the SELECT sees the writes of the in-progress
+        // outer command (the VOLATILE-function-in-UPDATE partial-update case).
+        if advance_cid {
+            xact_seams::command_counter_increment::call()?;
+            snapmgr::update_active_snapshot_command_id::call()?;
+        }
         let (n, cols, rows) = run_one_eval_stmt(stmt, param_li, maxtuples)?;
         processed = n;
         if !cols.is_empty() {

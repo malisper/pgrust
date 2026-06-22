@@ -390,6 +390,7 @@ seam_core::seam!(
         parse_state: types_nodes::parsestmt::PlpgsqlExprParseState,
         datum_snapshot: std::vec::Vec<Option<EvalParamValue>>,
         maxtuples: i64,
+        read_only: bool,
     ) -> PgResult<EvalExprResult>
 );
 

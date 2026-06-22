@@ -1947,6 +1947,14 @@ fn exec_eval_expr_impl(
         parse_state,
         snapshot,
         2, // detect ">1 row" like C exec_run_select(expr, 2, ...)
+        // C: exec_run_select → SPI_execute_plan_with_paramlist(..., read_only =
+        // estate->readonly_func, ...). A VOLATILE function (readonly_func=false)
+        // makes _SPI_execute_plan advance the command counter + update the active
+        // snapshot's command id before the query, so the expression's SELECT sees
+        // the partial effects of the in-progress outer command (e.g. an UPDATE
+        // whose SET expression calls this function). A STABLE/IMMUTABLE function
+        // (readonly_func=true) runs read-only and sees only committed-as-of-snap.
+        estate.readonly_func,
     )?;
 
     // Stash the by-ref image (if any) as the out-of-band companion to the
