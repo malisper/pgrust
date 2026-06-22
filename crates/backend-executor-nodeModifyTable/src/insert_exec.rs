@@ -81,41 +81,11 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
-seam_core::seam!(
-    /// `ExecGetRootToChildMap(resultRelInfo, estate)` (execMain.c): compute
-    /// lazily the tuple-conversion map from the root rowtype to this child
-    /// partition's. `Ok(true)` means a conversion is needed and the map now
-    /// lives on the pooled `ResultRelInfo` (`ri_RootToChildMap`); `Ok(false)`
-    /// is the C `NULL` map (rowtypes already match).
-    pub fn exec_get_root_to_child_map<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-    ) -> PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `execute_attr_map_slot(resultRelInfo->ri_RootToChildMap->attrMap,
-    /// srcSlot, dstSlot)` (tupconvert.c): convert `src_slot` into the child
-    /// partition's format using this relation's root->child map. Returns the
-    /// destination slot id.
-    pub fn execute_root_to_child_attr_map_slot<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-        src_slot: SlotId,
-        dst_slot: SlotId,
-    ) -> PgResult<SlotId>
-);
-
-seam_core::seam!(
-    /// `dstSlot->tts_tableOid = srcSlot->tts_tableOid; ItemPointerCopy(
-    /// &srcSlot->tts_tid, &dstSlot->tts_tid)` (tuptable.h): carry the source
-    /// slot's table OID and TID onto the converted slot.
-    pub fn slot_copy_identity<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        dst_slot: SlotId,
-        src_slot: SlotId,
-    )
-);
+// The cross-partition UPDATE save-old root→child conversion uses the
+// already-installed `exec_get_root_to_child_map` seam from
+// `backend-executor-execUtils-seams` (which returns the AttrMap copy) plus
+// `execute_attr_map_slot_explicit` from `backend-executor-execTuples-seams`;
+// the tableOid/tid carry is done inline on the EState slot. No local seams here.
 
 /// `ExecInsert(context, resultRelInfo, slot, canSetTag, inserted_tuple,
 /// insert_destrel)` — insert `slot` into `resultRelInfo`'s relation (or route
@@ -605,21 +575,37 @@ pub fn ExecInsert<'mcx>(
             // needed. Note that ExecDelete() already converted it to the root's
             // partition's format/slot.
             old_slot = Some(cp_deleted);
-            if exec_get_root_to_child_map::call(estate, result_rel_info)? {
+            // tupconv_map = ExecGetRootToChildMap(resultRelInfo, estate);
+            // if (tupconv_map != NULL) { oldSlot = execute_attr_map_slot(...,
+            //   ExecGetReturningSlot(estate, resultRelInfo)); ... }
+            if let Some(attr_map) =
+                backend_executor_execUtils_seams::exec_get_root_to_child_map::call(
+                    mcx,
+                    estate,
+                    result_rel_info,
+                )?
+            {
                 let returning_slot = backend_executor_execMain_seams::exec_get_returning_slot::call(
                     estate,
                     result_rel_info,
                 )?;
-                let converted = execute_root_to_child_attr_map_slot::call(
-                    estate,
-                    result_rel_info,
-                    cp_deleted,
-                    returning_slot,
-                )?;
+                let converted =
+                    backend_executor_execTuples_seams::execute_attr_map_slot_explicit::call(
+                        estate,
+                        &attr_map,
+                        cp_deleted,
+                        returning_slot,
+                    )?;
 
                 // oldSlot->tts_tableOid = context->cpDeletedSlot->tts_tableOid;
                 // ItemPointerCopy(&context->cpDeletedSlot->tts_tid, &oldSlot->tts_tid);
-                slot_copy_identity::call(estate, converted, cp_deleted);
+                let (src_oid, src_tid) = {
+                    let s = estate.slot(cp_deleted);
+                    (s.tts_tableOid, s.tts_tid)
+                };
+                let dst = estate.slot_mut(converted);
+                dst.tts_tableOid = src_oid;
+                dst.tts_tid = src_tid;
                 old_slot = Some(converted);
             }
         }

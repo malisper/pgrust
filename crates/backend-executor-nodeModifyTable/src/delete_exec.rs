@@ -203,35 +203,12 @@ seam_core::seam!(
 );
 
 
-seam_core::seam!(
-    /// `ExecGetChildToRootMap(resultRelInfo) != NULL` (execPartition.c): does
-    /// this child result relation have a child→root tuple-conversion map?
-    pub fn ri_has_child_to_root_map(estate: &mut EStateData<'_>, result_rel_info: RriId) -> bool
-);
-
-seam_core::seam!(
-    /// `execute_attr_map_slot(ExecGetChildToRootMap(resultRelInfo)->attrMap,
-    /// srcSlot, ExecGetReturningSlot(estate, rootRelInfo))` (tupconvert.c):
-    /// convert the source slot into the root partition's format using this
-    /// child relation's child→root map. Returns the destination slot id.
-    pub fn execute_child_to_root_attr_map_slot<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-        root_rel_info: RriId,
-        src_slot: SlotId,
-    ) -> PgResult<SlotId>
-);
-
-seam_core::seam!(
-    /// `dstSlot->tts_tableOid = srcSlot->tts_tableOid; ItemPointerCopy(
-    /// &srcSlot->tts_tid, &dstSlot->tts_tid)` (tuptable.h): carry the source
-    /// slot's table OID and TID onto the converted slot.
-    pub fn slot_copy_identity<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        dst_slot: SlotId,
-        src_slot: SlotId,
-    )
-);
+// `ExecGetChildToRootMap` / `execute_attr_map_slot` / slot-identity copy for the
+// cross-partition DELETE save-old path use the already-installed seams from
+// `backend-executor-execMain-seams` (`exec_get_child_to_root_map`,
+// `exec_get_returning_slot`) and `backend-executor-execTuples-seams`
+// (`execute_attr_map_slot`); the tableOid/tid carry is done inline on the EState
+// slot. No local seams are needed here.
 
 seam_core::seam!(
     /// `ExecMaterializeSlot(slot)` (execTuples.c): force the slot to hold a
@@ -560,21 +537,40 @@ pub fn ExecDelete<'mcx>(
             // Convert the tuple into the root partition's format/slot, if
             // needed.  ExecInsert() will then convert it to the new partition's
             // format/slot, if necessary.
-            if ri_has_child_to_root_map::call(estate, result_rel_info) {
+            // tupconv_map = ExecGetChildToRootMap(resultRelInfo);
+            // if (tupconv_map != NULL)
+            if backend_executor_execMain_seams::exec_get_child_to_root_map::call(
+                estate,
+                result_rel_info,
+            )? {
                 let root_rel_info = mtstate
                     .rootResultRelInfo
                     .expect("cross-partition DELETE save-old requires a root ResultRelInfo");
                 let old_slot = slot.expect("save-old slot must be set");
-                let converted = execute_child_to_root_attr_map_slot::call(
+
+                // slot = execute_attr_map_slot(tupconv_map->attrMap, slot,
+                //          ExecGetReturningSlot(estate, rootRelInfo));
+                let out_slot = backend_executor_execMain_seams::exec_get_returning_slot::call(
+                    estate,
+                    root_rel_info,
+                )?;
+                let converted = backend_executor_execTuples_seams::execute_attr_map_slot::call(
                     estate,
                     result_rel_info,
-                    root_rel_info,
                     old_slot,
+                    out_slot,
                 )?;
 
                 // slot->tts_tableOid = oldSlot->tts_tableOid;
                 // ItemPointerCopy(&oldSlot->tts_tid, &slot->tts_tid);
-                slot_copy_identity::call(estate, converted, old_slot);
+                let (src_oid, src_tid) = {
+                    let s = estate.slot(old_slot);
+                    (s.tts_tableOid, s.tts_tid)
+                };
+                let dst = estate.slot_mut(converted);
+                dst.tts_tableOid = src_oid;
+                dst.tts_tid = src_tid;
+
                 slot = Some(converted);
             }
 
