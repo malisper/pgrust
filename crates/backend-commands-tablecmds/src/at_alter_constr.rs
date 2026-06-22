@@ -343,10 +343,84 @@ fn ATExecAlterConstrDeferrability<'mcx>(
         && (rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE
             || lsyscache_seams::get_rel_relkind::call(refrelid)? == RELKIND_PARTITIONED_TABLE)
     {
-        unported("ALTER CONSTRAINT DEFERRABILITY recursion into partition children (AlterConstrDeferrabilityRecurse)");
+        AlterConstrDeferrabilityRecurse(mcx, cmdcon, currcon.oid, recurse, otherrelids, _lockmode)?;
     }
 
     Ok(changed)
+}
+
+/// `AlterConstrDeferrabilityRecurse(...)` (tablecmds.c:12812) — scan
+/// `pg_constraint` for every row whose `conparentid` equals `conoid` (the
+/// children of this constraint) and recursively apply the deferrability change.
+///
+/// Like the enforceability variant, this recurses through the `conparentid`
+/// relationships rather than scanning the list of child relations directly.
+fn AlterConstrDeferrabilityRecurse<'mcx>(
+    mcx: Mcx<'mcx>,
+    cmdcon: &ATAlterConstraint<'mcx>,
+    conoid: Oid,
+    recurse: bool,
+    otherrelids: &mut Vec<Oid>,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let conrel = backend_access_table_table_seams::table_open::call(
+        mcx,
+        ConstraintRelationId,
+        RowExclusiveLock,
+    )?;
+
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        types_catalog::pg_constraint::Anum_pg_constraint_conparentid,
+        BTEqualStrategyNumber,
+        types_core::fmgr::F_OIDEQ,
+        types_tuple::backend_access_common_heaptuple::Datum::from_oid(conoid),
+    )?;
+    let keys = [key];
+
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &conrel,
+        types_catalog::pg_constraint::ConstraintParentIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+
+    // Collect the child constraint OIDs first; recursion below re-opens
+    // pg_constraint (for its own trigger updates), so we don't hold the scan
+    // across the recursive calls.
+    let mut child_oids: Vec<Oid> = Vec::new();
+    while let Some(tup) =
+        backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+    {
+        let cols = heap_deform_tuple(mcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
+        let child_oid =
+            cols[types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1].0.as_oid();
+        child_oids.push(child_oid);
+    }
+    drop(scan);
+    conrel.close(NoLock)?;
+
+    for child_oid in child_oids {
+        let childcon =
+            backend_utils_cache_syscache_seams::search_constraint_form_by_oid::call(child_oid)?
+                .ok_or_else(|| {
+                    backend_utils_error::ereport(ERROR)
+                        .errmsg_internal(format!(
+                            "could not find tuple for constraint {child_oid}"
+                        ))
+                        .into_error()
+                })?;
+        let crel = relation_open(mcx, childcon.form.conrelid, lockmode)?;
+        let res = ATExecAlterConstrDeferrability(
+            mcx, cmdcon, &crel, &childcon, recurse, otherrelids, lockmode,
+        );
+        crel.close(NoLock)?;
+        res?;
+    }
+
+    Ok(())
 }
 
 /// `ATExecAlterConstrEnforceability(...)` (tablecmds.c:12412) — apply a

@@ -5311,30 +5311,32 @@ fn make_transition_capture_state_impl<'mcx>(
 }
 
 fn has_noncloned_pk_fkey_trigger_impl<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _relinfo: types_nodes::RriId,
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
 ) -> PgResult<bool> {
-    // ExecCrossPartitionUpdateForeignKey's inner walk over ri_TrigDesc->triggers
-    // for a non-cloned RI_TRIGGER_PK AFTER ROW UPDATE trigger. Reachable only on
-    // a cross-partition FK update path (firing-front substrate, not yet ported).
-    //
-    // This must travel as a recoverable `Err`, NOT the diverging `front_half`
-    // `panic!`: this site is reached from inside `ALTER TABLE ... ADD FOREIGN
-    // KEY`'s validation/cross-partition walk, where a `panic!` unwinds through a
-    // catalog-mutating, non-unwind-safe section and escalates to a backend kill
-    // (cf. the "crashes = port-introduced unwind/cleanup-path escalations" class).
-    // The sibling firing-front sites that already error gracefully only do so
-    // because their panic is caught on a plain DML path; relying on that here
-    // truncates the rest of the session. An `Err` carrying the same diagnostic
-    // text propagates without unwinding and is reported as a normal ERROR.
-    Err(PgError::error(
-        "backend-commands-trigger: ExecARUpdateTriggers (has-noncloned-PK-FK walk) \
-         (trigger.c:3145) needs the per-trigger WHEN-qual ExprState \
-         (ResultRelInfo.ri_TrigWhenExprs, trimmed), OLD/NEW slot materialization, and \
-         GetTupleForTrigger (table_tuple_lock / heap_fetch / EvalPlanQual) — \
-         firing-front substrate not yet ported"
-            .to_string(),
-    ))
+    // ExecCrossPartitionUpdateForeignKey's inner walk over
+    // `rInfo->ri_TrigDesc->triggers` (nodeModifyTable.c:2400-2411): return true
+    // if this non-root ancestor carries a non-cloned RI_TRIGGER_PK trigger, i.e.
+    // a foreign key points directly into the ancestor rather than the root. The
+    // caller has already verified `trig_update_after_row`.
+    const RI_TRIGGER_PK: i32 = 1;
+    let numtriggers = match estate.result_rel(relinfo).ri_TrigDesc.as_ref() {
+        Some(td) => td.triggers.len(),
+        None => return Ok(false),
+    };
+    for i in 0..numtriggers {
+        let (tgisclone, tgfoid) = {
+            let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[i];
+            (trig.tgisclone, trig.tgfoid)
+        };
+        if !tgisclone
+            && backend_utils_adt_ri_triggers_seams::ri_fkey_trigger_type::call(tgfoid)
+                == RI_TRIGGER_PK
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // ===========================================================================
