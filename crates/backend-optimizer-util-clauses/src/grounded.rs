@@ -439,10 +439,65 @@ fn contain_volatile_functions_walker(node: Option<&Expr>) -> PgResult<bool> {
         return Ok(true);
     }
 
+    // C `expression_tree_walker` walks a SubLink's `subselect` (a Query) and the
+    // `contain_volatile_functions_walker` `IsA(node, Query)` arm recurses into it
+    // via `query_tree_walker`. The Expr-typed `expression_tree_walker` here drops
+    // the sub-Query, so do that recursion explicitly: without it a scalar
+    // sub-SELECT containing a volatile (e.g. `(select random())` in a subquery
+    // targetlist) is not seen, and `is_simple_subquery` wrongly pulls the
+    // subquery up — duplicating the volatile across each upper reference.
+    if let Expr::SubLink(sublink) = node {
+        if let Some(subselect) = sublink.subselect.as_deref() {
+            if contain_volatile_functions_in_query(subselect)? {
+                return Ok(true);
+            }
+        }
+    }
+
     // The C also looks through RestrictInfo / PathTarget (caching their
-    // hasvolatile flag) and recurses into Query; the Expr model carries none of
-    // those node kinds, so those arms are unreachable here.
+    // hasvolatile flag); the Expr model carries neither, so those arms are
+    // unreachable here.
     walk_default(node, &mut contain_volatile_functions_walker)
+}
+
+/// The `IsA(node, Query)` arm of `contain_volatile_functions_walker`: recurse
+/// into a (sub)Query's expression children via `query_tree_walker`, dispatching
+/// each reached `Node` back to the Expr-level walker (and re-recursing on any
+/// nested sub-Query).
+fn contain_volatile_functions_in_query(
+    query: &types_nodes::copy_query::Query,
+) -> PgResult<bool> {
+    let mut err: Option<PgError> = None;
+    let aborted = backend_nodes_core::node_walker::query_tree_walker(
+        query,
+        &mut |n| match contain_volatile_functions_node(n) {
+            Ok(b) => b,
+            Err(e) => {
+                err = Some(e);
+                true
+            }
+        },
+        0,
+    );
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(aborted)
+}
+
+/// Dispatch a `Node` reached during the volatile scan: a `Query` recurses via
+/// [`contain_volatile_functions_in_query`]; every other Node is an `Expr` and
+/// runs the per-node Expr walker.
+fn contain_volatile_functions_node(
+    node: &types_nodes::nodes::Node,
+) -> PgResult<bool> {
+    if node.is_query() {
+        return contain_volatile_functions_in_query(node.expect_query());
+    }
+    match node.as_expr() {
+        Some(expr) => contain_volatile_functions_walker(Some(expr)),
+        None => Ok(false),
+    }
 }
 
 /// `contain_volatile_functions_not_nextval(clause)` (clauses.c:671).
