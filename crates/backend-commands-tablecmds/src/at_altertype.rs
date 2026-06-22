@@ -440,8 +440,14 @@ pub fn ATPrepAlterColumnType<'mcx>(
         }
     }
 
-    // Look up the target type.
-    let (targettype, targettypmod) = seam::typename_type_id_and_mod::call(mcx, type_name)?;
+    // Look up the target type. C passes `pstate` (p_sourcetext = queryString)
+    // to typenameTypeIdAndMod so type-lookup errors (e.g. "type x does not
+    // exist") carry a parse cursor at typeName->location. The seam resolves
+    // with a NULL pstate, so re-attach the cursor here, mirroring the internal
+    // parser_errposition(pstate, typeName->location).
+    let (targettype, targettypmod) =
+        seam::typename_type_id_and_mod::call(mcx, type_name)
+            .map_err(|e| attach_errpos(e, query_string, type_name.location))?;
 
     // ACL_USAGE on the target type.
     let aclresult =
@@ -450,8 +456,18 @@ pub fn ATPrepAlterColumnType<'mcx>(
         aclchk_seam::aclcheck_error_type::call(aclresult, targettype)?;
     }
 
-    // And the collation.
-    let targetcollid = seam::get_column_def_collation::call(mcx, def, targettype)?;
+    // And the collation. C passes pstate to GetColumnDefCollation, so the
+    // "collations are not supported by type ..." error carries a cursor at
+    // the COLLATE clause (def->collClause->location), falling back to
+    // def->location when there is no COLLATE clause. Re-attach the cursor
+    // from the same location since the seam runs with a NULL pstate.
+    let coll_location = def
+        .collClause
+        .as_deref()
+        .map(|cc| cc.location)
+        .unwrap_or(location);
+    let targetcollid = seam::get_column_def_collation::call(mcx, def, targettype)
+        .map_err(|e| attach_errpos(e, query_string, coll_location))?;
 
     // Make sure datatype is legal for a column.
     let flags = if attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
@@ -2330,6 +2346,28 @@ fn errpos(query: Option<&str>, location: i32) -> i32 {
     let Some(s) = query else { return 0 };
     let limit = (location as usize).min(s.len());
     s[..limit].chars().count() as i32 + 1
+}
+
+/// Re-attach a parse cursor to an error raised by a callee that ran with a
+/// NULL `ParseState` (the seam resolves `typenameTypeIdAndMod`/
+/// `GetColumnDefCollation` without a pstate). Mirrors C's
+/// `parser_errposition(pstate, location)` where `pstate->p_sourcetext =
+/// context->queryString`. Only set the cursor when the error carries none of
+/// its own, matching errstart's `edata->cursorpos == 0` guard.
+fn attach_errpos(
+    e: backend_utils_error::PgError,
+    query: Option<&str>,
+    location: i32,
+) -> backend_utils_error::PgError {
+    if e.cursor_position().is_some() {
+        return e;
+    }
+    let pos = errpos(query, location);
+    if pos > 0 {
+        e.with_cursor_position(pos)
+    } else {
+        e
+    }
 }
 
 /// `rel->rd_rel->reloftype` via the syscache projection.
