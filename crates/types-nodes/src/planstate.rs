@@ -404,6 +404,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::ForeignScan(f) => Some(&f.ss),
             // `IndexScanState` begins with a `ScanState`.
             PlanStateNode::IndexScan(i) => Some(&i.ss),
+            // `IndexOnlyScanState` begins with a `ScanState`.
+            PlanStateNode::IndexOnlyScan(i) => Some(&i.ss),
             // `BitmapIndexScanState` begins with a `ScanState`.
             PlanStateNode::BitmapIndexScan(b) => Some(&b.ss),
             // `SubqueryScanState` begins with a `ScanState`.
@@ -443,11 +445,24 @@ impl<'mcx> PlanStateNode<'mcx> {
     }
 
     /// `((AppendState *) node)->appendplans[0..as_nplans]` — the Append's input
-    /// plan states. `None` until the `AppendState` variant lands.
-    pub fn append_input_states(&self) -> Option<&[PgBox<'mcx, PlanStateNode<'mcx>>]> {
-        match self {
-            _ => None,
+    /// plan states, in array order. `None` for non-Append nodes (the C cast
+    /// `(AppendState *) node` only happens after the `T_AppendState` tag check).
+    /// The owned `appendplans` vector carries `Option<PgBox<..>>` slots; a
+    /// not-yet-initialized slot reads as absent (filtered out), mirroring the C
+    /// arrays which are fully populated by `ExecInitAppend`.
+    pub fn append_input_states(&self) -> Option<alloc::vec::Vec<&PlanStateNode<'mcx>>> {
+        let appendplans = match self {
+            PlanStateNode::Append(a) => &a.appendplans,
+            _ => return None,
+        };
+        let mut out: alloc::vec::Vec<&PlanStateNode<'mcx>> =
+            alloc::vec::Vec::with_capacity(appendplans.len());
+        for c in appendplans.iter() {
+            if let Some(c) = c.as_deref() {
+                out.push(c);
+            }
         }
+        Some(out)
     }
 
     /// `planstate_walk_members(planstate, ...)` — the per-node member child

@@ -442,7 +442,7 @@ fn search_plan_tree<'a, 'mcx>(
         T_AppendState => {
             if let Some(children) = node.append_input_states() {
                 for child in children {
-                    let elem = search_plan_tree(&**child, table_oid, pending_rescan);
+                    let elem = search_plan_tree(child, table_oid, pending_rescan);
                     let elem = match elem {
                         Some(e) => e,
                         None => continue,
