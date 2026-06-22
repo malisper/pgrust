@@ -9710,11 +9710,13 @@ dependencies = [
  "backend-executor-execParallel-support-seams",
  "backend-executor-execProcnode",
  "backend-executor-instrument-seams",
+ "backend-executor-nodeAgg",
  "backend-executor-nodeAppend",
  "backend-executor-nodeBitmapHeapscan",
  "backend-executor-nodeBitmapIndexscan",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
+ "backend-executor-nodeIncrementalSort",
  "backend-executor-nodeIndexonlyscan",
  "backend-executor-nodeIndexscan",
  "backend-executor-nodeMemoize",
@@ -10331,6 +10333,7 @@ dependencies = [
  "types-execparallel",
  "types-fmgr",
  "types-nodes",
+ "types-parallel",
  "types-tuple",
 ]
 
@@ -10817,6 +10820,7 @@ dependencies = [
  "types-error",
  "types-execparallel",
  "types-nodes",
+ "types-parallel",
  "types-tuple",
 ]
 

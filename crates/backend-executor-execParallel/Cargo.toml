@@ -41,4 +41,6 @@ backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHe
 backend-executor-nodeHashjoin = { path = "../backend-executor-nodeHashjoin" }
 backend-executor-nodeHash = { path = "../backend-executor-nodeHash" }
 backend-executor-nodeSort = { path = "../backend-executor-nodeSort" }
+backend-executor-nodeIncrementalSort = { path = "../backend-executor-nodeIncrementalSort" }
+backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }
 backend-executor-nodeMemoize = { path = "../backend-executor-nodeMemoize" }

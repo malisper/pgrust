@@ -321,6 +321,14 @@ pub struct AggStatePerHashData<'mcx> {
 // ---------------------------------------------------------------------------
 
 /// `AggregateInstrumentation` (executor/execnodes.h).
+///
+/// `#[repr(C)]` because it is the element type of the `SharedAggInfo`
+/// flexible-array member that lives DIRECTLY in the parallel-query DSM segment
+/// (`ExecAggInitializeDSM` `shm_toc_allocate`s the chunk and each worker writes
+/// its own `sinstrument[ParallelWorkerNumber]` slot in `ExecEndAgg`). Placed /
+/// attached through the typed shared-DSM-object flex primitive
+/// (`shared_dsm_object::place_flex` / `attach_flex`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AggregateInstrumentation {
     /// `Size hash_mem_peak`.
@@ -331,15 +339,81 @@ pub struct AggregateInstrumentation {
     pub hash_batches_used: i32,
 }
 
-/// `SharedAggInfo` (executor/execnodes.h) — shared-memory per-worker container.
-/// C uses a `FLEXIBLE_ARRAY_MEMBER` tail; the port carries it as a counted
-/// slice whose `num_workers` mirrors C's leading int.
-#[derive(Debug, Default)]
-pub struct SharedAggInfo<'mcx> {
+// SAFETY (audited per the `SharedDsmObject` contract): `AggregateInstrumentation`
+//   1. is `#[repr(C)]` and matches `execnodes.h` field-for-field (Size,
+//      uint64, int — all POD scalars).
+//   2. Each parallel worker writes ONLY its own
+//      `sinstrument[ParallelWorkerNumber]` slot (in `ExecEndAgg`'s copyback);
+//      the leader reads the whole array only in `ExecAggRetrieveInstrumentation`
+//      after the workers have detached; element bytes are never
+//      aliased-and-mutated concurrently.
+//   3. The leader's placement initializer zero-fills every element before any
+//      worker attaches (`place_flex` writes `AggregateInstrumentation::default()`).
+//   4. A shared `&AggregateInstrumentation` aliasing another process's mapping of
+//      the SAME element is never created concurrently with a write (clause 2).
+unsafe impl types_parallel::SharedDsmObject for AggregateInstrumentation {}
+
+/// `offsetof(SharedAggInfo, sinstrument)`-bearing header of `SharedAggInfo`
+/// (execnodes.h): `{ int num_workers; AggregateInstrumentation sinstrument[]; }`.
+/// The `H` of the `place_flex`/`attach_flex` flexible-array placement; the
+/// `sinstrument[]` tail is the `E = AggregateInstrumentation` slice.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SharedAggInfoHeader {
     /// `int num_workers`.
     pub num_workers: i32,
-    /// `AggregateInstrumentation sinstrument[]`.
-    pub sinstrument: Option<PgVec<'mcx, AggregateInstrumentation>>,
+}
+
+// SAFETY: `#[repr(C)]` POD header written once by the leader
+// (`ExecAggInitializeDSM`) before any worker attaches, read-only thereafter; no
+// concurrent mutation. Matches the C `SharedAggInfo` header field-for-field.
+unsafe impl types_parallel::SharedDsmObject for SharedAggInfoHeader {}
+
+/// `SharedAggInfo` (executor/execnodes.h) — shared-memory per-worker container.
+///
+/// In C this is a single `SharedAggInfo *` pointer that is FIRST the DSM-resident
+/// shared area (set in `ExecAggInitializeDSM` / inherited by workers via
+/// `shm_toc_lookup`) and is LATER REPLACED, in `ExecAggRetrieveInstrumentation`,
+/// by a backend-local `palloc`'d copy. Each worker writes its own
+/// `sinstrument[ParallelWorkerNumber]` slot into the DSM array directly (in
+/// `ExecEndAgg`). The two states have different ownership (cross-process DSM view
+/// vs. owned backend-local array), so they are modelled as the two arms —
+/// mirroring `SharedSortInfo`.
+#[derive(Debug)]
+pub enum SharedAggInfo<'mcx> {
+    /// The DSM-resident shared area: a cursor to the `shm_toc`-allocated chunk
+    /// (`{ SharedAggInfoHeader; AggregateInstrumentation[num_workers] }`) plus
+    /// the worker count needed to recover the flex length.
+    Dsm {
+        /// Real in-segment chunk address (the `shm_toc_allocate`/`shm_toc_lookup`
+        /// return value).
+        chunk: types_execparallel::SerializeCursor,
+        /// The DSM segment the chunk lives in, so the retrieve path can
+        /// `attach_flex` the array and the worker copyback can `with_mut` its
+        /// slot before detach.
+        seg: types_execparallel::DsmSegmentHandle,
+        /// `shared_info->num_workers`.
+        num_workers: i32,
+    },
+    /// The backend-local copy `ExecAggRetrieveInstrumentation` makes before the
+    /// DSM segment is detached.
+    Local {
+        /// `shared_info->num_workers`.
+        num_workers: i32,
+        /// `AggregateInstrumentation sinstrument[]` copied out of DSM.
+        sinstrument: PgVec<'mcx, AggregateInstrumentation>,
+    },
+}
+
+impl<'mcx> SharedAggInfo<'mcx> {
+    /// `shared_info->num_workers` — the number of per-worker slots, regardless of
+    /// arm.
+    pub fn num_workers(&self) -> i32 {
+        match self {
+            SharedAggInfo::Dsm { num_workers, .. } => *num_workers,
+            SharedAggInfo::Local { num_workers, .. } => *num_workers,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -493,8 +567,11 @@ pub struct AggStateData<'mcx> {
     /// transition mutates the entry's storage directly and no write-back is
     /// needed. Sized `num_hashes`.
     pub hash_cur_entry_index: alloc::vec::Vec<Option<usize>>,
-    /// `SharedAggInfo *shared_info` — one entry per worker.
-    pub shared_info: Option<PgBox<'mcx, SharedAggInfo<'mcx>>>,
+    /// `SharedAggInfo *shared_info` — one entry per worker. Either the
+    /// DSM-resident shared area (leader after `ExecAggInitializeDSM` / worker
+    /// after `ExecAggInitializeWorker`) or the backend-local copy (leader after
+    /// `ExecAggRetrieveInstrumentation`).
+    pub shared_info: Option<SharedAggInfo<'mcx>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +655,43 @@ impl<'mcx> types_nodes::aggstate_carrier::AggStateLive<'mcx> for AggStateData<'m
 
     fn ss(&self) -> &types_nodes::execnodes::ScanStateData<'mcx> {
         &self.ss
+    }
+
+    fn hashagg_explain_info(
+        &self,
+    ) -> Option<types_nodes::aggstate_carrier::HashAggExplainInfo> {
+        use types_nodes::aggstate_carrier::{HashAggExplainInfo, HashAggInstrument};
+        use types_nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
+
+        // C `show_hashagg_info`: returns early for non-hashed strategies.
+        if self.aggstrategy != AGG_HASHED && self.aggstrategy != AGG_MIXED {
+            return None;
+        }
+
+        // The per-worker slots are read after `ExecAggRetrieveInstrumentation`
+        // has snapshotted DSM into the `Local` arm; any other state (`Dsm` /
+        // `None`) yields no worker lines (C `shared_info == NULL`).
+        let worker_instrument = match self.shared_info.as_ref() {
+            Some(SharedAggInfo::Local { sinstrument, .. }) => sinstrument
+                .iter()
+                .map(|si| HashAggInstrument {
+                    hash_mem_peak: si.hash_mem_peak,
+                    hash_disk_used: si.hash_disk_used,
+                    hash_batches_used: si.hash_batches_used,
+                })
+                .collect(),
+            _ => alloc::vec::Vec::new(),
+        };
+
+        Some(HashAggExplainInfo {
+            hash_planned_partitions: self.hash_planned_partitions,
+            node: HashAggInstrument {
+                hash_mem_peak: self.hash_mem_peak,
+                hash_disk_used: self.hash_disk_used,
+                hash_batches_used: self.hash_batches_used,
+            },
+            worker_instrument,
+        })
     }
 }
 

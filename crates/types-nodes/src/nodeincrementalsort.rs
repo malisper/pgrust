@@ -5,9 +5,10 @@
 //! Incremental sort is an optimized variant of multikey sort for cases when the
 //! input is already sorted by a prefix of the sort keys.
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use mcx::{Mcx, PgBox, PgVec};
 use types_core::{AttrNumber, Oid};
 use types_error::PgResult;
+use types_execparallel::SerializeCursor;
 use types_slot::SlotData;
 
 use crate::execnodes::{PlanStateData, ScanStateData};
@@ -95,6 +96,11 @@ pub struct PresortedKeyData {
 ///     bits32 sortMethods;     /* bitmask of TuplesortMethod */
 /// } IncrementalSortGroupInfo;
 /// ```
+///
+/// `#[repr(C)]` because it is a sub-aggregate of [`IncrementalSortInfo`], which
+/// is the element type of the `SharedIncrementalSortInfo` flexible-array member
+/// living DIRECTLY in the parallel-query DSM segment.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IncrementalSortGroupInfo {
     /// `int64 groupCount`.
@@ -119,6 +125,15 @@ pub struct IncrementalSortGroupInfo {
 ///     IncrementalSortGroupInfo prefixsortGroupInfo;
 /// } IncrementalSortInfo;
 /// ```
+///
+/// `#[repr(C)]` because it is the element type of the
+/// `SharedIncrementalSortInfo` flexible-array member that lives DIRECTLY in the
+/// parallel-query DSM segment (`ExecIncrementalSortInitializeDSM`
+/// `shm_toc_allocate`s the chunk and each worker folds its own
+/// `sinfo[ParallelWorkerNumber]` slot). Placed/attached through the typed
+/// shared-DSM-object flex primitive (`shared_dsm_object::place_flex` /
+/// `attach_flex`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IncrementalSortInfo {
     /// `IncrementalSortGroupInfo fullsortGroupInfo`.
@@ -126,6 +141,36 @@ pub struct IncrementalSortInfo {
     /// `IncrementalSortGroupInfo prefixsortGroupInfo`.
     pub prefixsortGroupInfo: IncrementalSortGroupInfo,
 }
+
+// SAFETY (audited per the `SharedDsmObject` contract): `IncrementalSortInfo` is
+//   1. `#[repr(C)]` and matches `execnodes.h` field-for-field (two
+//      `IncrementalSortGroupInfo`s, each five `int64`s + one `bits32`, all POD).
+//   2. Each parallel worker folds ONLY its own `sinfo[ParallelWorkerNumber]`
+//      slot (in `INSTRUMENT_SORT_GROUP`), and the leader reads the whole array
+//      only in `ExecIncrementalSortRetrieveInstrumentation` after the workers
+//      have detached; element bytes are never aliased-and-mutated concurrently.
+//   3. The leader's placement initializer zero-fills every element before any
+//      worker attaches (`place_flex` writes `IncrementalSortInfo::default()`).
+//   4. A shared `&IncrementalSortInfo` aliasing another process's mapping of the
+//      SAME element is never created concurrently with a write (clause 2).
+unsafe impl types_parallel::SharedDsmObject for IncrementalSortInfo {}
+
+/// `offsetof(SharedIncrementalSortInfo, sinfo)`-bearing header of
+/// `SharedIncrementalSortInfo` (execnodes.h): `{ int num_workers;
+/// IncrementalSortInfo sinfo[]; }`. The `H` of the `place_flex`/`attach_flex`
+/// flexible-array placement; the `sinfo[]` tail is the `E = IncrementalSortInfo`
+/// slice.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SharedIncrementalSortInfoHeader {
+    /// `int num_workers`.
+    pub num_workers: i32,
+}
+
+// SAFETY: `#[repr(C)]` POD header written once by the leader
+// (`ExecIncrementalSortInitializeDSM`) before any worker attaches, read-only
+// thereafter; no concurrent mutation. Matches the C header field-for-field.
+unsafe impl types_parallel::SharedDsmObject for SharedIncrementalSortInfoHeader {}
 
 /// `SharedIncrementalSortInfo` (execnodes.h) — shared-memory container for
 /// per-worker incremental-sort information:
@@ -137,22 +182,47 @@ pub struct IncrementalSortInfo {
 /// } SharedIncrementalSortInfo;
 /// ```
 ///
-/// The flexible array member is modelled as an owned vector.
-#[derive(Clone, Debug)]
-pub struct SharedIncrementalSortInfo<'mcx> {
-    /// `int num_workers`.
-    pub num_workers: i32,
-    /// `IncrementalSortInfo sinfo[FLEXIBLE_ARRAY_MEMBER]`.
-    pub sinfo: PgVec<'mcx, IncrementalSortInfo>,
+/// In C this is a single `SharedIncrementalSortInfo *` pointer that is FIRST the
+/// DSM-resident shared area (set in `ExecIncrementalSortInitializeDSM` /
+/// inherited by workers via `shm_toc_lookup`) and is LATER REPLACED, in
+/// `ExecIncrementalSortRetrieveInstrumentation`, by a backend-local `palloc`'d
+/// copy. Each worker folds its own `sinfo[ParallelWorkerNumber]` slot in the DSM
+/// array directly (in `INSTRUMENT_SORT_GROUP`). The two states have different
+/// ownership (cross-process DSM view vs. owned backend-local array), so they are
+/// modelled as the two arms — mirroring `SharedSortInfo`.
+#[derive(Debug)]
+pub enum SharedIncrementalSortInfo<'mcx> {
+    /// The DSM-resident shared area: a cursor to the `shm_toc`-allocated chunk
+    /// (`{ SharedIncrementalSortInfoHeader; IncrementalSortInfo[num_workers] }`)
+    /// plus the worker count needed to recover the flex length.
+    Dsm {
+        /// Real in-segment chunk address (the
+        /// `shm_toc_allocate`/`shm_toc_lookup` return value).
+        chunk: SerializeCursor,
+        /// The DSM segment the chunk lives in, so the retrieve path can
+        /// `attach_flex` the array and the worker fold can `with_mut` its slot
+        /// before detach.
+        seg: types_execparallel::DsmSegmentHandle,
+        /// `shared_info->num_workers`.
+        num_workers: i32,
+    },
+    /// The backend-local copy `ExecIncrementalSortRetrieveInstrumentation` makes
+    /// before the DSM segment is detached.
+    Local {
+        /// `shared_info->num_workers`.
+        num_workers: i32,
+        /// `IncrementalSortInfo sinfo[]` copied out of DSM.
+        sinfo: PgVec<'mcx, IncrementalSortInfo>,
+    },
 }
 
 impl<'mcx> SharedIncrementalSortInfo<'mcx> {
-    /// A freshly allocated container with the flexible array empty (the C
-    /// `shm_toc_allocate` + `memset(0)` before any worker fills a slot).
-    pub fn new_in(mcx: Mcx<'mcx>) -> Self {
-        SharedIncrementalSortInfo {
-            num_workers: 0,
-            sinfo: PgVec::new_in(mcx),
+    /// `shared_info->num_workers` — the number of per-worker slots, regardless of
+    /// arm.
+    pub fn num_workers(&self) -> i32 {
+        match self {
+            SharedIncrementalSortInfo::Dsm { num_workers, .. } => *num_workers,
+            SharedIncrementalSortInfo::Local { num_workers, .. } => *num_workers,
         }
     }
 }
@@ -243,8 +313,11 @@ pub struct IncrementalSortStateData<'mcx> {
     /// `bool am_worker` — are we a worker?
     pub am_worker: bool,
     /// `SharedIncrementalSortInfo *shared_info` — one entry per worker. `None`
-    /// is the C `NULL`.
-    pub shared_info: Option<PgBox<'mcx, SharedIncrementalSortInfo<'mcx>>>,
+    /// is the C `NULL`. Either the DSM-resident shared area (leader after
+    /// `ExecIncrementalSortInitializeDSM` / worker after
+    /// `ExecIncrementalSortInitializeWorker`) or the backend-local copy (leader
+    /// after `ExecIncrementalSortRetrieveInstrumentation`).
+    pub shared_info: Option<SharedIncrementalSortInfo<'mcx>>,
 }
 
 impl Default for IncrementalSortExecutionStatus {
@@ -280,24 +353,3 @@ pub fn tuplesort_method_bits(method: TuplesortMethod) -> u32 {
     method as i32 as u32
 }
 
-/// Internal helper mirroring the per-element clone used by the parallel
-/// retrieve-instrumentation copy.
-#[allow(dead_code)]
-fn copy_sinfo<'b>(
-    mcx: Mcx<'b>,
-    src: &PgVec<'_, IncrementalSortInfo>,
-) -> PgResult<PgVec<'b, IncrementalSortInfo>> {
-    let mut out = vec_with_capacity_in(mcx, src.len())?;
-    for &v in src.iter() {
-        out.push(v);
-    }
-    Ok(out)
-}
-
-/// Allocate a fresh [`SharedIncrementalSortInfo`] carrier in `mcx`.
-#[allow(dead_code)]
-pub fn alloc_shared_incremental_sort_info<'mcx>(
-    mcx: Mcx<'mcx>,
-) -> PgResult<PgBox<'mcx, SharedIncrementalSortInfo<'mcx>>> {
-    alloc_in(mcx, SharedIncrementalSortInfo::new_in(mcx))
-}

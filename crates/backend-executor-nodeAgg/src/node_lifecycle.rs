@@ -1273,20 +1273,39 @@ pub fn ExecEndAgg<'mcx>(
     // When ending a parallel worker, copy the statistics gathered by the
     // worker back into shared memory so that it can be picked up by the main
     // process to report in EXPLAIN ANALYZE.
-    if node.shared_info.is_some() && is_parallel_worker() {
-        let worker = parallel_worker_number();
-        let si = node
-            .shared_info
-            .as_mut()
-            .expect("shared_info checked is_some")
-            .sinstrument
-            .as_mut()
-            .expect("sinstrument allocated in InitializeDSM");
-        debug_assert!(worker <= node.numaggs); // ParallelWorkerNumber <= num_workers
-        let slot = &mut si[worker as usize];
-        slot.hash_batches_used = node.hash_batches_used;
-        slot.hash_disk_used = node.hash_disk_used;
-        slot.hash_mem_peak = node.hash_mem_peak;
+    //
+    //   si = &node->shared_info->sinstrument[ParallelWorkerNumber];
+    //   si->hash_batches_used = node->hash_batches_used;
+    //   si->hash_disk_used = node->hash_disk_used;
+    //   si->hash_mem_peak = node->hash_mem_peak;
+    //
+    // The worker writes ONLY its own slot in the DSM `SharedAggInfo` flex array;
+    // the worker is the sole writer of that element, satisfying `with_mut`'s
+    // sole-accessor obligation.
+    if is_parallel_worker() {
+        if let Some(crate::aggstate::SharedAggInfo::Dsm {
+            chunk,
+            seg,
+            num_workers,
+        }) = node.shared_info.as_ref()
+        {
+            let worker = parallel_worker_number();
+            debug_assert!(worker >= 0 && worker < *num_workers);
+            if worker >= 0 && worker < *num_workers {
+                let stats = crate::aggstate::AggregateInstrumentation {
+                    hash_batches_used: node.hash_batches_used,
+                    hash_disk_used: node.hash_disk_used,
+                    hash_mem_peak: node.hash_mem_peak,
+                };
+                let elem = crate::aggapi::sinstrument_slot_cursor(*chunk, worker);
+                backend_access_transam_parallel::shared_dsm_object::with_mut::<
+                    crate::aggstate::AggregateInstrumentation,
+                    (),
+                >(*seg, elem, |si| {
+                    *si = stats;
+                });
+            }
+        }
     }
 
     // Make sure we have closed any open tuplesorts.
@@ -1372,16 +1391,15 @@ fn rescan_expr_context_hashcontext<'mcx>(
 }
 
 /// `IsParallelWorker()` (parallel.h) — am I a parallel worker backend? Owned by
-/// the parallel-infra; per-backend identity. Defaults to `false` (the leader)
-/// until that owner lands.
+/// the parallel-infra; per-backend identity.
 fn is_parallel_worker() -> bool {
-    false
+    backend_access_transam_parallel::is_parallel_worker()
 }
 
 /// `ParallelWorkerNumber` (parallel.c) — this worker's index, or -1 in the
 /// leader. Per-backend identity owned by the parallel infra.
 fn parallel_worker_number() -> i32 {
-    -1
+    backend_access_transam_parallel::parallel_worker_number()
 }
 
 /// `ExecReScanAgg(node)` — rescan the Agg node, re-using the hash table where

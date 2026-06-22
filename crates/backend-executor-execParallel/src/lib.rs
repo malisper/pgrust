@@ -69,9 +69,27 @@ use backend_executor_nodeHash as nodeHash;
 use backend_executor_nodeHashjoin as nodeHashjoin;
 use backend_executor_nodeIndexonlyscan as nodeIndexOnly;
 use backend_executor_nodeIndexscan as nodeIndex;
+use backend_executor_nodeIncrementalSort as nodeIncrementalSort;
+use backend_executor_nodeAgg as nodeAgg;
 use backend_executor_nodeMemoize as nodeMemoize;
 use backend_executor_nodeSeqscan as nodeSeqscan;
 use backend_executor_nodeSort as nodeSort;
+
+/// `(AggState *) planstate` — recover the concrete `AggStateData` carried behind
+/// the `PlanStateNode::Agg` variant's erased `AggStateLive` trait object
+/// (`AggStateData` lives above `types-nodes`, so the enum holds it tag-checked).
+/// The C parallel hooks all begin with the `(AggState *) node` cast; this is its
+/// owned-model rendering. Panics on a tag mismatch — only the canonical
+/// `AggStateData` ever rides as a `dyn AggStateLive`.
+#[inline]
+fn agg_state_mut<'a, 'mcx>(
+    live: &'a mut (dyn types_nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+) -> &'a mut nodeAgg::aggstate::AggStateData<'mcx> {
+    types_nodes::aggstate_carrier::downcast_agg_state_mut::<nodeAgg::aggstate::AggStateData<'mcx>>(
+        live,
+    )
+    .expect("PlanStateNode::Agg carries the canonical AggStateData")
+}
 
 // ===========================================================================
 // Magic numbers for parallel executor communication (execParallel.c:58-69).
@@ -250,16 +268,22 @@ fn ExecParallelEstimate<'mcx>(
         PlanStateNode::Sort(node) => {
             nodeSort::ExecSortEstimate(node, pcxt)?;
         }
+        // case T_IncrementalSortState: ExecIncrementalSortEstimate(..);
+        PlanStateNode::IncrementalSort(node) => {
+            nodeIncrementalSort::ExecIncrementalSortEstimate(node, pcxt)?;
+        }
+        // case T_AggState: ExecAggEstimate(..);
+        PlanStateNode::Agg(live) => {
+            let node = agg_state_mut(live.as_mut());
+            nodeAgg::ExecAggEstimate(node, pcxt)?;
+        }
         // case T_MemoizeState: ExecMemoizeEstimate(..);
         PlanStateNode::Memoize(node) => {
             nodeMemoize::ExecMemoizeEstimate(node, pcxt)?;
         }
-        // case T_IncrementalSortState: ExecIncrementalSortEstimate(..); and
-        // case T_AggState: ExecAggEstimate(..) — the IncrementalSortState and
-        // AggState variants are not present in the `#[non_exhaustive]`
-        // `PlanStateNode` enum yet (no owned nodeIncrementalSort crate; nodeAgg
-        // does not thread its AggState into the enum), so those tags cannot
-        // occur. They add their arm here as those units thread their state in.
+        // case T_AggState: ExecAggEstimate(..) — see ExecParallelRetrieveInstrumentation
+        // for why the AggState arm lands with nodeAgg (the concrete AggStateData
+        // lives above this crate behind the AggStateLive carrier).
         // No DSM-estimate method for any other node tag (C `default: break`).
         _ => {}
     }
@@ -424,6 +448,13 @@ fn ExecParallelInitializeDSM<'mcx>(
         }
         PlanStateNode::Sort(node) => {
             nodeSort::ExecSortInitializeDSM(node, pcxt)?;
+        }
+        PlanStateNode::IncrementalSort(node) => {
+            nodeIncrementalSort::ExecIncrementalSortInitializeDSM(node, pcxt)?;
+        }
+        PlanStateNode::Agg(live) => {
+            let node = agg_state_mut(live.as_mut());
+            nodeAgg::ExecAggInitializeDSM(node, pcxt)?;
         }
         PlanStateNode::Memoize(node) => {
             nodeMemoize::ExecMemoizeInitializeDSM(node, pcxt)?;
@@ -979,6 +1010,13 @@ fn ExecParallelRetrieveInstrumentation<'mcx>(
         PlanStateNode::Sort(node) => {
             nodeSort::ExecSortRetrieveInstrumentation(mcx, node)?;
         }
+        PlanStateNode::IncrementalSort(node) => {
+            nodeIncrementalSort::ExecIncrementalSortRetrieveInstrumentation(mcx, node)?;
+        }
+        PlanStateNode::Agg(live) => {
+            let node = agg_state_mut(live.as_mut());
+            nodeAgg::ExecAggRetrieveInstrumentation(mcx, node)?;
+        }
         PlanStateNode::Hash(node) => {
             nodeHash::instrument::ExecHashRetrieveInstrumentation(mcx, node)?;
         }
@@ -1251,6 +1289,13 @@ fn ExecParallelInitializeWorker<'mcx>(
         }
         PlanStateNode::Sort(node) => {
             nodeSort::ExecSortInitializeWorker(node, pwcxt)?;
+        }
+        PlanStateNode::IncrementalSort(node) => {
+            nodeIncrementalSort::ExecIncrementalSortInitializeWorker(node, pwcxt)?;
+        }
+        PlanStateNode::Agg(live) => {
+            let node = agg_state_mut(live.as_mut());
+            nodeAgg::ExecAggInitializeWorker(node, pwcxt)?;
         }
         PlanStateNode::Memoize(node) => {
             nodeMemoize::ExecMemoizeInitializeWorker(node, pwcxt)?;

@@ -67,6 +67,46 @@ pub trait AggStateLive<'mcx>: core::fmt::Debug + 'mcx {
 
     /// `(ScanState *) aggstate` — the embedded `ScanState` (`aggstate->ss`).
     fn ss(&self) -> &ScanStateData<'mcx>;
+
+    /// The hash-aggregate stats `show_hashagg_info` (explain.c) reads: the
+    /// node-level `aggstate->hash_*` counters plus, after
+    /// `ExecAggRetrieveInstrumentation`, the per-worker
+    /// `shared_info->sinstrument[..]` slots. Exposed through the carrier so the
+    /// EXPLAIN crate (which is below `nodeAgg` and cannot name `AggStateData` /
+    /// `SharedAggInfo` / `AggregateInstrumentation`) can render them without a
+    /// crate cycle. `None` when the strategy is not hashed/mixed (C's early
+    /// `return`).
+    fn hashagg_explain_info(&self) -> Option<HashAggExplainInfo>;
+}
+
+/// One worker's (or the leader's) hash-aggregate spill statistics — the fields
+/// `show_hashagg_info` (explain.c) renders as `Batches`/`Memory Usage`/`Disk
+/// Usage`. Mirrors `AggregateInstrumentation` (executor/execnodes.h), but lives
+/// in `types-nodes` so the EXPLAIN crate can read it through the carrier without
+/// depending on `nodeAgg`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HashAggInstrument {
+    /// `Size hash_mem_peak`.
+    pub hash_mem_peak: usize,
+    /// `uint64 hash_disk_used`.
+    pub hash_disk_used: u64,
+    /// `int hash_batches_used`.
+    pub hash_batches_used: i32,
+}
+
+/// The snapshot `show_hashagg_info` needs from a hashed/mixed `AggState`: the
+/// node-level (leader) counters plus the per-worker slots copied out of DSM by
+/// `ExecAggRetrieveInstrumentation`. `worker_instrument` is empty in the
+/// non-parallel case (C `shared_info == NULL`).
+#[derive(Clone, Debug, Default)]
+pub struct HashAggExplainInfo {
+    /// `aggstate->hash_planned_partitions`.
+    pub hash_planned_partitions: i32,
+    /// The node-level (leader) counters.
+    pub node: HashAggInstrument,
+    /// `shared_info->sinstrument[0..num_workers]` (empty when `shared_info ==
+    /// NULL`, i.e. non-parallel or no instrumentation).
+    pub worker_instrument: alloc::vec::Vec<HashAggInstrument>,
 }
 
 /// Marker implemented by the concrete type carried in a `PlanStateNode::Agg`.

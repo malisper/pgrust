@@ -11,7 +11,7 @@ use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::nodeagg::Aggref;
 use types_nodes::EcxtId;
-use crate::aggstate::{AggStateData, AggregateInstrumentation, SharedAggInfo};
+use crate::aggstate::{AggStateData, AggregateInstrumentation, SharedAggInfo, SharedAggInfoHeader};
 use types_execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
@@ -281,59 +281,50 @@ pub fn ExecAggInitializeDSM<'mcx>(
         return Ok(());
     }
 
+    // node->ss.ps.plan->plan_node_id (the DSM TOC key).
+    let plan_node_id = node
+        .ss
+        .ps
+        .plan
+        .expect("ExecAggInitializeDSM: ss.ps.plan is NULL")
+        .plan_head()
+        .plan_node_id;
+
     // size = offsetof(SharedAggInfo, sinstrument)
     //        + pcxt->nworkers * sizeof(AggregateInstrumentation);
     let size = shared_agg_info_sinstrument_offset()
         + (nworkers as usize) * core::mem::size_of::<AggregateInstrumentation>();
 
     // node->shared_info = shm_toc_allocate(pcxt->toc, size);
-    // memset(node->shared_info, 0, size);  -> zeroed sinstrument slots
-    // node->shared_info->num_workers = pcxt->nworkers;
-    // shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, node->shared_info);
-    //
-    // The leader `shm_toc_allocate`s the chunk (real keystone-backed call,
-    // below) and would then `shared_dsm_object::place_and_init` a `repr(C)`
-    // flexible-array `SharedAggInfo` over it (num_workers leader-write scalar +
-    // a zeroed `AggregateInstrumentation sinstrument[]` whose per-worker slots
-    // are launch-once-per-worker plain writes) and stash the resulting
-    // `SharedRef` for the worker copyback / leader retrieve. Two surfaces are
-    // genuinely missing for that handoff:
-    //
-    //  1. CARRIER: the live `SharedAggInfo *` lives in DSM; the AggState field
-    //     `node->shared_info` is — on the already-merged nodeAgg contract — an
-    //     in-process `PgBox<SharedAggInfo>` (types-nodes), which cannot hold the
-    //     DSM `SharedRef`/chunk cursor. `SharedRef` is unstorable in `types-nodes`
-    //     anyway (it lives in the `backend-access-transam-parallel` keystone
-    //     crate; importing it into `types-nodes` inverts the crate layering).
-    //     Re-typing `AggStateData.shared_info` to a DSM carrier is a
-    //     contract-divergence from the merged nodeAgg port and would also force a
-    //     rewrite of the worker copyback in `node_lifecycle::ExecEndAgg` (a
-    //     sibling family's file).
-    //  2. FAM ACCESSOR: the keystone exposes `place_and_init`/`attach`/`get`
-    //     (whole-`T` placement + a shared `&T`) but no sanctioned per-element
-    //     accessor for a flexible-array tail; reaching `sinstrument[i]` from a
-    //     shared `&T` needs raw pointer arithmetic, which node code may not do
-    //     (the only sanctioned raw-pointer surface is the keystone, and it does
-    //     not yet offer a FAM-slot accessor — cf. `sei_plan_node_id` lives in the
-    //     keystone crate itself, not in a node crate).
-    //  3. plan_node_id: the DSM TOC key `node->ss.ps.plan->plan_node_id` is
-    //     unreachable through the trimmed shared `Node` vocabulary (`ss.ps.plan`
-    //     is `None`; the PlanState back-reference / Node->Agg resolution is
-    //     unported — see node_lifecycle::agg_plan_node).
-    //
-    // The chunk allocation itself is a real keystone-backed shm_toc call; the
-    // placement + carrier + key handoff mirror-and-panic into the parallel DSM
-    // owner until those surfaces land.
     let toc = parallel_seams::pcxt_toc(pcxt);
-    let chunk = parallel_seams::shm_toc_allocate(toc, size);
-    let _ = (chunk, nworkers);
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: SharedAggInfo DSM \
-         place_and_init + carrier handoff (ExecAggInitializeDSM) — needs a \
-         DSM-resident shared_info carrier (merged AggState uses in-process \
-         PgBox<SharedAggInfo>; SharedRef is unstorable in types-nodes) and a \
-         keystone flexible-array slot accessor; unported"
-    );
+    let chunk = parallel_seams::shm_toc_allocate(toc, shared_dsm_object::estimate_flex(size));
+
+    // A parallel query with instrument-bearing workers always has a real DSM
+    // segment.
+    let seg = parallel_seams::pcxt_seg(pcxt)
+        .expect("ExecAggInitializeDSM: instrumenting parallel query without a DSM segment");
+
+    // /* ensure any unfilled slots will contain zeroes */
+    // memset(node->shared_info, 0, size);
+    // node->shared_info->num_workers = pcxt->nworkers;
+    let (_hdr, _tail) =
+        shared_dsm_object::place_flex::<SharedAggInfoHeader, AggregateInstrumentation>(
+            seg,
+            chunk,
+            nworkers as usize,
+            SharedAggInfoHeader { num_workers: nworkers },
+            |_i| AggregateInstrumentation::default(),
+        );
+
+    // shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, node->shared_info);
+    parallel_seams::shm_toc_insert(toc, plan_node_id as u64, chunk);
+
+    node.shared_info = Some(SharedAggInfo::Dsm {
+        chunk,
+        seg,
+        num_workers: nworkers,
+    });
+    Ok(())
 }
 
 /// `ExecAggInitializeWorker(node, pwcxt)` — in a worker, attach to the shared
@@ -348,15 +339,10 @@ pub fn ExecAggInitializeWorker<'mcx>(
     // The lookup is `noError = true` (missing_ok): when the leader is NOT
     // instrumenting (no EXPLAIN ANALYZE) `ExecAggInitializeDSM` returns early
     // without inserting any chunk, so this lookup finds nothing and the C leaves
-    // `node->shared_info == NULL`. We faithfully reproduce that arm:
-    // `shared_info = None`. Only when a chunk IS present (the instrumenting
-    // path) would the worker `shared_dsm_object::attach` to it, storing the
-    // `SharedRef` in `node->shared_info` so its own `ExecEndAgg` copyback lands
-    // in the shared DSM bytes — and that DSM-resident carrier is genuinely
-    // unported (merged AggState holds an in-process `PgBox<SharedAggInfo>`;
-    // `SharedRef` is unstorable in types-nodes, plus the keystone flexible-array
-    // slot accessor). Defer to the carrier owner only in that case rather than
-    // crashing every non-instrumented parallel HashAgg worker.
+    // `node->shared_info == NULL`. Otherwise the worker attaches the leader's DSM
+    // `SharedAggInfo` (the `Dsm` arm), storing the chunk/seg so its own
+    // `ExecEndAgg` copyback lands in the shared DSM bytes. Mirrors nodeSort's
+    // `ExecSortInitializeWorker`.
     let plan_node_id = node
         .ss
         .ps
@@ -369,47 +355,84 @@ pub fn ExecAggInitializeWorker<'mcx>(
         None => {
             // Leader was not instrumenting: no shared stats area to attach to.
             node.shared_info = None;
-            Ok(())
         }
-        Some(_chunk) => {
-            panic!(
-                "backend_access_transam_parallel::shared_dsm_object: SharedAggInfo DSM \
-                 attach (ExecAggInitializeWorker) — needs a DSM-resident shared_info \
-                 carrier and the keystone flexible-array slot accessor; unported"
-            );
+        Some(chunk) => {
+            // Attach to the leader's DSM `SharedAggInfo`: recover num_workers from
+            // the in-segment header. The worker writes ONLY its own
+            // `sinstrument[ParallelWorkerNumber]` slot later (in `ExecEndAgg`).
+            let seg = parallel_seams::pwcxt_seg(pwcxt);
+            let (hdr, _tail) = shared_dsm_object::attach_flex::<
+                SharedAggInfoHeader,
+                AggregateInstrumentation,
+            >(seg, chunk, 0);
+            let num_workers = hdr.get().num_workers;
+            node.shared_info = Some(SharedAggInfo::Dsm {
+                chunk,
+                seg,
+                num_workers,
+            });
         }
     }
+    Ok(())
 }
 
 /// `ExecAggRetrieveInstrumentation(node)` — in the leader, copy the
 /// per-worker instrumentation out of DSM into the node's own storage.
-pub fn ExecAggRetrieveInstrumentation<'mcx>(node: &mut AggStateData<'mcx>) -> PgResult<()> {
+///
+/// The DSM segment is still mapped here (the C runs this before detach): read the
+/// flex array out of the segment and snapshot it into a backend-local `PgVec`;
+/// `node->shared_info` then becomes the `Local` arm. Mirrors nodeSort's
+/// `ExecSortRetrieveInstrumentation`.
+pub fn ExecAggRetrieveInstrumentation<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: &mut AggStateData<'mcx>,
+) -> PgResult<()> {
     // if (node->shared_info == NULL) return;
-    let si = match node.shared_info.as_ref() {
-        None => return Ok(()),
-        Some(si) => si,
+    let (chunk, seg, num_workers) = match node.shared_info {
+        Some(SharedAggInfo::Dsm {
+            chunk,
+            seg,
+            num_workers,
+        }) => (chunk, seg, num_workers),
+        // Already a backend-local copy, or NULL: nothing to retrieve.
+        _ => return Ok(()),
     };
 
     // size = offsetof(SharedAggInfo, sinstrument)
     //        + node->shared_info->num_workers * sizeof(AggregateInstrumentation);
     // si = palloc(size); memcpy(si, node->shared_info, size); node->shared_info = si;
-    //
-    // In the leader, C re-homes the DSM `SharedAggInfo` into private memory: it
-    // would `shared_dsm_object::attach` to the carried chunk and copy each
-    // `sinstrument[i]` slot out via the keystone flexible-array accessor. With
-    // the merged in-process `PgBox<SharedAggInfo>` carrier, `node->shared_info`
-    // is already private memory (no DSM round-trip happened — see
-    // ExecAggInitializeDSM), so there is nothing real to copy out: the leader
-    // never observed the workers' DSM slots. Faithfully closing this requires
-    // the DSM-resident carrier + keystone flexible-array accessor that
-    // InitializeDSM/Worker also need; mirror-and-panic until they land.
-    let _ = si;
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: SharedAggInfo DSM \
-         copy-out (ExecAggRetrieveInstrumentation) — needs the DSM-resident \
-         shared_info carrier and the keystone flexible-array slot accessor; \
-         unported"
-    );
+    let (_hdr, tail) =
+        shared_dsm_object::attach_flex::<SharedAggInfoHeader, AggregateInstrumentation>(
+            seg,
+            chunk,
+            num_workers as usize,
+        );
+
+    let mut copy: mcx::PgVec<'mcx, AggregateInstrumentation> =
+        mcx::PgVec::with_capacity_in(num_workers as usize, mcx);
+    for &elem in tail.get().iter() {
+        copy.push(elem);
+    }
+    node.shared_info = Some(SharedAggInfo::Local {
+        num_workers,
+        sinstrument: copy,
+    });
+    Ok(())
+}
+
+/// `&shared_info->sinstrument[worker_index]` — the in-segment address of this
+/// worker's slot in the DSM `SharedAggInfo` flex array.
+#[inline]
+pub fn sinstrument_slot_cursor(
+    chunk: types_execparallel::SerializeCursor,
+    worker_index: i32,
+) -> types_execparallel::SerializeCursor {
+    let off = shared_agg_info_sinstrument_offset();
+    types_execparallel::SerializeCursor(
+        chunk.0
+            + off
+            + (worker_index as usize) * core::mem::size_of::<AggregateInstrumentation>(),
+    )
 }
 
 /// `offsetof(SharedAggInfo, sinstrument)` — the byte offset of the flexible
@@ -476,7 +499,22 @@ fn exec_agg_initialize_worker_shim(
 
 /// Seam shim for `ExecAggRetrieveInstrumentation`.
 fn exec_agg_retrieve_instrumentation_shim(node: PlanStateHandle) -> PgResult<()> {
-    ExecAggRetrieveInstrumentation(resolve_agg_state(node))
+    ExecAggRetrieveInstrumentation(resolve_retrieve_mcx(node), resolve_agg_state(node))
+}
+
+/// `CurrentMemoryContext` (`planstate->state->es_query_cxt`) at the
+/// `ExecAggRetrieveInstrumentation` call site — recovered from the same unported
+/// executor surface that backs `resolve_agg_state`, so it shares that panic.
+/// (The live executor dispatches `ExecAggRetrieveInstrumentation` directly over
+/// its owned `AggState` from `ExecParallelRetrieveInstrumentation`, threading the
+/// mcx in; this handle-shim path is only reached by a hypothetical
+/// pointer-registry caller.)
+fn resolve_retrieve_mcx<'mcx>(_node: PlanStateHandle) -> mcx::Mcx<'mcx> {
+    panic!(
+        "backend-executor-nodeAgg: the CurrentMemoryContext for \
+         ExecAggRetrieveInstrumentation's palloc'd copy is recovered from the unported executor \
+         surface (PlanState pointer registry); cannot run yet"
+    );
 }
 
 /// Install the `aggapi` parallel-instrumentation seams this unit owns

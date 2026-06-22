@@ -1451,6 +1451,17 @@ pub fn ExplainNode<'es, 'p>(
             // Group Key detail.
             let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
             show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
+
+            // explain.c:2198: show_hashagg_info((AggState *) planstate, es) —
+            // the planned-partition / per-(worker)-batch hash-aggregate spill
+            // stats. Read through the AggStateLive carrier (the EXPLAIN crate is
+            // below nodeAgg and cannot name AggStateData). Only present once the
+            // executor has run a hashed/mixed Agg state.
+            if let PlanStateNode::Agg(live) = planstate {
+                if let Some(hinfo) = live.hashagg_explain_info() {
+                    crate::details::show_hashagg_info(&hinfo, es)?;
+                }
+            }
         }
         ntag::T_MergeAppend => {
             // show_merge_append_keys (explain.c:2600): the merge sort keys refer

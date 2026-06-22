@@ -51,29 +51,49 @@ use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::{AttrNumber, Oid};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_execparallel::{
-    ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle, Size,
+    ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
 use types_nodes::execnodes::{ForwardScanDirection, ScanDirectionIsForward};
 use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use types_nodes::nodeincrementalsort::{
     IncrementalSort, IncrementalSortGroupInfo, IncrementalSortInfo, IncrementalSortStateData,
-    PresortedKeyData, INCSORT_LOADFULLSORT, INCSORT_LOADPREFIXSORT, INCSORT_READFULLSORT,
-    INCSORT_READPREFIXSORT,
+    PresortedKeyData, SharedIncrementalSortInfo, SharedIncrementalSortInfoHeader,
+    INCSORT_LOADFULLSORT, INCSORT_LOADPREFIXSORT, INCSORT_READFULLSORT, INCSORT_READPREFIXSORT,
 };
+use types_parallel::shared_dsm_object;
 use types_nodes::nodesort::{
     TuplesortInstrumentation, TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE,
 };
 use types_nodes::{EStateData, PlanStateNode, SlotData, SlotId, TupleSlotKind};
 
-/// `offsetof(SharedIncrementalSortInfo, sinfo)` (execnodes.h): an `int
-/// num_workers` followed by the `IncrementalSortInfo[]` flexible array, which
-/// begins on an 8-byte boundary (`IncrementalSortInfo` is all `int64`/`bits32`).
-/// The C (and c2rust) use the literal byte offset `8`.
-const SHARED_INCREMENTAL_SORT_INFO_HEADER: Size = 8;
+/// `offsetof(SharedIncrementalSortInfo, sinfo) + nworkers *
+/// sizeof(IncrementalSortInfo)` — the byte size of a `SharedIncrementalSortInfo`
+/// carrying `nworkers` per-worker slots. (`offsetof(SharedIncrementalSortInfo,
+/// sinfo)` is `sizeof(SharedIncrementalSortInfoHeader)` MAXALIGN'd up to
+/// `IncrementalSortInfo`'s alignment.)
+#[inline]
+fn shared_incremental_sort_info_size(nworkers: usize) -> usize {
+    use core::mem::{align_of, size_of};
+    let h = size_of::<SharedIncrementalSortInfoHeader>();
+    let a = align_of::<IncrementalSortInfo>();
+    let off = (h + a - 1) & !(a - 1);
+    off + nworkers * size_of::<IncrementalSortInfo>()
+}
 
-/// `sizeof(IncrementalSortInfo)` — used to size the per-worker shm chunk.
-fn sizeof_incremental_sort_info() -> Size {
-    core::mem::size_of::<IncrementalSortInfo>()
+/// `&shared_info->sinfo[worker_index]` — the in-segment address of this worker's
+/// slot in the DSM `SharedIncrementalSortInfo` flex array.
+#[inline]
+fn sinfo_slot_cursor(
+    chunk: types_execparallel::SerializeCursor,
+    worker_index: i32,
+) -> types_execparallel::SerializeCursor {
+    use core::mem::{align_of, size_of};
+    let h = size_of::<SharedIncrementalSortInfoHeader>();
+    let a = align_of::<IncrementalSortInfo>();
+    let off = (h + a - 1) & !(a - 1);
+    types_execparallel::SerializeCursor(
+        chunk.0 + off + (worker_index as usize) * size_of::<IncrementalSortInfo>(),
+    )
 }
 
 /// `DEFAULT_MIN_GROUP_SIZE` (nodeIncrementalSort.c) — the minimum number of
@@ -162,9 +182,7 @@ fn instrument_sort_group_fullsort(node: &mut IncrementalSortStateData<'_>) -> Pg
             .ok_or_else(|| missing_sort_state("fullsort"))?;
         tuplesort::tuplesort_get_stats::call(ts)
     };
-    let info = select_group_info_fullsort(node)?;
-    instrument_sorted_group(info, &stats);
-    Ok(())
+    fold_group_info(node, &stats, |info| &mut info.fullsortGroupInfo)
 }
 
 /// `INSTRUMENT_SORT_GROUP(node, prefixsort)` — the prefix-sort variant.
@@ -179,55 +197,47 @@ fn instrument_sort_group_prefixsort(node: &mut IncrementalSortStateData<'_>) -> 
             .ok_or_else(|| missing_sort_state("prefixsort"))?;
         tuplesort::tuplesort_get_stats::call(ts)
     };
-    let info = select_group_info_prefixsort(node)?;
-    instrument_sorted_group(info, &stats);
-    Ok(())
+    fold_group_info(node, &stats, |info| &mut info.prefixsortGroupInfo)
 }
 
 /// The C `INSTRUMENT_SORT_GROUP` macro selects either the shared-info worker
 /// slot (`node->shared_info && node->am_worker`) or the node's local
-/// `incsort_info`. This resolves the `fullsortGroupInfo` slot mutably.
-fn select_group_info_fullsort<'a>(
-    node: &'a mut IncrementalSortStateData<'_>,
-) -> PgResult<&'a mut IncrementalSortGroupInfo> {
-    if node.shared_info.is_some() && node.am_worker {
-        // Assert(IsParallelWorker());
-        // Assert(ParallelWorkerNumber <= node->shared_info->num_workers);
-        let worker_number = backend_access_transam_parallel::parallel_worker_number();
-        let shared = node
-            .shared_info
-            .as_deref_mut()
-            .expect("shared_info.is_some() checked");
-        debug_assert!(worker_number >= 0 && worker_number <= shared.num_workers);
-        let idx = worker_number as usize;
-        if idx >= shared.sinfo.len() {
-            return Err(worker_slot_oob());
+/// `incsort_info`, then folds `sortState`'s stats into the chosen group-info via
+/// `instrumentSortedGroup`. `pick` selects the full/prefix group-info sub-field
+/// of an `IncrementalSortInfo`.
+///
+/// When the worker is attached to DSM (`Dsm` arm), it folds into ITS OWN
+/// `sinfo[ParallelWorkerNumber]` slot in the shared segment via `with_mut` (the
+/// worker is the sole writer of that element); otherwise into the node-local
+/// `incsort_info`.
+fn fold_group_info(
+    node: &mut IncrementalSortStateData<'_>,
+    stats: &TuplesortInstrumentation,
+    pick: impl Fn(&mut IncrementalSortInfo) -> &mut IncrementalSortGroupInfo,
+) -> PgResult<()> {
+    if node.am_worker {
+        if let Some(SharedIncrementalSortInfo::Dsm {
+            chunk,
+            seg,
+            num_workers,
+        }) = node.shared_info.as_ref()
+        {
+            // Assert(IsParallelWorker());
+            // Assert(ParallelWorkerNumber <= node->shared_info->num_workers);
+            let worker_number = backend_access_transam_parallel::parallel_worker_number();
+            debug_assert!(worker_number >= 0 && worker_number <= *num_workers);
+            if worker_number < 0 || worker_number >= *num_workers {
+                return Err(worker_slot_oob());
+            }
+            let elem = sinfo_slot_cursor(*chunk, worker_number);
+            shared_dsm_object::with_mut::<IncrementalSortInfo, ()>(*seg, elem, |sinfo| {
+                instrument_sorted_group(pick(sinfo), stats);
+            });
+            return Ok(());
         }
-        Ok(&mut shared.sinfo[idx].fullsortGroupInfo)
-    } else {
-        Ok(&mut node.incsort_info.fullsortGroupInfo)
     }
-}
-
-/// As [`select_group_info_fullsort`] for the `prefixsortGroupInfo` slot.
-fn select_group_info_prefixsort<'a>(
-    node: &'a mut IncrementalSortStateData<'_>,
-) -> PgResult<&'a mut IncrementalSortGroupInfo> {
-    if node.shared_info.is_some() && node.am_worker {
-        let worker_number = backend_access_transam_parallel::parallel_worker_number();
-        let shared = node
-            .shared_info
-            .as_deref_mut()
-            .expect("shared_info.is_some() checked");
-        debug_assert!(worker_number >= 0 && worker_number <= shared.num_workers);
-        let idx = worker_number as usize;
-        if idx >= shared.sinfo.len() {
-            return Err(worker_slot_oob());
-        }
-        Ok(&mut shared.sinfo[idx].prefixsortGroupInfo)
-    } else {
-        Ok(&mut node.incsort_info.prefixsortGroupInfo)
-    }
+    instrument_sorted_group(pick(&mut node.incsort_info), stats);
+    Ok(())
 }
 
 // ===========================================================================
@@ -1086,16 +1096,17 @@ pub fn ExecIncrementalSortEstimate<'mcx>(
         return Ok(());
     }
 
+    let nworkers = backend_access_transam_parallel::pcxt_nworkers(pcxt) as usize;
+
     //   size = mul_size(pcxt->nworkers, sizeof(IncrementalSortInfo));
     //   size = add_size(size, offsetof(SharedIncrementalSortInfo, sinfo));
-    let nworkers = parallel_sup::pcxt_nworkers::call(pcxt);
-    let size =
-        (nworkers as Size) * sizeof_incremental_sort_info() + SHARED_INCREMENTAL_SORT_INFO_HEADER;
+    let size = shared_dsm_object::estimate_flex(shared_incremental_sort_info_size(nworkers));
 
     //   shm_toc_estimate_chunk(&pcxt->estimator, size);
     //   shm_toc_estimate_keys(&pcxt->estimator, 1);
-    parallel_sup::pcxt_estimate_chunk::call(pcxt, size)?;
-    parallel_sup::pcxt_estimate_keys::call(pcxt, 1)?;
+    let estimator = backend_access_transam_parallel::pcxt_estimator(pcxt);
+    backend_access_transam_parallel::shm_toc_estimate_chunk(estimator, size);
+    backend_access_transam_parallel::shm_toc_estimate_keys(estimator, 1);
     Ok(())
 }
 
@@ -1103,41 +1114,58 @@ pub fn ExecIncrementalSortEstimate<'mcx>(
 /// sort statistics.
 ///
 /// The leader `shm_toc_allocate`s a `SharedIncrementalSortInfo` chunk in DSM,
-/// zeroes it, sets `num_workers`, and registers it under
-/// `node->ss.ps.plan->plan_node_id`, stashing the DSM pointer in
-/// `node->shared_info`. As with nodeSort/nodeAgg, the merged
-/// `IncrementalSortStateData.shared_info` is an in-process
-/// `PgBox<SharedIncrementalSortInfo>` (types-nodes) that cannot hold the DSM
-/// `SharedRef`/chunk cursor (`SharedRef` is unstorable in types-nodes anyway).
-/// Re-typing the carrier is a contract-divergence from the merged node port;
-/// mirror-and-panic into the DSM owner until that carrier surface lands.
+/// zero-fills it, sets `num_workers`, and registers it under
+/// `node->ss.ps.plan->plan_node_id`, stashing the DSM cursor in
+/// `node->shared_info` (the `Dsm` arm). Mirrors nodeSort's
+/// `ExecSortInitializeDSM` exactly.
 pub fn ExecIncrementalSortInitializeDSM<'mcx>(
     node: &mut IncrementalSortStateData<'mcx>,
     pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
-    if node.ss.ps.instrument.is_none() || parallel_sup::pcxt_nworkers::call(pcxt) == 0 {
+    let nworkers = backend_access_transam_parallel::pcxt_nworkers(pcxt);
+    if node.ss.ps.instrument.is_none() || nworkers == 0 {
         return Ok(());
     }
 
+    let plan_node_id = incremental_sort_plan(node)?.sort.plan.plan_node_id;
+
     //   size = offsetof(SharedIncrementalSortInfo, sinfo)
     //          + pcxt->nworkers * sizeof(IncrementalSortInfo);
+    let size = shared_incremental_sort_info_size(nworkers as usize);
+
     //   node->shared_info = shm_toc_allocate(pcxt->toc, size);
+    let toc = backend_access_transam_parallel::pcxt_toc(pcxt);
+    let chunk =
+        backend_access_transam_parallel::shm_toc_allocate(toc, shared_dsm_object::estimate_flex(size));
+
+    // A parallel query with instrument-bearing workers always has a real DSM
+    // segment.
+    let seg = backend_access_transam_parallel::pcxt_seg(pcxt).expect(
+        "ExecIncrementalSortInitializeDSM: instrumenting parallel query without a DSM segment",
+    );
+
+    //   /* ensure any unfilled slots will contain zeroes */
     //   memset(node->shared_info, 0, size);
     //   node->shared_info->num_workers = pcxt->nworkers;
+    let (_hdr, _tail) =
+        shared_dsm_object::place_flex::<SharedIncrementalSortInfoHeader, IncrementalSortInfo>(
+            seg,
+            chunk,
+            nworkers as usize,
+            SharedIncrementalSortInfoHeader { num_workers: nworkers },
+            |_i| IncrementalSortInfo::default(),
+        );
+
     //   shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, node->shared_info);
-    let nworkers = parallel_sup::pcxt_nworkers::call(pcxt);
-    let size =
-        SHARED_INCREMENTAL_SORT_INFO_HEADER + (nworkers as Size) * sizeof_incremental_sort_info();
-    let plan_node_id = incremental_sort_plan(node)?.sort.plan.plan_node_id;
-    let _ = (size, plan_node_id, pcxt);
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: SharedIncrementalSortInfo DSM \
-         allocate + place_and_init + carrier handoff (ExecIncrementalSortInitializeDSM) — \
-         the merged IncrementalSortStateData.shared_info is an in-process \
-         PgBox<SharedIncrementalSortInfo> and cannot hold the DSM SharedRef (SharedRef is \
-         unstorable in types-nodes); same blocker as nodeSort/nodeAgg InitializeDSM; unported"
-    );
+    backend_access_transam_parallel::shm_toc_insert(toc, plan_node_id as u64, chunk);
+
+    node.shared_info = Some(SharedIncrementalSortInfo::Dsm {
+        chunk,
+        seg,
+        num_workers: nworkers,
+    });
+    Ok(())
 }
 
 /// `ExecIncrementalSortInitializeWorker(node, pwcxt)` — attach a worker to DSM
@@ -1149,73 +1177,85 @@ pub fn ExecIncrementalSortInitializeDSM<'mcx>(
 /// The lookup is `noError = true` (missing_ok): when the leader is NOT
 /// instrumenting (no EXPLAIN ANALYZE) `ExecIncrementalSortInitializeDSM`
 /// returns early without inserting any chunk, so this lookup finds nothing and
-/// the C leaves `node->shared_info == NULL`. We faithfully reproduce that arm:
-/// `shared_info = None`, `am_worker = true`. Only when a chunk IS present (the
-/// instrumenting path) would the DSM-resident `SharedIncrementalSortInfo`
-/// carrier be required — and that carrier is genuinely unported (the in-process
-/// `PgBox<SharedIncrementalSortInfo>` cannot hold the `shm_toc_lookup`
-/// `SharedRef`; same blocker as nodeSort/nodeAgg). Defer to the carrier owner
-/// only in that case rather than crashing every non-instrumented parallel
-/// incremental-sort worker.
+/// the C leaves `node->shared_info == NULL`. Otherwise the worker attaches the
+/// leader's DSM `SharedIncrementalSortInfo` (the `Dsm` arm) and later folds ONLY
+/// its own `sinfo[ParallelWorkerNumber]` slot. Mirrors nodeSort's
+/// `ExecSortInitializeWorker`.
 pub fn ExecIncrementalSortInitializeWorker<'mcx>(
     node: &mut IncrementalSortStateData<'mcx>,
     pwcxt: ParallelWorkerContextHandle,
 ) -> PgResult<()> {
     let plan_node_id = incremental_sort_plan(node)?.sort.plan.plan_node_id;
     let toc = backend_access_transam_parallel::pwcxt_toc(pwcxt);
+    node.am_worker = true;
     match backend_access_transam_parallel::shm_toc_lookup(toc, plan_node_id as u64, true) {
         None => {
             // Leader was not instrumenting: no shared stats area to attach to.
             node.shared_info = None;
-            node.am_worker = true;
-            Ok(())
         }
-        Some(_chunk) => {
-            node.am_worker = true;
-            panic!(
-                "backend_access_transam_parallel::shared_dsm_object: SharedIncrementalSortInfo DSM \
-                 attach (ExecIncrementalSortInitializeWorker) — the in-process \
-                 PgBox<SharedIncrementalSortInfo> carrier cannot hold the shm_toc_lookup SharedRef; \
-                 same blocker as nodeSort/nodeAgg InitializeWorker; unported"
-            );
+        Some(chunk) => {
+            // Attach to the leader's DSM `SharedIncrementalSortInfo`: recover
+            // num_workers from the in-segment header.
+            let seg = backend_access_transam_parallel::pwcxt_seg(pwcxt);
+            let (hdr, _tail) = shared_dsm_object::attach_flex::<
+                SharedIncrementalSortInfoHeader,
+                IncrementalSortInfo,
+            >(seg, chunk, 0);
+            let num_workers = hdr.get().num_workers;
+            node.shared_info = Some(SharedIncrementalSortInfo::Dsm {
+                chunk,
+                seg,
+                num_workers,
+            });
         }
     }
+    Ok(())
 }
 
 /// `ExecIncrementalSortRetrieveInstrumentation(node)` — transfer sort statistics
 /// from DSM to private memory.
 ///
 /// `if (node->shared_info == NULL) return;` runs directly. C then `palloc`s a
-/// private `SharedIncrementalSortInfo` and `memcpy`s the DSM bytes into it. With
-/// the merged in-process carrier no DSM round-trip ever happened (see
-/// `ExecIncrementalSortInitializeDSM`), so there are no worker-populated DSM
-/// slots to copy out; faithfully closing this needs the DSM-resident carrier the
-/// Init paths also need. Same blocker as nodeSort/nodeAgg; mirror-and-panic.
+/// private `SharedIncrementalSortInfo` and `memcpy`s the DSM bytes into it. The
+/// DSM segment is still mapped here (the C runs this before detach): read the
+/// flex array out of the segment and snapshot it into a backend-local `PgVec`;
+/// `node->shared_info` then becomes the `Local` arm. Mirrors nodeSort's
+/// `ExecSortRetrieveInstrumentation`.
 pub fn ExecIncrementalSortRetrieveInstrumentation<'mcx>(
+    mcx: Mcx<'mcx>,
     node: &mut IncrementalSortStateData<'mcx>,
 ) -> PgResult<()> {
     //   if (node->shared_info == NULL) return;
-    if node.shared_info.is_none() {
-        return Ok(());
-    }
+    let (chunk, seg, num_workers) = match node.shared_info {
+        Some(SharedIncrementalSortInfo::Dsm {
+            chunk,
+            seg,
+            num_workers,
+        }) => (chunk, seg, num_workers),
+        // Already a backend-local copy, or NULL: nothing to retrieve.
+        _ => return Ok(()),
+    };
 
     //   size = offsetof(SharedIncrementalSortInfo, sinfo)
     //          + node->shared_info->num_workers * sizeof(IncrementalSortInfo);
     //   si = palloc(size); memcpy(si, node->shared_info, size); node->shared_info = si;
-    let num_workers = node
-        .shared_info
-        .as_deref()
-        .expect("checked is_some above")
-        .num_workers;
-    let size = SHARED_INCREMENTAL_SORT_INFO_HEADER
-        + (num_workers as Size) * sizeof_incremental_sort_info();
-    let _ = size;
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: SharedIncrementalSortInfo DSM \
-         copy-out (ExecIncrementalSortRetrieveInstrumentation) — needs the DSM-resident \
-         shared_info carrier the Init paths also need; same blocker as nodeSort/nodeAgg \
-         RetrieveInstrumentation; unported"
-    );
+    let (_hdr, tail) =
+        shared_dsm_object::attach_flex::<SharedIncrementalSortInfoHeader, IncrementalSortInfo>(
+            seg,
+            chunk,
+            num_workers as usize,
+        );
+
+    let mut copy: PgVec<'mcx, IncrementalSortInfo> =
+        PgVec::with_capacity_in(num_workers as usize, mcx);
+    for &elem in tail.get().iter() {
+        copy.push(elem);
+    }
+    node.shared_info = Some(SharedIncrementalSortInfo::Local {
+        num_workers,
+        sinfo: copy,
+    });
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,7 +1306,25 @@ fn exec_incrementalsort_initialize_worker_shim(
 }
 
 fn exec_incrementalsort_retrieve_instrumentation_shim(node: PlanStateHandle) -> PgResult<()> {
-    ExecIncrementalSortRetrieveInstrumentation(resolve_incremental_sort_state(node))
+    ExecIncrementalSortRetrieveInstrumentation(
+        resolve_retrieve_mcx(node),
+        resolve_incremental_sort_state(node),
+    )
+}
+
+/// `CurrentMemoryContext` (`planstate->state->es_query_cxt`) at the
+/// `ExecIncrementalSortRetrieveInstrumentation` call site — recovered from the
+/// same unported executor surface that backs `resolve_incremental_sort_state`,
+/// so it shares that panic. (The live executor dispatches
+/// `ExecIncrementalSortRetrieveInstrumentation` directly over its owned state
+/// from `ExecParallelRetrieveInstrumentation`, threading the mcx in; this
+/// handle-shim path is only reached by a hypothetical pointer-registry caller.)
+fn resolve_retrieve_mcx<'mcx>(_node: PlanStateHandle) -> Mcx<'mcx> {
+    panic!(
+        "backend-executor-nodeIncrementalSort: the CurrentMemoryContext for \
+         ExecIncrementalSortRetrieveInstrumentation's palloc'd copy is recovered from the unported \
+         executor surface (PlanState pointer registry); cannot run yet"
+    );
 }
 
 // ===========================================================================

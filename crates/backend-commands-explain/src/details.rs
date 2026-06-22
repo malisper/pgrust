@@ -22,7 +22,9 @@ use types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 
 use types_nodes::nodehash::HashState;
-use types_nodes::nodeincrementalsort::{IncrementalSortGroupInfo, IncrementalSortStateData};
+use types_nodes::nodeincrementalsort::{
+    IncrementalSortGroupInfo, IncrementalSortStateData, SharedIncrementalSortInfo,
+};
 use types_nodes::nodesort::{SharedSortInfo, SortStateData, TuplesortMethod, TuplesortSpaceType};
 
 use backend_commands_explain_format as fmt;
@@ -215,6 +217,127 @@ pub fn show_hash_info(
                 "Buckets: {}  Batches: {}  Memory Usage: {}kB\n",
                 hinstrument.nbuckets, hinstrument.nbatch, space_peak_kb
             ))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// `show_hashagg_info(aggstate, es)` (commands/explain.c:3445) — for a
+/// hashed/mixed `Agg` node, emit the planned-partition count and, under EXPLAIN
+/// ANALYZE, the node-level `Batches`/`Memory Usage`/`Disk Usage` plus one line
+/// per parallel worker. `info` is the carrier snapshot (the EXPLAIN crate cannot
+/// name `AggStateData`); `None` means the strategy was not hashed/mixed and C
+/// returned early.
+pub fn show_hashagg_info(
+    info: &types_nodes::aggstate_carrier::HashAggExplainInfo,
+    es: &mut ExplainState<'_>,
+) -> PgResult<()> {
+    // int64 memPeakKb = BYTES_TO_KILOBYTES(aggstate->hash_mem_peak);
+    let mem_peak_kb = bytes_to_kilobytes(info.node.hash_mem_peak as i64);
+
+    if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        if es.costs {
+            fmt::ExplainPropertyInteger(
+                "Planned Partitions",
+                None,
+                info.hash_planned_partitions as i64,
+                es,
+            )?;
+        }
+
+        // During parallel query the leader may have not helped out; detect that
+        // by checking how much memory it used.
+        if es.analyze && info.node.hash_mem_peak > 0 {
+            fmt::ExplainPropertyInteger(
+                "HashAgg Batches",
+                None,
+                info.node.hash_batches_used as i64,
+                es,
+            )?;
+            fmt::ExplainPropertyInteger("Peak Memory Usage", Some("kB"), mem_peak_kb, es)?;
+            fmt::ExplainPropertyInteger(
+                "Disk Usage",
+                Some("kB"),
+                info.node.hash_disk_used as i64,
+                es,
+            )?;
+        }
+    } else {
+        let mut gotone = false;
+
+        if es.costs && info.hash_planned_partitions > 0 {
+            fmt::ExplainIndentText(es)?;
+            es.str.try_push_str(&format!(
+                "Planned Partitions: {}",
+                info.hash_planned_partitions
+            ))?;
+            gotone = true;
+        }
+
+        if es.analyze && info.node.hash_mem_peak > 0 {
+            if !gotone {
+                fmt::ExplainIndentText(es)?;
+            } else {
+                es.str.try_push_str("  ")?;
+            }
+
+            es.str.try_push_str(&format!(
+                "Batches: {}  Memory Usage: {}kB",
+                info.node.hash_batches_used, mem_peak_kb
+            ))?;
+            gotone = true;
+
+            // Only display disk usage if we spilled to disk.
+            if info.node.hash_batches_used > 1 {
+                es.str.try_push_str(&format!(
+                    "  Disk Usage: {}kB",
+                    info.node.hash_disk_used
+                ))?;
+            }
+        }
+
+        if gotone {
+            es.str.try_push('\n')?;
+        }
+    }
+
+    // Display stats for each parallel worker.
+    if es.analyze {
+        for sinstrument in info.worker_instrument.iter() {
+            // Skip workers that didn't do anything.
+            if sinstrument.hash_mem_peak == 0 {
+                continue;
+            }
+            let hash_disk_used = sinstrument.hash_disk_used;
+            let hash_batches_used = sinstrument.hash_batches_used;
+            let mem_peak_kb = bytes_to_kilobytes(sinstrument.hash_mem_peak as i64);
+
+            // es->workers_state is unmodelled on the structural slice (the
+            // ExplainOpenWorker/CloseWorker formatting is unmodelled), so worker
+            // data appears as top-level data — matching C's hide_workers
+            // fallback behaviour (cf. show_sort_info).
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                fmt::ExplainIndentText(es)?;
+                es.str.try_push_str(&format!(
+                    "Batches: {}  Memory Usage: {}kB",
+                    hash_batches_used, mem_peak_kb
+                ))?;
+                if hash_batches_used > 1 {
+                    es.str
+                        .try_push_str(&format!("  Disk Usage: {}kB", hash_disk_used))?;
+                }
+                es.str.try_push('\n')?;
+            } else {
+                fmt::ExplainPropertyInteger(
+                    "HashAgg Batches",
+                    None,
+                    hash_batches_used as i64,
+                    es,
+                )?;
+                fmt::ExplainPropertyInteger("Peak Memory Usage", Some("kB"), mem_peak_kb, es)?;
+                fmt::ExplainPropertyInteger("Disk Usage", Some("kB"), hash_disk_used as i64, es)?;
+            }
         }
     }
 
@@ -447,13 +570,17 @@ pub fn show_incremental_sort_info(
         }
     }
 
-    // Per-worker shared_info path: the merged IncrementalSortStateData.shared_info
-    // is an in-process PgBox<SharedIncrementalSortInfo> populated only on the
-    // worker-DSM round-trip, which is blocked (see nodeIncrementalSort
-    // ExecIncrementalSortInitializeDSM). Mirror C's loop over shared_info->sinfo.
-    if let Some(shared) = incrsortstate.shared_info.as_deref() {
-        for n in 0..shared.num_workers {
-            let incsort_info = match shared.sinfo.get(n as usize) {
+    // Per-worker shared_info path: at EXPLAIN ANALYZE time the leader's
+    // `shared_info` has been snapshotted into the backend-local `Local` arm by
+    // `ExecIncrementalSortRetrieveInstrumentation` (the DSM segment is already
+    // detached). Mirror C's loop over `shared_info->sinfo[0..num_workers]`.
+    if let Some(SharedIncrementalSortInfo::Local {
+        num_workers,
+        sinfo,
+    }) = incrsortstate.shared_info.as_ref()
+    {
+        for n in 0..*num_workers {
+            let incsort_info = match sinfo.get(n as usize) {
                 Some(s) => s,
                 None => break,
             };
