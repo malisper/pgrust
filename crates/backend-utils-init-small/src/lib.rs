@@ -74,6 +74,7 @@ pub fn InitProcessGlobals() -> types_error::PgResult<()> {
 pub fn init_seams() {
     backend_utils_init_small_seams::init_process_globals::set(InitProcessGlobals);
     backend_utils_init_small_seams::work_mem::set(globals::work_mem);
+    backend_utils_init_small_seams::hash_mem_multiplier::set(globals::hash_mem_multiplier);
     backend_utils_init_small_seams::max_worker_processes::set(globals::max_worker_processes);
     backend_utils_init_small_seams::max_parallel_workers::set(globals::max_parallel_workers);
     backend_utils_init_small_seams::fast_path_lock_groups_per_backend::set(

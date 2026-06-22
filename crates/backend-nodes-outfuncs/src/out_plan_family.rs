@@ -707,6 +707,22 @@ fn out_bitmapindexscan(
     write_expr_opt_list(buf, "indexqualorig", n.indexqualorig.as_deref(), wl);
 }
 
+fn out_bitmapheapscan(
+    buf: &mut String,
+    n: &types_nodes::nodebitmapheapscan::BitmapHeapScan<'_>,
+    wl: bool,
+) {
+    buf.push_str("BITMAPHEAPSCAN");
+    out_scan_fields(buf, &n.scan, "scan.", wl);
+    // C: WRITE_NODE_FIELD(bitmapqualorig). An empty List prints as `<>`.
+    let bqo: Option<&[Expr]> = if n.bitmapqualorig.is_empty() {
+        None
+    } else {
+        Some(n.bitmapqualorig.as_slice())
+    };
+    write_expr_opt_list(buf, "bitmapqualorig", bqo, wl);
+}
+
 fn out_tidscan(buf: &mut String, n: &types_nodes::nodeindexscan::TidScan<'_>, wl: bool) {
     buf.push_str("TIDSCAN");
     out_scan_fields(buf, &n.scan, "scan.", wl);
@@ -896,6 +912,7 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
         ntag::T_IndexScan => { let n = node.expect_indexscan(); crate::framed(buf, |b| out_indexscan(b, n, wl)) },
         ntag::T_IndexOnlyScan => { let n = node.expect_indexonlyscan(); crate::framed(buf, |b| out_indexonlyscan(b, n, wl)) },
         ntag::T_BitmapIndexScan => { let n = node.expect_bitmapindexscan(); crate::framed(buf, |b| out_bitmapindexscan(b, n, wl)) },
+        ntag::T_BitmapHeapScan => { let n = node.expect_bitmapheapscan(); crate::framed(buf, |b| out_bitmapheapscan(b, n, wl)) },
         ntag::T_TidScan => { let n = node.expect_tidscan(); crate::framed(buf, |b| out_tidscan(b, n, wl)) },
         ntag::T_TidRangeScan => { let n = node.expect_tidrangescan(); crate::framed(buf, |b| out_tidrangescan(b, n, wl)) },
         ntag::T_SubqueryScan => { let n = node.expect_subqueryscan(); crate::framed(buf, |b| out_subqueryscan(b, n, wl)) },

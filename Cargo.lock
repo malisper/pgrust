@@ -10678,6 +10678,7 @@ dependencies = [
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-small-seams",
  "backend-utils-mmgr-dsa-seams",
  "backend-utils-sort-storage-seams",
  "mcx",
@@ -12806,6 +12807,7 @@ dependencies = [
 name = "backend-optimizer-path-joinpath"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-equalfuncs-seams",
  "backend-optimizer-path-joinpath-seams",
  "backend-optimizer-util-relnode-seams",
  "backend-utils-cache-lsyscache-seams",

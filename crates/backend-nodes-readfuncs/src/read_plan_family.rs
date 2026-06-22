@@ -1348,6 +1348,17 @@ fn read_bitmapindexscan<'mcx>(
     })
 }
 
+fn read_bitmapheapscan<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::nodebitmapheapscan::BitmapHeapScan<'mcx>> {
+    let scan = read_scan_fields(mcx)?;
+    let bitmapqualorig = read_expr_pgvec(mcx)?;
+    Ok(types_nodes::nodebitmapheapscan::BitmapHeapScan {
+        scan,
+        bitmapqualorig,
+    })
+}
+
 fn read_tidscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::nodeindexscan::TidScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let tidquals = read_expr_pgvec_opt(mcx)?;
@@ -1539,6 +1550,7 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
         b"INDEXSCAN" => read_indexscan(mcx).and_then(|p| Node::mk_index_scan(mcx, p)),
         b"INDEXONLYSCAN" => read_indexonlyscan(mcx).and_then(|p| Node::mk_index_only_scan(mcx, p)),
         b"BITMAPINDEXSCAN" => read_bitmapindexscan(mcx).and_then(|p| Node::mk_bitmap_index_scan(mcx, p)),
+        b"BITMAPHEAPSCAN" => read_bitmapheapscan(mcx).and_then(|p| Node::mk_bitmap_heap_scan(mcx, p)),
         b"TIDSCAN" => read_tidscan(mcx).and_then(|p| Node::mk_tid_scan(mcx, p)),
         b"TIDRANGESCAN" => read_tidrangescan(mcx).and_then(|p| Node::mk_tid_range_scan(mcx, p)),
         b"SUBQUERYSCAN" => read_subqueryscan(mcx).and_then(|p| Node::mk_subquery_scan(mcx, p)),

@@ -2071,15 +2071,15 @@ fn mintuple_from_dsa<'mcx>(
 }
 
 /// `work_mem` / `hash_mem_multiplier` GUCs (`utils/guc.c`). C per-backend
-/// globals; ported as backend `thread_local` per AGENTS.md until the GUC owner
-/// installs a setter. PG defaults: work_mem 4 MB (4096 KB), multiplier 2.0.
+/// globals, read live from the owning `backend-utils-init-small` globals via
+/// the init-small seams (`globals::work_mem` / `globals::hash_mem_multiplier`),
+/// so a `SET work_mem`/`SET hash_mem_multiplier` is honored. PG defaults:
+/// work_mem 4 MB (4096 KB), multiplier 2.0.
 #[inline]
 pub(crate) fn hash_mem_gucs() -> (i32, f64) {
-    HASH_MEM_GUCS.with(|g| *g.borrow())
-}
-
-std::thread_local! {
-    static HASH_MEM_GUCS: std::cell::RefCell<(i32, f64)> = const { std::cell::RefCell::new((4096, 2.0)) };
+    let work_mem = backend_utils_init_small_seams::work_mem::call();
+    let hash_mem_multiplier = backend_utils_init_small_seams::hash_mem_multiplier::call();
+    (work_mem, hash_mem_multiplier)
 }
 
 // Local `Vec`/format shims (the crate is `std`).

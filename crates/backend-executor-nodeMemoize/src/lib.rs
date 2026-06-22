@@ -191,7 +191,10 @@ fn prepare_probe_slot<'mcx>(
 /// each non-null key is `datum_image_hash`ed; otherwise each key's hash function
 /// is invoked via `FunctionCall1Coll`. Successive keys are combined by rotating
 /// left one bit and XORing; the accumulator is finalized with `murmurhash32`.
-fn memoize_hash_hash<'mcx>(mstate: &mut MemoizeScanState<'mcx>) -> PgResult<u32> {
+fn memoize_hash_hash<'mcx>(
+    mstate: &mut MemoizeScanState<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<u32> {
     let numkeys = mstate.nkeys as usize;
     let mut hashkey: u32 = 0;
 
@@ -226,12 +229,14 @@ fn memoize_hash_hash<'mcx>(mstate: &mut MemoizeScanState<'mcx>) -> PgResult<u32>
                 // call the fmgr owner's leaf, then apply DatumGetUInt32 in-crate.
                 let fn_oid = mstate.hashfunctions[i].fn_oid;
                 let collation = mstate.collations[i];
-                // The fmgr leaf takes a bare scalar word; the probe value is the
-                // canonical unified value type, so unwrap its by-value arm (a
-                // hash key column is always pass-by-value-or-pointer scalar — a C
-                // `tts_values[i]` word).
-                let value = byval_word(&mstate.probe_values[i]);
-                let result = fmgr::function_call1_coll::call(fn_oid, collation, value)?;
+                // hkey = DatumGetUInt32(FunctionCall1Coll(...)). The probe value
+                // is the canonical unified value type and may be a by-reference
+                // value (e.g. a `numeric` cache key cast from text); route it
+                // through the value-typed fmgr seam, which marshals a `ByRef`
+                // referent over the fmgr by-reference side channel rather than
+                // requiring a bare scalar word.
+                let value = mstate.probe_values[i].clone();
+                let result = fmgr::function_call1_coll_datum::call(mcx, fn_oid, collation, value)?;
                 let hkey = result.as_u32(); // DatumGetUInt32
                 hashkey ^= hkey;
             }
@@ -516,7 +521,8 @@ fn cache_lookup<'mcx>(
     prepare_probe_slot(mstate, None, estate)?;
 
     // Hash the probe slot (mirrors memoize_insert -> MemoizeHash_hash).
-    let hash = memoize_hash_hash(mstate)?;
+    let mcx = estate.es_query_cxt;
+    let hash = memoize_hash_hash(mstate, mcx)?;
 
     // Look for an existing entry with this hash whose key matches the probe.
     if let Some(slot_id) = cache_find_matching(mstate, hash, estate)? {
@@ -1902,31 +1908,6 @@ fn copy_probe_slot_minimal_tuple<'mcx>(
     let (mtup, _should_free) =
         execTuples::exec_fetch_slot_minimal_tuple::call(mcx, estate, probeslot)?;
     Ok(mtup)
-}
-
-// ===========================================================================
-// Value-type ABI helpers.
-// ===========================================================================
-
-/// Unwrap a canonical unified value's by-value arm into the bare scalar word.
-///
-/// The slot key columns Memoize handles are hash-key columns — always
-/// pass-by-value scalars or by-reference *pointers*, i.e. a C `tts_values[i]`
-/// machine word. This is the projection across the still-bare-word
-/// (`types_datum::Datum`) execTuples / fmgr seam ABI edges, used until those
-/// owners migrate to the unified value type. A by-reference image here would be
-/// a caller bug (C would equally read garbage treating it as a scalar word).
-fn byval_word(value: &DatumV<'_>) -> types_datum::Datum {
-    match value {
-        DatumV::ByVal(word) => types_datum::Datum::from_usize(*word),
-        DatumV::ByRef(_)
-        | DatumV::Cstring(_)
-        | DatumV::Composite(_)
-        | DatumV::Expanded(_)
-        | DatumV::Internal(_) => {
-            panic!("Memoize: scalar slot word expected, found a by-reference value")
-        }
-    }
 }
 
 // ===========================================================================

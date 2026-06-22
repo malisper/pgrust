@@ -396,6 +396,21 @@ fn have_unsafe_outer_join_ref(
  * ======================================================================== */
 
 #[allow(clippy::type_complexity)]
+/// `list_member(param_exprs, expr)` — structural (`equal()`) membership test.
+///
+/// C compares cache-key expression handles with `list_member`, which runs the
+/// node-structural `equal()` routine, NOT pointer identity. Two distinct `Var`
+/// allocations for the same column (e.g. a lateral-var copy and a join-clause
+/// arg referencing the same outer column) are `equal()` and must dedup to a
+/// single cache key. The owned model carries `NodeId` handles, so resolve each
+/// to its `Expr` and compare via the equalfuncs `equal()` seam.
+fn param_exprs_member(root: &PlannerInfo, param_exprs: &[NodeId], expr: NodeId) -> bool {
+    let target = root.node(expr);
+    param_exprs
+        .iter()
+        .any(|&existing| backend_nodes_equalfuncs_seams::equal_expr::call(root.node(existing), target))
+}
+
 fn paraminfo_get_equal_hashops<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
@@ -441,7 +456,7 @@ fn paraminfo_get_equal_hashops<'mcx>(
             }
 
             // 'expr' may already be a parameter; if not, add it.
-            if !param_exprs.contains(&expr) {
+            if !param_exprs_member(root, &param_exprs, expr) {
                 charged_push(mcx, &mut operators, hasheqoperator)?;
                 charged_push(mcx, &mut param_exprs, expr)?;
             }
@@ -469,7 +484,7 @@ fn paraminfo_get_equal_hashops<'mcx>(
             None => return Ok(None),
         };
 
-        if !param_exprs.contains(&expr) {
+        if !param_exprs_member(root, &param_exprs, expr) {
             charged_push(mcx, &mut operators, eq_opr)?;
             charged_push(mcx, &mut param_exprs, expr)?;
         }

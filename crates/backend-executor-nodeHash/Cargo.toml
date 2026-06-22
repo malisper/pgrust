@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Type vocabulary
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
