@@ -761,11 +761,29 @@ pub(crate) fn search_proc_oid_sql(
     let proargtypes_vec = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, bytes)?;
     let proargtypes: std::vec::Vec<Oid> = proargtypes_vec.iter().copied().collect();
 
+    // proname (for sql_function_parse_error_callback's "SQL function \"%s\"")
+    let proname = getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?
+        .as_str()
+        .to_string();
+
+    // prosrc (TextDatumGetCString) — for function_parse_error_transpose. For an
+    // unquoted prosqlbody the attribute can be NULL; treat as empty.
+    let (prosrc_datum, prosrc_isnull) = SysCacheGetAttr(mcx, PROCOID, &tup, Anum_pg_proc_prosrc)?;
+    let prosrc = if prosrc_isnull {
+        String::new()
+    } else {
+        varlena_seams::text_to_cstring_v::call(mcx, &prosrc_datum)?
+            .as_str()
+            .to_string()
+    };
+
     ReleaseSysCache(tup);
     Ok(Some(backend_catalog_pg_proc_seams::SqlValidatorProcFacts {
         prorettype,
         pronargs,
         proargtypes,
+        proname,
+        prosrc,
     }))
 }
 

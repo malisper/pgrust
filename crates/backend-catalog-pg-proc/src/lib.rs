@@ -981,10 +981,44 @@ pub fn fmgr_sql_validator(validator_fn_oid: Oid, funcoid: Oid) -> PgResult<()> {
          * it.
          */
         let _ = haspolyarg;
-        seam::run_sql_function_body_check::call(funcoid)?;
+        // C wraps the body parse/check with `sql_function_parse_error_callback`
+        // on `error_context_stack`. This repo retires the ambient stack
+        // (docs/query-lifecycle-raii.md), so apply the callback as a `map_err`
+        // at this boundary instead: transpose a body syntax error to CREATE
+        // FUNCTION coordinates, and otherwise append the
+        // `CONTEXT: SQL function "<proname>"` context line.
+        seam::run_sql_function_body_check::call(funcoid)
+            .map_err(|e| sql_function_parse_error_callback_value(&proc.proname, &proc.prosrc, e))?;
     }
 
     Ok(())
+}
+
+/// Value-form of [`sql_function_parse_error_callback`] for the retired-stack
+/// error model: applied as a `map_err` around the SQL-function body check.
+/// Mirrors `sql_function_parse_error_callback` (pg_proc.c:995-1009): if the
+/// error is a syntax error (carries a cursor/internal position),
+/// `function_parse_error_transpose_value` remaps it to the CREATE FUNCTION
+/// source; otherwise push the `SQL function "%s"` context line.
+fn sql_function_parse_error_callback_value(proname: &str, prosrc: &str, err: PgError) -> PgError {
+    // See if it's a syntax error; if so, transpose to CREATE FUNCTION.
+    let had_position = err.cursor_position().map(|p| p > 0).unwrap_or(false)
+        || err.internal_position().map(|p| p > 0).unwrap_or(false);
+    match function_parse_error_transpose_value(prosrc, err) {
+        Ok(transposed) => {
+            if had_position {
+                // A syntax error was processed; no context line is added (C
+                // returns from the callback after the transpose).
+                transposed
+            } else {
+                // Not a syntax error: push the function-name context line.
+                transposed.add_context(format!("SQL function \"{proname}\""))
+            }
+        }
+        // The transpose helper only fails on a catalog-read surface; fall back
+        // to the plain context line rather than mask the original error.
+        Err(_) => PgError::error(format!("SQL function \"{proname}\"")),
+    }
 }
 
 /* ===========================================================================

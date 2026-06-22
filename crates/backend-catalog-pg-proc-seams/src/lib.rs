@@ -187,6 +187,13 @@ pub struct SqlValidatorProcFacts {
     pub pronargs: i16,
     /// `proc->proargtypes.values[..pronargs]` — declared input arg types.
     pub proargtypes: Vec<Oid>,
+    /// `NameStr(proc->proname)` — for the `sql_function_parse_error_callback`
+    /// `errcontext("SQL function \"%s\"", proname)` context line.
+    pub proname: String,
+    /// `prosrc` text (`TextDatumGetCString`) — for
+    /// `function_parse_error_transpose` (syntax-error position remapping).
+    /// Empty when the function has no `prosrc` (an unquoted `prosqlbody`).
+    pub prosrc: String,
 }
 
 seam_core::seam!(
