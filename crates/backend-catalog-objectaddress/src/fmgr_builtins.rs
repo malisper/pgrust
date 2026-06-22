@@ -237,27 +237,32 @@ fn fc_pg_identify_object_as_address(
 
     // type (text, never NULL)
     let (c0, n0) = text_col(m.mcx(), row.type_.as_deref())?;
-    // object_names / object_args (text[]; strlist_to_textarray, or empty array)
-    let name_elems: Vec<Option<&[u8]>> = row
-        .object_names
-        .iter()
-        .map(|o| o.as_deref().map(|s| s.as_bytes()))
-        .collect();
-    let arg_elems: Vec<Option<&[u8]>> = row
-        .object_args
-        .iter()
-        .map(|o| o.as_deref().map(|s| s.as_bytes()))
-        .collect();
-    let c1 = DatumV::ByRef(
-        backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(m.mcx(), &name_elems)?,
-    );
-    let c2 = DatumV::ByRef(
-        backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(m.mcx(), &arg_elems)?,
-    );
+    // object_names / object_args (text[]; strlist_to_textarray, or empty array;
+    // SQL NULL when `getObjectIdentityParts` returned NULL).
+    let build_array = |elems: &Option<Vec<Option<String>>>| -> types_error::PgResult<(DatumV, bool)> {
+        match elems {
+            None => Ok((DatumV::null(), true)),
+            Some(v) => {
+                let e: Vec<Option<&[u8]>> =
+                    v.iter().map(|o| o.as_deref().map(|s| s.as_bytes())).collect();
+                Ok((
+                    DatumV::ByRef(
+                        backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(
+                            m.mcx(),
+                            &e,
+                        )?,
+                    ),
+                    false,
+                ))
+            }
+        }
+    };
+    let (c1, n1) = build_array(&row.object_names)?;
+    let (c2, n2) = build_array(&row.object_args)?;
 
     let coltypes = [TEXTOID, TEXTARRAYOID, TEXTARRAYOID];
     let values = [c0, c1, c2];
-    let nulls = [n0, false, false];
+    let nulls = [n0, n1, n2];
     let rec = backend_utils_fmgr_funcapi_seams::record_from_values::call(
         m.mcx(),
         &coltypes,

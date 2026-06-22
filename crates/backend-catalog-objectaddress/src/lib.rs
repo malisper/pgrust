@@ -110,6 +110,14 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::amproc_description_row::set(
         amop_amproc_lookup::amproc_description_row,
     );
+    // ... and the matching getObjectIdentityParts OCLASS_AMOP / OCLASS_AMPROC
+    // legs, projecting the same by-oid scan to the identity columns.
+    backend_utils_cache_syscache_seams::amop_identity::set(
+        amop_amproc_lookup::amop_identity,
+    );
+    backend_utils_cache_syscache_seams::amproc_identity::set(
+        amop_amproc_lookup::amproc_identity,
+    );
 
     // pg_default_acl by-oid projection (no DEFACLOID syscache exists): the
     // `getObjectDescription` OCLASS_DEFACL leg fetches

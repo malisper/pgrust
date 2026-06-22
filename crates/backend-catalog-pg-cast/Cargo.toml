@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-access-table-table = { path = "../backend-access-table-table" }

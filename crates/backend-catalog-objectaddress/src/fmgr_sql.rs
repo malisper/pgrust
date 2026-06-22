@@ -663,8 +663,11 @@ pub(crate) fn datum_get_name(datum: &types_tuple::backend_access_common_heaptupl
 #[derive(Debug, Default)]
 pub struct IdentifyObjectAsAddressRow<'mcx> {
     pub type_: Option<PgString<'mcx>>,
-    pub object_names: Vec<Option<String>>,
-    pub object_args: Vec<Option<String>>,
+    /// `None` ⇒ the SQL NULL columns the C sets when `getObjectIdentityParts`
+    /// returns NULL (the object does not exist); `Some(vec)` ⇒ the `text[]`
+    /// (an empty `vec` standing in for `construct_empty_array(TEXTOID)`).
+    pub object_names: Option<Vec<Option<String>>>,
+    pub object_args: Option<Vec<Option<String>>>,
 }
 
 /// `pg_identify_object_as_address(PG_FUNCTION_ARGS)` (objectaddress.c 4365):
@@ -713,15 +716,16 @@ pub fn pg_identify_object_as_address<'mcx>(
     //   }
     //
     // The value-boundary model returns the deconstructed name/arg components
-    // directly as the two `text[]` columns (an empty `Vec` standing in for both
-    // the C `construct_empty_array(TEXTOID)` empty array and, when identity is
-    // NULL, the SQL NULL columns — the identity string itself is dropped, as
-    // the C only uses it as a NULL sentinel after `pfree`).
+    // directly as the two `text[]` columns. `None` (identity == NULL) maps to
+    // the SQL NULL columns the C sets (`nulls[1] = nulls[2] = true`); a present
+    // identity yields the arrays (an empty `Vec` standing in for the C
+    // `construct_empty_array(TEXTOID)`). The identity string itself is dropped,
+    // as the C only uses it as a NULL sentinel after `pfree`.
     let (object_names, object_args) = match f3_get_object_identity_parts(mcx, &address, true)? {
-        None => (Vec::new(), Vec::new()),
+        None => (None, None),
         Some((_identity, parts)) => (
-            parts.objname.into_iter().map(Some).collect(),
-            parts.objargs.into_iter().map(Some).collect(),
+            Some(parts.objname.into_iter().map(Some).collect()),
+            Some(parts.objargs.into_iter().map(Some).collect()),
         ),
     };
 

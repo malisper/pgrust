@@ -292,6 +292,58 @@ fn insert_pg_cast<'mcx>(
 }
 
 /* ======================================================================== *
+ * pg_transform — CreateTransform (OID column; insert new or update REPLACE).
+ * ======================================================================== */
+
+fn insert_pg_transform<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    row: &cat::pg_transform::PgTransformInsertRow,
+    replace_oid: Oid,
+    replace_tid: ItemPointerData,
+) -> PgResult<Oid> {
+    use cat::pg_transform as pt;
+
+    // values[Anum_pg_transform_trftype - 1]    = ObjectIdGetDatum(typeid);
+    // values[Anum_pg_transform_trflang - 1]    = ObjectIdGetDatum(langid);
+    // values[Anum_pg_transform_trffromsql - 1] = ObjectIdGetDatum(fromsqlfuncid);
+    // values[Anum_pg_transform_trftosql - 1]   = ObjectIdGetDatum(tosqlfuncid);
+    if replace_oid != InvalidOid {
+        // REPLACE: heap_modify_tuple of trffromsql/trftosql + CatalogTupleUpdate.
+        // The C re-forms only those two columns; re-forming the whole row from
+        // the same (trftype, trflang, trffromsql, trftosql) values is
+        // behaviour-identical, with the existing oid kept.
+        let values = [
+            Datum::from_oid(replace_oid),
+            Datum::from_oid(row.trftype),
+            Datum::from_oid(row.trflang),
+            Datum::from_oid(row.trffromsql),
+            Datum::from_oid(row.trftosql),
+        ];
+        let nulls = [false; pt::Natts_pg_transform];
+        let tupdesc = rel.rd_att_clone_in(mcx)?;
+        let mut tup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+        crate::keystone::CatalogTupleUpdate(mcx, rel, replace_tid, &mut tup)?;
+        return Ok(replace_oid);
+    }
+
+    // transformid = GetNewOidWithIndex(rel, TransformOidIndexId,
+    //                                  Anum_pg_transform_oid);
+    let transformid =
+        GetNewOidWithIndex(rel, pt::TransformOidIndexId, pt::Anum_pg_transform_oid)?;
+    let values = [
+        Datum::from_oid(transformid),
+        Datum::from_oid(row.trftype),
+        Datum::from_oid(row.trflang),
+        Datum::from_oid(row.trffromsql),
+        Datum::from_oid(row.trftosql),
+    ];
+    let nulls = [false; pt::Natts_pg_transform];
+    form_and_insert(mcx, rel, &values, &nulls)?;
+    Ok(transformid)
+}
+
+/* ======================================================================== *
  * pg_conversion — ConversionCreate (OID column + conname NameData).
  * ======================================================================== */
 
@@ -1169,6 +1221,7 @@ pub fn install() {
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_inherits::set(insert_pg_inherits);
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_range::set(insert_pg_range);
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_cast::set(insert_pg_cast);
+    backend_catalog_indexing_seams::catalog_tuple_insert_pg_transform::set(insert_pg_transform);
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_conversion::set(insert_pg_conversion);
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_enum::set(insert_pg_enum);
     backend_catalog_indexing_seams::get_new_oid_with_index_pg_enum::set(get_new_oid_pg_enum);

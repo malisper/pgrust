@@ -289,3 +289,67 @@ pub fn recovery_in_progress() -> PgResult<bool> {
 pub fn is_transaction_state() -> PgResult<bool> {
     Ok(backend_access_transam_xact_seams::is_transaction_state::call())
 }
+
+// ---------------------------------------------------------------------------
+// lock manager (lmgr) — object & relation locks on ReplicationOriginRelationId.
+// origin.c locks the pg_replication_origin catalog around create/drop so the
+// roident slot is not reused concurrently.
+// ---------------------------------------------------------------------------
+
+/// `LockSharedObject(ReplicationOriginRelationId, roident, 0,
+/// AccessExclusiveLock)` (origin.c).
+pub fn lock_shared_object_origin(roident: Oid) -> PgResult<()> {
+    backend_storage_lmgr_lmgr::LockSharedObject(
+        REPLICATION_ORIGIN_RELATION_ID,
+        roident,
+        0,
+        types_storage::lock::AccessExclusiveLock,
+    )
+}
+
+/// `UnlockSharedObject(ReplicationOriginRelationId, roident, 0,
+/// AccessExclusiveLock)` (origin.c).
+pub fn unlock_shared_object_origin(roident: Oid) -> PgResult<()> {
+    backend_storage_lmgr_lmgr::UnlockSharedObject(
+        REPLICATION_ORIGIN_RELATION_ID,
+        roident,
+        0,
+        types_storage::lock::AccessExclusiveLock,
+    )
+}
+
+/// `LockRelationOid(ReplicationOriginRelationId, RowExclusiveLock)` (origin.c).
+pub fn lock_relation_oid_origin() -> PgResult<()> {
+    backend_storage_lmgr_lmgr::LockRelationOid(REPLICATION_ORIGIN_RELATION_ID, RowExclusiveLock)
+}
+
+/// `UnlockRelationOid(ReplicationOriginRelationId, RowExclusiveLock)` (origin.c).
+pub fn unlock_relation_oid_origin() -> PgResult<()> {
+    backend_storage_lmgr_lmgr::UnlockRelationOid(REPLICATION_ORIGIN_RELATION_ID, RowExclusiveLock)
+}
+
+/// `ReplicationOriginLock` — built-in individual LWLock #40 (lwlocklist.h
+/// `PG_LWLOCK(40, ReplicationOrigin)`; runtime `MainLWLockArray` offset 40).
+const REPLICATION_ORIGIN_LOCK: usize = 40;
+
+/// `LWLockAcquire(ReplicationOriginLock, mode)` (origin.c). The lock stays held
+/// in HELD_LWLOCKS until the matching `LWLockReleaseReplicationOriginLock`
+/// (origin.c pairs acquire/release C-style within a function). The seam returns
+/// a RAII guard whose `Drop` would release the lock immediately, so it is
+/// `forget`-ed here, leaving the lock held (the abort-path `LWLockReleaseAll`
+/// is the leak backstop, exactly as in C).
+pub fn lwlock_acquire_replication_origin_lock(
+    mode: types_storage::LWLockMode,
+) -> PgResult<()> {
+    let guard = backend_storage_lmgr_lwlock_seams::lwlock_acquire_main::call(
+        REPLICATION_ORIGIN_LOCK,
+        mode,
+    )?;
+    core::mem::forget(guard);
+    Ok(())
+}
+
+/// `LWLockRelease(ReplicationOriginLock)` (origin.c).
+pub fn lwlock_release_replication_origin_lock() -> PgResult<()> {
+    backend_storage_lmgr_lwlock_seams::lwlock_release_main::call(REPLICATION_ORIGIN_LOCK)
+}

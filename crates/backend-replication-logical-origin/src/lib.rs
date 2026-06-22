@@ -1372,6 +1372,16 @@ pub fn init_seams() {
     sx::drop_delete_tuple::set(catalog_extern::drop_delete_tuple);
     sx::drop_close_relation_keep_unlocked::set(catalog_extern::drop_close_relation_keep_unlocked);
     sx::drop_close_relation_nolock::set(catalog_extern::drop_close_relation_nolock);
+    sx::LockSharedObjectOrigin::set(catalog_extern::lock_shared_object_origin);
+    sx::UnlockSharedObjectOrigin::set(catalog_extern::unlock_shared_object_origin);
+    sx::LockRelationOidOrigin::set(catalog_extern::lock_relation_oid_origin);
+    sx::UnlockRelationOidOrigin::set(catalog_extern::unlock_relation_oid_origin);
+    sx::LWLockAcquireReplicationOriginLock::set(
+        catalog_extern::lwlock_acquire_replication_origin_lock,
+    );
+    sx::LWLockReleaseReplicationOriginLock::set(
+        catalog_extern::lwlock_release_replication_origin_lock,
+    );
 
     // The transaction/recovery predicates origin.c checks before mutating
     // (replorigin_check_prerequisites / the create+drop Asserts). Owners ported.

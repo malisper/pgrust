@@ -181,7 +181,15 @@ fn error_location() -> types_error::ErrorLocation {
 
 #[inline]
 fn worker_lock_acquire(mode: LWLockMode) -> PgResult<()> {
-    lwlock::lwlock_acquire_main::call(LOGICAL_REP_WORKER_LOCK, mode).map(|_| ())
+    // C `LWLockAcquire(LogicalRepWorkerLock, mode)`: the lock stays held in the
+    // backend's HELD_LWLOCKS until the matching explicit `worker_lock_release()`
+    // (the launcher pairs acquire/release C-style within a function). The seam
+    // returns a RAII `MainLWLockGuard` whose `Drop` would release the lock the
+    // instant it falls out of scope here — so `forget` it, leaving the lock held
+    // (the abort-path `LWLockReleaseAll` is the leak backstop, exactly as in C).
+    let guard = lwlock::lwlock_acquire_main::call(LOGICAL_REP_WORKER_LOCK, mode)?;
+    core::mem::forget(guard);
+    Ok(())
 }
 
 #[inline]

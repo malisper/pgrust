@@ -425,11 +425,21 @@ fn attr_default_column(attrdefoid: Oid) -> PgResult<Option<(Oid, i16)>> {
     }
 }
 
+/// Inward adapter for the `get_attr_default_oid` heap seam: a scratch-`Mcx`
+/// wrapper over [`GetAttrDefaultOid`] (the function lives in `pg_attrdef.c`,
+/// the seam is declared in `backend-catalog-heap-seams` because its sole caller
+/// is `get_object_address`'s `OBJECT_DEFAULT` arm).
+fn get_attr_default_oid(relid: Oid, attnum: AttrNumber) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("heap get_attr_default_oid");
+    GetAttrDefaultOid(scratch.mcx(), relid, attnum)
+}
+
 pub fn init_seams() {
     use backend_catalog_pg_attrdef_seams as seams;
 
     seams::RemoveAttrDefaultById::set(RemoveAttrDefaultById);
     syscache_seams::attr_default_column::set(attr_default_column);
+    backend_catalog_heap_seams::get_attr_default_oid::set(get_attr_default_oid);
 }
 
 #[cfg(test)]

@@ -5212,6 +5212,7 @@ dependencies = [
  "backend-access-index-genam-seams",
  "backend-access-table-table",
  "backend-catalog-dependency-seams",
+ "backend-catalog-heap-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-objectaccess-seams",
  "backend-catalog-pg-attrdef-seams",
@@ -5259,6 +5260,7 @@ dependencies = [
 name = "backend-catalog-pg-cast"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-common-scankey",
  "backend-access-index-genam-seams",
  "backend-access-table-table",
@@ -16012,7 +16014,9 @@ dependencies = [
  "backend-storage-file-fd-seams",
  "backend-storage-file-seams",
  "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-lmgr",
  "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-lwlock-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-syscache",
  "backend-utils-fmgr-core",

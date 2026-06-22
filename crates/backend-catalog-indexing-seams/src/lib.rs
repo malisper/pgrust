@@ -629,6 +629,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CreateTransform`'s tuple build + insert/update of `pg_transform`. When
+    /// `replace_oid` is `InvalidOid`, a new row is allocated (`GetNewOidWithIndex(
+    /// rel, TransformOidIndexId, Anum_pg_transform_oid)` + `heap_form_tuple` +
+    /// `CatalogTupleInsert`) and its OID returned. When `replace_oid` is valid,
+    /// the existing row (found by the caller via `TRFTYPELANG`) is updated in
+    /// place (`heap_modify_tuple` of `trffromsql`/`trftosql` + `CatalogTupleUpdate`
+    /// at `tid`) and `replace_oid` is returned unchanged. `Err` carries the
+    /// heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_insert_pg_transform<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        row: &types_catalog::pg_transform::PgTransformInsertRow,
+        replace_oid: Oid,
+        replace_tid: ItemPointerData,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `StoreSingleInheritance`'s tuple build + insert: `heap_form_tuple(
     /// RelationGetDescr(rel), values, nulls)` + `CatalogTupleInsert(rel, tup)`
     /// (catalog/indexing.c + heapam). `pg_inherits` has no OID column, so

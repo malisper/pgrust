@@ -135,3 +135,21 @@ pub fn amproc_description_row(amprocid: Oid) -> PgResult<Option<AmprocDescriptio
         Ok(result)
     }
 }
+
+/// `(amopfamily, amoplefttype, amoprighttype, amopstrategy)` projection —
+/// `getObjectIdentityParts` `OCLASS_AMOP` (objectaddress.c 5235). Same by-oid
+/// `pg_amop` scan as [`amop_description_row`], reprojected to the columns the
+/// identity arm needs. `Ok(None)` on a scan miss.
+pub fn amop_identity(amopid: Oid) -> PgResult<Option<(Oid, Oid, Oid, i16)>> {
+    Ok(amop_description_row(amopid)?
+        .map(|r| (r.amopfamily, r.amoplefttype, r.amoprighttype, r.amopstrategy)))
+}
+
+/// `(amprocfamily, amproclefttype, amprocrighttype, amprocnum)` projection —
+/// `getObjectIdentityParts` `OCLASS_AMPROC` (objectaddress.c 5297). Same by-oid
+/// `pg_amproc` scan as [`amproc_description_row`], reprojected to the columns the
+/// identity arm needs. `Ok(None)` on a scan miss.
+pub fn amproc_identity(amprocid: Oid) -> PgResult<Option<(Oid, Oid, Oid, i16)>> {
+    Ok(amproc_description_row(amprocid)?
+        .map(|r| (r.amprocfamily, r.amproclefttype, r.amprocrighttype, r.amprocnum)))
+}

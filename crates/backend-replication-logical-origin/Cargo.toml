@@ -22,6 +22,8 @@ types-condvar = { path = "../types-condvar" }
 types-wal = { path = "../types-wal" }
 seam-core = { path = "../seam-core" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
 backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-replication-logical-origin-seams = { path = "../backend-replication-logical-origin-seams" }
