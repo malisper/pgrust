@@ -459,7 +459,7 @@ fn pgstat_build_snapshot_fixed(kind: PgStat_Kind) -> PgResult<()> {
         let ctl_ptr = l
             .shmem
             .as_ref()
-            .map(|c| c.as_ref() as *const _)
+            .map(|c| c as *const _)
             .expect("pgstat snapshot: shared control not initialized");
         // SAFETY: the snapshot_cb reads the shared control and writes the
         // snapshot; both are distinct fields of pgStatLocal.
@@ -1471,9 +1471,18 @@ pub fn pgstat_initialize() -> PgResult<()> {
         cb()?;
     }
 
-    // before_shmem_exit(pgstat_before_server_shutdown, 0).
+    // before_shmem_exit(pgstat_shutdown_hook, 0).
+    //
+    // NB: this is the *per-backend* cleanup hook, NOT pgstat_before_server_shutdown
+    // (which writes the SHARED `shmem->is_shutdown` flag + the on-disk statsfile and
+    // is registered by exactly one process — the checkpointer / single-user backend).
+    // Every backend running pgstat_before_server_shutdown here would, now that the
+    // control block lives in real shared memory, let any backend's clean exit poison
+    // `is_shutdown` for the whole cluster (asserts fire in every other backend's
+    // pgstat_report_*). C registers pgstat_shutdown_hook (pgstat.c:660); this port
+    // does the same.
     backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
-        before_shutdown_trampoline,
+        shutdown_hook_trampoline,
         types_tuple::Datum::null(),
     )?;
 
@@ -1481,12 +1490,46 @@ pub fn pgstat_initialize() -> PgResult<()> {
     Ok(())
 }
 
-/// The `before_shmem_exit`-registered trampoline (C `pgstat_before_server_shutdown`).
-fn before_shutdown_trampoline(
+/// The `before_shmem_exit`-registered trampoline (C `pgstat_shutdown_hook`).
+fn shutdown_hook_trampoline(
     code: i32,
     arg: types_tuple::Datum<'static>,
 ) -> PgResult<()> {
-    pgstat_before_server_shutdown(code, arg)
+    pgstat_shutdown_hook(code, arg)
+}
+
+/// `pgstat_shutdown_hook(code, arg)` (`pgstat.c`) — shut down a single backend's
+/// statistics reporting at process exit. Flushes any remaining counts, drops this
+/// backend's own stats entry, and detaches from the shared stats segment. Unlike
+/// `pgstat_before_server_shutdown` it does NOT touch the cluster-wide
+/// `shmem->is_shutdown` flag or write the permanent statsfile — those are the
+/// single-writer (checkpointer) responsibility.
+pub fn pgstat_shutdown_hook(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
+    if local::is_shutdown() {
+        return Ok(());
+    }
+
+    // flush out our own pending changes before exiting.
+    // (C also calls pgstat_report_disconnect(MyDatabaseId) first when a database
+    // is attached; that only adjusts the per-database session-time counter and is
+    // owned by pgstat_database, so it is left to that subsystem's own exit path.)
+    pgstat_report_stat(true)?;
+
+    // drop the backend stats entry; if it could not be freed (still referenced),
+    // request a GC of stale entry refs (C pgstat_request_entry_refs_gc()).
+    let dropped = shmem::pgstat_drop_entry(
+        types_pgstat::activity_pgstat::PGSTAT_KIND_BACKEND,
+        types_core::primitive::InvalidOid,
+        proc_seams::my_proc_number::call() as u64,
+    )?;
+    if !dropped {
+        shmem::pgstat_request_entry_refs_gc()?;
+    }
+
+    shmem::pgstat_detach_shmem()?;
+
+    local::set_shutdown(true);
+    Ok(())
 }
 
 /// `pgstat_before_server_shutdown(code, arg)` (`pgstat.c`) — the

@@ -238,6 +238,12 @@ pub struct PgStat_KindInfo {
 ///
 /// C's `raw_dsa_area` is a `void *` into the DSA segment; modeled as the
 /// `dsa_pointer` base the owner resolves through its `dsa_area` handle.
+///
+/// `#[repr(C)]` because this block is carved from the main shared-memory segment
+/// (`ShmemInitStruct`) so it has a single instance the whole cluster shares —
+/// the fixed-numbered stats (archiver/bgwriter/checkpointer/io/slru/wal) and
+/// their reset timestamps must be visible across backends, not per-process.
+#[repr(C)]
 #[derive(Debug, Default)]
 pub struct PgStat_ShmemControl {
     /// base of the raw DSA area (`void *raw_dsa_area`)

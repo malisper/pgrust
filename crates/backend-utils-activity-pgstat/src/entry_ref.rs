@@ -126,8 +126,12 @@ pub const PGSTAT_ENTRY_REF_HASH_SIZE: usize = 128;
 /// shared memory. Not owned: the pointees live in the shared DSA segment, whose
 /// lifetime is the segment, not this backend-local control block.
 pub struct PgStat_LocalState {
-    /// `PgStat_ShmemControl *shmem` — the shared control block.
-    pub shmem: Option<Box<PgStat_ShmemControl>>,
+    /// `PgStat_ShmemControl *shmem` — the shared control block. This is a raw
+    /// pointer into the main shared-memory segment (carved by `ShmemInitStruct`
+    /// in `stats_shmem_init`), so the fixed-numbered stats it holds are visible
+    /// across all backends (a `Box` here would be a per-process copy, hiding the
+    /// startup process's reset-timestamp initialization from forked backends).
+    pub shmem: SharedControl,
     /// `dsa_area *dsa` — the DSA area the shared hash and entry bodies live in,
     /// as the backend-local `*mut DsaArea` handle the `dsa.c` substrate hands
     /// back from `dsa_attach_in_place`. `null` until this backend has attached.
@@ -142,10 +146,50 @@ pub struct PgStat_LocalState {
     pub snapshot: PgStat_Snapshot,
 }
 
+/// A `PgStat_ShmemControl *` — a raw pointer into the main shared-memory
+/// segment (or null before `StatsShmemInit`/attach). Mirrors C's
+/// `pgStatLocal.shmem`, whose pointee is the single cluster-wide control block,
+/// not a per-process copy. The `Option<Box>`-shaped accessors (`as_ref` /
+/// `as_mut` / `as_deref_mut`) preserve the call sites that previously borrowed a
+/// `Box`.
+pub struct SharedControl(pub *mut PgStat_ShmemControl);
+
+// SAFETY: the pointee lives in the main shared-memory segment for the cluster's
+// lifetime; like the `dsa`/`shared_hash` raw handles in this same struct it is a
+// backend-local handle to genuinely-shared memory and is never freed by Rust.
+unsafe impl Send for SharedControl {}
+
+impl SharedControl {
+    /// Null handle (C `pgStatLocal.shmem == NULL`).
+    pub const fn null() -> Self {
+        SharedControl(core::ptr::null_mut())
+    }
+    /// True iff no control block is bound yet.
+    pub fn is_null(&self) -> bool {
+        self.0.is_null()
+    }
+    /// `Some(&*ptr)` when bound — matches the previous `Option<Box>::as_ref`.
+    #[allow(clippy::wrong_self_convention)]
+    pub fn as_ref(&self) -> Option<&PgStat_ShmemControl> {
+        // SAFETY: non-null pointer into the live shared segment.
+        unsafe { self.0.as_ref() }
+    }
+    /// `Some(&mut *ptr)` when bound — matches `Option<Box>::as_mut`.
+    #[allow(clippy::wrong_self_convention)]
+    pub fn as_mut(&mut self) -> Option<&mut PgStat_ShmemControl> {
+        // SAFETY: non-null pointer into the live shared segment.
+        unsafe { self.0.as_mut() }
+    }
+    /// `Some(&mut *ptr)` when bound — matches `Option<Box>::as_deref_mut`.
+    pub fn as_deref_mut(&mut self) -> Option<&mut PgStat_ShmemControl> {
+        self.as_mut()
+    }
+}
+
 impl PgStat_LocalState {
     pub fn new() -> Self {
         PgStat_LocalState {
-            shmem: None,
+            shmem: SharedControl::null(),
             dsa: core::ptr::null_mut(),
             shared_hash: core::ptr::null_mut(),
             snapshot: PgStat_Snapshot::default(),

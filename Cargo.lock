@@ -19270,6 +19270,7 @@ dependencies = [
  "backend-lib-dshash",
  "backend-storage-file-fd-seams",
  "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-proc-seams",
  "backend-utils-activity-pgstat-seams",

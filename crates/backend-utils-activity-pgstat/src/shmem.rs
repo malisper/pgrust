@@ -73,9 +73,17 @@ pub fn stats_shmem_size() -> PgResult<Size> {
 /// resolved handles in `pgStatLocal` and the publishable handle / dsa base in
 /// the control block.
 pub fn stats_shmem_init() -> PgResult<()> {
-    // ShmemInitStruct(PgStat_ShmemControl) — owned by the control block in
-    // pgStatLocal.shmem (process-global, created once for the cluster).
-    let mut ctl = Box::new(PgStat_ShmemControl::default());
+    // ShmemInitStruct("PgStat ShmemControl", sizeof(PgStat_ShmemControl)) — the
+    // control block must live in the main shared-memory segment so the fixed-
+    // numbered stats it holds (archiver/bgwriter/checkpointer/io/slru/wal and
+    // their reset timestamps) are a single cluster-wide instance, visible across
+    // all backends. A per-process `Box` would hide the startup process's
+    // reset-timestamp initialization from forked backends (it would write only
+    // its own copy-on-write copy).
+    let size = core::mem::size_of::<PgStat_ShmemControl>();
+    let (raw, found) =
+        backend_storage_ipc_shmem_seams::shmem_init_struct::call("PgStat ShmemControl", size)?;
+    let ctl_ptr = raw as *mut PgStat_ShmemControl;
 
     // dsa_create(LWTRANCHE_PGSTATS_DSA) — a fresh DSA area for stats entries.
     let area: *mut DsaArea = dsa::dsa_create::call(LWTRANCHE_PGSTATS_DSA)?;
@@ -89,14 +97,47 @@ pub fn stats_shmem_init() -> PgResult<()> {
     let params = dsh_params();
     let dsh: *mut DshashTable = dshash::dshash_create(area, &params)?;
 
-    // Publish the handles: raw_dsa_area base + hash handle in the control block.
-    ctl.raw_dsa_area = dsa::dsa_get_handle::call(area) as u64;
-    ctl.hash_handle = dshash::dshash_get_hash_table_handle(dsh);
-    ctl.is_shutdown = false;
+    // SAFETY: `raw` is a freshly-carved region in the shared segment of exactly
+    // `size_of::<PgStat_ShmemControl>()` bytes. The creator (`!found`) zeroes it
+    // into a valid `Default` value, then runs each fixed kind's `init_shmem_cb`
+    // (LWLock tranche setup); C's `StatsShmemInit` does the same. In the fork
+    // model the postmaster is the creator and children inherit the same pointer.
+    unsafe {
+        if !found {
+            ctl_ptr.write(PgStat_ShmemControl::default());
+        }
+        let ctl = &mut *ctl_ptr;
+        // Publish the handles: raw_dsa_area base + hash handle in the control
+        // block.
+        ctl.raw_dsa_area = dsa::dsa_get_handle::call(area) as u64;
+        ctl.hash_handle = dshash::dshash_get_hash_table_handle(dsh);
+        ctl.is_shutdown = false;
+
+        if !found {
+            // StatsShmemInit: for each fixed-numbered kind, run its init_shmem_cb
+            // to initialize the kind's LWLock(s) in the shared region.
+            let cbs: Vec<_> = registry::kind_table()
+                .iter()
+                .filter_map(|(_, ki)| {
+                    if ki.info.fixed_amount {
+                        ki.cb.init_shmem_cb.as_ref().map(|cb| cb as *const _)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for cb_ptr in cbs {
+                // SAFETY: the closure lives in the sealed 'static kind table.
+                let cb: &Box<dyn Fn(&mut PgStat_ShmemControl) + Send + Sync> =
+                    &*(cb_ptr as *const _);
+                cb(ctl);
+            }
+        }
+    }
 
     // Bind pgStatLocal to the live shared state.
     local::with_local(|l| {
-        l.shmem = Some(ctl);
+        l.shmem = crate::entry_ref::SharedControl(ctl_ptr);
         l.dsa = area;
         l.shared_hash = dsh;
     });
