@@ -1336,7 +1336,18 @@ fn remove_self_join_rel<'mcx>(
             .as_ref()
             .map(|t| t.exprs.clone())
             .unwrap_or_default();
-        if !keep_exprs.contains(&node_id) {
+        // C uses `list_member` here (analyzejoins.c:1913), which compares with
+        // `equal()` (structural), not pointer identity. After relid replacement a
+        // `toRemove` expr (e.g. `t2.c`) becomes structurally identical to an
+        // existing `toKeep` expr (`t3.c`) but is a distinct arena node, so an
+        // identity `contains` would miss the duplicate. Compare structurally.
+        let already_present = keep_exprs.iter().any(|&keep_id| {
+            backend_optimizer_path_equivclass_ext_seams::equal::call(
+                root.node(keep_id),
+                root.node(node_id),
+            )
+        });
+        if !already_present {
             if let Some(t) = root.rel_mut(to_keep).reltarget.as_deref_mut() {
                 t.exprs.push(node_id);
             }
