@@ -10,9 +10,10 @@ use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::PgResult;
 use types_tuple::Datum;
-use types_nodes::nodes::Node;
+use types_nodes::nodes::{Node, NodePtr};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::Expr;
+use types_nodes::rawnodes::ColumnRef;
 
 seam_core::seam!(
     /// `transformExpr(pstate, expr, exprKind)` (parse_expr.c) — analyze and
@@ -93,4 +94,20 @@ seam_core::seam!(
     /// the jsonb parser); declared here so the parser can build the const
     /// without depending on the jsonb crate. A parse failure raises `Err`.
     pub fn jsonb_const_from_cstring<'mcx>(mcx: Mcx<'mcx>, val: &str) -> PgResult<Datum<'mcx>>
+);
+
+seam_core::seam!(
+    /// `(*pstate->p_post_columnref_hook)(pstate, cref, var)` — invoke the active
+    /// PostParseColumnRefHook and return its raw result (`None` when the hook
+    /// declines, leaving the caller's default/error path to stand). The hook's
+    /// concrete dispatch (e.g. `sql_fn_post_column_ref`) is selected by the
+    /// `pstate.p_ref_hook_state` arm, which lives in `backend-parser-parse-expr`;
+    /// `parse_target.c`'s `ExpandColumnRefStar` consumes this seam so the `foo.*`
+    /// star-expansion path runs the same hook as `transformColumnRef` rather than
+    /// the no-op marker function pointer. Owned by `backend-parser-parse-expr`.
+    pub fn post_columnref_hook<'mcx>(
+        pstate: &mut ParseState<'mcx>,
+        cref: &ColumnRef<'mcx>,
+        var: Option<NodePtr<'mcx>>,
+    ) -> PgResult<Option<NodePtr<'mcx>>>
 );

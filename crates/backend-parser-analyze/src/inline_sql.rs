@@ -42,6 +42,9 @@ use backend_optimizer_util_clauses_seams::PgProcSimple;
 
 /// `RECORDOID` (pg_type.dat).
 const RECORDOID: Oid = 2249;
+
+/// `VOIDOID` (pg_type.dat).
+const VOIDOID: Oid = 2278;
 /// `PROVOLATILE_IMMUTABLE` / `PROVOLATILE_STABLE` (pg_proc.h).
 const PROVOLATILE_IMMUTABLE: u8 = b'i';
 const PROVOLATILE_STABLE: u8 = b's';
@@ -196,14 +199,25 @@ pub fn inline_sql_function<'mcx>(
     // rejected with "return type %s is not supported for SQL functions". This
     // error fires during inlining and the caller attaches the
     // `SQL function "<name>" during inlining` context line.
-    let fn_typtype = backend_utils_cache_lsyscache_seams::get_typtype::call(result_type)?;
+    // VOID return: check_sql_fn_retval short-circuits with isTupleResult = false
+    // (functions.c:2168) — "we don't care what's in the function". No typtype
+    // dispatch, no rejection, no coercion; the body inlines as-is (the later
+    // expr_type(newexpr) == result_type guard holds since VOID == VOID). Skip the
+    // "not supported" rejection and the scalar/rowtype coercion legs below.
+    let is_void = result_type == VOIDOID;
+
+    let fn_typtype = if is_void {
+        0
+    } else {
+        backend_utils_cache_lsyscache_seams::get_typtype::call(result_type)?
+    };
     let is_scalar = fn_typtype == TYPTYPE_BASE
         || fn_typtype == TYPTYPE_DOMAIN
         || fn_typtype == TYPTYPE_ENUM
         || fn_typtype == TYPTYPE_RANGE
         || fn_typtype == TYPTYPE_MULTIRANGE;
     let is_rowtype = fn_typtype == TYPTYPE_COMPOSITE || result_type == RECORDOID;
-    if !is_scalar && !is_rowtype {
+    if !is_void && !is_scalar && !is_rowtype {
         let tyname =
             backend_utils_adt_format_type_seams::format_type_be::call(mcx, result_type)?;
         return Err(PgError::error(format!(

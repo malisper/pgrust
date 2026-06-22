@@ -3502,6 +3502,41 @@ fn seam_transform_post_columnref_hook<'mcx>(
     unreachable!()
 }
 
+/// Seam impl of `(*pstate->p_post_columnref_hook)(pstate, cref, var)` — runs the
+/// active PostParseColumnRefHook (selected by `pstate.p_ref_hook_state`) and
+/// returns its raw `Option<NodePtr>` result. This is the shared dispatch that
+/// `transformColumnRef`'s tail uses, exposed for `parse_target.c`'s
+/// `ExpandColumnRefStar`, which previously called the no-op marker function
+/// pointer directly and so never resolved e.g. a SQL-function `param.*`
+/// whole-row reference.
+fn post_columnref_hook_impl<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    cref: &ColumnRef<'mcx>,
+    var: Option<types_nodes::nodes::NodePtr<'mcx>>,
+) -> PgResult<Option<types_nodes::nodes::NodePtr<'mcx>>> {
+    use types_nodes::parsestmt::ParseRefHookState;
+
+    let var_node: Option<&Node<'mcx>> = var.as_deref();
+    let result: Option<Node<'mcx>> = match &pstate.p_ref_hook_state {
+        ParseRefHookState::SqlFunction(pinfo) => {
+            let pinfo = pinfo.clone();
+            sql_fn_post_column_ref(pstate, &pinfo, cref, var_node)?
+        }
+        ParseRefHookState::None
+        | ParseRefHookState::FixedParams(_)
+        | ParseRefHookState::VarParams(_)
+        | ParseRefHookState::PlpgsqlExpr(_)
+        | ParseRefHookState::DomainCheckValue(_) => None,
+    };
+    match result {
+        Some(n) => {
+            let mcx = aexpr_clone_ctx(pstate);
+            Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?))
+        }
+        None => Ok(None),
+    }
+}
+
 /// `sql_fn_post_column_ref` (executor/functions.c:353) — parser callback for
 /// `ColumnRef`s when parsing a SQL-function body. Resolves a bareword (or
 /// `fname.param`, `fname.param.field`, `param.field`, with optional trailing `.*`)
@@ -6901,6 +6936,7 @@ pub fn init_seams() {
     me::parser_errposition::set(parser_errposition_impl);
     me::parse_expr_kind_name::set(ParseExprKindName);
     me::transformExpr::set(transformExpr);
+    me::post_columnref_hook::set(post_columnref_hook_impl);
     backend_parser_small1_seams::subscripting_transform::set(subscripting_transform_impl);
 
     // Install the GUC engine's variable accessors for `transform_null_equals`

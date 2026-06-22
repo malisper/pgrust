@@ -1323,8 +1323,11 @@ fn ExpandColumnRefStar<'mcx>(
         }
     }
 
-    // Give the PostParseColumnRefHook, if any, a chance.
-    if let Some(hook) = pstate.p_post_columnref_hook {
+    // Give the PostParseColumnRefHook, if any, a chance. The hook's concrete
+    // dispatch lives in parse_expr (selected by pstate.p_ref_hook_state); route
+    // through the seam rather than the no-op marker function pointer so that e.g.
+    // a SQL-function `param.*` whole-row reference is resolved here too.
+    if pstate.p_post_columnref_hook.is_some() {
         let cref_clone = cref.clone_in(mcx)?;
         // We cheat by passing the RangeTblEntry, not a Var, as the translation.
         let rte_node: Option<NodePtr<'mcx>> = match resolved {
@@ -1337,7 +1340,7 @@ fn ExpandColumnRefStar<'mcx>(
             }
             None => None,
         };
-        let node = hook(pstate, &cref_clone, rte_node)?;
+        let node = parse_expr::post_columnref_hook::call(pstate, &cref_clone, rte_node)?;
         if let Some(node) = node {
             if resolved.is_some() {
                 return Err(ereport(ERROR)
