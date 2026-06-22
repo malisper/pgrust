@@ -37,7 +37,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_access_gin_core_probe_seams::{gin_consistent_call_bool, gin_consistent_call_tri};
 use backend_access_gin_ginutil_seams::{
-    gin_extract_query, gin_extract_value, GinExtractQueryResult,
+    gin_compare_partial, gin_extract_query, gin_extract_value, GinExtractQueryResult,
 };
 use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seams;
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
@@ -93,6 +93,8 @@ pub const F_GIN_TSQUERY_CONSISTENT_6ARGS: u32 = 3088;
 pub const F_GIN_TSQUERY_CONSISTENT_OLDSIG: u32 = 3792;
 /// `gin_tsquery_triconsistent(...)` — ternary `triConsistent`.
 pub const F_GIN_TSQUERY_TRICONSISTENT: u32 = 3921;
+/// `gin_cmp_prefix(text, text, int2, internal)` — tsvector_ops `comparePartial`.
+pub const F_GIN_CMP_PREFIX: u32 = 2700;
 
 // pg_proc.dat OIDs of the `jsonb_ops` / `jsonb_path_ops` GIN support procedures
 // (`jsonb_gin.c`). These are the values `index_getprocinfo` records in the
@@ -706,6 +708,35 @@ fn dispatch_consistent_tri(key: &mut GinScanKey) -> GinTernaryValue {
     }
 }
 
+/// `gin_compare_partial` dispatch (`comparePartialFn`, `FunctionCall4Coll`,
+/// ginget.c `collectMatchBitmap` / `matchPartialInPendingList`): route
+/// `flinfo.fn_oid` to the `tsvector_ops` `gin_cmp_prefix` body. The query key and
+/// the stored index key are both `text` GIN keys (the tsvector_ops `opckeytype`
+/// is `text`); their canonical by-ref `Datum` image is the full varlena, and the
+/// `gin_cmp_prefix` core consumes the header-stripped `VARDATA_ANY` payload (just
+/// like `gin_cmp_tslexeme`). The `strategy` / `extra_data` args are `#ifdef
+/// NOT_USED` in the C body and ignored. Other opclasses have no `comparePartial`
+/// proc (anyarray_ops / jsonb_ops set `canPartialMatch=false`), so any other OID
+/// bottoms out loudly.
+fn dispatch_compare_partial<'mcx>(
+    _flinfo: &types_core::fmgr::FmgrInfo,
+    _collation: Oid,
+    query_key: Datum<'mcx>,
+    idatum: Datum<'mcx>,
+    _strategy: u16,
+    _extra_data: Option<&[u8]>,
+) -> PgResult<i32> {
+    match _flinfo.fn_oid {
+        F_GIN_CMP_PREFIX => {
+            // gin_cmp_prefix(partial_key, key): VARDATA_ANY of both `text` keys.
+            let a = &query_key.as_ref_bytes()[VARHDRSZ..];
+            let b = &idatum.as_ref_bytes()[VARHDRSZ..];
+            Ok(backend_utils_adt_tsginidx::gin_cmp_prefix(a, b))
+        }
+        other => Err(unported(other, "comparePartial")),
+    }
+}
+
 /// The loud bottom-out for a GIN opclass support-proc OID this dispatch does not
 /// handle (a tsvector_ops / jsonb_ops support proc whose body is not yet ported,
 /// or a user-defined opclass that would need a `Datum::Internal` fmgr arm).
@@ -725,4 +756,5 @@ pub fn install() {
     gin_extract_query::set(dispatch_extract_query);
     gin_consistent_call_bool::set(dispatch_consistent_bool);
     gin_consistent_call_tri::set(dispatch_consistent_tri);
+    gin_compare_partial::set(dispatch_compare_partial);
 }
