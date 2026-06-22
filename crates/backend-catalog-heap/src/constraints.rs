@@ -1480,8 +1480,14 @@ pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber)
 
     // C: rel = relation_open(relid, AccessExclusiveLock); held until end of
     //    transaction (closed NoLock at the end so the lock is retained).
-    let rel =
-        backend_access_table_table::table_open(mcx, relid, types_storage::lock::AccessExclusiveLock)?;
+    // Must be relation_open (not table_open): when cascading from an ALTER TYPE
+    // ... DROP ATTRIBUTE the target relation is a composite type, which
+    // table_open's validate_relation_kind would reject.
+    let rel = backend_access_common_relation::relation_open(
+        mcx,
+        relid,
+        types_storage::lock::AccessExclusiveLock,
+    )?;
 
     // attr_rel = table_open(AttributeRelationId, RowExclusiveLock);
     let attr_rel = backend_access_table_table::table_open(
