@@ -236,7 +236,13 @@ pub fn tts_virtual_materialize<'mcx>(
         }
 
         // val = slot->tts_values[natt]; (by-reference => owned bytes)
-        let val = slot.base.tts_values[natt].as_ref_bytes();
+        // A composite-typed column (attlen == -1) may carry an owned `Composite`
+        // Datum (e.g. a wholerow Var / ROW() result projected into a virtual
+        // slot, as in DELETE ... RETURNING). C always has a flat varlena pointer
+        // here; serialize the composite into its flat datum image first
+        // (as_varlena_bytes), matching heap_form_tuple's fill_val path.
+        let val_cow = slot.base.tts_values[natt].as_varlena_bytes();
+        let val = val_cow.as_ref();
 
         if att.attlen == -1 && varatt_is_external_expanded(val) {
             // /* flatten the expanded value so the materialized slot doesn't
@@ -289,8 +295,10 @@ pub fn tts_virtual_materialize<'mcx>(
         }
 
         // val = slot->tts_values[natt];
-        // (clone the source bytes so we can borrow `data` mutably below)
-        let val: alloc::vec::Vec<u8> = slot.base.tts_values[natt].as_ref_bytes().to_vec();
+        // (clone the source bytes so we can borrow `data` mutably below; a
+        // `Composite` Datum is serialized to its flat image by as_varlena_bytes)
+        let val: alloc::vec::Vec<u8> =
+            slot.base.tts_values[natt].as_varlena_bytes().into_owned();
 
         let data_length: usize;
         if att.attlen == -1 && varatt_is_external_expanded(&val) {
