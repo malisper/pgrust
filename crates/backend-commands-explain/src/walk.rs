@@ -1277,6 +1277,11 @@ pub fn ExplainNode<'es, 'p>(
                 Some(&s.collations),
                 Some(&s.nullsFirst),
             )?;
+            // show_sort_info(castNode(SortState, planstate), es) (explain.c:2222)
+            // — the ANALYZE-time "Sort Method: ...  Memory: NNkB" line.
+            if let PlanStateNode::Sort(sortstate) = planstate {
+                crate::details::show_sort_info(sortstate, es)?;
+            }
         }
         ntag::T_IncrementalSort => {
             // show_incremental_sort_keys (explain.c:2583): the full "Sort Key"

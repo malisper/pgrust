@@ -7187,6 +7187,7 @@ dependencies = [
  "backend-utils-misc-guc-tables",
  "backend-utils-mmgr-fgram",
  "backend-utils-sort-tuplesort",
+ "backend-utils-sort-tuplesort-seams",
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "portability-instr-time",

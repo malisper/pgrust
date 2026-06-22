@@ -50,6 +50,8 @@ backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-plann
 backend-executor-execTuples = { path = "../backend-executor-execTuples" }
 # tuplesort_method_name / tuplesort_space_type_name for show_incremental_sort_info.
 backend-utils-sort-tuplesort = { path = "../backend-utils-sort-tuplesort" }
+# tuplesort_get_stats seam for show_sort_info (plain Sort node EXPLAIN ANALYZE).
+backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 types-slot = { path = "../types-slot" }

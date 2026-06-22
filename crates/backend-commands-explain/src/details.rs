@@ -22,7 +22,7 @@ use types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 
 use types_nodes::nodeincrementalsort::{IncrementalSortGroupInfo, IncrementalSortStateData};
-use types_nodes::nodesort::{TuplesortMethod, TuplesortSpaceType};
+use types_nodes::nodesort::{SortStateData, TuplesortMethod, TuplesortSpaceType};
 
 use backend_commands_explain_format as fmt;
 use backend_utils_sort_tuplesort::{tuplesort_method_name, tuplesort_space_type_name};
@@ -420,6 +420,73 @@ pub fn show_incremental_sort_info(
             }
             if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
                 es.str.try_push('\n')?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// `show_sort_info(sortstate, es)` (explain.c:3084) — under EXPLAIN ANALYZE,
+/// emit the sort algorithm + space (Memory/Disk) used by a plain `Sort` node
+/// (the "Sort Method: quicksort  Memory: NNkB" line). Reads the node's completed
+/// `Tuplesortstate` via the `tuplesort_get_stats` seam.
+pub fn show_sort_info(
+    sortstate: &SortStateData<'_>,
+    es: &mut ExplainState<'_>,
+) -> PgResult<()> {
+    if !es.analyze {
+        return Ok(());
+    }
+
+    // if (sortstate->sort_Done && sortstate->tuplesortstate != NULL)
+    if sortstate.sort_Done {
+        if let Some(state) = sortstate.tuplesortstate.as_deref() {
+            let stats = backend_utils_sort_tuplesort_seams::tuplesort_get_stats::call(state);
+            let sort_method = tuplesort_method_name(stats.sortMethod);
+            let space_type = tuplesort_space_type_name(stats.spaceType);
+            let space_used = stats.spaceUsed;
+
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                fmt::ExplainIndentText(es)?;
+                es.str.try_push_str(&format!(
+                    "Sort Method: {sort_method}  {space_type}: {space_used}kB\n"
+                ))?;
+            } else {
+                fmt::ExplainPropertyText("Sort Method", sort_method, es)?;
+                fmt::ExplainPropertyInteger("Sort Space Used", Some("kB"), space_used, es)?;
+                fmt::ExplainPropertyText("Sort Space Type", space_type, es)?;
+            }
+        }
+    }
+
+    // Per-worker shared_info (parallel sort): emit each filled slot. The
+    // workers_state/OpenWorker/CloseWorker formatting is unmodelled on the
+    // structural slice, so worker 0's data appears as top-level data (matching
+    // C's hide_workers fallback behaviour).
+    if let Some(shared) = sortstate.shared_info.as_deref() {
+        for n in 0..shared.num_workers {
+            let sinstrument = match shared.sinstrument.get(n as usize) {
+                Some(s) => s,
+                None => break,
+            };
+            // ignore any unfilled slots
+            if sinstrument.sortMethod == TuplesortMethod::SORT_TYPE_STILL_IN_PROGRESS {
+                continue;
+            }
+            let sort_method = tuplesort_method_name(sinstrument.sortMethod);
+            let space_type = tuplesort_space_type_name(sinstrument.spaceType);
+            let space_used = sinstrument.spaceUsed;
+
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                fmt::ExplainIndentText(es)?;
+                es.str.try_push_str(&format!(
+                    "Sort Method: {sort_method}  {space_type}: {space_used}kB\n"
+                ))?;
+            } else {
+                fmt::ExplainPropertyText("Sort Method", sort_method, es)?;
+                fmt::ExplainPropertyInteger("Sort Space Used", Some("kB"), space_used, es)?;
+                fmt::ExplainPropertyText("Sort Space Type", space_type, es)?;
             }
         }
     }
