@@ -2473,6 +2473,66 @@ fn exec_for_query(
     Ok(rc)
 }
 
+/// The FOR-over-a-bound-cursor driver (`exec_for_query` driven off a live portal,
+/// pl_exec.c 5837) that fetches ONE row at a time from the still-open named cursor
+/// `portal_name`, keeping it POSITIONED on the current row while the loop body
+/// runs. This is what lets `UPDATE ... WHERE CURRENT OF <cursor>` inside the body
+/// resolve the cursor's current scan position. The portal stays open across the
+/// loop (C `PinPortal`); the caller closes it afterward.
+fn exec_for_query_cursor(
+    estate: &mut PLpgSQL_execstate,
+    loopvar: &types_plpgsql::PLpgSQL_variable,
+    body: &[PLpgSQL_stmt],
+    label: Option<&str>,
+    portal_name: &str,
+) -> PLpgSQL_rc_result {
+    let mut rc = PLpgSQL_rc::PLPGSQL_RC_OK;
+    let mut found = false;
+
+    loop {
+        // SPI_cursor_fetch(portal, true, 1): advance the live portal by one row.
+        // The portal is left positioned on this row, so WHERE CURRENT OF in the
+        // body sees the correct current tuple.
+        let fetched = exec_seams::spi_cursor_fetch_move::call(
+            portal_name.to_string(),
+            exec_seams::CursorFetchDirection::Forward,
+            1,
+            false,
+        )?;
+        estate.eval_processed = fetched.processed;
+
+        let Some(row) = fetched.rows.into_iter().next() else {
+            // No more rows. On the very first iteration (found == false) C sets
+            // the target to NULL; exec_for_query handles that the same way, but
+            // here the loop simply ends (the loop var keeps its prior value, as in
+            // C when n == 0 with a NULL move — the SETOF cursor target isn't read
+            // after the loop).
+            break;
+        };
+        found = true;
+
+        // exec_move_row(estate, var, tuple, tupdesc).
+        exec_move_row_into_target(estate, loopvar, &row)?;
+
+        // Execute the loop body.
+        let body_rc = exec_stmts(estate, body)?;
+
+        match loop_rc_processing(estate, label, body_rc) {
+            LoopRc::Break(r) => {
+                rc = r;
+                break;
+            }
+            LoopRc::Continue(_) => {}
+        }
+    }
+
+    // Set FOUND last (whether the loop ran one or more times), so it does not
+    // interfere with FOUND inside the loop body.
+    exec_set_found(estate, found);
+
+    Ok(rc)
+}
+
 // ===========================================================================
 // Value-substrate statement arms — dispatch targets with LOUD bodies. Each is a
 // whole-statement SQL/value leg (SPI / executor / fmgr), not control flow.
@@ -2699,21 +2759,21 @@ fn exec_stmt_forc(
 
     exec_eval_cleanup(estate);
 
-    // Fetch every row from the cursor (the owned model materializes the cursor's
-    // rows up front; the observable iteration is identical to C's per-row
-    // PortalRunFetch in exec_for_query — there is no UPDATE WHERE CURRENT OF
-    // inside the loop reachable here without the live portal, which stays open).
+    // Iterate the cursor one row at a time, keeping the portal OPEN and POSITIONED
+    // on the current row across the loop body. C's exec_for_query does
+    // `SPI_cursor_fetch(portal, true, 1)` per iteration; the live portal is what
+    // makes `UPDATE ... WHERE CURRENT OF c` inside the body work (it resolves the
+    // cursor's current scan position). A FETCH_ALL up front would leave the portal
+    // at end-of-scan (not positioned), breaking WHERE CURRENT OF.
     let name = curname.unwrap_or_else(|| portal_name.clone());
-    let fetched = exec_seams::spi_cursor_fetch_move::call(
-        name.clone(),
-        exec_seams::CursorFetchDirection::Forward,
-        FETCH_ALL,
-        false,
-    )?;
-    estate.eval_processed = fetched.processed;
-
     let loopvar = stmt.var.as_deref().expect("FOR-IN-cursor carries a loop variable");
-    let rc = exec_for_query(estate, loopvar, &stmt.body, stmt.label.as_deref(), fetched.rows)?;
+    let rc = exec_for_query_cursor(
+        estate,
+        loopvar,
+        &stmt.body,
+        stmt.label.as_deref(),
+        &name,
+    )?;
 
     // Close the portal, and restore the cursor variable if it was initially NULL.
     exec_seams::spi_cursor_close::call(name)?;
