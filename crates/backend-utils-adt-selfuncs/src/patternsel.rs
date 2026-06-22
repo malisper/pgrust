@@ -28,7 +28,6 @@
 
 use mcx::{slice_in, Mcx};
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_datum::datum::Datum as WordDatum;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_COLLATION,
 };
@@ -564,14 +563,14 @@ fn prefix_selectivity<'mcx>(
 ) -> PgResult<f64> {
     // The `>=` / `<` histogram probes (`ineq_histogram_selectivity`) and the
     // `=` clamp (`var_eq_const`) compare the prefix const against the column's
-    // by-reference text/bytea histogram/MCV slot values. A by-reference prefix
-    // const can only cross that comparison once the selfuncs by-reference value
-    // carrier is threaded through `get_attstatsslot` (WALL 1ai, shared with
-    // `var_eq_const`). Until then a by-reference prefix takes C's "no usable
-    // histogram" outcome: `DEFAULT_MATCH_SEL`.
-    if !matches!(prefixcon.constvalue, Datum::ByVal(_)) {
-        return Ok(DEFAULT_MATCH_SEL);
-    }
+    // text/bytea histogram/MCV slot values. Both the prefix const and each slot
+    // value cross the operator's fmgr boundary as their canonical images via the
+    // by-reference-capable lane (the slot values are re-decoded by value through
+    // `slot_canon_values`), so a by-reference prefix const is compared correctly
+    // — WALL 1ai cleared. (Intra-bin interpolation for a by-reference element
+    // type degrades to the bin midpoint, exactly C's `convert_to_scalar`
+    // "don't know how to convert" outcome; the bin itself is located by real
+    // by-reference comparisons.)
 
     // Estimate the selectivity of "x >= prefix".
     let ge_opproc = lsc::get_opcode::call(geopr)?;
@@ -771,16 +770,6 @@ fn charinc(lastchar: &mut [u8]) -> bool {
  * patternsel_common + entry points (like_support.c).
  * ------------------------------------------------------------------------- */
 
-/// The bare ABI word of a by-value const, or `None` for a by-reference value
-/// (which cannot cross the bare-word histogram/MCV fmgr lane — WALL 1ai). The
-/// caller takes C's histogram/MCV-free path when this is `None`.
-fn const_word_opt(v: &Datum<'_>) -> Option<WordDatum> {
-    match v {
-        Datum::ByVal(w) => Some(WordDatum::from_usize(*w)),
-        _ => None,
-    }
-}
-
 /// `patternsel_common(root, oprid, opfuncid, args, varRelid, collation, ptype,
 /// negate)` (like_support.c) — the LIKE/regex/prefix restriction-selectivity
 /// core. 1:1 with the C body.
@@ -914,51 +903,17 @@ fn patternsel_common<'mcx>(
         //
         // The histogram (`histogram_selectivity`) and MCV (`mcv_selectivity`)
         // scans invoke the pattern operator's `opfuncid` against the column's
-        // by-reference text/bytea histogram/MCV slot values, which cross the
-        // bare-word fmgr lane (`AttStatsSlot.values` are bare pointer words from
-        // the C-shaped pg_statistic tuple). When the pattern const is itself a
-        // by-reference value, that comparison needs the canonical by-reference
-        // value carrier threaded through `get_attstatsslot` — the shared selfuncs
-        // by-reference value-carrier follow-on (WALL 1ai, the same wall
-        // `var_eq_const`'s MCV loop documents). Until it lands, a by-reference
-        // const can only take the histogram/MCV-free heuristic path, which is
-        // exactly C's `selec < 0` (no usable histogram) + empty-MCV outcome.
-        // The pattern operator (LIKE/regex) compares the pattern const against
-        // the column's histogram/MCV slot values. The slot values are bare
-        // pointer words (deconstruct_array offsets) from the C-shaped
-        // `pg_statistic` tuple, which the pattern proc cannot dereference; so a
-        // by-reference pattern const still takes C's histogram/MCV-free
-        // heuristic path. (The const itself now crosses by reference, but the
-        // bin side cannot — WALL 1ai.)
-        if const_word_opt(&patt.constvalue).is_none() {
-            {
-                // By-reference const: no histogram/MCV comparison possible, so
-                // estimate from the fixed prefix and pattern remainder alone
-                // (C's `hist_size < 100`, `selec < 0` => `selec = heursel`
-                // branch, with `mcv_selec == 0` and `sumcommon == 0`).
-                let prefixsel = if pstatus == PatternPrefixStatus::Partial {
-                    let pfx = prefix.as_ref().expect("partial prefix must be present");
-                    prefix_selectivity(mcx, run, root, &vardata, eqopr, ltopr, geopr, collation, pfx)?
-                } else {
-                    1.0
-                };
-                let mut selec = prefixsel * rest_selec;
-                if selec < 0.0001 {
-                    selec = 0.0001;
-                } else if selec > 0.9999 {
-                    selec = 0.9999;
-                }
-                selec *= 1.0 - nullfrac;
-
-                result = selec;
-                if negate {
-                    result = 1.0 - result - nullfrac;
-                }
-                result = clamp_probability(result);
-                crate::examine::release_variable_stats(vardata);
-                return Ok(result);
-            }
-        }
+        // text/bytea histogram/MCV slot values. Both the pattern const and each
+        // slot value cross the operator's fmgr boundary as their canonical images
+        // (by-value word OR by-reference referent) via the by-reference-capable
+        // `function_call_invoke_datum` lane: a pass-by-reference slot element
+        // (`text`/`bytea`/`bpchar`/`name`) is re-decoded by value through
+        // `slot_canon_values` (the bare `AttStatsSlot.values` offset is
+        // non-dereferenceable), and the pattern const itself is already the
+        // canonical `Const` image. So a by-reference pattern const (the usual
+        // `c ~ 'a1$'` / `LIKE 'foo%'` case) reaches the histogram/MCV path
+        // exactly as C does — WALL 1ai cleared (the same value-carrier follow-on
+        // that landed `var_eq_const`'s MCV loop covers the pattern path here).
 
         // Try to use the histogram entries to get selectivity.
         if !OidIsValid(opfuncid) {
