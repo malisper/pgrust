@@ -480,6 +480,11 @@ pub fn set_cte_pathlist<'mcx>(
         resjunk: bool,
     }
     let (cte_plan_rows, pending) = {
+        // The CTE's plan targetlist Exprs (e.g. `sum(ten)` -> Aggref) carry
+        // context-allocated children; a shallow `.clone()` traps. Deep-copy each
+        // through the sanctioned `Expr::clone_in` into the planner mcx (the
+        // durable arena that `alloc_node` interns into).
+        let mcx = run.mcx();
         let cteplan = planner_subplan_get_plan(run, root, plan_id);
         let head = cteplan.plan_head();
         let rows = head.plan_rows;
@@ -487,12 +492,12 @@ pub fn set_cte_pathlist<'mcx>(
         if let Some(tl) = head.targetlist.as_ref() {
             pend.reserve(tl.len());
             for tle in tl.iter() {
+                let expr = match tle.expr.as_deref() {
+                    Some(e) => e.clone_in(mcx)?,
+                    None => types_nodes::primnodes::Expr::Const(Default::default()),
+                };
                 pend.push(PendingTle {
-                    expr: tle
-                        .expr
-                        .as_deref()
-                        .cloned()
-                        .unwrap_or(types_nodes::primnodes::Expr::Const(Default::default())),
+                    expr,
                     resno: tle.resno,
                     ressortgroupref: tle.ressortgroupref,
                     resorigtbl: tle.resorigtbl,

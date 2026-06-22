@@ -1327,6 +1327,22 @@ pub fn parseCheckAggregates<'mcx>(
         }
     }
 
+    // In C, pstate->p_rtable and qry->rtable alias the same List, so every later
+    // reference (the JOIN/self-reference scan below, the ungrouped-column check's
+    // `rt_fetch(var->varno, p_rtable)`, and the RTE_GROUP append) sees the
+    // FROM-clause RTEs. The owned model moved p_rtable into qry->rtable during
+    // transformStmt (emptying p_rtable), so restore p_rtable from the current
+    // qry->rtable here — unconditionally, BEFORE any p_rtable consumer including
+    // the self-reference scan (a recursive term's aggregate check depends on
+    // seeing the self-reference RTE_CTE entry here).
+    if pstate.p_rtable.is_empty() && !qry.rtable.is_empty() {
+        let mut restored: PgVec<RangeTblEntry<'mcx>> = PgVec::new_in(mcx);
+        for rte in qry.rtable.iter() {
+            restored.push(rte.clone_in(mcx)?);
+        }
+        pstate.p_rtable = restored;
+    }
+
     // Scan range table for JOIN or self-reference CTE entries.
     {
         let mut hj = false;
@@ -1380,21 +1396,6 @@ pub fn parseCheckAggregates<'mcx>(
                 group_clause_common_vars.push(e.clone());
             }
         }
-    }
-
-    // In C, pstate->p_rtable and qry->rtable alias the same List, so every later
-    // reference (the ungrouped-column check's `rt_fetch(var->varno, p_rtable)`,
-    // and the RTE_GROUP append below) sees the FROM-clause RTEs. The owned model
-    // moved p_rtable into qry->rtable during transformStmt (emptying p_rtable),
-    // so restore p_rtable from the current qry->rtable here — unconditionally,
-    // before any p_rtable consumer — not just on the GROUP BY path (a HAVING
-    // without GROUP BY still resolves ungrouped Vars against p_rtable).
-    if pstate.p_rtable.is_empty() && !qry.rtable.is_empty() {
-        let mut restored: PgVec<RangeTblEntry<'mcx>> = PgVec::new_in(mcx);
-        for rte in qry.rtable.iter() {
-            restored.push(rte.clone_in(mcx)?);
-        }
-        pstate.p_rtable = restored;
     }
 
     // Build RTE_GROUP RTE/nsitem if there are acceptable GROUP BY expressions.
