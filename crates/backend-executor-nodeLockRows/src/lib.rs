@@ -131,6 +131,7 @@ pub fn ExecLockRows<'mcx>(
                     let erm = rowmark_mut(node, mark_index)?;
                     erm.ermActive = false;
                     erm.curCtid = item_pointer_set_invalid();
+                    sync_rowmark_to_estate(node, estate, mark_index)?;
                     mark_index += 1;
                     continue;
                 }
@@ -243,6 +244,10 @@ pub fn ExecLockRows<'mcx>(
             // Remember locked tuple's TID for EPQ testing and WHERE CURRENT OF
             //   erm->curCtid = tid;
             rowmark_mut(node, mark_index)?.curCtid = tid;
+            // Mirror the curCtid/ermActive into the EState's canonical
+            // es_rowmarks entry so `WHERE CURRENT OF` (execCurrentOf) sees the
+            // current TID (C aliases the one ExecRowMark; see helper).
+            sync_rowmark_to_estate(node, estate, mark_index)?;
 
             mark_index += 1;
         }
@@ -465,6 +470,36 @@ fn rowmark_mut<'a, 'mcx>(
         .rowmark
         .as_deref_mut()
         .ok_or_else(|| elog_internal("aux rowmark has no ExecRowMark"))
+}
+
+/// Mirror an `ermActive`/`curCtid` write into the EState's canonical
+/// `es_rowmarks[rti-1]` entry.
+///
+/// In C `aerm->rowmark` is a *pointer* to the single `ExecRowMark` that
+/// `InitPlan` stored in `estate->es_rowmarks`, so writing `erm->curCtid` /
+/// `erm->ermActive` here is immediately visible to every other reader of that
+/// rowmark — crucially `execCurrentOf` (`WHERE CURRENT OF`), which digs the
+/// current TID out of `estate->es_rowmarks`. The owned model gives the LockRows
+/// node its *own* copy of the rowmark (`ExecFindRowMark` hands the aux mark a
+/// fresh value), so the node's writes would otherwise never reach the
+/// `es_rowmarks` entry the cursor's `execCurrentOf` reads. Propagate them here so
+/// the two stay the single logical rowmark C has. Resolved by `rti` (the aux
+/// copy carries the same `rti` as the `es_rowmarks` entry, which is indexed by
+/// `rti - 1`).
+fn sync_rowmark_to_estate<'mcx>(
+    node: &LockRowsStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mark_index: usize,
+) -> PgResult<()> {
+    let src = rowmark(node, mark_index)?;
+    let rti = src.rti;
+    let ( erm_active, cur_ctid ) = (src.ermActive, src.curCtid);
+    let idx = (rti - 1) as usize;
+    if let Some(Some(erm)) = estate.es_rowmarks.get_mut(idx) {
+        erm.ermActive = erm_active;
+        erm.curCtid = cur_ctid;
+    }
+    Ok(())
 }
 
 /// `lappend(list, x)` — an OOM-fallible push into a context-allocated `PgVec`.

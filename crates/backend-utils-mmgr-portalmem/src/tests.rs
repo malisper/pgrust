@@ -105,10 +105,10 @@ fn portal_lifecycle() {
         assert_eq!(PortalGetPrimaryStmt(&p2), Some(1));
         assert_eq!(portal_num_stmts(&p2), 2);
 
-        assert_eq!(
-            pg_cursor(FcinfoHandle(0)).expect("pg_cursor"),
-            Datum::null()
-        );
+        // `pg_cursor` is now a materialized SRF requiring a real fmgr call
+        // frame with a `ReturnSetInfo` (exercised end-to-end by the `portals`
+        // regression test via the fmgr by-OID dispatch); no longer unit-driven
+        // here through the removed `FcinfoHandle` placeholder.
 
         PortalDrop(&p2, false).expect("drop c1");
         assert!(GetPortalByName(Some("c1")).is_none());

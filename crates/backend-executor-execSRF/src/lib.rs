@@ -82,6 +82,7 @@ mod pg_listening_channels;
 mod pg_get_multixact_members;
 mod pg_get_catalog_foreign_keys;
 mod pg_partition_tree;
+mod pg_cursor;
 mod pg_event_trigger_dropped_objects;
 mod pg_event_trigger_ddl_commands;
 mod pg_get_publication_tables;
@@ -233,6 +234,9 @@ pub fn init_seams() {
     // `pg_event_trigger_ddl_commands` (OID 4568) — the `ddl_command_end`
     // event-trigger SRF listing the DDL commands the firing command ran.
     pg_event_trigger_ddl_commands::register_pg_event_trigger_ddl_commands();
+    // `pg_cursor()` (OID 2511) — the `pg_cursors` view's underlying SRF, listing
+    // every open cursor (portal) of the current session.
+    pg_cursor::register_pg_cursor();
     // `pg_get_publication_tables(VARIADIC text[])` (OID 6119) — the published
     // tables (column lists + row filters) of one or more publications.
     pg_get_publication_tables::register_pg_get_publication_tables();
