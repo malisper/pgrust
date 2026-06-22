@@ -367,15 +367,32 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
         // `rewindPlanIDs` Bitmapset, so no subplan is suggested REWIND here (the
         // common case: initplans/correlated subplans are never in rewindPlanIDs).
         let sp_eflags = eflags & !(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK);
-        if let Some(subplans) = plannedstmt.subplans.take() {
-            for subplan in subplans {
+        // C `foreach(l, plannedstmt->subplans)` reads the list non-destructively;
+        // the executor's per-SubPlan plan-state trees alias the planner-owned
+        // subplan Plan nodes, and EXPLAIN later re-reads `plannedstmt->subplans`
+        // (e.g. a CteScan resolving `dpns->subplans[ctePlanId-1]` for FieldSelect
+        // field names). The owned model can't share the allocation, so — exactly
+        // like the `rtable`/`permInfos` clones above — we clone each subplan tree
+        // into the EState's query context for ExecInitNode and leave the bundle's
+        // `plannedstmt.subplans` intact for EXPLAIN deparse. (A prior `.take()`
+        // here emptied it, so `pstmt.subplans` reached EXPLAIN as None and every
+        // CteScan field deparsed to the fallback `fN` names.)
+        let n_subplans = plannedstmt.subplans.as_ref().map(|s| s.len()).unwrap_or(0);
+        for idx in 0..n_subplans {
                 // lfirst(l) — a `Plan *`; an entry can be NULL (a pruned/unused
                 // subplan slot), in which case ExecInitNode(NULL, ...) yields a
-                // NULL plan-state. Leak the owning box into an honest `&'mcx Node`
-                // (it lives until the per-query context drops, faithful to C's
-                // "plan freed with its context"), exactly like the main planTree.
-                let subnode: Option<&types_nodes::nodes::Node<'_>> =
-                    subplan.map(|tree| &*mcx::leak_in(tree));
+                // NULL plan-state. Clone the subplan tree into `mcx` and leak the
+                // owning box into an honest `&'mcx Node` (it lives until the
+                // per-query context drops, faithful to C's "plan freed with its
+                // context"), exactly like the main planTree.
+                let subnode: Option<&types_nodes::nodes::Node<'_>> = {
+                    let subplan_box: Option<mcx::PgBox<'_, types_nodes::nodes::Node<'_>>> =
+                        match plannedstmt.subplans.as_ref().and_then(|s| s[idx].as_ref()) {
+                            Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                            None => None,
+                        };
+                    subplan_box.map(|tree| &*mcx::leak_in(tree))
+                };
                 // subplanstate = ExecInitNode(subplan, estate, sp_eflags);
                 // es_subplanstates = lappend(es_subplanstates, subplanstate).
                 // A NULL subplan slot (pruned/unused) lappends a NULL, preserving
@@ -394,7 +411,6 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
                 estate.es_subplan_root_slot = None;
                 let subplanstate = init_result?;
                 estate.es_subplanstates.push(subplanstate);
-            }
         }
 
         // planstate = ExecInitNode(plan, estate, eflags).
