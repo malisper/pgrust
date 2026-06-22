@@ -114,18 +114,29 @@ fn is_polymorphic_type(typid: Oid) -> bool {
 }
 
 /// `parser_errposition(pstate, location)` — the cursor position to attach to an
-/// ereport. A no-op returning 0 when `location < 0` or `pstate == NULL`.
+/// ereport. A no-op returning 0 when `location < 0`, `pstate == NULL`, or
+/// `pstate->p_sourcetext == NULL` (parse_node.c: "Can't do anything if source
+/// text is not available"). The last guard matters: callers such as
+/// `AddRelationNewConstraints` build a ParseState with `p_sourcetext = NULL`
+/// (e.g. re-cooking a stored CHECK after ALTER COLUMN TYPE), and C reports no
+/// cursor in that case — so neither may we, otherwise the offset gets painted
+/// onto the unrelated outer query psql actually sent.
 #[inline]
 fn errpos(pstate: Option<&ParseState<'_>>, location: i32) -> i32 {
-    if location < 0 || pstate.is_none() {
+    if location < 0 {
         return 0;
     }
-    // The repo's trimmed ParseState carries only p_sourcetext; the raw byte
-    // location IS the cursor position the C parser_errposition resolves to
-    // (parse_node.c maps p_sourcetext-relative byte offset -> char position;
-    // with only the source text we reproduce the +1 1-based column the same way
-    // parser_errposition does for an ASCII source).
-    location + 1
+    match pstate {
+        Some(ps) if ps.p_sourcetext.is_some() => {
+            // The repo's trimmed ParseState carries only p_sourcetext; the raw
+            // byte location IS the cursor position the C parser_errposition
+            // resolves to (parse_node.c maps p_sourcetext-relative byte offset
+            // -> char position; with only the source text we reproduce the +1
+            // 1-based column the same way parser_errposition does for ASCII).
+            location + 1
+        }
+        _ => 0,
+    }
 }
 
 /// Borrow `opname` (`&[String]`, the inward-seam name shape) as `&[&str]` for
