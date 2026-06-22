@@ -997,6 +997,14 @@ fn QueueCheckConstraintValidation<'mcx>(
     let tab = ATGetQueueEntry(mcx, wqueue, rel)?;
     wqueue[tab].constraints.push(newcon);
 
+    // Invalidate relcache so that others see the new validated constraint
+    // (tablecmds.c:13197). Without this, the relation's cached TupleConstr keeps
+    // ccvalid=false for this CHECK constraint — a pg_constraint update only
+    // invalidates the constrained relation's relcache for FOREIGN keys, not for
+    // CHECK constraints — so constraint-exclusion in the same session would not
+    // pick up the now-validated constraint.
+    backend_utils_cache_inval_seams::cache_invalidate_relcache::call(rel.rd_id)?;
+
     // Mark the pg_constraint row as validated (CatalogTupleUpdate +
     // InvokeObjectPostAlterHook).
     backend_catalog_pg_constraint::set_constraint_validated(mcx, conoid)?;
@@ -1105,6 +1113,10 @@ fn QueueNNConstraintValidation<'mcx>(
     // Queue validation for phase 3: a full-table NOT NULL recheck.
     let tab = ATGetQueueEntry(mcx, wqueue, rel)?;
     wqueue[tab].verify_new_notnull = true;
+
+    // Invalidate relcache so that others see the new validated constraint
+    // (tablecmds.c:13297).
+    backend_utils_cache_inval_seams::cache_invalidate_relcache::call(rel.rd_id)?;
 
     // Mark the pg_constraint row as validated.
     backend_catalog_pg_constraint::set_constraint_validated(mcx, conoid)?;
