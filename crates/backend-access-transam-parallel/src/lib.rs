@@ -327,6 +327,21 @@ thread_local! {
     /// `already borrowed: BorrowMutError`. A plain [`Cell`] is reentrancy-safe
     /// (no borrow tracking), matching C's `volatile sig_atomic_t` semantics.
     static PARALLEL_MESSAGE_PENDING: Cell<bool> = const { Cell::new(false) };
+
+    /// The current worker's `ParallelWorkerContext.seg` (`access/parallel.h`).
+    ///
+    /// In C the worker holds a `ParallelWorkerContext pwcxt = {seg, toc}` on the
+    /// stack of `ParallelWorkerMain` and passes `&pwcxt` to the per-node
+    /// `Exec*InitializeWorker` hooks, which read `pwcxt->seg`. The owned port
+    /// carries `ParallelWorkerContextHandle` as a single `usize` (it encodes the
+    /// `toc` slot), so the segment can't be recovered from the handle: a forked
+    /// worker did NOT build the leader's `ParallelContext` in its own `G.slots`
+    /// (those are leader-only; the worker inherits a stale COW copy that is not
+    /// indexed by `toc`). `make_parallel_worker_context(seg, toc)` records the real
+    /// `seg` here so `pwcxt_seg` returns it directly, exactly mirroring
+    /// `pwcxt->seg`. A worker process runs one parallel context at a time, so a
+    /// single per-process cell is faithful.
+    static WORKER_CONTEXT_SEG: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 fn with_globals<R>(f: impl FnOnce(&mut ParallelGlobals) -> R) -> R {
@@ -841,9 +856,12 @@ pub fn pcxt_worker_bgwhandle(pcxt: ParallelContextHandle, i: i32) -> BackgroundW
     })
 }
 pub fn make_parallel_worker_context(seg: ExecDsmSeg, toc: ExecShmToc) -> ParallelWorkerContextHandle {
-    // {seg, toc} pair handed to per-node Exec*InitializeWorker hooks; encode the
-    // toc slot (both share the context identity).
-    let _ = seg;
+    // {seg, toc} pair handed to per-node Exec*InitializeWorker hooks. The handle
+    // encodes the toc slot; the seg can't be recovered from a single-usize handle
+    // (a forked worker has no leader `ParallelContext` in its own `G.slots`), so
+    // record it in the per-process worker-context cell for `pwcxt_seg` to read
+    // back. Mirrors C `pwcxt = {seg, toc}`.
+    WORKER_CONTEXT_SEG.with(|c| c.set(Some(seg.0)));
     ParallelWorkerContextHandle(toc.0)
 }
 pub fn pwcxt_toc(pwcxt: ParallelWorkerContextHandle) -> ExecShmToc {
@@ -853,11 +871,14 @@ pub fn pwcxt_toc(pwcxt: ParallelWorkerContextHandle) -> ExecShmToc {
     toc_handle(pwcxt.0)
 }
 pub fn pwcxt_seg(pwcxt: ParallelWorkerContextHandle) -> ExecDsmSeg {
-    // The worker context shares the parallel context's slot identity (its toc,
-    // seg and estimator are all addressed by the same slot — see
-    // `make_parallel_worker_context`), so the segment is the context's `seg`.
-    // Mirrors C `pwcxt->seg`.
-    with_globals(|g| ExecDsmSeg(g.get(ParallelContextHandle(pwcxt.0)).seg.0))
+    // `pwcxt->seg`. The handle's `.0` is the toc slot (not a `G.slots` index), so
+    // the seg is recovered from the per-process cell set by
+    // `make_parallel_worker_context`, exactly mirroring C `pwcxt->seg`.
+    let _ = pwcxt;
+    let seg = WORKER_CONTEXT_SEG.with(|c| c.get()).expect(
+        "pwcxt_seg called before make_parallel_worker_context set the worker context seg",
+    );
+    ExecDsmSeg(seg)
 }
 pub fn parallel_worker_number() -> i32 {
     with_globals(|g| g.parallel_worker_number)

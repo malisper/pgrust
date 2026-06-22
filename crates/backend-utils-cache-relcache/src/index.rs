@@ -569,76 +569,106 @@ pub fn RelationInitTableAccessMethod(rd: &mut RelationData) -> PgResult<()> {
 
 /// `RelationReloadIndexInfo(relation)` (relcache.c): refresh a non-nailed
 /// index entry's `pg_class`/`pg_index` fields in place during rebuild.
-pub fn RelationReloadIndexInfo(rd: &mut RelationData) -> PgResult<()> {
-    // Should be called only for invalidated, live indexes.
-    debug_assert!(
-        (rd.rd_rel.relkind == RELKIND_INDEX || rd.rd_rel.relkind == RELKIND_PARTITIONED_INDEX)
-            && !rd.rd_isvalid
-            && rd.rd_droppedSubid == InvalidSubTransactionId
-    );
+///
+/// Takes the index's Oid (not a held `&mut RelationData`) because the
+/// `ScanPgRelation` and `search_pg_index_info` re-reads below re-enter the
+/// relcache — when `index_ok` is true the pg_class scan opens an index relation,
+/// which borrows another relcache cell (and can recurse back to this one). A held
+/// `with_rel_mut` borrow across those re-entrant scans aliases (RefCell
+/// double-borrow panic), which in a terminated parallel worker's teardown
+/// escalates to a backend crash. C operates on a bare `Relation` pointer with no
+/// borrow exclusivity; we mirror that with short scoped borrows (`with_rel_mut`)
+/// around the un-borrowed catalog scans, exactly like `RelationReloadNailed`.
+pub fn RelationReloadIndexInfo(relation: Oid) -> PgResult<()> {
+    use crate::core_entry_store::{with_rel, with_rel_mut};
+
+    // Should be called only for invalidated, live indexes. (Short borrow.)
+    let (relisshared, rd_id) = with_rel(relation, |rd| {
+        debug_assert!(
+            (rd.rd_rel.relkind == RELKIND_INDEX || rd.rd_rel.relkind == RELKIND_PARTITIONED_INDEX)
+                && !rd.rd_isvalid
+                && rd.rd_droppedSubid == InvalidSubTransactionId
+        );
+        (rd.rd_rel.relisshared, rd.rd_id)
+    });
 
     // If it's a shared index, we might be called before backend startup has
     // finished selecting a database. A shared index can never have schema
     // updates, so just refresh the physical relfilenumber, mark valid, return.
     let critical_built = crate::core_entry_store::with_state(|st| st.critical_relcaches_built);
-    if rd.rd_rel.relisshared && !critical_built {
-        RelationInitPhysicalAddr(rd)?;
-        rd.rd_isvalid = true;
-        return Ok(());
+    if relisshared && !critical_built {
+        return with_rel_mut(relation, |rd| {
+            RelationInitPhysicalAddr(rd)?;
+            rd.rd_isvalid = true;
+            Ok(())
+        });
     }
 
     // Read the pg_class row. Don't try to use an indexscan of
     // pg_class_oid_index to reload the info for pg_class_oid_index.
-    let index_ok = rd.rd_id != CLASS_OID_INDEX_ID;
-    let (pg_class, reloptions) = match crate::build::ScanPgRelation(rd.rd_id, index_ok, false)? {
+    // ScanPgRelation re-enters the relcache (opens an index relation when
+    // index_ok), so run it with NO relcache cell borrowed.
+    let index_ok = rd_id != CLASS_OID_INDEX_ID;
+    let (pg_class, reloptions) = match crate::build::ScanPgRelation(rd_id, index_ok, false)? {
         Some(pair) => pair,
         None => {
             return Err(ereport(ERROR)
-                .errmsg_internal(format!("could not find pg_class tuple for index {}", rd.rd_id))
+                .errmsg_internal(format!("could not find pg_class tuple for index {rd_id}"))
                 .into_error());
         }
     };
-    // memcpy(relation->rd_rel, relp, CLASS_TUPLE_SIZE)
-    rd.rd_rel = pg_class;
-    // Reload reloptions in case they changed (RelationParseRelOptions is build
-    // family own logic).
-    crate::build::RelationParseRelOptions(rd, reloptions.as_deref())?;
-    // We must recalculate physical address in case it changed.
-    RelationInitPhysicalAddr(rd)?;
 
-    // For a non-system index, re-read the bool fields of pg_index.
-    if !is_system_relation(rd) {
+    // Store the refreshed pg_class form back and recalc the physical address.
+    // (Short borrow; RelationParseRelOptions / RelationInitPhysicalAddr do not
+    // scan catalogs.)
+    with_rel_mut(relation, |rd| {
+        // memcpy(relation->rd_rel, relp, CLASS_TUPLE_SIZE)
+        rd.rd_rel = pg_class;
+        // Reload reloptions in case they changed (RelationParseRelOptions is
+        // build family own logic).
+        crate::build::RelationParseRelOptions(rd, reloptions.as_deref())?;
+        // We must recalculate physical address in case it changed.
+        RelationInitPhysicalAddr(rd)
+    })?;
+
+    // For a non-system index, re-read the bool fields of pg_index. (Short borrow
+    // to test system-ness; the syscache search re-enters the relcache and must
+    // run un-borrowed.)
+    let system = with_rel(relation, |rd| is_system_relation(rd));
+    if !system {
         let scratch = MemoryContext::new("index reload");
         let mcx = scratch.mcx();
-        let idxinfo = match syscache_seam::search_pg_index_info::call(mcx, rd.rd_id)? {
+        let idxinfo = match syscache_seam::search_pg_index_info::call(mcx, rd_id)? {
             Some(info) => info,
             None => {
                 return Err(ereport(ERROR)
-                    .errmsg_internal(format!("cache lookup failed for index {}", rd.rd_id))
+                    .errmsg_internal(format!("cache lookup failed for index {rd_id}"))
                     .into_error());
             }
         };
-        if let Some(idx) = rd.rd_index.as_mut() {
-            // Copy all the bool fields; none of the array fields may change.
-            idx.indisunique = idxinfo.indisunique;
-            idx.indnullsnotdistinct = idxinfo.indnullsnotdistinct;
-            idx.indisprimary = idxinfo.indisprimary;
-            idx.indisexclusion = idxinfo.indisexclusion;
-            idx.indimmediate = idxinfo.indimmediate;
-            idx.indisclustered = idxinfo.indisclustered;
-            idx.indisvalid = idxinfo.indisvalid;
-            idx.indcheckxmin = idxinfo.indcheckxmin;
-            idx.indisready = idxinfo.indisready;
-            idx.indislive = idxinfo.indislive;
-            idx.indisreplident = idxinfo.indisreplident;
-            // The C copies t_data's xmin too (for indcheckxmin); the owned
-            // entry doesn't carry the raw heap-tuple header, so the xmin lives
-            // with the projected tuple, not separately tracked here.
-        }
+        with_rel_mut(relation, |rd| {
+            if let Some(idx) = rd.rd_index.as_mut() {
+                // Copy all the bool fields; none of the array fields may change.
+                idx.indisunique = idxinfo.indisunique;
+                idx.indnullsnotdistinct = idxinfo.indnullsnotdistinct;
+                idx.indisprimary = idxinfo.indisprimary;
+                idx.indisexclusion = idxinfo.indisexclusion;
+                idx.indimmediate = idxinfo.indimmediate;
+                idx.indisclustered = idxinfo.indisclustered;
+                idx.indisvalid = idxinfo.indisvalid;
+                idx.indcheckxmin = idxinfo.indcheckxmin;
+                idx.indisready = idxinfo.indisready;
+                idx.indislive = idxinfo.indislive;
+                idx.indisreplident = idxinfo.indisreplident;
+                // The C copies t_data's xmin too (for indcheckxmin); the owned
+                // entry doesn't carry the raw heap-tuple header, so the xmin
+                // lives with the projected tuple, not separately tracked here.
+            }
+        });
     }
 
-    // Okay, now it's valid again.
-    rd.rd_isvalid = true;
+    // Okay, now it's valid again. (Short borrow.)
+    with_rel_mut(relation, |rd| rd.rd_isvalid = true);
     Ok(())
 }
 

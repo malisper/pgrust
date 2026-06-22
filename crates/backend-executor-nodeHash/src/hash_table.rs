@@ -324,7 +324,8 @@ pub fn ExecHashTableCreate<'mcx>(
         // Attach to the build barrier, elect a backend to set up the shared
         // batch state, allocate batch 0. All of this lives in the DSA-resident
         // shared state reached through the (unported) DSA area; the parallel
-        // setup routines panic until execParallel/dsa land.
+        // setup routines raise a recoverable not-ported ERROR until
+        // sharedtuplestore/sharedfileset land.
         crate::parallel::ExecParallelHashJoinSetUpBatches(mcx, &mut hashtable, nbatch)?;
         crate::parallel::ExecParallelHashTableAlloc(mcx, &mut hashtable, 0)?;
     } else {

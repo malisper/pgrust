@@ -1288,6 +1288,27 @@ pub fn ExecParallelHashJoinSetUpBatches<'mcx>(
     hashtable: &mut HashJoinTableData<'mcx>,
     nbatch: i32,
 ) -> PgResult<()> {
+    // The per-batch shared state is a SharedTuplestore over a SharedFileSet
+    // (sharedtuplestore.c / sharedfileset.c), whose owner crates are not yet
+    // ported: the `sts_estimate`/`sts_initialize`/… seams reached just below
+    // (via `estimate_parallel_hash_join_batch`) are installed as
+    // `panic!("UNPORTED")`. A raw panic in a parallel WORKER's hash build does
+    // NOT unwind cleanly — it escalates through the worker's resowner/relcache
+    // teardown into a backend crash, which truncates the whole regression file.
+    // Raise the unported condition as a recoverable `ERROR` here, BEFORE the
+    // panicking seams run: the leader catches it, every backend stays alive, and
+    // the parallel-aware hash join (Parallel Hash) reads as a graceful error —
+    // the pre-port baseline behavior — instead of a crash. Parallel hash never
+    // completes today regardless (the sts seams always panic), so this changes
+    // nothing functional, only crash → clean ERROR. Remove this gate when
+    // sharedtuplestore/sharedfileset land.
+    return Err(types_error::PgError::error(
+        "utils/sort/sharedtuplestore.c not ported: parallel-aware hash join (Parallel \
+         Hash) needs the SharedTuplestore over a SharedFileSet, whose owner crate is \
+         absent in this worktree",
+    ));
+    #[allow(unreachable_code)]
+    {
     debug_assert!(hashtable.batches.is_empty());
     let area = hashtable.area.expect("parallel hash: area is None");
     let nparticipants = pstate_mut(hashtable).nparticipants;
@@ -1356,6 +1377,7 @@ pub fn ExecParallelHashJoinSetUpBatches<'mcx>(
     }
     hashtable.batches = accessors;
     Ok(())
+    }
 }
 
 // ===========================================================================

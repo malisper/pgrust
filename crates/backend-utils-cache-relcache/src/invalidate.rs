@@ -205,10 +205,14 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
     // Indexes only have a limited number of possible schema changes; use the
     // light reload unless the index access info hasn't been initialized yet
     // (index creation relies on the full procedure in that window). The reload
-    // mutates the stored entry in place (`with_rel_mut`), keeping its `Box`
-    // allocation — and any `RelationRef` pinned to it — stable.
+    // mutates the stored entry in place, keeping its `Box` allocation — and any
+    // `RelationRef` pinned to it — stable. NB: RelationReloadIndexInfo reads
+    // pg_class via ScanPgRelation, which re-enters the relcache (and can
+    // re-borrow this entry's own cell). So it must NOT be run under a held
+    // `with_rel_mut` borrow — it takes the Oid and uses short scoped borrows
+    // internally instead (mirroring RelationReloadNailed).
     if is_index && index_info_initialized {
-        return with_rel_mut(relation, crate::index::RelationReloadIndexInfo);
+        return crate::index::RelationReloadIndexInfo(relation);
     }
     // Nailed relations are handled separately. NB: RelationReloadNailed reads
     // pg_class via ScanPgRelation, which re-enters the relcache (and, when the
