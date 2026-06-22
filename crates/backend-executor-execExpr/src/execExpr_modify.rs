@@ -186,39 +186,6 @@ pub fn exec_init_merge_join_condition<'mcx>(
     Ok(())
 }
 
-/// The inherited-root WCO / RETURNING setup of `ExecInitMerge`
-/// (nodeModifyTable.c L3856-3950).
-///
-/// When the MERGE targets an inherited (non-partitioned) table with INSERT
-/// actions, the root `ResultRelInfo` is not in the `resultRelInfo[]` array, so
-/// its WCO constraints and RETURNING projection must be initialized here:
-/// `build_attrmap_by_name` + `map_variable_attnos` the first plan WCO/RETURNING
-/// list to the root's attnos (when root and first result rel differ),
-/// `ExecInitQual` each WCO qual, and `ExecBuildProjectionInfo` the RETURNING
-/// list. The execExpr_core compiler primitives are landed, but the
-/// `build_attrmap_by_name` (attmap.c) and `map_variable_attnos` (rewriteManip.c)
-/// remap that must run first has no reachable owner seam, so this is blocked on
-/// those unported owners.
-pub fn exec_init_merge_inherited_root<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _mtstate: &mut ModifyTableState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _root_result_rel_info: RriId,
-    _first_result_rel: RriId,
-    _econtext: EcxtId,
-) -> PgResult<()> {
-    panic!(
-        "execExpr-modify::exec_init_merge_inherited_root: inherited-root WCO/RETURNING setup \
-         is blocked on attmap.c (build_attrmap_by_name) + rewriteManip.c \
-         (map_variable_attnos) — no reachable owner seam — which must remap the WCO/RETURNING \
-         lists before the (landed) execExpr_core ExecInitQual/ExecBuildProjectionInfo can run; \
-         the per-WCO branch is additionally blocked on the not-yet-modeled WithCheckOption node \
-         in types-nodes (withCheckOptionLists is a plain Node list, so wco->qual cannot be \
-         extracted as an Expr-list) — note this is the still-unmodeled WCO node, NOT the \
-         resolved gap-3 MergeAction/onConflictWhere/mergeJoinConditions Expr-list retype"
-    )
-}
-
 /// The WITH CHECK OPTION map-and-build of `ExecInitPartitionInfo`
 /// (execPartition.c L556-614).
 ///

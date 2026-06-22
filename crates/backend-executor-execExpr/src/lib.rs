@@ -136,7 +136,6 @@ pub fn init_seams() {
         execExpr_modify::exec_build_merge_update_projection,
     );
     seams::exec_init_merge_join_condition::set(execExpr_modify::exec_init_merge_join_condition);
-    seams::exec_init_merge_inherited_root::set(execExpr_modify::exec_init_merge_inherited_root);
     seams::partition_init_with_check_options::set(
         execExpr_modify::partition_init_with_check_options,
     );

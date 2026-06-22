@@ -580,31 +580,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// The inherited-root WITH CHECK OPTION / RETURNING setup of `ExecInitMerge`
-    /// (nodeModifyTable.c L3853-3958): when the MERGE targets an inherited
-    /// (non-partitioned) table with INSERT actions, the root `ResultRelInfo` is
-    /// not in the `resultRelInfo[]` array, so initialize its WCO constraints and
-    /// RETURNING projection here — taking the first plan WCO/RETURNING list as
-    /// reference, `build_attrmap_by_name` + `map_variable_attnos` it to the
-    /// root's attnos when the root and first result rel differ, `ExecInitQual`
-    /// each WCO qual into `ri_WithCheckOptions`/`ri_WithCheckOptionExprs`, and
-    /// `ExecBuildProjectionInfo` the RETURNING list into `ri_returningList`/
-    /// `ri_projectReturning`. Reads the `ModifyTable` plan node's WCO/RETURNING
-    /// lists (the owner interprets them) and the rewrite attmap machinery. A
-    /// no-op unless the root differs from `resultRelInfo[0]`, the root is not
-    /// partitioned, and `MERGE_INSERT` is among the subcommands. Fallible on
-    /// OOM / `ereport(ERROR)`.
-    pub fn exec_init_merge_inherited_root<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
-        estate: &mut types_nodes::EStateData<'mcx>,
-        root_result_rel_info: types_nodes::RriId,
-        first_result_rel: types_nodes::RriId,
-        econtext: types_nodes::EcxtId,
-    ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
     /// The WITH CHECK OPTION map-and-build of `ExecInitPartitionInfo`
     /// (execPartition.c L549-614): take `ref_wco_list` (the first plan's WCO
     /// list), `build_attrmap_by_name(partrel, firstResultRel)` +

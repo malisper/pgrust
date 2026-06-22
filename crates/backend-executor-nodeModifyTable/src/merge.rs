@@ -590,14 +590,176 @@ pub fn ExecInitMerge<'mcx>(
         && root_relkind != types_tuple::access::RELKIND_PARTITIONED_TABLE
         && (mtstate.mt_merge_subcommands & MERGE_INSERT) != 0
     {
-        backend_executor_execExpr_seams::exec_init_merge_inherited_root::call(
+        ExecInitMergeInheritedRoot(mcx, mtstate, estate, root_rel_info, first_result_rel)?;
+    }
+
+    Ok(())
+}
+
+/// The inherited-root WITH CHECK OPTION / RETURNING setup of `ExecInitMerge`
+/// (nodeModifyTable.c L3856-3947): when a MERGE targets an inherited
+/// (non-partitioned) table whose root `ResultRelInfo` is not in the
+/// `resultRelInfo[]` array, initialize the root rel's WCO constraints and
+/// RETURNING projection — taking the first plan WCO/RETURNING list as the
+/// reference and `build_attrmap_by_name` + `map_variable_attnos`-remapping it to
+/// the root's attnos when the root and first result relation differ. Mirrors the
+/// `ExecInitPartition{WithCheckOptions,Returning}` legs (the per-rel WCO/RETURNING
+/// compile is the same execExpr-owned path).
+fn ExecInitMergeInheritedRoot<'mcx>(
+    mcx: Mcx<'mcx>,
+    mtstate: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    root_rel_info: RriId,
+    first_result_rel: RriId,
+) -> PgResult<()> {
+    // ModifyTable *node = (ModifyTable *) mtstate->ps.plan;
+    let node = match mtstate.plan_node {
+        Some(n) => n,
+        None => return Ok(()),
+    };
+
+    // Relation rootRelation = rootRelInfo->ri_RelationDesc;
+    // Relation firstResultRel = mtstate->resultRelInfo[0].ri_RelationDesc;
+    // int firstVarno = mtstate->resultRelInfo[0].ri_RangeTableIndex;
+    let first_varno = estate.result_rel(first_result_rel).ri_RangeTableIndex;
+
+    // The C decides whether a remap is needed by comparing the Relation pointers
+    // (rootRelation != firstResultRel). The owned model compares by relation OID.
+    let root_oid = estate
+        .result_rel(root_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecInitMergeInheritedRoot: root ResultRelInfo has no open relation")
+        .rd_id;
+    let first_oid = estate
+        .result_rel(first_result_rel)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecInitMergeInheritedRoot: first result ResultRelInfo has no open relation")
+        .rd_id;
+    let needs_remap = root_oid != first_oid;
+
+    // part_attmap = build_attrmap_by_name(RelationGetDescr(rootRelation),
+    //                                     RelationGetDescr(firstResultRel), false);
+    // (built lazily only when a remap is required; shared by the WCO and RETURNING
+    // legs as in the C.)
+    let (root_attnums, root_reltype) = if needs_remap {
+        let root_desc = estate
+            .result_rel(root_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecInitMergeInheritedRoot: root ResultRelInfo has no open relation")
+            .rd_att_clone_in(mcx)?;
+        let root_reltype = estate
+            .result_rel(root_rel_info)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecInitMergeInheritedRoot: root ResultRelInfo has no open relation")
+            .rd_rel
+            .reltype;
+        let first_desc = estate
+            .result_rel(first_result_rel)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecInitMergeInheritedRoot: first result ResultRelInfo has no open relation")
+            .rd_att_clone_in(mcx)?;
+        let attmap = backend_access_common_next_seams::build_attrmap_by_name::call(
             mcx,
-            mtstate,
-            estate,
-            root_rel_info,
-            first_result_rel,
-            econtext,
+            &root_desc,
+            &first_desc,
+            false,
         )?;
+        let attnums: alloc::vec::Vec<i16> = attmap.attnums.iter().copied().collect();
+        (Some(attnums), root_reltype)
+    } else {
+        (None, 0)
+    };
+
+    // if (node->withCheckOptionLists != NIL) { ... }
+    if let Some(lists) = node.withCheckOptionLists.as_ref() {
+        if !lists.is_empty() {
+            // wcoList = linitial(node->withCheckOptionLists);
+            let ref_wco_list = lists[0].as_slice();
+            // Clone each WithCheckOption out of the plan node so its qual can be
+            // remapped without mutating the shared plan (mirrors
+            // ExecInitPartitionWithCheckOptions).
+            let mut remapped_wco_nodes: mcx::PgVec<'mcx, types_nodes::nodes::Node<'mcx>> =
+                mcx::vec_with_capacity_in(mcx, ref_wco_list.len())?;
+            for wco_node in ref_wco_list {
+                let wco = wco_node.as_withcheckoption().ok_or_else(|| {
+                    types_error::PgError::error(
+                        "ExecInitMergeInheritedRoot: withCheckOptionLists element is not a \
+                         WithCheckOption node",
+                    )
+                })?;
+                let mut wco = wco.clone_in(mcx)?;
+                // map_variable_attnos((Node *) wcoList, firstVarno, 0, part_attmap,
+                //                     rootRelation reltype, &found_whole_row);
+                if let Some(attnums) = root_attnums.as_ref() {
+                    if let Some(qual) = wco.qual.take() {
+                        let (mapped_qual, _found_whole_row) =
+                            backend_rewrite_rewritemanip_seams::map_variable_attnos_node::call(
+                                mcx,
+                                qual,
+                                first_varno as i32,
+                                0,
+                                attnums,
+                                root_reltype,
+                            )?;
+                        wco.qual = Some(mapped_qual);
+                    }
+                }
+                remapped_wco_nodes
+                    .push(types_nodes::nodes::Node::mk_with_check_option(mcx, wco)?);
+            }
+            // foreach(lc, wcoList) ExecInitQual ... ; rootRelInfo->ri_WithCheckOptions
+            // = wcoList; ri_WithCheckOptionExprs = wcoExprs;
+            backend_executor_execExpr_seams::exec_init_with_check_options::call(
+                mtstate,
+                estate,
+                root_rel_info,
+                remapped_wco_nodes.as_slice(),
+            )?;
+        }
+    }
+
+    // if (node->returningLists != NIL) { ... }
+    if let Some(lists) = node.returningLists.as_ref() {
+        if !lists.is_empty() {
+            // returningList = linitial(node->returningLists);
+            let ref_returning_list = lists[0].as_slice();
+            let mut returning_list: mcx::PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+                mcx::vec_with_capacity_in(mcx, ref_returning_list.len())?;
+            for tle in ref_returning_list {
+                returning_list.push(tle.clone_in(mcx)?);
+            }
+            // map_variable_attnos((Node *) returningList, firstVarno, 0, part_attmap,
+            //                     rootRelation reltype, &found_whole_row);
+            let returning_list = if let Some(attnums) = root_attnums.as_ref() {
+                let (mapped, _fwr) =
+                    backend_rewrite_rewritemanip_seams::map_variable_attnos_targetentry_list::call(
+                        mcx,
+                        returning_list,
+                        first_varno as i32,
+                        attnums,
+                        root_reltype,
+                    )?;
+                mapped
+            } else {
+                returning_list
+            };
+            // rootRelInfo->ri_returningList = returningList;
+            // rootRelInfo->ri_projectReturning =
+            //     ExecBuildProjectionInfo(returningList, econtext,
+            //         mtstate->ps.ps_ResultTupleSlot, &mtstate->ps,
+            //         RelationGetDescr(rootRelation));
+            backend_executor_execExpr_seams::exec_build_returning_projection::call(
+                mtstate,
+                estate,
+                root_rel_info,
+                returning_list.as_slice(),
+            )?;
+        }
     }
 
     Ok(())
