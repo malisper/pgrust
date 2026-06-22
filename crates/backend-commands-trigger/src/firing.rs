@@ -128,6 +128,13 @@ struct CurrentTriggerSlots {
     trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'static>>,
     /// `trigdata->tg_newslot` payload — the NEW tuple (UPDATE), or NULL.
     newtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'static>>,
+    /// The firing query context (`estate->es_query_cxt`), `'static`-extended for
+    /// the install/drop window of this side-channel. A trigger function that
+    /// rebuilds and returns a row (`tsvector_update_trigger`'s
+    /// `make_and_install_tsvector`) allocates the modified tuple here so it
+    /// survives until `decode_before_trigger_result` re-anchors it — the owned
+    /// analogue of C returning a `rettuple` palloc'd in the per-tuple context.
+    query_mcx: Mcx<'static>,
 }
 
 /// RAII guard installing the per-call slot side-channel (paired with
@@ -781,6 +788,8 @@ pub fn after_trigger_execute<'mcx>(
         relation: slots_relation,
         trigtuple: trig_formed,
         newtuple: new_formed,
+        // SAFETY: `mcx` is the firing query context, live for this call's window.
+        query_mcx: unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(mcx) },
     });
 
     let rettuple = exec_call_trigger_func(trigdata);
@@ -1017,6 +1026,8 @@ pub fn validate_foreign_key_constraint<'mcx>(
                 relation: row_relation,
                 trigtuple: Some(formed_static),
                 newtuple: None,
+                // SAFETY: `mcx` is the firing query context, live for this window.
+                query_mcx: unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(mcx) },
             });
             let _td_guard = CurrentTriggerGuard::install(trigdata);
 
@@ -1494,6 +1505,8 @@ fn fire_statement_trigger(
         relation: slots_relation,
         trigtuple: None,
         newtuple: None,
+        // SAFETY: `mcx` is the firing query context, live for this call's window.
+        query_mcx: unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(mcx) },
     });
 
     let result = exec_call_trigger_func(trigdata)?;
@@ -2154,6 +2167,8 @@ fn fire_row_insert_trigger<'mcx>(
         relation: slots_relation,
         trigtuple: Some(formed_static),
         newtuple: None,
+        // SAFETY: `mcx` is the firing query context, live for this call's window.
+        query_mcx: unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(mcx) },
     });
 
     // result = ExecCallTriggerFunc(&LocTriggerData, ...);
@@ -2183,8 +2198,23 @@ fn fire_row_modify_trigger<'mcx>(
         types_nodes::SlotId,
         &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
     )>,
+    // `LocTriggerData.tg_updatedcols` — the UPDATE's modified-column set
+    // (`ExecGetAllUpdatedCols`), `None` for DELETE. Read by the
+    // `tsvector_update_trigger` `updated_col` carrier seam (and any
+    // column-specific WHEN-qual the trigger function inspects).
+    updated_cols: Option<&types_nodes::Bitmapset<'_>>,
 ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'static>>> {
     let mcx = estate.es_query_cxt;
+
+    // tg_updatedcols = updatedCols — cloned into the query context and
+    // `'static`-extended for the side-channel window.
+    let tg_updatedcols: Option<mcx::PgBox<'static, types_nodes::Bitmapset<'static>>> =
+        match backend_nodes_core::bitmapset::bms_copy(mcx, updated_cols)? {
+            // SAFETY: allocated in mcx (= es_query_cxt); the TriggerData that
+            // borrows it is installed/dropped within this call.
+            Some(boxed) => Some(unsafe { core::mem::transmute(boxed) }),
+            None => None,
+        };
 
     // tg_trigger = &(trigdesc->triggers[tgindx]) — cloned into the query context.
     let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
@@ -2267,13 +2297,15 @@ fn fire_row_modify_trigger<'mcx>(
         tg_newslot,
         tg_oldtable: None,
         tg_newtable: None,
-        tg_updatedcols: None,
+        tg_updatedcols,
     };
 
     let _slots_guard = CurrentSlotsGuard::install(CurrentTriggerSlots {
         relation: slots_relation,
         trigtuple: Some(old_formed_static),
         newtuple: new_formed_static,
+        // SAFETY: `mcx` is the firing query context, live for this call's window.
+        query_mcx: unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(mcx) },
     });
 
     // result = ExecCallTriggerFunc(&LocTriggerData, ...);
@@ -2405,6 +2437,211 @@ pub fn set_before_trigger_result_to_newtuple() -> bool {
 /// decodes this as no row change.
 pub fn set_before_trigger_result_do_nothing() {
     BEFORE_TRIGGER_RESULT.with(|c| *c.borrow_mut() = Some(BeforeTriggerResult::DoNothing));
+}
+
+// ===========================================================================
+// tsvector_update_trigger carrier seams (utils/adt/tsvector_op.c) — the
+// trigger-manager state the ported `tsvector_update_trigger` body reads off the
+// current-trigger side-channel, keyed (like the RI accessors above) on the
+// explicit `TriggerDataRef` handle. The body lives in
+// `backend-utils-adt-tsvector-core`; these expose the `TriggerData` /
+// `tg_relation->rd_att` / working-tuple state it consumes, then build the
+// tsvector and deposit the modified rettuple on the BEFORE-trigger return-tuple
+// channel. Installed by [`crate::ri_accessors::init_seams`].
+// ===========================================================================
+
+use backend_utils_adt_tsvector_ext_seams::{
+    TriggerEvent as TsvTriggerEvent, TupleSource as TsvTupleSource,
+};
+
+/// `tsv_trigger_event(trigdata)` — decode `CALLED_AS_TRIGGER(fcinfo)` and the
+/// `TRIGGER_FIRED_*` predicates over `trigdata->tg_event` for the top-of-function
+/// checks in `tsvector_update_trigger`.
+pub fn tsv_trigger_event_impl(_trigdata: types_ri_triggers::TriggerDataRef) -> TsvTriggerEvent {
+    use types_nodes::trigger::{
+        TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_INSERT, TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW,
+        TRIGGER_EVENT_TIMINGMASK, TRIGGER_EVENT_UPDATE,
+    };
+    with_current_trigger_data(|td| match td {
+        Some(t) => {
+            let ev = t.tg_event;
+            TsvTriggerEvent {
+                called_as_trigger: true,
+                // TRIGGER_FIRED_FOR_ROW: (ev & TRIGGER_EVENT_ROW) != 0.
+                fired_for_row: (ev & TRIGGER_EVENT_ROW) != 0,
+                // TRIGGER_FIRED_BEFORE: (ev & TRIGGER_EVENT_TIMINGMASK) == TRIGGER_EVENT_BEFORE.
+                fired_before: (ev & TRIGGER_EVENT_TIMINGMASK) == TRIGGER_EVENT_BEFORE,
+                // TRIGGER_FIRED_BY_INSERT: (ev & TRIGGER_EVENT_OPMASK) == TRIGGER_EVENT_INSERT.
+                fired_by_insert: (ev & TRIGGER_EVENT_OPMASK) == TRIGGER_EVENT_INSERT,
+                // TRIGGER_FIRED_BY_UPDATE: (ev & TRIGGER_EVENT_OPMASK) == TRIGGER_EVENT_UPDATE.
+                fired_by_update: (ev & TRIGGER_EVENT_OPMASK) == TRIGGER_EVENT_UPDATE,
+            }
+        }
+        // No TriggerData in flight — CALLED_AS_TRIGGER(fcinfo) is false.
+        None => TsvTriggerEvent::default(),
+    })
+}
+
+/// `trigdata->tg_trigger->tgnargs`.
+pub fn tsv_tgnargs_impl(_trigdata: types_ri_triggers::TriggerDataRef) -> i32 {
+    with_current_trigger_data(|td| {
+        td.and_then(|t| t.tg_trigger.as_ref())
+            .map(|t| t.tgnargs as i32)
+            .unwrap_or_else(|| panic!("tsvector_update_trigger: no active tg_trigger"))
+    })
+}
+
+/// `trigdata->tg_trigger->tgargs[i]` — the i-th textual trigger argument's bytes,
+/// **without** a NUL terminator (the body's `SPI_fnumber` byte-compares against
+/// the descriptor's `name_str()`, and `cstr_display`/`qualified_name_length`
+/// scan to the first NUL or end). Out-of-range yields an empty vector (the C path
+/// never indexes past `tgnargs`, which the body's `< 3` check guards).
+pub fn tsv_tgarg_impl(_trigdata: types_ri_triggers::TriggerDataRef, i: i32) -> Vec<u8> {
+    with_current_trigger_data(|td| {
+        let t = td
+            .and_then(|t| t.tg_trigger.as_ref())
+            .unwrap_or_else(|| panic!("tsvector_update_trigger: no active tg_trigger"));
+        if i < 0 || i as usize >= t.tgargs.len() {
+            Vec::new()
+        } else {
+            t.tgargs[i as usize].as_bytes().to_vec()
+        }
+    })
+}
+
+/// `trigdata->tg_relation->rd_att` — the trigger relation's tuple descriptor,
+/// copied into `mcx`. The body's `SPI_fnumber`/`SPI_gettypeid`/`SPI_getbinval`
+/// run against this. Resolved off the per-call slot side-channel's relation.
+pub fn tsv_tg_relation_tupdesc_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    _trigdata: types_ri_triggers::TriggerDataRef,
+) -> PgResult<types_tuple::heaptuple::TupleDescData<'mcx>> {
+    CURRENT_TRIGGER_SLOTS.with(|cell| {
+        let b = cell.borrow();
+        let s = b
+            .as_ref()
+            .ok_or_else(|| slot_no_payload("tsv_tg_relation_tupdesc"))?;
+        s.relation.rd_att.clone_in(mcx)
+    })
+}
+
+/// The trigger's working tuple (`tg_trigtuple` for INSERT / `tg_newtuple` for
+/// UPDATE) materialized into `mcx` as the [`FormedTuple`] the body's
+/// `SPI_getbinval` reads. Resolved off the per-call slot side-channel.
+pub fn tsv_tg_rettuple_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    _trigdata: types_ri_triggers::TriggerDataRef,
+    which: TsvTupleSource,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>> {
+    CURRENT_TRIGGER_SLOTS.with(|cell| {
+        let b = cell.borrow();
+        let s = b.as_ref().ok_or_else(|| slot_no_payload("tsv_tg_rettuple"))?;
+        let tup = match which {
+            TsvTupleSource::TrigTuple => s.trigtuple.as_ref(),
+            TsvTupleSource::NewTuple => s.newtuple.as_ref(),
+        }
+        .ok_or_else(|| slot_no_payload("tsv_tg_rettuple"))?;
+        tup.clone_in(mcx)
+    })
+}
+
+/// `bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber,
+/// trigdata->tg_updatedcols)`. `tg_updatedcols` is NULL for INSERT (the body
+/// never consults it there — `update_needed` is already true), so a NULL set
+/// reports `false`.
+pub fn tsv_updated_col_impl(_trigdata: types_ri_triggers::TriggerDataRef, attnum: i32) -> bool {
+    with_current_trigger_data(|td| {
+        let Some(t) = td else {
+            return false;
+        };
+        let bms = t.tg_updatedcols.as_deref();
+        backend_nodes_core::bitmapset::bms_is_member(
+            attnum - types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber as i32,
+            bms,
+        )
+    })
+}
+
+/// `rettuple = heap_modify_tuple_by_cols(rettuple, rel->rd_att, 1,
+/// &tsvector_attr_num, &TSVectorGetDatum(make_tsvector(&prs)), &false)` — build
+/// the tsvector image from `prs`, install it in column `tsvector_attr_num` of the
+/// working tuple, and deposit the modified tuple on the BEFORE-trigger
+/// return-tuple channel (the owned analogue of the C function returning the
+/// rebuilt `rettuple`).
+pub fn tsv_make_and_install_tsvector_impl(
+    _trigdata: types_ri_triggers::TriggerDataRef,
+    which: TsvTupleSource,
+    tsvector_attr_num: i32,
+    mut prs: backend_tsearch_parse::ts_parse::ParsedText,
+) -> PgResult<()> {
+    // datum = TSVectorGetDatum(make_tsvector(&prs)) — the header-ful tsvector
+    // varlena image on the by-ref lane.
+    let image = backend_tsearch_to_tsany::make_tsvector::make_tsvector(&mut prs)?;
+
+    CURRENT_TRIGGER_SLOTS.with(|cell| {
+        let b = cell.borrow();
+        let s = b
+            .as_ref()
+            .ok_or_else(|| slot_no_payload("tsv_make_and_install_tsvector"))?;
+        let rettuple = match which {
+            TsvTupleSource::TrigTuple => s.trigtuple.as_ref(),
+            TsvTupleSource::NewTuple => s.newtuple.as_ref(),
+        }
+        .ok_or_else(|| slot_no_payload("tsv_make_and_install_tsvector"))?;
+
+        // Allocate the rebuilt tuple in the firing query context so it survives
+        // until `decode_before_trigger_result` re-anchors it (the C `rettuple` is
+        // palloc'd in the per-tuple context, taken back by the firing front).
+        let mcx = s.query_mcx;
+
+        let datum =
+            types_tuple::backend_access_common_heaptuple::Datum::from_byref_bytes_in(mcx, &image)?;
+        let repl_cols = [tsvector_attr_num];
+        let repl_values = [datum];
+        let repl_isnull = [false];
+        let modified = backend_access_common_heaptuple::heap_modify_tuple_by_cols(
+            mcx,
+            rettuple,
+            &s.relation.rd_att,
+            1,
+            &repl_cols,
+            &repl_values,
+            &repl_isnull,
+        )
+        .map_err(|_| mcx.oom(0))?;
+
+        BEFORE_TRIGGER_RESULT
+            .with(|c| *c.borrow_mut() = Some(BeforeTriggerResult::Tuple(modified)));
+        Ok(())
+    })
+}
+
+/// `return PointerGetDatum(rettuple)` for the no-rebuild leg of
+/// `tsvector_update_trigger`: deposit the *unmodified* working tuple
+/// (`tg_trigtuple` for INSERT / `tg_newtuple` for UPDATE) on the BEFORE-trigger
+/// return-tuple channel. The fmgr frame calls this before the body so the firing
+/// path always has a row to take back; a rebuild overwrites it.
+pub fn tsv_deposit_unmodified_rettuple_impl(
+    _trigdata: types_ri_triggers::TriggerDataRef,
+    which: TsvTupleSource,
+) -> PgResult<()> {
+    CURRENT_TRIGGER_SLOTS.with(|cell| {
+        let b = cell.borrow();
+        let s = b
+            .as_ref()
+            .ok_or_else(|| slot_no_payload("tsv_deposit_unmodified_rettuple"))?;
+        let rettuple = match which {
+            TsvTupleSource::TrigTuple => s.trigtuple.as_ref(),
+            TsvTupleSource::NewTuple => s.newtuple.as_ref(),
+        }
+        .ok_or_else(|| slot_no_payload("tsv_deposit_unmodified_rettuple"))?;
+        // The slot tuple already lives 'static in the firing query context (taken
+        // back within the same ExecCallTriggerFunc call), so a clone-free copy is
+        // sound — same model as `set_before_trigger_result_to_newtuple`.
+        BEFORE_TRIGGER_RESULT
+            .with(|c| *c.borrow_mut() = Some(BeforeTriggerResult::Tuple(rettuple.clone())));
+        Ok(())
+    })
 }
 
 /// `(HeapTuple) DatumGetPointer(result)` for a BEFORE/INSTEAD-OF row trigger —
@@ -3275,6 +3512,8 @@ fn ri_fk_enforcement_skip<'mcx>(
         relation: slots_relation,
         trigtuple: old_formed,
         newtuple: new_formed,
+        // SAFETY: `mcx` is the firing query context, live for this call's window.
+        query_mcx: unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(mcx) },
     });
 
     let trigger = types_ri_triggers::TriggerRef(crate::ri_accessors::CURRENT);
@@ -3893,7 +4132,9 @@ fn exec_br_delete_triggers_impl<'mcx>(
 
         // newtuple = ExecCallTriggerFunc(&LocTriggerData, ...);
         let returned =
-            fire_row_modify_trigger(estate, relinfo, i, tgoid, tg_event, slot, &trigtuple, None)?;
+            fire_row_modify_trigger(
+                estate, relinfo, i, tgoid, tg_event, slot, &trigtuple, None, /* updated_cols */ None,
+            )?;
         match returned {
             // newtuple == NULL  ->  suppress the delete.
             None => {
@@ -4095,6 +4336,7 @@ fn exec_ir_delete_triggers_impl<'mcx>(
             oldslot,
             &trigtuple,
             /* new */ None,
+            /* updated_cols */ None,
         )?;
 
         // if (rettuple == NULL) return false;  /* Delete was suppressed */
@@ -4251,6 +4493,7 @@ fn exec_br_update_triggers_impl<'mcx>(
             oldslot,
             &trigtuple,
             Some((newslot, &oldtuple)),
+            updated_cols.as_deref(),
         )?;
 
         match returned {
@@ -4528,6 +4771,7 @@ fn exec_ir_update_triggers_impl<'mcx>(
 
         // newtuple = ExecCallTriggerFunc(...); tg_trigslot = oldslot,
         // tg_trigtuple = trigtuple [OLD], tg_newslot = newslot, tg_newtuple = newtuple.
+        // INSTEAD OF UPDATE triggers carry no tg_updatedcols (C leaves it NULL).
         let returned = fire_row_modify_trigger(
             estate,
             relinfo,
@@ -4537,6 +4781,7 @@ fn exec_ir_update_triggers_impl<'mcx>(
             oldslot,
             &trigtuple,
             Some((newslot, &oldtuple)),
+            /* updated_cols */ None,
         )?;
 
         match returned {

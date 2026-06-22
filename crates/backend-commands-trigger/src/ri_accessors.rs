@@ -328,4 +328,19 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::render_slot_columns::set(
         crate::firing::render_slot_columns_impl,
     );
+
+    // `tsvector_update_trigger` (utils/adt/tsvector_op.c) carrier seams — the
+    // trigger-manager state the ported body reads off the current-trigger
+    // side-channel, plus the rebuild-and-deposit of the modified rettuple.
+    {
+        use backend_utils_adt_tsvector_ext_seams as ts;
+        ts::trigger_event::set(crate::firing::tsv_trigger_event_impl);
+        ts::tgnargs::set(crate::firing::tsv_tgnargs_impl);
+        ts::tgarg::set(crate::firing::tsv_tgarg_impl);
+        ts::tg_relation_tupdesc::set(crate::firing::tsv_tg_relation_tupdesc_impl);
+        ts::tg_rettuple::set(crate::firing::tsv_tg_rettuple_impl);
+        ts::updated_col::set(crate::firing::tsv_updated_col_impl);
+        ts::make_and_install_tsvector::set(crate::firing::tsv_make_and_install_tsvector_impl);
+        ts::deposit_unmodified_rettuple::set(crate::firing::tsv_deposit_unmodified_rettuple_impl);
+    }
 }

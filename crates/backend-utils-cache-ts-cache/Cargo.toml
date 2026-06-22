@@ -27,6 +27,8 @@ backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-commands-tsearchcmds-seams = { path = "../backend-commands-tsearchcmds-seams" }
+# tsvector_update_trigger config-name resolution (lookup_ts_config seam).
+backend-utils-adt-tsvector-ext-seams = { path = "../backend-utils-adt-tsvector-ext-seams" }
 backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
 backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }

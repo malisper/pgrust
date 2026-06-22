@@ -1103,4 +1103,24 @@ pub fn init_seams() {
 
     // getTokenTypes's parser-cache `lextypeOid` read.
     backend_commands_tsearchcmds_seams::parser_lextype_oid::set(parser_lextype_oid);
+
+    // `tsvector_update_trigger` (no-config-column variant) config-name resolution:
+    // `cfgId = get_ts_config_oid(stringToQualifiedNameList(tgargs[1]), false)`.
+    backend_utils_adt_tsvector_ext_seams::lookup_ts_config::set(lookup_ts_config_impl);
+}
+
+/// `get_ts_config_oid(stringToQualifiedNameList(name), false)` (the
+/// `tsvector_update_trigger` no-config-column leg). `name` is the raw,
+/// server-encoded trigger-arg bytes (no NUL terminator); the schema-qualification
+/// requirement is enforced by the caller before this point, so the namelist is
+/// always multi-element here.
+fn lookup_ts_config_impl(name: &[u8]) -> PgResult<Oid> {
+    let scratch = MemoryContext::new("tsvector_update_trigger lookup_ts_config");
+    let mcx = scratch.mcx();
+    let s = core::str::from_utf8(name)
+        .map_err(|_| PgError::error("invalid UTF-8 in text search configuration name"))?;
+    let namelist = regproc_seams::string_to_qualified_name_list::call(mcx, s, false)?
+        .expect("hard-error parse returned no list");
+    let parts: Vec<&str> = namelist.iter().map(|p| p.as_str()).collect();
+    namespace_seams::get_ts_config_oid::call(&parts, false)
 }

@@ -287,6 +287,71 @@ fn fc_ts_match_qv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 // ---------------------------------------------------------------------------
+// tsvector_update_trigger_byid / _bycolumn (tsvector_op.c) — the trigger-manager
+// frame.  A registry-dispatched trigger function returns its result row through
+// the BEFORE-trigger return-tuple channel (the fmgr-returned `Datum` is the
+// ignored sentinel), exactly like `suppress_redundant_updates_trigger`.  The
+// per-call `TriggerData` rides the trigger manager's side-channel; the value core
+// reads it through the carrier seams keyed on this marker handle.
+// ---------------------------------------------------------------------------
+
+use backend_utils_adt_tsvector_ext_seams as ext;
+
+/// The current-`TriggerData` marker handle (the side-channel holds the payload;
+/// the handle is just the marker the firing path mints — see
+/// `lsn-trigfuncs`/`ri_accessors`).
+const CURRENT_TRIGGER: types_ri_triggers::TriggerDataRef = types_ri_triggers::TriggerDataRef(1);
+
+/// Shared frame for `tsvector_update_trigger_byid`/`_bycolumn`: deposit the
+/// unmodified working tuple on the return-tuple channel (so the firing path
+/// always has a row to take back), then run the body, which overwrites that
+/// deposit when it rebuilds the tsvector column.  `config_column` selects the
+/// `_byid` (false) vs `_bycolumn` (true) variant.
+fn tsvector_update_trigger_frame(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    config_column: bool,
+) -> PgResult<Datum> {
+    // Determine the working tuple (tg_trigtuple for INSERT / tg_newtuple for
+    // UPDATE) and reject a non-trigger / non-row / non-before call up front, the
+    // same checks the body re-runs (the deposit needs a valid INSERT/UPDATE row).
+    let ev = ext::trigger_event::call(CURRENT_TRIGGER);
+    let which = if ev.fired_by_insert {
+        ext::TupleSource::TrigTuple
+    } else {
+        ext::TupleSource::NewTuple
+    };
+    // Pre-deposit the unmodified row (only meaningful for a row-level
+    // INSERT/UPDATE; for any other shape the body raises the protocol error
+    // before a deposit is consumed). Guard on the same conditions the body uses
+    // so we don't touch the channel for a malformed call.
+    if ev.called_as_trigger && ev.fired_for_row && ev.fired_before
+        && (ev.fired_by_insert || ev.fired_by_update)
+    {
+        ext::deposit_unmodified_rettuple::call(CURRENT_TRIGGER, which)?;
+    }
+
+    let m = mcx::MemoryContext::new("tsvector_update_trigger fmgr scratch");
+    if config_column {
+        crate::op::tsvector_update_trigger_bycolumn(m.mcx(), CURRENT_TRIGGER)?;
+    } else {
+        crate::op::tsvector_update_trigger_byid(m.mcx(), CURRENT_TRIGGER)?;
+    }
+
+    // The trigger protocol forbids a SQL-NULL result flag; the returned Datum is
+    // the ignored sentinel (the row crossed the return-tuple channel).
+    fcinfo.isnull = false;
+    Ok(Datum::from_usize(0))
+}
+
+fn fc_tsvector_update_trigger_byid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    tsvector_update_trigger_frame(fcinfo, false)
+}
+
+fn fc_tsvector_update_trigger_bycolumn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    tsvector_update_trigger_frame(fcinfo, true)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -345,4 +410,34 @@ pub fn register_tsvector_builtins() {
         builtin(3634, "ts_match_vq", 2, fc_ts_match_vq),
         builtin(3635, "ts_match_qv", 2, fc_ts_match_qv),
     ]);
+    // The two trigger-support functions (pg_proc.dat: nargs 0, proisstrict 'f',
+    // rettype trigger) — registered via the trigger-manager frame above.
+    backend_utils_fmgr_core::register_builtins_native([
+        builtin_nonstrict(3752, "tsvector_update_trigger_byid", fc_tsvector_update_trigger_byid),
+        builtin_nonstrict(
+            3753,
+            "tsvector_update_trigger_bycolumn",
+            fc_tsvector_update_trigger_bycolumn,
+        ),
+    ]);
+}
+
+/// A 0-arg, non-strict (`proisstrict => 'f'`) builtin row — the trigger-support
+/// functions.
+fn builtin_nonstrict(
+    foid: u32,
+    name: &str,
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs: 0,
+            strict: false,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }

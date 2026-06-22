@@ -338,8 +338,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3749, "to_tsvector", BuiltinGapKind::NotRegistered),
     (3750, "to_tsquery", BuiltinGapKind::NotRegistered),
     (3751, "plainto_tsquery", BuiltinGapKind::NotRegistered),
-    (3752, "tsvector_update_trigger_byid", BuiltinGapKind::NotRegistered),
-    (3753, "tsvector_update_trigger_bycolumn", BuiltinGapKind::NotRegistered),
     (3759, "get_current_ts_config", BuiltinGapKind::NotRegistered),
     (3760, "ts_match_tt", BuiltinGapKind::NotRegistered),
     (3761, "ts_match_tq", BuiltinGapKind::NotRegistered),

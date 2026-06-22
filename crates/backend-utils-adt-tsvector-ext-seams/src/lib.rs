@@ -195,3 +195,17 @@ seam_core::seam!(
         prs: ParsedText,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `return PointerGetDatum(rettuple)` for the `update_needed == false` leg —
+    /// the C function returns the *unmodified* `rettuple` (`tg_trigtuple` for
+    /// INSERT / `tg_newtuple` for UPDATE) when no indexed column changed.  The
+    /// fmgr frame deposits this on the BEFORE-trigger return-tuple channel before
+    /// running the body, so the firing path always has a row to take back even if
+    /// `make_and_install_tsvector` never fires.  When the body *does* rebuild the
+    /// tsvector, `make_and_install_tsvector` overwrites this deposit.
+    pub fn deposit_unmodified_rettuple(
+        trigdata: TriggerDataRef,
+        which: TupleSource,
+    ) -> PgResult<()>
+);
