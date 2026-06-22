@@ -4460,12 +4460,13 @@ fn lcons_namespace<'mcx>(
 /// Determine the field name to use for a FieldSelect of `var.fieldno`. The
 /// query-decompilation paths (RowExpr whole-row colnames, non-RECORD Var via
 /// `get_expr_result_tupdesc`, RTE-in-rtable whole-row/RTE_SUBQUERY/RTE_JOIN/
-/// RTE_CTE recursion) are ported in full. The plan-tree-only branches
-/// (OUTER_VAR/INNER_VAR/INDEX_VAR digging into subplan tlists, the plan-tree
-/// SubqueryScan/CteScan/WorkTableScan childless-Result paths, and the Param
-/// referent into an ancestor plan) require the #159 plan-tree namespace, which
-/// is unported; they raise a precise deferred() the same way `get_variable`
-/// gates its #159 paths.
+/// RTE_CTE recursion) are ported in full, as are the OUTER_VAR/INNER_VAR/
+/// INDEX_VAR subplan-tlist digs and the Param-referent-into-ancestor-plan arm
+/// (which mirrors `get_parameter`'s find_param_referent / push_ancestor_plan /
+/// pop_ancestor_plan flow). The remaining plan-tree-only branches (the
+/// SubqueryScan/CteScan/WorkTableScan childless-Result paths) require the #159
+/// plan-tree namespace, which is unported; they raise a precise deferred() the
+/// same way `get_variable` gates its #159 paths.
 fn get_name_for_var_field<'mcx>(
     var: &Expr,
     fieldno: i32,
@@ -4490,14 +4491,26 @@ fn get_name_for_var_field<'mcx>(
     if let Expr::Param(param) = var {
         // find_param_referent only resolves with a plan tree (dpns->plan set);
         // for query decompilation it returns None and we fall through.
-        if let Some((expr, _ancestor_idx)) = find_param_referent(mcx, param, context)? {
-            // Found a match: recurse to decipher the field name. push_ancestor_plan
-            // / pop_ancestor_plan is a plan-tree (#159) operation, unreachable for
-            // query decompilation (find_param_referent only succeeds with a plan).
-            let _ = expr;
-            return Err(deferred(
-                "get_name_for_var_field Param referent (push_ancestor_plan; #159 plan-tree)",
-            ));
+        if let Some((expr, ancestor_index)) = find_param_referent(mcx, param, context)? {
+            // Found a match, so recurse to decipher the field name
+            // (ruleutils.c 8050-8061). push_ancestor_plan switches deparse
+            // attention to the ancestor plan node that generated the Param;
+            // find_param_referent / push_ancestor_plan / pop_ancestor_plan all
+            // operate on the head namespace (context.namespaces[0]).
+            let target = {
+                let dpns = &context.namespaces[0];
+                let cloned: Node<'mcx> = dpns.ancestors[ancestor_index].clone_in(mcx)?;
+                mcx::alloc_in(mcx, cloned)?
+            };
+            let save = crate::push_ancestor_plan(
+                mcx,
+                &mut context.namespaces[0],
+                ancestor_index,
+                &target,
+            )?;
+            let result = get_name_for_var_field(&expr, fieldno, 0, context);
+            crate::pop_ancestor_plan(&mut context.namespaces[0], save);
+            return result;
         }
     }
 
