@@ -33,7 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use types_pgtime::{pg_tm, pg_tz};
 use types_core::pg_time_t;
 use state_pgtz::session_timezone;
-use backend_timezone_localtime::{pg_localtime};
+use backend_timezone_localtime::{pg_get_timezone_offset, pg_localtime};
 use types_datetime::{
     DATETIME_MIN_JULIAN, DAYS_PER_WEEK, DT_NOBEGIN, DT_NOEND, END_TIMESTAMP, HOURS_PER_DAY,
     Interval, MAX_TIMESTAMP_PRECISION, MINS_PER_HOUR, MIN_TIMESTAMP, MONTHS_PER_YEAR,
@@ -1097,6 +1097,19 @@ fn timestamp2timestamptz_opt_overflow_tz(
     }
 
     Err(timestamp_out_of_range())
+}
+
+/// `TimestampTimestampTzRequiresRewrite()` (timestamp.c:6435) -- returns `false`
+/// if the `TimeZone` GUC setting causes `timestamp_timestamptz` and
+/// `timestamptz_timestamp` to be no-ops (the session-zone offset is 0), where
+/// the return value has the same bits as the argument.
+pub fn TimestampTimestampTzRequiresRewrite() -> bool {
+    if let Some(offset) = pg_get_timezone_offset(&session_timezone()) {
+        if offset == 0 {
+            return false;
+        }
+    }
+    true
 }
 
 /// `timestamp2timestamptz_opt_overflow()` (timestamp.c:6466) -- convert a local

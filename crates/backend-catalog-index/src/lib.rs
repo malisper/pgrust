@@ -4210,12 +4210,13 @@ fn object_address_set(address: &mut ObjectAddress, class_id: Oid, object_id: Oid
 /// Returns `true` if any indexes were rebuilt. A `CommandCounterIncrement`
 /// occurs after each index rebuild.
 ///
-/// The installed inward seam ([`backend_catalog_index_seams::reindex_relation`])
-/// drops the C `stmt` argument (every current caller passes `NULL`), so this
-/// body threads `stmt = None` into `reindex_index`; the recursion's
-/// event-trigger leg is therefore never taken on any live path.
+/// `stmt` is `Some` only when invoked from a REINDEX command; it is threaded to
+/// `reindex_index` (and into the toast-relation recursion) so each rebuilt index
+/// is collected for `ddl_command_end` event triggers. CLUSTER / VACUUM FULL /
+/// TRUNCATE pass `None` (C `NULL`).
 fn reindex_relation<'mcx>(
     mcx: Mcx<'mcx>,
+    stmt: Option<&types_nodes::ddlnodes::ReindexStmt<'mcx>>,
     relid: Oid,
     flags: i32,
     params: &types_cluster::ReindexParams,
@@ -4280,7 +4281,7 @@ fn reindex_relation<'mcx>(
         let mut newparams = *params;
         newparams.options &= !REINDEXOPT_MISSING_OK;
         newparams.tablespace_oid = InvalidOid;
-        result |= reindex_relation(mcx, toast_relid, flags, &newparams)?;
+        result |= reindex_relation(mcx, stmt, toast_relid, flags, &newparams)?;
     }
 
     /*
@@ -4335,7 +4336,7 @@ fn reindex_relation<'mcx>(
 
         reindex_index(
             mcx,
-            None,
+            stmt,
             index_oid,
             (flags & types_cluster::REINDEX_REL_CHECK_CONSTRAINTS) == 0,
             persistence,
@@ -4409,14 +4410,14 @@ pub fn init_seams() {
     index_seam::reset_reindex_state::set(ResetReindexState);
 
     // reindex_index / reindex_relation — rebuild one / all indexes of a relation
-    // in place (CLUSTER, VACUUM FULL, TRUNCATE, REINDEX). The installed
-    // reindex_relation seam drops the C `stmt` arg (every current caller passes
-    // NULL), so its body threads `stmt = None` into reindex_index.
+    // in place (CLUSTER, VACUUM FULL, TRUNCATE, REINDEX). `stmt` is threaded so
+    // the REINDEX-command path collects each rebuilt index for ddl_command_end
+    // event triggers; CLUSTER / VACUUM FULL / TRUNCATE pass `None`.
     index_seam::reindex_index::set(|mcx, stmt, index_id, skip, persistence, params| {
         reindex_index(mcx, Some(stmt), index_id, skip, persistence, &params)
     });
-    index_seam::reindex_relation::set(|mcx, relid, flags, params| {
-        reindex_relation(mcx, relid, flags, &params)
+    index_seam::reindex_relation::set(|mcx, stmt, relid, flags, params| {
+        reindex_relation(mcx, stmt, relid, flags, &params)
     });
 
     // index_drop — drop one index relation and its catalog rows (dependency.c's

@@ -34,6 +34,8 @@ backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams
 backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc-seams" }
 backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
 backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
+# TimestampTimestampTzRequiresRewrite for ATColumnChangeRequiresRewrite.
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 # ProcessUtility dispatch arms (installs TRUNCATE + DROP-relations forwarding seams).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 # raw_parser() for ATPostAlterTypeParse (re-parse saved index/constraint defs).

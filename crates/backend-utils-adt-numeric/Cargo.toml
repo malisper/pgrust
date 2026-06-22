@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 # Keystone carrier: on-disk ABI + in-memory NumericVar<'mcx> + agg states.
 types-numeric = { path = "../types-numeric" }
+types-core = { path = "../types-core" }
 mcx = { path = "../mcx" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }

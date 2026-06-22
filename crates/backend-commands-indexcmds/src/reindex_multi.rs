@@ -269,6 +269,7 @@ pub(crate) fn ReindexMultipleInternal<'mcx>(
             newparams.options |= REINDEXOPT_REPORT_PROGRESS | REINDEXOPT_MISSING_OK;
             let _ = backend_catalog_index_seams::reindex_relation::call(
                 mcx,
+                Some(stmt),
                 relid,
                 REINDEX_REL_PROCESS_TOAST | REINDEX_REL_CHECK_CONSTRAINTS,
                 newparams,

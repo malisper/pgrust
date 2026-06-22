@@ -14,6 +14,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `TimestampTimestampTzRequiresRewrite()` (`utils/adt/timestamp.c:6435`):
+    /// returns `false` when the current `TimeZone` GUC makes
+    /// `timestamp_timestamptz` / `timestamptz_timestamp` no-ops (session
+    /// timezone offset is 0), so an ALTER COLUMN TYPE between the two needs no
+    /// heap rewrite. Read by `ATColumnChangeRequiresRewrite` (tablecmds.c).
+    pub fn timestamp_timestamptz_requires_rewrite() -> bool
+);
+
+seam_core::seam!(
     /// `timestamptz_to_time_t(t)` (`utils/adt/timestamp.c`): convert a
     /// `TimestampTz` (microseconds since the PG epoch, UTC) to a `pg_time_t`
     /// (seconds since the Unix epoch). Pure arithmetic; never errors. Used by

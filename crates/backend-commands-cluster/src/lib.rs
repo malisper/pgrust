@@ -1423,7 +1423,7 @@ pub fn finish_heap_swap(
         PROGRESS_CLUSTER_PHASE_REBUILD_INDEX,
     )?;
 
-    let _ = index::reindex_relation::call(mcx, OIDOldHeap, reindex_flags, _reindex_params)?;
+    let _ = index::reindex_relation::call(mcx, None, OIDOldHeap, reindex_flags, _reindex_params)?;
 
     /* Report that we are now doing clean up */
     backend_progress::pgstat_progress_update_param::call(

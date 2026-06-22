@@ -111,4 +111,33 @@ pub fn init_seams() {
     // table (C: fmgr_builtins[]), so by-OID dispatch resolves them.
     fmgr_builtins::register_numeric_builtins();
     agg_fmgr::register_numeric_agg_builtins();
+
+    // `numeric_support`'s pg_proc OID (3157). `simplify_function` reaches this
+    // via the `call_support_simplify` boundary when const-folding a
+    // `numeric(source, typmod)` call, flattening a widening (scale-preserving)
+    // length coercion into a bare RelabelType so that, e.g.,
+    // `ALTER COLUMN ... TYPE numeric(12,4)` from `numeric(10,4)` skips the table
+    // rewrite (ATColumnChangeRequiresRewrite sees a RelabelType, not a FuncExpr).
+    const F_NUMERIC_SUPPORT: types_core::primitive::Oid = 3157;
+    backend_optimizer_util_clauses::support_simplify::register_support_simplify(
+        F_NUMERIC_SUPPORT,
+        numeric_support_simplify,
+    );
+}
+
+/// `SupportSimplifyFn` adapter for `numeric_support` (numeric.c:1195). The
+/// dispatch boundary passes the full `SupportRequestSimplify` decomposition; the
+/// `numeric()` length-coercion kernel only reads the argument list.
+#[allow(clippy::too_many_arguments)]
+fn numeric_support_simplify<'mcx>(
+    _mcx: mcx::Mcx<'mcx>,
+    _funcid: types_core::primitive::Oid,
+    _result_type: types_core::primitive::Oid,
+    _result_collid: types_core::primitive::Oid,
+    _input_collid: types_core::primitive::Oid,
+    args: &[types_nodes::primnodes::Expr<'mcx>],
+    _funcvariadic: bool,
+    _estimate: bool,
+) -> types_error::PgResult<Option<types_nodes::primnodes::Expr<'mcx>>> {
+    series_srf::numeric_support(args)
 }

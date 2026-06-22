@@ -1503,6 +1503,7 @@ fn ReindexTable<'mcx>(
         newparams.options |= REINDEXOPT_REPORT_PROGRESS;
         let result = index_seam::reindex_relation::call(
             mcx,
+            Some(stmt),
             heap_oid,
             REINDEX_REL_PROCESS_TOAST | REINDEX_REL_CHECK_CONSTRAINTS,
             newparams,

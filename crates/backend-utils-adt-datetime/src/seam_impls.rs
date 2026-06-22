@@ -528,6 +528,9 @@ fn seam_interval_lerp(
 pub fn init_seams() {
     use backend_utils_adt_timestamp_seams as ts;
     ts::get_current_timestamp::set(crate::timestamp::GetCurrentTimestamp);
+    ts::timestamp_timestamptz_requires_rewrite::set(
+        crate::timestamp::TimestampTimestampTzRequiresRewrite,
+    );
     ts::timestamptz_to_time_t::set(crate::convert::timestamptz_to_time_t);
     ts::timestamptz_pl_interval::set(seam_timestamptz_pl_interval);
     ts::interval_lerp::set(seam_interval_lerp);

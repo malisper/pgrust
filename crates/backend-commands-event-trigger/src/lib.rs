@@ -35,7 +35,8 @@ use core::cell::RefCell;
 use mcx::{Mcx, MemoryContext};
 use types_catalog::catalog::{
     AUTH_ID_RELATION_ID, AUTH_MEM_RELATION_ID, DATABASE_RELATION_ID, EVENT_TRIGGER_RELATION_ID,
-    PARAMETER_ACL_RELATION_ID, PROCEDURE_RELATION_ID, RELATION_RELATION_ID, TABLE_SPACE_RELATION_ID,
+    OPERATOR_CLASS_RELATION_ID, OPERATOR_FAMILY_RELATION_ID, PARAMETER_ACL_RELATION_ID,
+    PROCEDURE_RELATION_ID, RELATION_RELATION_ID, TABLE_SPACE_RELATION_ID,
 };
 use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use types_catalog::pg_event_trigger::PgEventTriggerInsertRow;
@@ -1441,25 +1442,78 @@ pub fn event_trigger_collect_simple_command_publication(
     })
 }
 
+/// Build a qualified-name `List *` of `String` value nodes
+/// (`PgVec<NodePtr>`) in `mcx` from a `Vec<StringNode>`, mirroring the grammar's
+/// `opfamilyname`/`opclassname` representation.
+fn opclass_name_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    names: &[types_opclass::StringNode],
+) -> PgResult<mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>>> {
+    let mut out = mcx::vec_with_capacity_in(mcx, names.len())?;
+    for n in names {
+        let sval = mcx::PgString::from_str_in(n.sval.as_deref().unwrap_or(""), mcx)?;
+        let node = Node::mk_string(mcx, types_nodes::value::StringNode { sval })?;
+        out.push(mcx::alloc_in(mcx, node)?);
+    }
+    Ok(out)
+}
+
 /// `EventTriggerCollectSimpleCommand` (event_trigger.c) for a CREATE OPERATOR
 /// FAMILY `CreateOpFamilyStmt` (opclasscmds.c `CreateOpFamily`). No-op without
 /// an active collection state (the standalone / no-trigger case), matching the
-/// C early `return`. The active path would deep-copy the statement into the
-/// state arena like its `Node`-typed sibling above; that command-deparse path
-/// is the deeper sub-campaign and is not modelled here, so it loudly stops.
+/// C early `return`. The active path deep-copies the statement into the state
+/// arena and appends an `SCT_Simple` `CollectedCommand`. `pg_event_trigger_
+/// ddl_commands` reads only the command tag (from the parse tree's node kind)
+/// and the object_type/identity (from `address`); the `pg_ddl_command` deparse
+/// pointer, which is the only field the `operators`/`procedures` member lists
+/// feed, is never modelled (the reader leaves that column NULL).
 pub fn event_trigger_collect_simple_command_opfamily(
-    _address: ObjectAddress,
-    _secondary_object: ObjectAddress,
-    _stmt: &types_opclass::CreateOpFamilyStmt,
+    address: ObjectAddress,
+    secondary_object: ObjectAddress,
+    stmt: &types_opclass::CreateOpFamilyStmt,
 ) -> PgResult<()> {
     if !collecting() {
         return Ok(());
     }
-    panic!(
-        "EventTriggerCollectSimpleCommand: CREATE OPERATOR FAMILY command \
-         collection is part of the command-deparse sub-campaign and is not \
-         modelled here"
-    );
+
+    let in_extension = extension_seams::creating_extension::call();
+
+    CURRENT_STATE.with(|s| {
+        let mut stack = s.borrow_mut();
+        let st = match stack.last_mut() {
+            Some(st) => st,
+            None => return Ok(()),
+        };
+
+        let mcx = st.cmd_cxt.mcx();
+        let ddl = types_nodes::ddlnodes::CreateOpFamilyStmt {
+            opfamilyname: opclass_name_list(mcx, &stmt.opfamilyname)?,
+            amname: match &stmt.amname {
+                Some(a) => Some(mcx::PgString::from_str_in(a, mcx)?),
+                None => None,
+            },
+        };
+        let copied = Node::mk_create_op_family_stmt(mcx, ddl)?;
+        // SAFETY: `copied` lives in `cmd_cxt`; `command_list` is dropped before
+        // `cmd_cxt` (field order in `EventTriggerQueryState`), so the copy never
+        // outlives its arena — same invariant as the generic collector above.
+        let copied: Node<'static> =
+            unsafe { core::mem::transmute::<Node<'_>, Node<'static>>(copied) };
+
+        let command = CollectedCommand {
+            in_extension,
+            parsetree: copied,
+            address,
+            secondary_object,
+            data: CollectedCommandData::Simple,
+        };
+
+        st.command_list
+            .try_reserve(1)
+            .map_err(|_| st.cmd_cxt.oom(core::mem::size_of::<CollectedCommand>()))?;
+        st.command_list.push(command);
+        Ok(())
+    })
 }
 
 /// `EventTriggerCollectCreateOpClass(stmt, opclassoid, operators, procedures)`
@@ -1469,19 +1523,67 @@ pub fn event_trigger_collect_simple_command_opfamily(
 /// command variant that is part of the command-deparse sub-campaign and is not
 /// modelled here.
 pub fn event_trigger_collect_create_opclass(
-    _stmt: &types_opclass::CreateOpClassStmt,
-    _opclassoid: Oid,
+    stmt: &types_opclass::CreateOpClassStmt,
+    opclassoid: Oid,
     _operators: &[types_opclass::OpFamilyMember],
     _procedures: &[types_opclass::OpFamilyMember],
 ) -> PgResult<()> {
     if !collecting() {
         return Ok(());
     }
-    panic!(
-        "EventTriggerCollectCreateOpClass: the SCT_CreateOpClass collected \
-         command (with its operator/procedure member lists) is part of the \
-         command-deparse sub-campaign and is not modelled here"
-    );
+
+    let in_extension = extension_seams::creating_extension::call();
+
+    CURRENT_STATE.with(|s| {
+        let mut stack = s.borrow_mut();
+        let st = match stack.last_mut() {
+            Some(st) => st,
+            None => return Ok(()),
+        };
+
+        let mcx = st.cmd_cxt.mcx();
+        // The deparse-only fields (`datatype`/`items`) are not read by the
+        // ddl_commands tag/type/identity reader; the SCT_CreateOpClass deparse
+        // pointer (fed by `operators`/`procedures`) is left NULL by the reader.
+        let ddl = types_nodes::ddlnodes::CreateOpClassStmt {
+            opclassname: opclass_name_list(mcx, &stmt.opclassname)?,
+            opfamilyname: opclass_name_list(mcx, &stmt.opfamilyname)?,
+            amname: match &stmt.amname {
+                Some(a) => Some(mcx::PgString::from_str_in(a, mcx)?),
+                None => None,
+            },
+            datatype: None,
+            items: mcx::PgVec::new_in(mcx),
+            isDefault: stmt.isDefault,
+        };
+        let copied = Node::mk_create_op_class_stmt(mcx, ddl)?;
+        // SAFETY: see the opfamily collector above — `copied` lives in `cmd_cxt`
+        // and never outlives the arena (`command_list` drops first).
+        let copied: Node<'static> =
+            unsafe { core::mem::transmute::<Node<'_>, Node<'static>>(copied) };
+
+        // ObjectAddressSet(command->d.createopc.address,
+        //                  OperatorClassRelationId, opclassoid)
+        let address = ObjectAddress {
+            classId: OPERATOR_CLASS_RELATION_ID,
+            objectId: opclassoid,
+            objectSubId: 0,
+        };
+
+        let command = CollectedCommand {
+            in_extension,
+            parsetree: copied,
+            address,
+            secondary_object: InvalidObjectAddress,
+            data: CollectedCommandData::Simple,
+        };
+
+        st.command_list
+            .try_reserve(1)
+            .map_err(|_| st.cmd_cxt.oom(core::mem::size_of::<CollectedCommand>()))?;
+        st.command_list.push(command);
+        Ok(())
+    })
 }
 
 /// `EventTriggerCollectAlterOpFam(stmt, opfamilyoid, operators, procedures)`
@@ -1490,18 +1592,62 @@ pub fn event_trigger_collect_create_opclass(
 /// `SCT_AlterOpFamily` `CollectedCommand`, part of the unmodelled
 /// command-deparse sub-campaign.
 pub fn event_trigger_collect_alter_opfam(
-    _stmt: &types_opclass::AlterOpFamilyStmt,
-    _opfamilyoid: Oid,
+    stmt: &types_opclass::AlterOpFamilyStmt,
+    opfamilyoid: Oid,
     _operators: &[types_opclass::OpFamilyMember],
     _procedures: &[types_opclass::OpFamilyMember],
 ) -> PgResult<()> {
     if !collecting() {
         return Ok(());
     }
-    panic!(
-        "EventTriggerCollectAlterOpFam: the SCT_AlterOpFamily collected command \
-         is part of the command-deparse sub-campaign and is not modelled here"
-    );
+
+    let in_extension = extension_seams::creating_extension::call();
+
+    CURRENT_STATE.with(|s| {
+        let mut stack = s.borrow_mut();
+        let st = match stack.last_mut() {
+            Some(st) => st,
+            None => return Ok(()),
+        };
+
+        let mcx = st.cmd_cxt.mcx();
+        // `items` is a deparse-only field, not read by the ddl_commands reader.
+        let ddl = types_nodes::ddlnodes::AlterOpFamilyStmt {
+            opfamilyname: opclass_name_list(mcx, &stmt.opfamilyname)?,
+            amname: match &stmt.amname {
+                Some(a) => Some(mcx::PgString::from_str_in(a, mcx)?),
+                None => None,
+            },
+            isDrop: stmt.isDrop,
+            items: mcx::PgVec::new_in(mcx),
+        };
+        let copied = Node::mk_alter_op_family_stmt(mcx, ddl)?;
+        // SAFETY: see the opfamily collector above.
+        let copied: Node<'static> =
+            unsafe { core::mem::transmute::<Node<'_>, Node<'static>>(copied) };
+
+        // ObjectAddressSet(command->d.opfam.address,
+        //                  OperatorFamilyRelationId, opfamoid)
+        let address = ObjectAddress {
+            classId: OPERATOR_FAMILY_RELATION_ID,
+            objectId: opfamilyoid,
+            objectSubId: 0,
+        };
+
+        let command = CollectedCommand {
+            in_extension,
+            parsetree: copied,
+            address,
+            secondary_object: InvalidObjectAddress,
+            data: CollectedCommandData::Simple,
+        };
+
+        st.command_list
+            .try_reserve(1)
+            .map_err(|_| st.cmd_cxt.oom(core::mem::size_of::<CollectedCommand>()))?;
+        st.command_list.push(command);
+        Ok(())
+    })
 }
 
 /// `EventTriggerAlterTableStart(parsetree)` (event_trigger.c:1753) — begin

@@ -133,6 +133,11 @@ fn object_address_subset(class_id: Oid, object_id: Oid, sub: i32) -> ObjectAddre
 // ATColumnChangeRequiresRewrite (tablecmds.c:14678)
 // ===========================================================================
 
+/// `F_TIMESTAMP_TIMESTAMPTZ` (utils/fmgroids.h) — `timestamp_timestamptz(timestamp)`.
+const F_TIMESTAMP_TIMESTAMPTZ: Oid = 2027;
+/// `F_TIMESTAMPTZ_TIMESTAMP` (utils/fmgroids.h) — `timestamptz_timestamp(timestamptz)`.
+const F_TIMESTAMPTZ_TIMESTAMP: Oid = 2028;
+
 /// `ATColumnChangeRequiresRewrite(Node *expr, AttrNumber varattno)`
 /// (tablecmds.c:14678). When the data type of a column is changed, a rewrite
 /// might not be required if the new type is sufficiently identical to the old
@@ -158,13 +163,23 @@ fn ATColumnChangeRequiresRewrite(expr: &Expr, varattno: AttrNumber) -> PgResult<
                 cur = d.arg.as_deref().expect("CoerceToDomain.arg is NULL");
             }
             Expr::FuncExpr(f) => {
-                // The only no-rewrite FuncExpr case in C is the
-                // timestamp<->timestamptz pair under a UTC session
-                // (TimestampTimestampTzRequiresRewrite). That predicate is not
-                // yet ported; conservatively require a rewrite (the always-safe
-                // direction — the table is rewritten, never silently skipped).
-                let _ = f;
-                return Ok(true);
+                // The only no-rewrite FuncExpr cases are the
+                // timestamp<->timestamptz pair when the session timezone makes
+                // the conversion a no-op (TimestampTimestampTzRequiresRewrite);
+                // every other function requires a rewrite.
+                match f.funcid {
+                    F_TIMESTAMPTZ_TIMESTAMP | F_TIMESTAMP_TIMESTAMPTZ => {
+                        if backend_utils_adt_timestamp_seams::timestamp_timestamptz_requires_rewrite::call() {
+                            return Ok(true);
+                        }
+                        // expr = linitial(f->args)
+                        cur = f
+                            .args
+                            .first()
+                            .expect("timestamp<->timestamptz FuncExpr has no args");
+                    }
+                    _ => return Ok(true),
+                }
             }
             _ => return Ok(true),
         }

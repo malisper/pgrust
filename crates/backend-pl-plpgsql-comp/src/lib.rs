@@ -135,6 +135,11 @@ thread_local! {
 
     /// `char *plpgsql_error_funcname;`
     static PLPGSQL_ERROR_FUNCNAME: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Tracks `plpgsql_latest_lineno(yyscanner)` for the compile error-context
+    /// callback. `plpgsql_scanner_init` resets `cur_line_num` to 1, so a
+    /// semantic compile error raised before/around the parse reports "near line
+    /// 1"; the parse advances it.
+    static PLPGSQL_LATEST_LINENO: RefCell<i32> = const { RefCell::new(1) };
     /// `bool plpgsql_DumpExecTree = false;`
     static PLPGSQL_DUMP_EXEC_TREE: RefCell<bool> = const { RefCell::new(false) };
     /// `bool plpgsql_check_syntax = false;`
@@ -179,6 +184,34 @@ fn set_check_syntax(value: bool) {
 /// Read `plpgsql_error_funcname`.
 pub fn plpgsql_error_funcname() -> Option<String> {
     PLPGSQL_ERROR_FUNCNAME.with(|f| f.borrow().clone())
+}
+
+/// Set the tracked `plpgsql_latest_lineno` (called by the parse with the
+/// scanner's final value; reset to 1 at the start of each compile).
+fn set_latest_lineno(lineno: i32) {
+    PLPGSQL_LATEST_LINENO.with(|f| *f.borrow_mut() = lineno);
+}
+fn latest_lineno() -> i32 {
+    PLPGSQL_LATEST_LINENO.with(|f| *f.borrow())
+}
+
+/// `plpgsql_compile_error_callback` (pl_comp.c) — the "near line N" fallback
+/// the error_context_stack callback adds for any error raised during a compile.
+/// Mirrors the callback's final `errcontext(...)`: applied once, and only if the
+/// parse phase did not already attach the (transposed) "compilation of …" line.
+fn add_compile_error_context(e: PgError) -> PgError {
+    if e.context()
+        .is_some_and(|c| c.contains("compilation of PL/pgSQL function"))
+    {
+        return e;
+    }
+    if let Some(funcname) = plpgsql_error_funcname() {
+        return e.with_context(format!(
+            "compilation of PL/pgSQL function \"{funcname}\" near line {}",
+            latest_lineno()
+        ));
+    }
+    e
 }
 
 /// `ereport(ERROR, (errcode(code), errmsg(msg)))` — raise a structured error
@@ -1694,6 +1727,11 @@ pub struct ProcCompileFacts {
 /// `plpgsql_compile_inline` — make an execution tree for an anonymous code
 /// block (`DO`).  Generally parallel to the non-trigger compile.
 pub fn plpgsql_compile_inline(proc_source: String) -> PgResult<PLpgSQL_function> {
+    set_latest_lineno(1);
+    plpgsql_compile_inline_inner(proc_source).map_err(add_compile_error_context)
+}
+
+fn plpgsql_compile_inline_inner(proc_source: String) -> PgResult<PLpgSQL_function> {
     let func_name = "inline_code_block";
 
     PLPGSQL_ERROR_FUNCNAME.with(|f| *f.borrow_mut() = Some(mem::sdup(func_name)));
@@ -1767,6 +1805,14 @@ pub fn plpgsql_compile_inline(proc_source: String) -> PgResult<PLpgSQL_function>
 /// non-trigger scalar/procedure branch).  Trigger / event-trigger functions
 /// take the gated trigtype branches and are not handled on this cold path.
 pub fn plpgsql_compile_from_source(facts: &ProcCompileFacts) -> PgResult<PLpgSQL_function> {
+    // `plpgsql_scanner_init` resets cur_line_num to 1 before the trigtype checks
+    // and the parse; mirror that so an early semantic compile error reports
+    // "near line 1". The error-context callback wraps the whole compile.
+    set_latest_lineno(1);
+    plpgsql_compile_from_source_inner(facts).map_err(add_compile_error_context)
+}
+
+fn plpgsql_compile_from_source_inner(facts: &ProcCompileFacts) -> PgResult<PLpgSQL_function> {
     let mut num_out_args: i32 = 0;
     let mut in_arg_varnos: Vec<i32> = Vec::new();
     let mut out_arg_variables: Vec<i32> = Vec::new();
@@ -2139,6 +2185,8 @@ fn parse_function_body(src: &str) -> PgResult<Box<PLpgSQL_stmt_block>> {
     // the same `PgError` it would have raised; run the transpose on it before
     // propagating, mirroring the C error-context callback.
     backend_pl_plpgsql_gram::plpgsql_yyparse_with_lineno(scanner).map_err(|(e, latest_lineno)| {
+        // Record the scanner's final line for any later compile error-context.
+        set_latest_lineno(latest_lineno);
         // `plpgsql_compile_error_callback` (pl_comp.c): first try to relocate the
         // body-relative cursor position into the original CREATE FUNCTION / DO
         // text. If `function_parse_error_transpose` reports a syntax-error

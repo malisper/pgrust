@@ -340,10 +340,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `reindex_relation(NULL, relid, flags, &params)` (index.c) — rebuilds
-    /// every index on the heap; ends with CommandCounterIncrement.
+    /// `reindex_relation(stmt, relid, flags, &params)` (index.c) — rebuilds
+    /// every index on the heap; ends with CommandCounterIncrement. `stmt` is
+    /// `Some` only when invoked from a REINDEX command (indexcmds.c
+    /// `ReindexTable` / `ReindexMultipleInternal`): it is threaded to
+    /// `reindex_index` so each rebuilt index is collected for `ddl_command_end`
+    /// event triggers. CLUSTER / VACUUM FULL / TRUNCATE pass `None` (C `NULL`).
     pub fn reindex_relation<'mcx>(
         mcx: mcx::Mcx<'mcx>,
+        stmt: Option<&types_nodes::ddlnodes::ReindexStmt<'mcx>>,
         relid: types_core::Oid,
         flags: i32,
         params: types_cluster::ReindexParams,

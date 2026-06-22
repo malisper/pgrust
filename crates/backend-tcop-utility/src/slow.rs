@@ -510,21 +510,22 @@ fn process_utility_slow_body<'mcx>(
         }
 
         t if t == ntag::T_CreateOpClassStmt => {
-            address = rt::define_op_class::call(mcx, parsetree)?;
+            rt::define_op_class::call(mcx, parsetree)?;
+            // command is stashed in DefineOpClass (EventTriggerCollectCreateOpClass).
+            command_collected = true;
         }
 
         t if t == ntag::T_CreateOpFamilyStmt => {
             address = rt::define_op_family::call(mcx, parsetree)?;
+            // DefineOpFamily calls EventTriggerCollectSimpleCommand directly.
+            command_collected = true;
         }
 
         t if t == ntag::T_AlterOpFamilyStmt => {
-            // ObjectAddressSet(address, OperatorFamilyRelationId, AlterOpFamily(stmt))
-            let opfamilyoid = rt::alter_op_family::call(mcx, parsetree)?;
-            address = ObjectAddress {
-                classId: types_catalog::catalog::OPERATOR_FAMILY_RELATION_ID,
-                objectId: opfamilyoid,
-                objectSubId: 0,
-            };
+            // AlterOpFamily(stmt) — commands are stashed in AlterOpFamily
+            // (EventTriggerCollectAlterOpFam); the call also fixes the address.
+            rt::alter_op_family::call(mcx, parsetree)?;
+            command_collected = true;
         }
 
         t if t == ntag::T_CreateAmStmt => {
