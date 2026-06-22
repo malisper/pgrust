@@ -88,6 +88,7 @@ const BOOLOID: u32 = 16;
 const INT4OID: u32 = 23;
 const TEXTOID: u32 = 25;
 const UNKNOWNOID: u32 = 705;
+const JSONBOID: u32 = 3802;
 const NUMERICOID: u32 = 1700;
 
 /// `utils/fmgroids.h` builtin-function OIDs referenced by `get_func_sql_syntax`.
@@ -585,6 +586,188 @@ fn get_json_path_spec(
     } else {
         let n = Node::mk_expr(mcx, path_spec.clone_in(mcx)?)?;
         get_rule_expr(&n, context, showimplicit)
+    }
+}
+
+/// `get_json_format(format, buf)` (ruleutils.c:11627) — parse back a JsonFormat
+/// node into a plain text buffer. 1:1 port.
+fn get_json_format(format: &types_nodes::primnodes::JsonFormat, buf: &mut String) {
+    use types_nodes::primnodes::JsonEncoding::*;
+    use types_nodes::primnodes::JsonFormatType::*;
+
+    if format.format_type == JS_FORMAT_DEFAULT {
+        return;
+    }
+
+    buf.push_str(if format.format_type == JS_FORMAT_JSONB {
+        " FORMAT JSONB"
+    } else {
+        " FORMAT JSON"
+    });
+
+    if format.encoding != JS_ENC_DEFAULT {
+        let encoding = match format.encoding {
+            JS_ENC_UTF16 => "UTF16",
+            JS_ENC_UTF32 => "UTF32",
+            _ => "UTF8",
+        };
+        buf.push_str(" ENCODING ");
+        buf.push_str(encoding);
+    }
+}
+
+/// `get_json_returning(returning, buf, json_format_by_default)`
+/// (ruleutils.c:11652) — parse back a JsonReturning structure into a plain text
+/// buffer. 1:1 port.
+fn get_json_returning(
+    mcx: Mcx<'_>,
+    returning: &types_nodes::primnodes::JsonReturning,
+    buf: &mut String,
+    json_format_by_default: bool,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonFormatType::{JS_FORMAT_JSON, JS_FORMAT_JSONB};
+
+    if !oid_is_valid(returning.typid) {
+        return Ok(());
+    }
+
+    let tname = format_type_with_typemod(mcx, returning.typid, returning.typmod)?;
+    buf.push_str(" RETURNING ");
+    buf.push_str(tname.as_str());
+
+    // returning->format is a NOT NULL field in C.
+    let format = returning
+        .format
+        .as_ref()
+        .ok_or_else(|| missing_field("JsonReturning.format"))?;
+
+    let default_format = if returning.typid == JSONBOID {
+        JS_FORMAT_JSONB
+    } else {
+        JS_FORMAT_JSON
+    };
+    if !json_format_by_default || format.format_type != default_format {
+        get_json_format(format, buf);
+    }
+    Ok(())
+}
+
+/// `get_json_constructor(ctor, context, showimplicit)` (ruleutils.c:11672) —
+/// parse back a JsonConstructorExpr node. 1:1 port.
+fn get_json_constructor(
+    ctor: &types_nodes::primnodes::JsonConstructorExpr,
+    context: &mut DeparseContext<'_>,
+    _showimplicit: bool,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonConstructorType::*;
+
+    if ctor.r#type == JSCTOR_JSON_OBJECTAGG {
+        return get_json_agg_constructor(ctor, context, "JSON_OBJECTAGG", true);
+    } else if ctor.r#type == JSCTOR_JSON_ARRAYAGG {
+        return get_json_agg_constructor(ctor, context, "JSON_ARRAYAGG", false);
+    }
+
+    let funcname = match ctor.r#type {
+        JSCTOR_JSON_OBJECT => "JSON_OBJECT",
+        JSCTOR_JSON_ARRAY => "JSON_ARRAY",
+        JSCTOR_JSON_PARSE => "JSON",
+        JSCTOR_JSON_SCALAR => "JSON_SCALAR",
+        JSCTOR_JSON_SERIALIZE => "JSON_SERIALIZE",
+        other => {
+            return Err(elog_error(format!("invalid JsonConstructorType {}", other as u32)))
+        }
+    };
+
+    str_(context, funcname)?;
+    ch_(context, b'(')?;
+
+    let is_json_object = ctor.r#type == JSCTOR_JSON_OBJECT;
+    for (curridx, arg) in ctor.args.iter().enumerate() {
+        if curridx > 0 {
+            let sep = if is_json_object && (curridx % 2) != 0 {
+                " : "
+            } else {
+                ", "
+            };
+            str_(context, sep)?;
+        }
+        get_rule_expr_e(arg, context, true)?;
+    }
+
+    let mut options = String::new();
+    get_json_constructor_options(context.buf.allocator(), ctor, &mut options)?;
+    str_(context, &options)?;
+    ch_(context, b')')?;
+    Ok(())
+}
+
+/// `get_json_constructor_options(ctor, buf)` (ruleutils.c:11738) — append the
+/// JSON constructor options (ABSENT/NULL ON NULL, WITH UNIQUE KEYS, RETURNING)
+/// into a plain text buffer. 1:1 port.
+fn get_json_constructor_options(
+    mcx: Mcx<'_>,
+    ctor: &types_nodes::primnodes::JsonConstructorExpr,
+    buf: &mut String,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonConstructorType::*;
+
+    if ctor.absent_on_null {
+        if ctor.r#type == JSCTOR_JSON_OBJECT || ctor.r#type == JSCTOR_JSON_OBJECTAGG {
+            buf.push_str(" ABSENT ON NULL");
+        }
+    } else if ctor.r#type == JSCTOR_JSON_ARRAY || ctor.r#type == JSCTOR_JSON_ARRAYAGG {
+        buf.push_str(" NULL ON NULL");
+    }
+
+    if ctor.unique {
+        buf.push_str(" WITH UNIQUE KEYS");
+    }
+
+    // Append RETURNING clause if needed; JSON() and JSON_SCALAR() don't support
+    // one.
+    if ctor.r#type != JSCTOR_JSON_PARSE && ctor.r#type != JSCTOR_JSON_SCALAR {
+        let returning = ctor
+            .returning
+            .as_ref()
+            .ok_or_else(|| missing_field("JsonConstructorExpr.returning"))?;
+        get_json_returning(mcx, returning, buf, true)?;
+    }
+    Ok(())
+}
+
+/// `get_json_agg_constructor(ctor, context, funcname, is_json_objectagg)`
+/// (ruleutils.c:11768) — parse back an aggregate JsonConstructorExpr node. 1:1
+/// port.
+fn get_json_agg_constructor(
+    ctor: &types_nodes::primnodes::JsonConstructorExpr,
+    context: &mut DeparseContext<'_>,
+    funcname: &str,
+    is_json_objectagg: bool,
+) -> PgResult<()> {
+    let mut options = String::new();
+    get_json_constructor_options(context.buf.allocator(), ctor, &mut options)?;
+
+    let func = ctor
+        .func
+        .as_deref()
+        .ok_or_else(|| missing_field("JsonConstructorExpr.func"))?;
+
+    match func {
+        Expr::Aggref(_) => get_agg_expr_helper(
+            func,
+            context,
+            func,
+            Some(funcname),
+            Some(&options),
+            is_json_objectagg,
+        ),
+        Expr::WindowFunc(_) => {
+            get_windowfunc_expr_helper(func, context, Some(funcname), Some(&options), is_json_objectagg)
+        }
+        other => Err(elog_error(format!(
+            "invalid JsonConstructorExpr underlying node type: {:?}",
+            core::mem::discriminant(other)
+        ))),
     }
 }
 
@@ -1635,18 +1818,101 @@ fn get_rule_expr_e(
                 str_(context, &opcbuf)?;
             }
         }
-        Expr::JsonValueExpr(_) => {
-            return Err(deferred("JsonValueExpr (get_json_format; JSON deparser family)"))
+        Expr::JsonValueExpr(jve) => {
+            // C `case T_JsonValueExpr:` (ruleutils.c:10488).
+            //   get_rule_expr((Node *) jve->raw_expr, context, false);
+            //   get_json_format(jve->format, context->buf);
+            if let Some(raw) = jve.raw_expr.as_deref() {
+                get_rule_expr_e(raw, context, false)?;
+            }
+            if let Some(format) = jve.format.as_ref() {
+                let mut tmp = String::new();
+                get_json_format(format, &mut tmp);
+                str_(context, &tmp)?;
+            }
         }
-        Expr::JsonConstructorExpr(_) => {
-            return Err(deferred(
-                "JsonConstructorExpr (get_json_constructor; JSON deparser family)",
-            ))
+        Expr::JsonConstructorExpr(ctor) => {
+            // C `case T_JsonConstructorExpr:` (ruleutils.c:10497).
+            get_json_constructor(ctor, context, false)?;
         }
-        Expr::JsonExpr(_) => {
-            return Err(deferred(
-                "JsonExpr (get_json_table / JSON_*_OP renderer; JSON deparser family)",
-            ))
+        Expr::JsonExpr(jexpr) => {
+            // C `case T_JsonExpr:` (ruleutils.c:10537).
+            use types_nodes::primnodes::JsonBehaviorType::{
+                JSON_BEHAVIOR_FALSE, JSON_BEHAVIOR_NULL,
+            };
+            use types_nodes::primnodes::JsonExprOp::{
+                JSON_EXISTS_OP, JSON_QUERY_OP, JSON_VALUE_OP,
+            };
+
+            let opname = match jexpr.op {
+                JSON_EXISTS_OP => "JSON_EXISTS(",
+                JSON_QUERY_OP => "JSON_QUERY(",
+                JSON_VALUE_OP => "JSON_VALUE(",
+                other => {
+                    return Err(elog_error(format!(
+                        "unrecognized JsonExpr op: {}",
+                        other as u32
+                    )))
+                }
+            };
+            str_(context, opname)?;
+
+            if let Some(fe) = jexpr.formatted_expr.as_deref() {
+                get_rule_expr_e(fe, context, showimplicit)?;
+            }
+
+            str_(context, ", ")?;
+
+            let path_spec = jexpr
+                .path_spec
+                .as_deref()
+                .ok_or_else(|| missing_field("JsonExpr.path_spec"))?;
+            get_json_path_spec(path_spec, context, showimplicit)?;
+
+            if !jexpr.passing_values.is_empty() {
+                str_(context, " PASSING ")?;
+                let mut needcomma = false;
+                let mcx = context.buf.allocator();
+                for (name, val) in jexpr.passing_names.iter().zip(jexpr.passing_values.iter()) {
+                    if needcomma {
+                        str_(context, ", ")?;
+                    }
+                    needcomma = true;
+
+                    get_rule_expr_e(val, context, showimplicit)?;
+                    let q = quote_identifier(mcx, name)?;
+                    str_(context, " AS ")?;
+                    str_(context, q.as_str())?;
+                }
+            }
+
+            // returning is a NOT NULL field in C.
+            let returning = jexpr
+                .returning
+                .as_ref()
+                .ok_or_else(|| missing_field("JsonExpr.returning"))?;
+            if jexpr.op != JSON_EXISTS_OP || returning.typid != BOOLOID {
+                let mut tmp = String::new();
+                get_json_returning(
+                    context.buf.allocator(),
+                    returning,
+                    &mut tmp,
+                    jexpr.op == JSON_QUERY_OP,
+                )?;
+                str_(context, &tmp)?;
+            }
+
+            get_json_expr_options(
+                jexpr,
+                context,
+                if jexpr.op != JSON_EXISTS_OP {
+                    JSON_BEHAVIOR_NULL
+                } else {
+                    JSON_BEHAVIOR_FALSE
+                },
+            )?;
+
+            ch_(context, b')')?;
         }
         // Planner-internal / not-in-scope expression nodes (PlaceHolderVar,
         // RestrictInfo, and any variant the deparser never legitimately walks):
