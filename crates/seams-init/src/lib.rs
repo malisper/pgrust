@@ -1338,13 +1338,13 @@ mod recurrence_guard {
         // owned by backend-commands-functioncmds on the
         // `backend_tcop_utility_out_seams::call_stmt_result_desc` seam, reading
         // the live transformed `T_CallStmt` funcexpr/outargs.)
-        // nodes-core re-homes this cross-unit DESIGN_DEBT seam onto its own
-        // -seams crate so the guard can track it (see DESIGN_DEBT.md). It reads
-        // the unported call-expression node tree (FuncExpr/OpExpr/RowExpr/Const)
-        // and folds into funcapi's `internal_get_result_type` tupdesc spine — no
-        // funcapi callback seam exists yet, so the body stays seam-and-panic
-        // (mirror-pg-and-panic) until that owner lands.
-        ("backend_nodes_core", "get_expr_result_type_node"),
+        // (`get_expr_result_type_node` is now RETIRED: the RECORD-type-Const arm
+        // of funcapi's get_expr_result_type — reached only by EXPLAIN of
+        // SEARCH/CYCLE recursive CTEs — is ported in place over the composite
+        // Datum's HeapTupleHeader (datum_typeid/datum_typmod) +
+        // lookup_rowtype_tupdesc_copy, so the funcapi caller no longer routes to
+        // this seam. The seam declaration and its nodes-core no-op install are
+        // removed.)
         // DESIGN_DEBT (provider-unported): the CustomScan/CustomScanState
         // provider callbacks (extensible.h `CustomScanMethods` /
         // `CustomExecMethods`, dispatched by nodeCustom.c through

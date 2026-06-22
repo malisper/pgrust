@@ -333,23 +333,10 @@ seam_core::seam!(
 // descriptor spine through `funcapi`'s `build_function_result_tupdesc_t` seam,
 // so this is no longer a nodes-core seam.
 
-seam_core::seam!(
-    /// The non-`FuncExpr`/`OpExpr` arms of `get_expr_result_type` (funcapi.c):
-    /// the `IsA` dispatch over `RowExpr`/`Const`/generic expression that
-    /// inspects the expression node's tag and per-variant fields (`row_typeid`,
-    /// `args`/`colnames`, the RECORD `Const` datum) and runs `exprType` /
-    /// `CreateTemplateTupleDesc` / `BlessTupleDesc` / `lookup_rowtype_tupdesc_copy`
-    /// / `get_type_func_class` over them. Re-homed here (from
-    /// `backend-nodes-nodeFuncs-seams`) onto the `backend-nodes-core` owner so
-    /// the guard can track it. The expression-node tree is owned by the
-    /// nodeFuncs/parser side and the FuncExpr/OpExpr funnel folds back into the
-    /// funcapi-owned `internal_get_result_type` (no callback seam exists yet), so
-    /// the body still lands behind the real owners — DESIGN_DEBT
-    /// (CONTRACT_RECONCILE_PENDING). `expr == None` is the C `NULL` (generic
-    /// `exprType` path on a NULL node). `Err` carries the lookup/
-    /// `assign_record_type_typmod` `ereport(ERROR)` surface.
-    pub fn get_expr_result_type_node<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        expr: Option<&types_nodes::nodes::Node<'mcx>>,
-    ) -> types_error::PgResult<types_nodes::funcapi::ResolvedResultType<'mcx>>
-);
+// `get_expr_result_type_node` is RETIRED. All arms of funcapi's
+// `get_expr_result_type` (funcapi.c) — including the RECORD-type-`Const` arm
+// reached only by EXPLAIN of SEARCH/CYCLE recursive CTEs — are now ported in
+// place inside `backend-utils-fmgr-funcapi` (`result_type::get_expr_result_type`),
+// reading the composite Datum's `HeapTupleHeader` (`datum_typeid`/`datum_typmod`)
+// and resolving the tupdesc through `lookup_rowtype_tupdesc_copy`. The funcapi
+// caller no longer routes back to this seam, so the declaration is removed.

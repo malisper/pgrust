@@ -182,15 +182,51 @@ pub fn get_expr_result_type<'mcx>(
     //        /* resolve field names of a RECORD-type Const from its datum's typmod */
     if let Some(c) = expr.and_then(|n| n.as_const()) {
         if c.consttype == RECORDOID && !c.constisnull {
-            // The RECORD-type Const path inspects the rowtype datum header
-            // (DatumGetHeapTupleHeader / HeapTupleHeaderGetTypeId /
-            // HeapTupleHeaderGetTypMod), which is Datum-model machinery owned
-            // below funcapi (heaptoast/typcache). This arm is reached only by
-            // EXPLAIN of SEARCH/CYCLE recursive CTEs (the C comment notes "we
-            // may need to resolve field names of a RECORD-type Const"); it is
-            // out of scope for any function-in-FROM. Route to the owner seam,
-            // which stays mirror-and-panic until the datum-header readers land.
-            return backend_nodes_core_seams::get_expr_result_type_node::call(mcx, expr);
+            // When EXPLAIN'ing some queries with SEARCH/CYCLE clauses, we may
+            // need to resolve field names of a RECORD-type Const. The datum
+            // should contain a typmod that will tell us that.
+            //
+            // C: rec = DatumGetHeapTupleHeader(((Const *) expr)->constvalue);
+            //    tupType = HeapTupleHeaderGetTypeId(rec);
+            //    tupTypmod = HeapTupleHeaderGetTypMod(rec);
+            //
+            // The composite Datum carries the rowtype header either as a live
+            // `FormedTuple` (Datum::Composite) or as a flat varlena image
+            // (Datum::ByRef); both decode the same DatumTupleFields header
+            // (datum_typeid / datum_typmod) that C reads off the
+            // HeapTupleHeader.
+            use types_tuple::{
+                FormedTuple, HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId,
+            };
+            let formed: FormedTuple<'mcx> = match &c.constvalue {
+                types_tuple::Datum::Composite(t) => t.clone_in(mcx)?,
+                d => FormedTuple::from_datum_image(mcx, d.as_ref_bytes())?,
+            };
+            let header = formed
+                .tuple
+                .t_data
+                .as_ref()
+                .expect("RECORD Const: composite Datum has no header");
+            let tup_type = HeapTupleHeaderGetTypeId(header);
+            let tup_typmod = HeapTupleHeaderGetTypMod(header);
+
+            let mut out = ResolvedResultType::default();
+            // if (resultTypeId) *resultTypeId = tupType;
+            out.result_type_id = Some(tup_type);
+            if tup_type != RECORDOID || tup_typmod >= 0 {
+                // Should be able to look it up.
+                // *resultTupleDesc = lookup_rowtype_tupdesc_copy(tupType, tupTypmod);
+                let td = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_copy::call(
+                    mcx, tup_type, tup_typmod,
+                )?;
+                out.result_tuple_desc = Some(td);
+                out.class = Some(TypeFuncClass::Composite);
+            } else {
+                // This shouldn't really happen ...
+                out.result_tuple_desc = None;
+                out.class = Some(TypeFuncClass::Record);
+            }
+            return Ok(out);
         }
     }
 

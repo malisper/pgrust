@@ -1922,11 +1922,11 @@ pub fn init_seams() {
         cz::expr_type::set(seam_costsize_expr_type);
         cz::expr_typmod::set(seam_costsize_expr_typmod);
     }
-    // `get_expr_result_type_node` reaches into funcapi/tupdesc catalog machinery
-    // owned by backend-utils-fmgr-funcapi (CreateTemplateTupleDesc /
-    // BlessTupleDesc / lookup_rowtype_tupdesc_copy / get_type_func_class); that
-    // lookup spine is not part of this pure-node-inspection family, so the seam
-    // stays installed by its real owner. Not set here.
+    // (`get_expr_result_type_node` is RETIRED: all arms of funcapi's
+    // get_expr_result_type — incl. the RECORD-type-Const arm reached by EXPLAIN
+    // of SEARCH/CYCLE recursive CTEs — are ported in place inside
+    // backend-utils-fmgr-funcapi over the composite Datum's HeapTupleHeader, so
+    // there is no cross-unit seam to install here.)
 
     // The equivclass-ext cycle-break seams initsplan.c / equivclass.c call into
     // nodeFuncs.c (`exprType`/`exprTypmod`/`exprCollation`) over an owned
