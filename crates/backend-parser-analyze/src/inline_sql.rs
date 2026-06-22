@@ -245,7 +245,15 @@ pub fn inline_sql_function<'mcx>(
     // (COERCION_ASSIGNMENT / COERCE_IMPLICIT_CAST). On failure C raises a
     // "return type mismatch" error; that error would equally fire at runtime,
     // so we surface it rather than silently declining.
-    if src_type != result_type && result_type != RECORDOID {
+    //
+    // For a VOID return, check_sql_fn_retval short-circuits (functions.c:2169)
+    // without any coercion: "we don't care what's in the function". So skip the
+    // scalar coercion leg entirely. inline_function then only inlines a VOID
+    // function if its body already returns VOID (the exprType == result_type
+    // guard below); otherwise it declines (goto fail), it does NOT error. So a
+    // VOID function whose body is e.g. `SELECT a + 1` (int) must fall through to
+    // the `expr_type != result_type => Ok(None)` guard, not into this coercion.
+    if !is_void && src_type != result_type && result_type != RECORDOID {
         let coerced = backend_parser_coerce::coerce_to_target_type(
             mcx,
             None,

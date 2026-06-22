@@ -472,6 +472,7 @@ fn fmgr_sql<'mcx>(
         params,
         &form.proname,
         return_rowtype,
+        readonly,
     );
 
     if pushed_snapshot {
@@ -918,7 +919,7 @@ fn check_sql_function_body(mcx: Mcx<'_>, funcoid: Oid) -> PgResult<()> {
         &form.proargtypes,
         InvalidOid,
     );
-    let querytrees = parse_body_queries(
+    let mut querytrees = parse_body_queries(
         mcx,
         prosrc.as_str(),
         prosqlbody.as_ref().map(|s| s.as_str()),
@@ -928,6 +929,26 @@ fn check_sql_function_body(mcx: Mcx<'_>, funcoid: Oid) -> PgResult<()> {
     // check_sql_fn_statements (functions.c:2042): reject calling procedures
     // with output arguments from a SQL function body.
     check_sql_fn_statements(&querytrees)?;
+
+    // get_func_result_type + check_sql_fn_retval (pg_proc.c:980-985): with no
+    // polymorphic argument the result type is fully known at CREATE FUNCTION
+    // time, so validate the body's final targetlist against the declared return
+    // type now — a return-type mismatch (or a non-SELECT/non-RETURNING final
+    // statement) is reported at definition time, not deferred to first call.
+    // get_func_result_type resolves rettype/rettupdesc; with no call expression
+    // rettype is simply prorettype and rettupdesc the OUT-parameter rowtype (if
+    // any). check_sql_fn_retval may insert coercions in place — harmless here
+    // since the validated trees are discarded.
+    let rettupdesc =
+        backend_utils_fmgr_funcapi_seams::build_function_result_tupdesc_t::call(mcx, funcoid)?;
+    backend_parser_analyze::check_sql_fn_retval(
+        mcx,
+        &mut querytrees[..],
+        form.prorettype,
+        rettupdesc.as_deref(),
+        form.prokind,
+        false,
+    )?;
 
     Ok(())
 }
@@ -972,10 +993,18 @@ fn run_body<'mcx>(
     params: ParamListInfo,
     fname: &str,
     return_rowtype: Option<Oid>,
+    readonly: bool,
 ) -> PgResult<Option<CaptureSlot>> {
-    // Rewrite + plan each query. Find the index of the last canSetTag plan: that
-    // one delivers the function result.
-    let mut plans: alloc::vec::Vec<PlannedStmt<'mcx>> = alloc::vec::Vec::new();
+    // Rewrite each query up front (this only takes relation locks, it does not
+    // run the statements), and find the index of the last canSetTag query: that
+    // one delivers the function result. Planning is deferred to the execution
+    // loop below so that DDL earlier in the body (made visible by the per-
+    // statement CommandCounterIncrement) is seen by the planner of a later
+    // statement — e.g. `CREATE TABLE t; INSERT INTO t ...` in one SQL function.
+    // (C functions.c plans each query lazily in the postquel loop for the same
+    // reason; planning all queries up front would make the INSERT's planner fail
+    // to find the not-yet-committed table.)
+    let mut rewritten_queries: alloc::vec::Vec<Query<'mcx>> = alloc::vec::Vec::new();
     let mut last_setstag: Option<usize> = None;
 
     for query in querytrees.iter() {
@@ -990,35 +1019,48 @@ fn run_body<'mcx>(
             rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)?;
         let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)?;
         for rq in rewritten.iter() {
-            // Utility statements require no planning; C wraps them in a trivial
-            // CMD_UTILITY PlannedStmt (copying canSetTag/utilityStmt/etc.) and
-            // executes them via ProcessUtility on the postquel path
-            // (pg_plan_queries / functions.c postquel_getnext). See run_one_query.
-            let plan = if rq.commandType == CmdType::CMD_UTILITY {
-                PlannedStmt::for_utility(mcx, rq)?
-            } else {
-                planner_seams::pg_plan_query::call(
-                    mcx,
-                    rq,
-                    source_text,
-                    CURSOR_OPT_PARALLEL_OK,
-                )?
-            };
-            if plan.canSetTag {
-                last_setstag = Some(plans.len());
+            if rq.canSetTag {
+                last_setstag = Some(rewritten_queries.len());
             }
-            plans.push(plan);
+            rewritten_queries.push(rq.clone_in(mcx)?);
         }
     }
 
     let mut captured: Option<CaptureSlot> = None;
 
-    for (i, plan) in plans.iter().enumerate() {
+    for (i, rq) in rewritten_queries.iter().enumerate() {
+        // For a non-read-only (VOLATILE) function, advance the command counter
+        // before each statement so that work done by earlier statements in the
+        // body — including DDL such as CREATE/ALTER TABLE — is visible to this
+        // statement's planning and execution (functions.c:1684). The active
+        // snapshot's command id was already advanced by the caller's snapshot
+        // push; CommandCounterIncrement makes the catalog changes visible.
+        if !readonly {
+            xact_seams::command_counter_increment::call()?;
+        }
+
+        // Utility statements require no planning; C wraps them in a trivial
+        // CMD_UTILITY PlannedStmt (copying canSetTag/utilityStmt/etc.) and
+        // executes them via ProcessUtility on the postquel path
+        // (pg_plan_queries / functions.c postquel_getnext). See run_one_query.
+        // Plan each query here (lazily) rather than up front, so a later
+        // statement sees DDL committed by an earlier one (see comment above).
+        let plan = if rq.commandType == CmdType::CMD_UTILITY {
+            PlannedStmt::for_utility(mcx, rq)?
+        } else {
+            planner_seams::pg_plan_query::call(
+                mcx,
+                rq,
+                source_text,
+                CURSOR_OPT_PARALLEL_OK,
+            )?
+        };
+
         let is_result = Some(i) == last_setstag;
         // sql_exec_error_callback (functions.c:1929): any error raised while
         // executing an identifiable body statement gets the call-stack context
         // line `SQL function "<fname>" statement <N>` (N = 1-based error_query_index).
-        let cap = run_one_query(mcx, plan, source_text, params.clone(), is_result, return_rowtype)
+        let cap = run_one_query(mcx, &plan, source_text, params.clone(), is_result, return_rowtype)
             .map_err(|e| e.add_context(sql_exec_context(fname, i + 1)))?;
         if is_result {
             captured = cap;

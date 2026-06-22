@@ -816,21 +816,47 @@ fn exec_clean_target_list_length(tlist: &[TargetEntry<'_>]) -> i32 {
     tlist.iter().filter(|tle| !tle.resjunk).count() as i32
 }
 
+/// `format_type_be(oid)` rendered to its printable type name for an error
+/// message; falls back to the raw OID if the type-name lookup itself fails (so
+/// an error is never masked by a secondary cache-lookup failure).
+fn fmt_type(oid: Oid) -> String {
+    match backend_utils_adt_format_type_seams::format_type_be_str::call(oid) {
+        Ok(name) => name,
+        Err(_) => format!("type {oid}"),
+    }
+}
+
 fn retval_mismatch(rettype: Oid, detail: &str) -> PgError {
+    // errmsg("return type mismatch in function declared to return %s",
+    //        format_type_be(rettype)) + errdetail(detail). (functions.c:2224)
     PgError::error(format!(
-        "return type mismatch in function declared to return type {rettype}: {detail}"
+        "return type mismatch in function declared to return {}",
+        fmt_type(rettype)
     ))
+    .with_detail(detail.to_string())
 }
 
 fn retval_mismatch_actual(rettype: Oid, actual: Oid) -> PgError {
+    // errdetail("Actual return type is %s.", format_type_be(...)) (functions.c:2278)
     PgError::error(format!(
-        "return type mismatch in function declared to return type {rettype}: actual return type is {actual}"
+        "return type mismatch in function declared to return {}",
+        fmt_type(rettype)
     ))
+    .with_detail(format!("Actual return type is {}.", fmt_type(actual)))
 }
 
 fn retval_mismatch_col(rettype: Oid, actual: Oid, want: Oid, col: i32) -> PgError {
+    // errdetail("Final statement returns %s instead of %s at column %d.", ...)
+    // (functions.c:2401)
     PgError::error(format!(
-        "return type mismatch in function declared to return type {rettype}: final statement returns {actual} instead of {want} at column {col}"
+        "return type mismatch in function declared to return {}",
+        fmt_type(rettype)
+    ))
+    .with_detail(format!(
+        "Final statement returns {} instead of {} at column {}.",
+        fmt_type(actual),
+        fmt_type(want),
+        col
     ))
 }
 
