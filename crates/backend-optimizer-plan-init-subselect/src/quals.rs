@@ -256,12 +256,12 @@ pub fn distribute_qual_to_rels<'mcx>(
             // EC rejected it, so set left_ec/right_ec the hard way ...
             if !root.rinfo(restrictinfo).mergeopfamilies.is_empty() {
                 // EC might have changed this
-                backend_optimizer_path_pathkeys::initialize_mergeclause_eclasses(root, restrictinfo);
+                backend_optimizer_path_pathkeys::initialize_mergeclause_eclasses(run.mcx(), root, restrictinfo);
             }
             // ... and fall through to distribute_restrictinfo_to_rels.
         } else if maybe_outer_join && root.rinfo(restrictinfo).can_join {
             // we need to set up left_ec/right_ec the hard way
-            backend_optimizer_path_pathkeys::initialize_mergeclause_eclasses(root, restrictinfo);
+            backend_optimizer_path_pathkeys::initialize_mergeclause_eclasses(run.mcx(), root, restrictinfo);
             // now see if it should go to any outer-join lists
             let sj = sjinfo.expect("maybe_outer_join implies sjinfo present");
             let left_relids = bms::relids_copy::call(&root.rinfo(restrictinfo).left_relids);
@@ -288,7 +288,7 @@ pub fn distribute_qual_to_rels<'mcx>(
             // nope, so fall through to distribute_restrictinfo_to_rels
         } else {
             // we still need to set up left_ec/right_ec
-            backend_optimizer_path_pathkeys::initialize_mergeclause_eclasses(root, restrictinfo);
+            backend_optimizer_path_pathkeys::initialize_mergeclause_eclasses(run.mcx(), root, restrictinfo);
         }
     }
 
