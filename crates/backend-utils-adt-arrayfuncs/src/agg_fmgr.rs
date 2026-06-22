@@ -64,6 +64,15 @@ impl ArrayAggInternal {
         let state = construct::init_array_result(element_type, false)?;
         Ok(Box::new(ArrayAggInternal { ctx, state }))
     }
+
+    /// A carrier wrapping an already-built `state` (e.g. one produced by
+    /// `array_agg_deserialize_state`), with a leaked agg context backing its
+    /// by-ref element copies.
+    fn from_state(state: types_datum::array_build::ArrayBuildState) -> Box<ArrayAggInternal> {
+        let ctx: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("array_agg state")));
+        Box::new(ArrayAggInternal { ctx, state })
+    }
 }
 
 /// `PG_ARGISNULL(i)`.
@@ -378,7 +387,312 @@ fn fc_array_agg_array_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult
     }
 }
 
+/// Take the `internal` `ArrayBuildStateArr` transition state out of `args[i]`.
+fn take_array_arr_state_at(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    i: usize,
+) -> Option<Box<ArrayAggArrInternal>> {
+    if arg_isnull(fcinfo, i) {
+        return None;
+    }
+    match fcinfo.take_ref_arg(i) {
+        Some(RefPayload::Internal(b)) => Some(b.downcast::<ArrayAggArrInternal>().unwrap_or_else(
+            |_| panic!("array_agg_array fn: args[{i}] internal state is not an ArrayAggArrInternal"),
+        )),
+        Some(other) => panic!("array_agg_array fn: args[{i}] is not an internal state ({other:?})"),
+        None => None,
+    }
+}
+
+/// A fresh `ArrayAggArrInternal` carrier with a leaked agg context whose `state`
+/// is overwritten by a combine/deserialize result.
+fn new_arr_carrier(
+    state: types_datum::array_build::ArrayBuildStateArr,
+) -> Box<ArrayAggArrInternal> {
+    let ctx: &'static MemoryContext =
+        Box::leak(Box::new(MemoryContext::new("array_agg_array state")));
+    Box::new(ArrayAggArrInternal { ctx, state })
+}
+
+/// `array_agg_array_combine`(6296): concatenate `state2`'s items onto `state1`.
+/// `proisstrict => 'f'`. Mirrors `array_agg_array_combine`.
+fn fc_array_agg_array_combine(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let state1 = take_array_arr_state_at(fcinfo, 0);
+    let state2 = take_array_arr_state_at(fcinfo, 1);
+
+    let state2 = match state2 {
+        None => {
+            return Ok(match state1 {
+                None => ret_null(fcinfo),
+                Some(s1) => ret_internal(fcinfo, s1),
+            });
+        }
+        Some(s2) => s2,
+    };
+
+    let combined = match state1 {
+        // state1 == NULL: copy state2's data into a fresh agg-context state.
+        None => {
+            let s2 = &state2.state;
+            let copy = types_datum::array_build::ArrayBuildStateArr {
+                data: s2.data.clone(),
+                nullbitmap: s2.nullbitmap.clone(),
+                nbytes: s2.nbytes,
+                nitems: s2.nitems,
+                ndims: s2.ndims,
+                dims: s2.dims,
+                lbs: s2.lbs,
+                array_type: s2.array_type,
+                element_type: s2.element_type,
+                private_cxt: false,
+            };
+            new_arr_carrier(copy)
+        }
+        Some(mut s1) => {
+            if state2.state.nitems > 0 {
+                combine_arr_states(&mut s1.state, &state2.state)?;
+            }
+            s1
+        }
+    };
+
+    Ok(ret_internal(fcinfo, combined))
+}
+
+/// Append `src`'s items onto `dst` (the `state2->nitems > 0` branch of
+/// `array_agg_array_combine`), checking dimensional compatibility.
+fn combine_arr_states(
+    dst: &mut types_datum::array_build::ArrayBuildStateArr,
+    src: &types_datum::array_build::ArrayBuildStateArr,
+) -> PgResult<()> {
+    // Check the states are compatible (same dims ignoring the first).
+    let dim_err = || {
+        types_error::PgError::error("cannot accumulate arrays of different dimensionality")
+            .with_sqlstate(types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+    };
+    if dst.ndims != src.ndims {
+        return Err(dim_err());
+    }
+    for i in 1..dst.ndims as usize {
+        if dst.dims[i] != src.dims[i] || dst.lbs[i] != src.lbs[i] {
+            return Err(dim_err());
+        }
+    }
+
+    // nullbitmap handling: if src has nulls, ensure dst has a bitmap covering
+    // its existing (non-null) items, then copy src's bits in.
+    if src.nullbitmap.is_some() {
+        let newnitems = dst.nitems + src.nitems;
+        if dst.nullbitmap.is_none() {
+            // First input with nulls: previous dst items are all non-null.
+            let aitems = (newnitems + 1).max(256);
+            let size = ((aitems as usize) + 7) / 8;
+            // All-zero except we set the existing dst.nitems bits to non-null
+            // (1). array_bitmap_copy(dst, 0, NULL, 0, nitems) sets them to 1.
+            let mut bm = vec![0u8; size];
+            for i in 0..dst.nitems as usize {
+                bm[i / 8] |= 1u8 << (i % 8);
+            }
+            dst.nullbitmap = Some(bm);
+        }
+        // Ensure capacity for newnitems bits.
+        let needed = ((newnitems as usize) + 7) / 8;
+        if let Some(bm) = dst.nullbitmap.as_mut() {
+            if bm.len() < needed {
+                bm.resize(needed, 0);
+            }
+        }
+        // array_bitmap_copy(dst, dst.nitems, src, 0, src.nitems).
+        let srcbm = src.nullbitmap.as_ref().unwrap();
+        let dstbm = dst.nullbitmap.as_mut().unwrap();
+        for i in 0..src.nitems as usize {
+            let srcbit = (srcbm[i / 8] >> (i % 8)) & 1;
+            let dstidx = dst.nitems as usize + i;
+            if srcbit != 0 {
+                dstbm[dstidx / 8] |= 1u8 << (dstidx % 8);
+            } else {
+                dstbm[dstidx / 8] &= !(1u8 << (dstidx % 8));
+            }
+        }
+    }
+
+    // Append data bytes.
+    dst.data.extend_from_slice(&src.data[..src.nbytes as usize]);
+    dst.nbytes += src.nbytes;
+    dst.nitems += src.nitems;
+    dst.dims[0] += src.dims[0];
+    Ok(())
+}
+
+/// `array_agg_array_serialize`(6297): serialize the running `ArrayBuildStateArr`.
+fn fc_array_agg_array_serialize(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let carrier = take_array_arr_state(fcinfo)
+        .expect("array_agg_array_serialize: NULL internal state (strict aggregate)");
+    let m = MemoryContext::new("array_agg_array serialize");
+    let payload = crate::io::array_agg_array_serialize_state(m.mcx(), &carrier.state)?
+        .as_slice()
+        .to_vec();
+    keep_internal(fcinfo, carrier);
+    Ok(ret_bytea(fcinfo, payload))
+}
+
+/// `array_agg_array_deserialize`(6298): rebuild an `ArrayBuildStateArr`.
+fn fc_array_agg_array_deserialize(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let body = arg_bytea(fcinfo, 0);
+    let m = MemoryContext::new("array_agg_array deserialize");
+    let state = crate::io::array_agg_array_deserialize_state(m.mcx(), body)?;
+    Ok(ret_internal(fcinfo, new_arr_carrier(state)))
+}
+
 // ===========================================================================
+// array_agg_combine(6293) / array_agg_serialize(6294) / array_agg_deserialize(6295).
+//
+// The parallel-aggregation half of scalar `array_agg`: a parallel worker
+// accumulates its own `ArrayBuildState`, `array_agg_serialize`s it to a `bytea`,
+// ships it to the leader, which `array_agg_deserialize`s it back and
+// `array_agg_combine`s the worker states into one. Mirrors `array_userfuncs.c`.
+// ===========================================================================
+
+/// `array_agg_combine`(6293): concatenate `state2`'s elements onto `state1`.
+/// `proisstrict => 'f'`. C: if state2 is NULL return state1; if state1 is NULL
+/// copy state2's elements into the agg context; else append.
+fn fc_array_agg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let state1 = take_array_state(fcinfo);
+    let state2 = take_array_state_at(fcinfo, 1);
+
+    // if (state2 == NULL) { if (state1==NULL) PG_RETURN_NULL(); PG_RETURN_POINTER(state1); }
+    let state2 = match state2 {
+        None => {
+            return Ok(match state1 {
+                None => ret_null(fcinfo),
+                Some(s1) => ret_internal(fcinfo, s1),
+            });
+        }
+        Some(s2) => s2,
+    };
+
+    let combined = match state1 {
+        // state1 == NULL: copy state2's data into a fresh agg-context state.
+        None => {
+            let mut s1 = ArrayAggInternal::new(state2.state.element_type)?;
+            append_state(&mut s1.state, &state2.state);
+            s1
+        }
+        // else if (state2->nelems > 0): append state2's elements onto state1.
+        Some(mut s1) => {
+            if state2.state.nelems > 0 {
+                debug_assert_eq!(s1.state.element_type, state2.state.element_type);
+                append_state(&mut s1.state, &state2.state);
+            }
+            s1
+        }
+    };
+
+    Ok(ret_internal(fcinfo, combined))
+}
+
+/// Append all of `src`'s elements (values + nulls + by-ref backing) onto `dst`.
+/// `dst` and `src` share the same element type. For by-ref types the backing
+/// boxes are cloned so `dst` owns stable storage and `dst.dvalues` point at it.
+fn append_state(
+    dst: &mut types_datum::array_build::ArrayBuildState,
+    src: &types_datum::array_build::ArrayBuildState,
+) {
+    if src.nelems == 0 {
+        return;
+    }
+    // Carry over the storage metadata (a NULL state1 was just initialized).
+    dst.typlen = src.typlen;
+    dst.typbyval = src.typbyval;
+    dst.typalign = src.typalign;
+
+    let mut src_store = 0usize;
+    for i in 0..src.nelems as usize {
+        if src.dnulls[i] {
+            dst.dvalues.push(Datum::null());
+            dst.dnulls.push(true);
+        } else if src.typbyval {
+            dst.dvalues.push(src.dvalues[i]);
+            dst.dnulls.push(false);
+        } else {
+            // Clone the by-ref backing box so dst owns it; point dvalues at it.
+            let copy = src.byref_storage[src_store].clone();
+            src_store += 1;
+            let dword = Datum::from_usize(copy.as_ptr() as usize);
+            dst.byref_storage.push(copy);
+            dst.dvalues.push(dword);
+            dst.dnulls.push(false);
+        }
+    }
+    dst.nelems += src.nelems;
+}
+
+/// `array_agg_serialize`(6294): serialize the running `ArrayBuildState` into a
+/// `bytea`. Strict (the running `internal` state is never NULL here).
+fn fc_array_agg_serialize(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let carrier = take_array_state(fcinfo)
+        .expect("array_agg_serialize: NULL internal state (strict aggregate)");
+    let m = MemoryContext::new("array_agg serialize");
+    let payload = crate::io::array_agg_serialize_state(m.mcx(), &carrier.state)?
+        .as_slice()
+        .to_vec();
+    // C `PG_GETARG_POINTER(0)` does not consume the state; restore it.
+    keep_internal(fcinfo, carrier);
+    Ok(ret_bytea(fcinfo, payload))
+}
+
+/// `array_agg_deserialize`(6295): rebuild an `ArrayBuildState` from a `bytea`.
+/// Strict.
+fn fc_array_agg_deserialize(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let body = arg_bytea(fcinfo, 0);
+    let m = MemoryContext::new("array_agg deserialize");
+    let state = crate::io::array_agg_deserialize_state(m.mcx(), body)?;
+    Ok(ret_internal(fcinfo, ArrayAggInternal::from_state(state)))
+}
+
+/// `PG_GETARG_BYTEA_PP(i)` body bytes (varlena header stripped). The serialized
+/// state rides the by-ref `Varlena` lane.
+fn arg_bytea<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    let image = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("array_agg_deserialize: by-ref `bytea` arg missing from by-ref lane");
+    if image.len() >= types_datum::varlena::VARHDRSZ {
+        &image[types_datum::varlena::VARHDRSZ..]
+    } else {
+        &[]
+    }
+}
+
+/// `PG_RETURN_BYTEA_P(image)` — a by-ref `bytea` result with 4-byte varlena
+/// framing.
+fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
+    let mut image = Vec::with_capacity(payload.len() + types_datum::varlena::VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(
+        payload.len() + types_datum::varlena::VARHDRSZ,
+    ));
+    image.extend_from_slice(&payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
+/// Take the `internal` `ArrayAggInternal` transition state out of `args[i]`.
+fn take_array_state_at(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    i: usize,
+) -> Option<Box<ArrayAggInternal>> {
+    if arg_isnull(fcinfo, i) {
+        return None;
+    }
+    match fcinfo.take_ref_arg(i) {
+        Some(RefPayload::Internal(b)) => Some(b.downcast::<ArrayAggInternal>().unwrap_or_else(
+            |_| panic!("array_agg fn: args[{i}] internal state is not an ArrayAggInternal"),
+        )),
+        Some(other) => panic!("array_agg fn: args[{i}] is not an internal state ({other:?})"),
+        None => None,
+    }
+}
+
 // Registration (C: their `fmgr_builtins[]` rows; transition/final functions are
 // `proisstrict => 'f'` — they handle the NULL `internal` running state / NULL
 // input themselves). `array_agg_finalfn` is declared `internal anynonarray`
@@ -391,7 +705,35 @@ pub fn register_array_agg_builtins() {
         builtin(2334, "array_agg_finalfn", 2, fc_array_agg_finalfn),
         builtin(4051, "array_agg_array_transfn", 2, fc_array_agg_array_transfn),
         builtin(4052, "array_agg_array_finalfn", 2, fc_array_agg_array_finalfn),
+        builtin(6293, "array_agg_combine", 2, fc_array_agg_combine),
+        builtin(6296, "array_agg_array_combine", 2, fc_array_agg_array_combine),
     ]);
+    backend_utils_fmgr_core::register_builtins_native([
+        builtin_strict(6294, "array_agg_serialize", 1, fc_array_agg_serialize),
+        builtin_strict(6295, "array_agg_deserialize", 2, fc_array_agg_deserialize),
+        builtin_strict(6297, "array_agg_array_serialize", 1, fc_array_agg_array_serialize),
+        builtin_strict(6298, "array_agg_array_deserialize", 2, fc_array_agg_array_deserialize),
+    ]);
+}
+
+/// A strict (`proisstrict => 't'`) native builtin row.
+fn builtin_strict(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// A non-strict (`proisstrict => 'f'`) native builtin row (`func: None`; the

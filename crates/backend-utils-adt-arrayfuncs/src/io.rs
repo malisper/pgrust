@@ -1374,6 +1374,29 @@ impl<'a> MsgReader<'a> {
         Ok(v)
     }
 
+    /// `pq_getmsgint64(buf)` — 8-byte network byte order.
+    fn get_int64(&mut self) -> PgResult<u64> {
+        if self.cursor + 8 > self.data.len() {
+            return Err(insufficient_data());
+        }
+        let mut v: u64 = 0;
+        for _ in 0..8 {
+            v = (v << 8) | self.data[self.cursor] as u64;
+            self.cursor += 1;
+        }
+        Ok(v)
+    }
+
+    /// `pq_getmsgbytes(buf, n)` — borrow `n` raw bytes and advance.
+    fn get_bytes(&mut self, n: usize) -> PgResult<&'a [u8]> {
+        if self.cursor + n > self.data.len() {
+            return Err(insufficient_data());
+        }
+        let s = &self.data[self.cursor..self.cursor + n];
+        self.cursor += n;
+        Ok(s)
+    }
+
     /// `buf->len - buf->cursor`.
     fn remaining(&self) -> usize {
         self.data.len() - self.cursor
@@ -1674,4 +1697,335 @@ fn send_bytes<'mcx>(mcx: Mcx<'mcx>, buf: &mut PgVec<'mcx, u8>, data: &[u8]) -> P
     buf.try_reserve(data.len()).map_err(|_| mcx.oom(data.len()))?;
     buf.extend_from_slice(data);
     Ok(())
+}
+
+/// `pq_sendint64(buf, i)` — append an 8-byte network-byte-order integer.
+fn send_int64<'mcx>(mcx: Mcx<'mcx>, buf: &mut PgVec<'mcx, u8>, i: u64) -> PgResult<()> {
+    buf.try_reserve(8).map_err(|_| mcx.oom(8))?;
+    buf.extend_from_slice(&i.to_be_bytes());
+    Ok(())
+}
+
+/// `pq_sendint16(buf, i)` — append a 2-byte network-byte-order integer.
+fn send_int16<'mcx>(mcx: Mcx<'mcx>, buf: &mut PgVec<'mcx, u8>, i: u16) -> PgResult<()> {
+    buf.try_reserve(2).map_err(|_| mcx.oom(2))?;
+    buf.extend_from_slice(&i.to_be_bytes());
+    Ok(())
+}
+
+/// `pq_sendbyte(buf, b)` — append one byte.
+fn send_byte<'mcx>(mcx: Mcx<'mcx>, buf: &mut PgVec<'mcx, u8>, b: u8) -> PgResult<()> {
+    buf.try_reserve(1).map_err(|_| mcx.oom(1))?;
+    buf.push(b);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// array_agg parallel serialize / deserialize (array_userfuncs.c).
+//
+// These move an `ArrayBuildState` between a parallel worker (serialize → bytea)
+// and the leader (deserialize → state). The wire format is byte-for-byte the C
+// format in `array_agg_serialize`/`array_agg_deserialize`:
+//   int32 element_type | int64 nelems | int16 typlen | byte typbyval |
+//   byte typalign | nelems bool dnulls |
+//   then dvalues: if typbyval, the raw Datum array (sizeof(Datum) per element,
+//   including null slots); else for each non-null element a (int32 len, bytes)
+//   produced by the element type's binary send function.
+// ---------------------------------------------------------------------------
+
+/// `sizeof(Datum)` on this build (C transmits the raw Datum array for by-value
+/// element types via `memcpy`, so the on-wire element width must match).
+const DATUM_WIDTH: usize = core::mem::size_of::<types_datum::datum::Datum>();
+
+/// Serialize an `ArrayBuildState` into the `bytea` payload bytes (varlena header
+/// added by the caller's `ret_bytea`). Mirrors `array_agg_serialize`.
+pub fn array_agg_serialize_state<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &types_datum::array_build::ArrayBuildState,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut buf: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+    let nelems = state.nelems as usize;
+
+    // element_type (first, for convenient deserialization).
+    send_int32(mcx, &mut buf, state.element_type)?;
+    // nelems.
+    send_int64(mcx, &mut buf, state.nelems as i64 as u64)?;
+    // typlen.
+    send_int16(mcx, &mut buf, state.typlen as u16)?;
+    // typbyval.
+    send_byte(mcx, &mut buf, state.typbyval as u8)?;
+    // typalign.
+    send_byte(mcx, &mut buf, state.typalign)?;
+    // dnulls (one bool byte per element).
+    for i in 0..nelems {
+        send_byte(mcx, &mut buf, state.dnulls[i] as u8)?;
+    }
+
+    // dvalues.
+    if state.typbyval {
+        // Transmit the Datum array as-is, including null slots.
+        for i in 0..nelems {
+            let word = state.dvalues[i].as_usize() as u64;
+            send_bytes(mcx, &mut buf, &word.to_ne_bytes()[..DATUM_WIDTH])?;
+        }
+    } else {
+        // Avoid repeat catalog lookups for the typsend function.
+        let meta =
+            lsyscache::get_array_element_io_data::call(state.element_type, ArrayIoFuncSelector::Send)?;
+        if meta.typiofunc == 0 {
+            let name = format_type::format_type_be::call(mcx, state.element_type)?;
+            return Err(PgError::error(format!(
+                "no binary output function available for type {}",
+                name.as_str()
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
+        }
+        // For by-ref element types, the non-null `dvalues[i]` point at copies in
+        // `byref_storage`, pushed in element order for each non-null element.
+        let mut store_idx = 0usize;
+        for i in 0..nelems {
+            if state.dnulls[i] {
+                continue;
+            }
+            let image: &[u8] = state
+                .byref_storage
+                .get(store_idx)
+                .map(|b| &b[..])
+                .ok_or_else(|| {
+                    PgError::error(
+                        "array_agg_serialize: by-ref element has no backing storage",
+                    )
+                })?;
+            store_idx += 1;
+            let value = ArrayElementDatum::ByRef(image);
+            let outputbytes = fmgr::array_send_function_call::call(mcx, meta.typiofunc, value)?;
+            send_int32(mcx, &mut buf, outputbytes.len() as u32)?;
+            send_bytes(mcx, &mut buf, &outputbytes)?;
+        }
+    }
+
+    Ok(buf)
+}
+
+/// Rebuild an `ArrayBuildState` from a serialized `bytea` body. Mirrors
+/// `array_agg_deserialize`.
+pub fn array_agg_deserialize_state(
+    mcx: Mcx<'_>,
+    body: &[u8],
+) -> PgResult<types_datum::array_build::ArrayBuildState> {
+    let mut msg = MsgReader::new(body);
+
+    // element_type.
+    let element_type = msg.get_int(4)? as Oid;
+    // nelems.
+    let nelems = msg.get_int64()? as i64;
+    let nelems_usize = nelems as usize;
+
+    let mut state = crate::construct::init_array_result(element_type, false)?;
+    // typlen / typbyval / typalign as transmitted (do not trust catalog so the
+    // wire image round-trips exactly, matching C).
+    state.typlen = msg.get_int(2)? as i16;
+    state.typbyval = msg.get_int(1)? != 0;
+    state.typalign = msg.get_int(1)? as u8;
+
+    state.dnulls.clear();
+    state.dvalues.clear();
+    state.byref_storage.clear();
+
+    // dnulls.
+    let mut dnulls: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(nelems_usize);
+    for _ in 0..nelems_usize {
+        dnulls.push(msg.get_int(1)? != 0);
+    }
+
+    if state.typbyval {
+        for i in 0..nelems_usize {
+            let raw = msg.get_bytes(DATUM_WIDTH)?;
+            let mut word_bytes = [0u8; 8];
+            word_bytes[..DATUM_WIDTH].copy_from_slice(raw);
+            let word = u64::from_ne_bytes(word_bytes) as usize;
+            state.dvalues.push(types_datum::datum::Datum::from_usize(word));
+            state.dnulls.push(dnulls[i]);
+        }
+    } else {
+        let meta = lsyscache::get_array_element_io_data::call(
+            element_type,
+            ArrayIoFuncSelector::Receive,
+        )?;
+        if meta.typiofunc == 0 {
+            let name = format_type::format_type_be::call(mcx, element_type)?;
+            return Err(PgError::error(format!(
+                "no binary input function available for type {}",
+                name.as_str()
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
+        }
+        for i in 0..nelems_usize {
+            if dnulls[i] {
+                state.dvalues.push(types_datum::datum::Datum::null());
+                state.dnulls.push(true);
+                continue;
+            }
+            let itemlen = msg.get_int(4)? as i32;
+            if itemlen < 0 || itemlen as usize > msg.remaining() {
+                return Err(insufficient_data());
+            }
+            let elem = msg.get_bytes(itemlen as usize)?;
+            // Receive the element; materialize its on-disk bytes into the state's
+            // own `byref_storage`, with `dvalues[i]` pointing at that copy (the
+            // ownership invariant `accum_array_result` maintains).
+            // The receive function returns a Datum whose word points at the
+            // materialized (already-detoasted) on-disk element bytes in `mcx`.
+            // Copy that verbatim byte span into the state's own `byref_storage`
+            // so `dvalues[i]` has stable backing for the life of the aggregate.
+            let value = fmgr::array_receive_function_call::call(
+                mcx,
+                meta.typiofunc,
+                elem,
+                meta.typioparam,
+                -1,
+            )?;
+            let ptr = value.as_usize() as *const u8;
+            let len = byref_element_len(ptr, state.typlen as i32);
+            let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+            let copy: alloc::boxed::Box<[u8]> = bytes.to_vec().into_boxed_slice();
+            let dword = types_datum::datum::Datum::from_usize(copy.as_ptr() as usize);
+            state.byref_storage.push(copy);
+            state.dvalues.push(dword);
+            state.dnulls.push(false);
+        }
+    }
+
+    state.nelems = nelems as i32;
+    Ok(state)
+}
+
+// ---------------------------------------------------------------------------
+// array_agg(anyarray) parallel serialize / deserialize (array_userfuncs.c).
+//
+// `ArrayBuildStateArr` accumulates whole sub-arrays into one flat data buffer
+// plus dims/lbs/nullbitmap, so the wire form is the raw buffer (no per-element
+// send functions). Wire format (array_agg_array_serialize):
+//   int32 element_type | int32 array_type | int32 nbytes | nbytes data |
+//   int32 abytes | int32 aitems | (aitems>0 ? (aitems+7)/8 nullbitmap) |
+//   int32 nitems | int32 ndims | sizeof(dims) dims | sizeof(lbs) lbs
+// where dims/lbs are MAXDIM int32 each.
+// ---------------------------------------------------------------------------
+
+/// `MAXDIM` int32 slots, the fixed `dims`/`lbs` array width C transmits.
+const ARR_DIMS_BYTES: usize = (MAX_DIM as usize) * 4;
+
+/// Serialize an `ArrayBuildStateArr` into the `bytea` payload. Mirrors
+/// `array_agg_array_serialize`.
+pub fn array_agg_array_serialize_state<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &types_datum::array_build::ArrayBuildStateArr,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut buf: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+    let nbytes = state.nbytes as usize;
+
+    send_int32(mcx, &mut buf, state.element_type)?;
+    send_int32(mcx, &mut buf, state.array_type)?;
+    send_int32(mcx, &mut buf, state.nbytes as u32)?;
+    send_bytes(mcx, &mut buf, &state.data[..nbytes])?;
+    // abytes: the on-wire allocated size; we have no separate alloc figure, so
+    // transmit nbytes (deserialize recomputes abytes from nbytes regardless of
+    // this value, then overwrites it with this field — using nbytes is safe and
+    // round-trips identically for our purposes).
+    send_int32(mcx, &mut buf, state.nbytes as u32)?;
+    // aitems.
+    let aitems = match &state.nullbitmap {
+        Some(_) => state.nitems, // a present bitmap covers at least nitems bits
+        None => 0,
+    };
+    send_int32(mcx, &mut buf, aitems as u32)?;
+    if let Some(bm) = &state.nullbitmap {
+        let size = ((aitems as usize) + 7) / 8;
+        // Send exactly `size` bytes (pad with zeros if the stored bitmap is
+        // shorter, which cannot happen for a well-formed state).
+        if bm.len() >= size {
+            send_bytes(mcx, &mut buf, &bm[..size])?;
+        } else {
+            send_bytes(mcx, &mut buf, bm)?;
+            for _ in bm.len()..size {
+                send_byte(mcx, &mut buf, 0)?;
+            }
+        }
+    }
+    send_int32(mcx, &mut buf, state.nitems as u32)?;
+    send_int32(mcx, &mut buf, state.ndims as u32)?;
+    // dims / lbs (MAXDIM int32 each, native order to match C's raw memcpy).
+    for d in state.dims.iter() {
+        send_bytes(mcx, &mut buf, &(*d as u32).to_ne_bytes())?;
+    }
+    for l in state.lbs.iter() {
+        send_bytes(mcx, &mut buf, &(*l as u32).to_ne_bytes())?;
+    }
+
+    Ok(buf)
+}
+
+/// Rebuild an `ArrayBuildStateArr` from a serialized `bytea`. Mirrors
+/// `array_agg_array_deserialize`.
+pub fn array_agg_array_deserialize_state(
+    _mcx: Mcx<'_>,
+    body: &[u8],
+) -> PgResult<types_datum::array_build::ArrayBuildStateArr> {
+    let mut msg = MsgReader::new(body);
+
+    let element_type = msg.get_int(4)? as Oid;
+    let array_type = msg.get_int(4)? as Oid;
+    let nbytes = msg.get_int(4)? as i32;
+
+    let mut result = types_datum::array_build::ArrayBuildStateArr {
+        data: alloc::vec::Vec::new(),
+        nullbitmap: None,
+        nbytes: 0,
+        nitems: 0,
+        ndims: 0,
+        dims: [0i32; MAX_DIM as usize],
+        lbs: [0i32; MAX_DIM as usize],
+        array_type,
+        element_type,
+        private_cxt: false,
+    };
+
+    // data.
+    let data = msg.get_bytes(nbytes as usize)?;
+    result.data = data.to_vec();
+    result.nbytes = nbytes;
+
+    // abytes (read and discarded — Vec growth is implicit in the port).
+    let _abytes = msg.get_int(4)?;
+    // aitems.
+    let aitems = msg.get_int(4)? as i32;
+    if aitems > 0 {
+        let size = ((aitems as usize) + 7) / 8;
+        let bm = msg.get_bytes(size)?;
+        result.nullbitmap = Some(bm.to_vec());
+    } else {
+        result.nullbitmap = None;
+    }
+    // nitems.
+    result.nitems = msg.get_int(4)? as i32;
+    // ndims.
+    result.ndims = msg.get_int(4)? as i32;
+    // dims.
+    let dims_raw = msg.get_bytes(ARR_DIMS_BYTES)?;
+    for i in 0..(MAX_DIM as usize) {
+        let off = i * 4;
+        result.dims[i] =
+            u32::from_ne_bytes([dims_raw[off], dims_raw[off + 1], dims_raw[off + 2], dims_raw[off + 3]])
+                as i32;
+    }
+    // lbs.
+    let lbs_raw = msg.get_bytes(ARR_DIMS_BYTES)?;
+    for i in 0..(MAX_DIM as usize) {
+        let off = i * 4;
+        result.lbs[i] =
+            u32::from_ne_bytes([lbs_raw[off], lbs_raw[off + 1], lbs_raw[off + 2], lbs_raw[off + 3]])
+                as i32;
+    }
+
+    Ok(result)
 }
