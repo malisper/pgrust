@@ -42,6 +42,8 @@
 
 #![allow(clippy::identity_op)]
 
+use core::sync::atomic::Ordering;
+
 use common_hashfn::murmurhash32;
 use types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
@@ -111,7 +113,12 @@ fn hash_table_too_large() -> PgError {
 /// page, `blockno` is the page number and bit `k` of `words` represents tuple
 /// offset `k + 1`. For a lossy chunk, `blockno` is the first page in the chunk
 /// and bit `k` represents page `blockno + k`.
+///
+/// `#[repr(C)]` so a dense array of these can be placed in a DSA `PTEntryArray`
+/// for shared (parallel) iteration and read back at a stable layout by every
+/// attached worker (`tbm_prepare_shared_iterate` / `tbm_shared_iterate`).
 #[derive(Clone, Debug)]
+#[repr(C)]
 struct PagetableEntry {
     /// `BlockNumber blockno` — page number (hashtable key).
     blockno: BlockNumber,
@@ -1832,86 +1839,463 @@ fn attach_shared_iterate(
 }
 
 // ===========================================================================
-// Shared (parallel, DSA-backed) sub-seams.
+// Shared (parallel, DSA-backed) iterator: TBMSharedIteratorState / PTEntryArray
+// / PTIterationArray, placed in the per-query `dsa_area` so multiple workers
+// jointly iterate one bitmap. (tidbitmap.c `tbm_prepare_shared_iterate` /
+// `tbm_attach_shared_iterate` / `tbm_shared_iterate` / `tbm_free_shared_area`.)
 //
-// The DSA area, its `dsa_pointer`s, the cross-backend `refcount` atomics, and
-// the `TBMSharedIteratorState.lock` `LWLock` are shared-memory primitives this
-// in-crate state cannot own. They belong to a DSA-backed shared-TBM provider
-// that is NOT YET PORTED. The in-crate code does all the bitmap walking/sorting
-// (see provide_tbm_prepare_shared_iterate); these sub-seams do only the DSA
-// marshaling and panic until that owner lands (mirror-pg-and-panic).
+// The C uses `dsa_allocate`/`dsa_get_address`/`dsa_free`, cross-backend
+// `pg_atomic_*` refcounts on the arrays, and an in-DSA `LWLock` to serialize
+// iterator-position advances. The cross-process grown-segment attach is fixed
+// (beb2336ff), so the DSA floor is solid; this is a faithful 1:1 port.
 // ===========================================================================
 
-/// The bitmap layout the in-crate code marshals to the shared-TBM provider:
-/// the dense `PagetableEntry` array (`PTEntryArray.ptentry`) plus the sorted
-/// exact/lossy index arrays (`PTIterationArray.index`) into it, and the scalar
-/// `TBMSharedIteratorState` members.
+use backend_storage_lmgr_lwlock_seams as lwlock;
+use backend_utils_mmgr_dsa_seams as dsa_seam;
+use types_storage::{pg_atomic_uint32, LWLock, LW_EXCLUSIVE, LWTRANCHE_SHARED_TIDBITMAP};
+
+/// The bitmap layout the in-crate code builds before marshaling it into the
+/// DSA: the dense `PagetableEntry` array (`PTEntryArray.ptentry`) plus the
+/// sorted exact/lossy index arrays (`PTIterationArray.index`) into it, and the
+/// scalar `TBMSharedIteratorState` members.
 struct SharedBitmapLayout {
-    // The scalar `TBMSharedIteratorState` members are read by the (unported)
-    // shared-TBM provider sub-seam, not in-crate yet — hence `dead_code`.
-    #[allow(dead_code)]
     nentries: i32,
-    #[allow(dead_code)]
     maxentries: i32,
-    #[allow(dead_code)]
     npages: i32,
-    #[allow(dead_code)]
     nchunks: i32,
     entries: Vec<PagetableEntry>,
     spages: Vec<i32>,
     schunks: Vec<i32>,
 }
 
-/// SEAM (unported owner: the DSA-backed shared-TIDBitmap provider — `dsa_*`
-/// allocation of `TBMSharedIteratorState` / `PTEntryArray` / `PTIterationArray`,
-/// `pg_atomic_*` refcounts, `LWLockInitialize(LWTRANCHE_SHARED_TIDBITMAP)`).
-/// Mirrors the DSA-marshaling tail of `tbm_prepare_shared_iterate`.
+/// `struct PTEntryArray` (`tidbitmap.c`): `pg_atomic_uint32 refcount;
+/// PagetableEntry ptentry[FLEXIBLE_ARRAY_MEMBER];`. We allocate
+/// `offsetof(PTEntryArray, ptentry) + nentries * sizeof(PagetableEntry)` bytes
+/// in the DSA and address the header + tail by hand (a flexible-array member
+/// can't be a Rust field), exactly as the C does over its DSA pointer.
+#[repr(C)]
+struct PTEntryArrayHeader {
+    /// `pg_atomic_uint32 refcount` — no. of iterators attached.
+    refcount: pg_atomic_uint32,
+}
+
+/// `struct PTIterationArray` (`tidbitmap.c`): `pg_atomic_uint32 refcount;
+/// int index[FLEXIBLE_ARRAY_MEMBER];`.
+#[repr(C)]
+struct PTIterationArrayHeader {
+    /// `pg_atomic_uint32 refcount` — no. of iterators attached.
+    refcount: pg_atomic_uint32,
+}
+
+/// `struct TBMSharedIteratorState` (`tidbitmap.c`): the shared members so that
+/// multiple processes can jointly iterate. DSA-resident (`#[repr(C)]`); its
+/// `lock` is a real in-DSA `LWLock` and the position fields are mutated under
+/// that lock.
+#[repr(C)]
+struct TBMSharedIteratorState {
+    /// `int nentries` — number of entries in pagetable.
+    nentries: i32,
+    /// `int maxentries` — limit on same to meet maxbytes.
+    maxentries: i32,
+    /// `int npages` — number of exact entries in pagetable.
+    npages: i32,
+    /// `int nchunks` — number of lossy entries in pagetable.
+    nchunks: i32,
+    /// `dsa_pointer pagetable` — head of the `PTEntryArray`.
+    pagetable: u64,
+    /// `dsa_pointer spages` — head of the exact-page `PTIterationArray`.
+    spages: u64,
+    /// `dsa_pointer schunks` — head of the lossy-chunk `PTIterationArray`.
+    schunks: u64,
+    /// `LWLock lock` — protects the position members below.
+    lock: LWLock,
+    /// `int spageptr` — next spages index.
+    spageptr: i32,
+    /// `int schunkptr` — next schunks index.
+    schunkptr: i32,
+    /// `int schunkbit` — next bit to check in current schunk.
+    schunkbit: i32,
+}
+
+/// `offsetof(PTEntryArray, ptentry)` — header rounded up to `PagetableEntry`
+/// alignment (where the C flexible array begins).
+#[inline]
+fn ptentry_offset() -> usize {
+    let h = core::mem::size_of::<PTEntryArrayHeader>();
+    let a = core::mem::align_of::<PagetableEntry>();
+    (h + a - 1) & !(a - 1)
+}
+
+/// `offsetof(PTIterationArray, index)` — header rounded up to `i32` alignment.
+#[inline]
+fn ptindex_offset() -> usize {
+    let h = core::mem::size_of::<PTIterationArrayHeader>();
+    let a = core::mem::align_of::<i32>();
+    (h + a - 1) & !(a - 1)
+}
+
+/// `dsa_get_address(dsa, dp)` as a raw byte address (the C `void *`), `0` for
+/// `InvalidDsaPointer`. The cursor's `.0` is the backend-local address.
+#[inline]
+fn dsa_addr(dsa: DsaAreaHandle, dp: u64) -> usize {
+    dsa_seam::dsa_get_address::call(dsa, dp).0
+}
+
+/// Mirrors the DSA-marshaling tail of `tbm_prepare_shared_iterate`: allocate
+/// the `PTEntryArray` (dense entries), the two `PTIterationArray`s, and the
+/// `TBMSharedIteratorState` head in the DSA; fill them; init the refcounts and
+/// the iterator `LWLock`; return the istate `dsa_pointer`.
 fn dsa_shared_tbm_prepare(
-    _dsa: DsaAreaHandle,
-    _layout: SharedBitmapLayout,
+    dsa: DsaAreaHandle,
+    layout: SharedBitmapLayout,
 ) -> PgResult<types_tidbitmap::dsa_pointer> {
-    panic!(
-        "SEAM tbm_prepare_shared_iterate (DSA path): the DSA-backed shared-TIDBitmap \
-         provider (TBMSharedIteratorState/PTEntryArray/PTIterationArray dsa_allocate, \
-         refcount atomics, LWLockInitialize) is not yet ported"
-    )
+    // dp = dsa_allocate0(tbm->dsa, sizeof(TBMSharedIteratorState));
+    let istate_dp =
+        dsa_seam::dsa_allocate::call(dsa, core::mem::size_of::<TBMSharedIteratorState>());
+
+    // PTEntryArray: header + dense PagetableEntry array. C reuses the bitmap's
+    // existing `dsapagetable` for TBM_HASH and allocates one entry for
+    // TBM_ONE_PAGE; the owned port has no DSA-resident pagetable, so it always
+    // allocates a dense copy of the entries that the sorted index arrays point
+    // into. `nentries` here is the dense-array length (== npages + nchunks).
+    let dense_len = layout.entries.len();
+    let pagetable_dp = if dense_len > 0 {
+        let bytes =
+            ptentry_offset() + dense_len * core::mem::size_of::<PagetableEntry>();
+        let dp = dsa_seam::dsa_allocate::call(dsa, bytes);
+        let base = dsa_addr(dsa, dp);
+        // pg_atomic_init_u32(&ptbase->refcount, 0);
+        // SAFETY: `base` is the backend-local address of `bytes >= ...`
+        // DSA-resident writable bytes just allocated; the leader is the sole
+        // writer until it returns the dp to other workers. The header and the
+        // dense entry array are written once here.
+        unsafe {
+            core::ptr::write(
+                base as *mut PTEntryArrayHeader,
+                PTEntryArrayHeader {
+                    refcount: pg_atomic_uint32::new(0),
+                },
+            );
+            let entries_ptr = (base + ptentry_offset()) as *mut PagetableEntry;
+            for (i, e) in layout.entries.iter().enumerate() {
+                core::ptr::write(entries_ptr.add(i), e.clone());
+            }
+        }
+        dp
+    } else {
+        INVALID_DSA_POINTER
+    };
+
+    // spages PTIterationArray.
+    let spages_dp = if layout.npages != 0 {
+        let bytes = ptindex_offset() + (layout.npages as usize) * core::mem::size_of::<i32>();
+        let dp = dsa_seam::dsa_allocate::call(dsa, bytes);
+        write_iteration_array(dsa, dp, &layout.spages);
+        dp
+    } else {
+        INVALID_DSA_POINTER
+    };
+
+    // schunks PTIterationArray.
+    let schunks_dp = if layout.nchunks != 0 {
+        let bytes = ptindex_offset() + (layout.nchunks as usize) * core::mem::size_of::<i32>();
+        let dp = dsa_seam::dsa_allocate::call(dsa, bytes);
+        write_iteration_array(dsa, dp, &layout.schunks);
+        dp
+    } else {
+        INVALID_DSA_POINTER
+    };
+
+    // Fill the istate. SAFETY: `istate_dp` addresses a freshly-allocated
+    // `TBMSharedIteratorState`-sized DSA chunk; the leader is the sole writer
+    // pre-launch.
+    let istate_base = dsa_addr(dsa, istate_dp);
+    unsafe {
+        let istate = istate_base as *mut TBMSharedIteratorState;
+        core::ptr::write(
+            istate,
+            TBMSharedIteratorState {
+                nentries: layout.nentries,
+                maxentries: layout.maxentries,
+                npages: layout.npages,
+                nchunks: layout.nchunks,
+                pagetable: pagetable_dp,
+                spages: spages_dp,
+                schunks: schunks_dp,
+                lock: LWLock::default(),
+                spageptr: 0,
+                schunkptr: 0,
+                schunkbit: 0,
+            },
+        );
+        // LWLockInitialize(&istate->lock, LWTRANCHE_SHARED_TIDBITMAP);
+        lwlock::lwlock_initialize::call(&mut (*istate).lock, LWTRANCHE_SHARED_TIDBITMAP);
+
+        // For every shared iterator referring to pagetable and iterator array,
+        // increase the refcount by 1 (this prepare creates the first iterator;
+        // attach/free adjust it per-worker).
+        if pagetable_dp != INVALID_DSA_POINTER {
+            entry_array_refcount(dsa, pagetable_dp).value.fetch_add(1, Ordering::SeqCst);
+        }
+        if spages_dp != INVALID_DSA_POINTER {
+            iter_array_refcount(dsa, spages_dp).value.fetch_add(1, Ordering::SeqCst);
+        }
+        if schunks_dp != INVALID_DSA_POINTER {
+            iter_array_refcount(dsa, schunks_dp).value.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    Ok(istate_dp)
 }
 
-/// SEAM (unported owner: the DSA-backed shared-TIDBitmap provider). Mirrors
-/// `tbm_attach_shared_iterate`: `dsa_get_address` of the shared state + arrays.
+/// Write a `PTIterationArray` (refcount 0 + index array) at `dp`.
+fn write_iteration_array(dsa: DsaAreaHandle, dp: u64, index: &[i32]) {
+    let base = dsa_addr(dsa, dp);
+    // SAFETY: `dp` addresses a freshly-allocated chunk of
+    // `ptindex_offset() + index.len() * 4` writable DSA bytes; leader sole writer.
+    unsafe {
+        core::ptr::write(
+            base as *mut PTIterationArrayHeader,
+            PTIterationArrayHeader {
+                refcount: pg_atomic_uint32::new(0),
+            },
+        );
+        let idx_ptr = (base + ptindex_offset()) as *mut i32;
+        for (i, &v) in index.iter().enumerate() {
+            core::ptr::write(idx_ptr.add(i), v);
+        }
+    }
+}
+
+/// `&ptbase->refcount` for a `PTEntryArray` at `dp`.
+///
+/// SAFETY: `dp` addresses a live `PTEntryArray` (refcount is the first,
+/// interior-mutable field, sound to alias across processes).
+fn entry_array_refcount(dsa: DsaAreaHandle, dp: u64) -> &'static pg_atomic_uint32 {
+    let base = dsa_addr(dsa, dp);
+    unsafe { &(*(base as *const PTEntryArrayHeader)).refcount }
+}
+
+/// `&ptiter->refcount` for a `PTIterationArray` at `dp`.
+fn iter_array_refcount(dsa: DsaAreaHandle, dp: u64) -> &'static pg_atomic_uint32 {
+    let base = dsa_addr(dsa, dp);
+    unsafe { &(*(base as *const PTIterationArrayHeader)).refcount }
+}
+
+/// `tbm_attach_shared_iterate(dsa, dp)` (`tidbitmap.c`): resolve the istate +
+/// the three arrays to backend-local addresses and store them in the private
+/// `TBMSharedIterator` carrier.
 fn dsa_shared_tbm_attach(
-    _dsa: DsaAreaHandle,
-    _dp: types_tidbitmap::dsa_pointer,
+    dsa: DsaAreaHandle,
+    dp: types_tidbitmap::dsa_pointer,
 ) -> PgResult<types_tidbitmap::TBMSharedIterator> {
-    panic!(
-        "SEAM tbm_attach_shared_iterate: the DSA-backed shared-TIDBitmap provider \
-         (dsa_get_address of the shared state/arrays) is not yet ported"
-    )
+    // istate = dsa_get_address(dsa, dp);
+    let istate_addr = dsa_addr(dsa, dp);
+    // SAFETY: `dp` is a `dsa_pointer` returned by tbm_prepare_shared_iterate;
+    // `istate` addresses a live `TBMSharedIteratorState`. The scalar dsa_pointer
+    // members were written once by the leader before workers attached.
+    let istate = unsafe { &*(istate_addr as *const TBMSharedIteratorState) };
+
+    // iterator->ptbase = dsa_get_address(dsa, istate->pagetable);
+    let ptbase_entries = if dsa_pointer_is_valid(istate.pagetable) {
+        Some(dsa_addr(dsa, istate.pagetable) + ptentry_offset())
+    } else {
+        None
+    };
+    // if (istate->npages) iterator->ptpages = dsa_get_address(dsa, istate->spages);
+    let ptpages_index = if istate.npages != 0 {
+        Some(dsa_addr(dsa, istate.spages) + ptindex_offset())
+    } else {
+        None
+    };
+    // if (istate->nchunks) iterator->ptchunks = dsa_get_address(dsa, istate->schunks);
+    let ptchunks_index = if istate.nchunks != 0 {
+        Some(dsa_addr(dsa, istate.schunks) + ptindex_offset())
+    } else {
+        None
+    };
+
+    let carrier = SharedIterCarrier {
+        dsa,
+        istate: istate_addr,
+        ptbase_entries,
+        ptpages_index,
+        ptchunks_index,
+    };
+    Ok(types_tidbitmap::TBMSharedIterator(Some(Box::new(carrier))))
 }
 
-/// SEAM (unported owner: the DSA-backed shared-TIDBitmap provider). Mirrors
-/// `tbm_free_shared_area`: refcount `pg_atomic_sub_fetch_u32` + `dsa_free`.
+/// Mirrors `tbm_free_shared_area`: drop the per-array refcounts and `dsa_free`
+/// the arrays whose refcount reaches 0, then free the istate.
 fn dsa_shared_tbm_free(
-    _dsa: DsaAreaHandle,
-    _dp: types_tidbitmap::dsa_pointer,
+    dsa: DsaAreaHandle,
+    dp: types_tidbitmap::dsa_pointer,
 ) -> PgResult<()> {
-    panic!(
-        "SEAM tbm_free_shared_area: the DSA-backed shared-TIDBitmap provider \
-         (refcount atomics + dsa_free) is not yet ported"
-    )
+    let istate_addr = dsa_addr(dsa, dp);
+    // SAFETY: `dp` is a valid istate dsa_pointer; reading the array dsa_pointers
+    // is sound, and the refcount atomics serialize the free decision.
+    let (pagetable, spages, schunks) = unsafe {
+        let istate = &*(istate_addr as *const TBMSharedIteratorState);
+        (istate.pagetable, istate.spages, istate.schunks)
+    };
+
+    if dsa_pointer_is_valid(pagetable) {
+        // if (pg_atomic_sub_fetch_u32(&ptbase->refcount, 1) == 0) dsa_free(...)
+        let prev = entry_array_refcount(dsa, pagetable).value.fetch_sub(1, Ordering::SeqCst);
+        if prev - 1 == 0 {
+            dsa_seam::dsa_free::call(dsa, pagetable);
+        }
+    }
+    if dsa_pointer_is_valid(spages) {
+        let prev = iter_array_refcount(dsa, spages).value.fetch_sub(1, Ordering::SeqCst);
+        if prev - 1 == 0 {
+            dsa_seam::dsa_free::call(dsa, spages);
+        }
+    }
+    if dsa_pointer_is_valid(schunks) {
+        let prev = iter_array_refcount(dsa, schunks).value.fetch_sub(1, Ordering::SeqCst);
+        if prev - 1 == 0 {
+            dsa_seam::dsa_free::call(dsa, schunks);
+        }
+    }
+
+    // dsa_free(dsa, dp);
+    dsa_seam::dsa_free::call(dsa, dp);
+    Ok(())
+}
+
+/// The backend-private payload stored in a [`types_tidbitmap::TBMSharedIterator`]
+/// carrier (the C `struct TBMSharedIterator`): the DSA area handle plus the
+/// resolved backend-local addresses of the shared istate and the three arrays.
+struct SharedIterCarrier {
+    dsa: DsaAreaHandle,
+    /// backend-local address of the `TBMSharedIteratorState`.
+    istate: usize,
+    /// backend-local address of `PTEntryArray.ptentry` (the dense entries),
+    /// `None` when there is no pagetable.
+    ptbase_entries: Option<usize>,
+    /// backend-local address of the exact-page `PTIterationArray.index`.
+    ptpages_index: Option<usize>,
+    /// backend-local address of the lossy-chunk `PTIterationArray.index`.
+    ptchunks_index: Option<usize>,
 }
 
 /// `tbm_shared_iterate(iterator, tbmres)` (`tidbitmap.c`): advance a shared
-/// iteration (the table-AM scan owns this call once ported). Routes through the
-/// DSA-backed shared-TBM provider (it holds the iterator `LWLock`).
+/// iteration under the istate `LWLock`, delivering pages in numerical order
+/// across cooperating workers. A faithful port of the C state machine.
 pub fn tbm_shared_iterate(
-    _iterator: &mut types_tidbitmap::TBMSharedIterator,
-    _tbmres: &mut TBMIterateResult,
+    iterator: &mut types_tidbitmap::TBMSharedIterator,
+    tbmres: &mut TBMIterateResult,
 ) -> PgResult<bool> {
-    panic!(
-        "SEAM tbm_shared_iterate: the DSA-backed shared-TIDBitmap provider \
-         (LWLock + shared state walk) is not yet ported"
-    )
+    let carrier = iterator
+        .0
+        .as_ref()
+        .and_then(|p| p.downcast_ref::<SharedIterCarrier>())
+        .ok_or_else(|| PgError::error("tbm_shared_iterate: shared iterator carrier is foreign"))?;
+
+    // SAFETY: the carrier addresses live DSA objects mapped in this process; the
+    // istate position members are mutated only under `istate->lock` (acquired
+    // below), and the entry/index arrays are read-only after prepare.
+    let istate = unsafe { &*(carrier.istate as *const TBMSharedIteratorState) };
+    let ptbase = carrier.ptbase_entries.map(|a| a as *const PagetableEntry);
+    let idxpages = carrier.ptpages_index.map(|a| a as *const i32);
+    let idxchunks = carrier.ptchunks_index.map(|a| a as *const i32);
+
+    // Helpers that index the DSA arrays. SAFETY: indices are in range
+    // [0, npages|nchunks) which equal the allocated array lengths.
+    let entry_at = |idx: i32| -> &PagetableEntry {
+        unsafe { &*ptbase.expect("ptbase").add(idx as usize) }
+    };
+    let page_index = |i: i32| -> i32 { unsafe { *idxpages.expect("idxpages").add(i as usize) } };
+    let chunk_index = |i: i32| -> i32 { unsafe { *idxchunks.expect("idxchunks").add(i as usize) } };
+
+    // Acquire the LWLock before accessing the shared members (guard releases on
+    // drop / on the explicit release below).
+    let guard = lwlock::lwlock_acquire::call(
+        &istate.lock,
+        LW_EXCLUSIVE,
+        backend_storage_lmgr_proc_seams::my_proc_number::call(),
+    )?;
+
+    // Read the shared position into locals; write them back before releasing.
+    let mut spageptr = istate.spageptr;
+    let mut schunkptr = istate.schunkptr;
+    let mut schunkbit = istate.schunkbit;
+    let npages = istate.npages;
+    let nchunks = istate.nchunks;
+
+    // If lossy chunk pages remain, advance schunkptr/schunkbit to the next set
+    // bit.
+    while schunkptr < nchunks {
+        let chunk = entry_at(chunk_index(schunkptr));
+        let mut bit = schunkbit;
+        advance_schunkbit(chunk, &mut bit);
+        if (bit as usize) < PAGES_PER_CHUNK {
+            schunkbit = bit;
+            break;
+        }
+        schunkptr += 1;
+        schunkbit = 0;
+    }
+
+    // If both chunk and per-page data remain, output the numerically earlier
+    // page.
+    if schunkptr < nchunks {
+        let chunk = entry_at(chunk_index(schunkptr));
+        let chunk_blockno = chunk.blockno + schunkbit as u32;
+        if spageptr >= npages || chunk_blockno < entry_at(page_index(spageptr)).blockno {
+            // Return a lossy page indicator from the chunk.
+            tbmres.blockno = chunk_blockno;
+            tbmres.lossy = true;
+            tbmres.recheck = true;
+            tbmres.internal_page = None;
+            schunkbit += 1;
+            write_back(istate, &guard, spageptr, schunkptr, schunkbit);
+            guard.release()?;
+            return Ok(true);
+        }
+    }
+
+    if spageptr < npages {
+        let page = entry_at(page_index(spageptr));
+        tbmres.internal_page = Some(Box::new(page.clone()));
+        tbmres.blockno = page.blockno;
+        tbmres.lossy = false;
+        tbmres.recheck = page.recheck;
+        spageptr += 1;
+        write_back(istate, &guard, spageptr, schunkptr, schunkbit);
+        guard.release()?;
+        return Ok(true);
+    }
+
+    write_back(istate, &guard, spageptr, schunkptr, schunkbit);
+    guard.release()?;
+
+    // Nothing more in the bitmap.
+    tbmres.blockno = InvalidBlockNumber;
+    Ok(false)
+}
+
+/// Write the advanced iterator position back into the shared istate. The
+/// caller holds `istate->lock` (`_guard`), so this exclusive write to the
+/// position members is the sole concurrent access.
+#[inline]
+fn write_back(
+    istate: &TBMSharedIteratorState,
+    _guard: &lwlock::LWLockGuard<'_>,
+    spageptr: i32,
+    schunkptr: i32,
+    schunkbit: i32,
+) {
+    // SAFETY: the position members are mutated only under `istate->lock`, which
+    // the caller holds for the duration of `_guard`. The cast to `*mut` writes
+    // exactly the three position words; no other process touches them now.
+    let p = istate as *const TBMSharedIteratorState as *mut TBMSharedIteratorState;
+    unsafe {
+        (*p).spageptr = spageptr;
+        (*p).schunkptr = schunkptr;
+        (*p).schunkbit = schunkbit;
+    }
 }
 
 /// `tbm_iterate(iterator, tbmres)` (`tidbitmap.c`): advance the unified iterator

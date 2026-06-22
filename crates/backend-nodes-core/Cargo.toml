@@ -31,6 +31,12 @@ backend-executor-execParallel-support-seams = { path = "../backend-executor-exec
 backend-nodes-makefuncs-seams = { path = "../backend-nodes-makefuncs-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-nodes-core-tidbitmap-seams = { path = "../backend-nodes-core-tidbitmap-seams" }
+# Parallel (DSA-backed) shared TIDBitmap iterator: dsa_allocate/get_address/free
+# of the TBMSharedIteratorState/PTEntryArray/PTIterationArray, the iterator
+# LWLock, and MyProcNumber for LWLockAcquire. Leaf seam crates — no cycle.
+backend-utils-mmgr-dsa-seams = { path = "../backend-utils-mmgr-dsa-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-nodes-params-seams = { path = "../backend-nodes-params-seams" }
 backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
