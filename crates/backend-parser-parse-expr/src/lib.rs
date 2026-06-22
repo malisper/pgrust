@@ -85,7 +85,7 @@ fn cmptype_to_enum(c: i32) -> types_nodes::primnodes::CompareType {
 }
 use types_tuple::heaptuple::{
     BOOLOID, BYTEAOID, DATEOID, INT2VECTOROID, INT4OID, JSONBOID, NAMEOID, OIDVECTOROID, RECORDOID,
-    TEXTOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, UNKNOWNOID, XMLOID,
+    REFCURSOROID, TEXTOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, UNKNOWNOID, XMLOID,
 };
 
 // SQL/JSON catalog OIDs (stable; nodes/parsenodes.h transforms reference these).
@@ -1469,15 +1469,54 @@ fn transformCurrentOfExpr<'mcx>(
     })?;
     cexpr.cvarno = nsitem.p_rtindex as types_core::Index;
 
-    // The cursor-name → REFCURSOR-Param rewrite consults the columnref parser
-    // hooks (opaque cross-ABI function pointers). With no hook installed the C
-    // takes the "no translation" path and leaves the node unchanged; that is
-    // exactly what happens here when the hooks are absent. The hook-installed
-    // path needs the columnref-hook ABI — reached via the columnref seam.
-    if cexpr.cursor_name.is_some()
-        && (pstate.p_pre_columnref_hook.is_some() || pstate.p_post_columnref_hook.is_some())
-    {
-        return seam_transform_column_ref_hook_currentof(pstate, Expr::CurrentOfExpr(cexpr));
+    // Check whether the cursor name matches a REFCURSOR parameter; if so, replace
+    // the raw name reference with a parameter reference (a hack for plpgsql's
+    // convenience — `WHERE CURRENT OF <plpgsql cursor var>`). C builds an
+    // unqualified ColumnRef of the cursor name and runs it through the installed
+    // columnref hooks (pre, then post if pre returned nothing); a resulting
+    // PARAM_EXTERN Param of type refcursor converts CURRENT OF into a
+    // cursor_param reference. A non-Param / non-refcursor translation is silently
+    // ignored (false match). With no hook installed, nothing matches.
+    if let Some(cursor_name) = cexpr.cursor_name.clone() {
+        let want_hooks =
+            pstate.p_pre_columnref_hook.is_some() || pstate.p_post_columnref_hook.is_some();
+        if want_hooks {
+            let mcx = aexpr_clone_ctx(pstate);
+            // cref->fields = list_make1(makeString(cursor_name)); cref->location = -1;
+            let mut fields: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+            fields.push(mcx::alloc_in(
+                mcx,
+                Node::mk_string(
+                    mcx,
+                    types_nodes::value::StringNode {
+                        sval: mcx::PgString::from_str_in(&cursor_name, mcx)?,
+                    },
+                )?,
+            )?);
+            let cref = types_nodes::rawnodes::ColumnRef { fields, location: -1 };
+
+            // pre hook, then post hook only if pre returned nothing (C order).
+            let mut node = if pstate.p_pre_columnref_hook.is_some() {
+                plpgsql_pre_column_ref(pstate, &cref)?
+            } else {
+                None
+            };
+            if node.is_none() && pstate.p_post_columnref_hook.is_some() {
+                node = plpgsql_post_column_ref(pstate, &cref, None)?;
+            }
+
+            if let Some(node) = node {
+                if let Some(types_nodes::primnodes::Expr::Param(p)) = node.as_ref().as_expr() {
+                    if p.paramkind == types_nodes::primnodes::PARAM_EXTERN
+                        && p.paramtype == REFCURSOROID
+                    {
+                        // Matches: convert CURRENT OF to a param reference.
+                        cexpr.cursor_name = None;
+                        cexpr.cursor_param = p.paramid;
+                    }
+                }
+            }
+        }
     }
 
     Ok(Expr::CurrentOfExpr(cexpr))
