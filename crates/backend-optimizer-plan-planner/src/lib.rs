@@ -10802,34 +10802,78 @@ fn apply_tlist_labeling_impl<'mcx>(
         })
         .collect();
 
-    let dest = match plan.plan_head_mut().targetlist.as_deref_mut() {
-        Some(d) => d,
-        None => {
-            // An empty dest is only valid when the source is also empty.
-            assert!(
-                src_labels.is_empty(),
-                "apply_tlist_labeling: dest tlist is NIL but processed_tlist is not"
-            );
-            return Ok(());
+    // Apply the labeling to the topmost plan node, then propagate it down
+    // through tlist-passthrough (non-projecting) plan nodes.
+    //
+    // In C, pass-through plan nodes (Sort, IncrementalSort, Unique, Material,
+    // Memoize, LockRows, Limit, Hash, Gather, GatherMerge) reuse their child's
+    // `targetlist` *List pointer*, so the whole chain shares the same
+    // TargetEntry objects down to the bottom-most node that builds its own
+    // tlist (e.g. a SubqueryScan or table scan). `apply_tlist_labeling`'s single
+    // in-place mutation in C therefore labels every node in that shared chain.
+    // Our owned model gives each plan node its own TargetEntry copies, so we
+    // must walk the chain and apply the labeling to each node explicitly.
+    // Notably `trivial_subqueryscan` (setrefs.c) compares the SubqueryScan
+    // tlist's `resjunk` against its subplan's; without this propagation the
+    // SubqueryScan keeps `resjunk=false` on junk sort columns and is wrongly
+    // judged trivial and removed.
+    let mut cur: &mut Node<'mcx> = plan;
+    loop {
+        {
+            let dest = match cur.plan_head_mut().targetlist.as_deref_mut() {
+                Some(d) => d,
+                None => {
+                    // An empty dest is only valid when the source is also empty.
+                    assert!(
+                        src_labels.is_empty(),
+                        "apply_tlist_labeling: dest tlist is NIL but processed_tlist is not"
+                    );
+                    return Ok(());
+                }
+            };
+            // If lengths differ, the child projects to a different tlist (this
+            // node does not share its parent's TLEs); stop the descent.
+            if dest.len() != src_labels.len() {
+                break;
+            }
+            for (dest_tle, (resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk)) in
+                dest.iter_mut().zip(src_labels.iter())
+            {
+                debug_assert_eq!(dest_tle.resno, *resno);
+                dest_tle.resname = match resname {
+                    Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
+                    None => None,
+                };
+                dest_tle.ressortgroupref = *ressortgroupref;
+                dest_tle.resorigtbl = *resorigtbl;
+                dest_tle.resorigcol = *resorigcol;
+                dest_tle.resjunk = *resjunk;
+            }
         }
-    };
-    assert_eq!(
-        dest.len(),
-        src_labels.len(),
-        "apply_tlist_labeling: tlist length mismatch"
-    );
-    for (dest_tle, (resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk)) in
-        dest.iter_mut().zip(src_labels.into_iter())
-    {
-        debug_assert_eq!(dest_tle.resno, resno);
-        dest_tle.resname = match resname {
-            Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
-            None => None,
-        };
-        dest_tle.ressortgroupref = ressortgroupref;
-        dest_tle.resorigtbl = resorigtbl;
-        dest_tle.resorigcol = resorigcol;
-        dest_tle.resjunk = resjunk;
+
+        // Descend into the lefttree only through tlist-passthrough node types,
+        // mirroring the createplan.c make_* functions that set
+        // `plan->targetlist = lefttree->targetlist`.
+        let is_passthrough = matches!(
+            cur.node_tag(),
+            types_nodes::nodes::T_Sort
+                | types_nodes::nodeincrementalsort::T_IncrementalSort
+                | types_nodes::nodeunique::T_Unique
+                | types_nodes::nodes::T_Material
+                | types_nodes::nodememoize::T_Memoize
+                | types_nodes::nodes::T_LockRows
+                | types_nodes::nodes::T_Limit
+                | types_nodes::nodehashjoin::T_Hash
+                | types_nodes::nodegather::T_Gather
+                | types_nodes::nodegathermerge::T_GatherMerge
+        );
+        if !is_passthrough {
+            break;
+        }
+        match cur.plan_head_mut().lefttree.as_deref_mut() {
+            Some(child) => cur = child,
+            None => break,
+        }
     }
     Ok(())
 }
