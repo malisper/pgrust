@@ -484,8 +484,17 @@ fn exec_init_node_finish<'mcx>(
     // `EEOP_MERGE_SUPPORT_FUNC` can recover the `ModifyTableState` through
     // `parent.as_modify_table_state()`.
     if let types_nodes::PlanStateNode::ModifyTable(m) = &*result {
-        let result_rel_ids: Vec<types_nodes::execnodes::RriId> =
+        let mut result_rel_ids: Vec<types_nodes::execnodes::RriId> =
             m.resultRelInfo.iter().copied().collect();
+        // An inherited-table MERGE INSERT uses rootResultRelInfo (not in
+        // resultRelInfo[]); its ri_projectReturning (built by
+        // ExecInitMergeInheritedRoot, which may hold merge_action()) must also be
+        // stamped. C passes &mtstate->ps there too.
+        if let Some(root) = m.rootResultRelInfo {
+            if !result_rel_ids.contains(&root) {
+                result_rel_ids.push(root);
+            }
+        }
         // Record the enclosing-enum back-link on the ModifyTableState so the
         // per-leaf-partition ExprStates built lazily by ExecInitPartitionInfo
         // (after this up-front stamp pass) can be stamped with the same
