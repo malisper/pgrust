@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_error::PgResult;
 use types_pathnodes::planner_run::PlannerRun;
-use types_pathnodes::{PlannerInfo, RelId, RELOPT_JOINREL};
+use types_pathnodes::{PlannerInfo, RelId, RELOPT_JOINREL, RELOPT_OTHER_JOINREL};
 
 use backend_optimizer_path_joinrels::{is_dummy_rel, mark_dummy_rel};
 use backend_optimizer_util_pathnode_seams as pathnode;
@@ -13,10 +13,14 @@ use backend_tcop_postgres_seams as tcop;
 
 use crate::add_paths_to_append_rel;
 
-/// `IS_JOIN_REL(rel)` (pathnodes.h) — a joinrel (reloptkind == RELOPT_JOINREL).
+/// `IS_JOIN_REL(rel)` (pathnodes.h) — a joinrel: `RELOPT_JOINREL` (a top-level
+/// join) **or** `RELOPT_OTHER_JOINREL` (a partitionwise child-join). Both must be
+/// accepted here so that a partitioned child-join (an `OTHER_JOINREL` that is
+/// itself sub-partitioned, e.g. in a nested partitionwise join) recurses and has
+/// `set_cheapest` run on its grandchildren.
 #[inline]
 fn is_join_rel(rel: &types_pathnodes::RelOptInfo) -> bool {
-    rel.reloptkind == RELOPT_JOINREL
+    rel.reloptkind == RELOPT_JOINREL || rel.reloptkind == RELOPT_OTHER_JOINREL
 }
 
 /// `IS_PARTITIONED_REL(rel)` field-only conjuncts (pathnodes.h): has a scheme,
