@@ -1389,6 +1389,11 @@ pub fn init_seams() {
     // owned in this unit (pl_handler.c); the executor reads it through the seam.
     backend_pl_plpgsql_exec_seams::plpgsql_check_asserts::set(plpgsql_check_asserts);
 
+    // `plpgsql_extra_warnings` / `plpgsql_extra_errors` live-GUC reads for the
+    // executor's runtime too-many-rows / strict-multi-assignment checks.
+    backend_pl_plpgsql_exec_seams::plpgsql_extra_warnings::set(plpgsql_extra_warnings);
+    backend_pl_plpgsql_exec_seams::plpgsql_extra_errors::set(plpgsql_extra_errors);
+
     // `type_is_rowtype` for exec_stmt_return's composite-result test.
     backend_pl_plpgsql_exec_seams::type_is_rowtype::set(|typid: types_core::Oid| {
         backend_utils_cache_lsyscache_seams::type_is_rowtype::call(typid)

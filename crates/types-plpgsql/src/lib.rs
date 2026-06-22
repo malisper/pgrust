@@ -1130,6 +1130,18 @@ pub struct PLpgSQL_execstate {
     pub readonly_func: bool,
     pub atomic: bool,
 
+    /// `func->extra_warnings` — the `plpgsql.extra_warnings` bitmask the function
+    /// was compiled with, carried directly so the executor's extra-check sites
+    /// (too-many-rows, strict-multi-assignment) can read the active level without
+    /// dereferencing the opaque `func` back-reference.
+    pub extra_warnings: int32,
+    /// `func->extra_errors` — the `plpgsql.extra_errors` bitmask (companion to
+    /// [`Self::extra_warnings`]).
+    pub extra_errors: int32,
+    /// `func->print_strict_params` — whether STRICT INTO failures append the
+    /// `parameters: …` DETAIL.
+    pub print_strict_params: bool,
+
     /// the "target" label of the current EXIT/CONTINUE stmt, if any.
     pub exitlabel: Option<String>,
     // `estate->cur_error` — the live error being handled by the current

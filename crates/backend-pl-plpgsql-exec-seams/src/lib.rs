@@ -572,6 +572,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `plpgsql_extra_warnings` (pl_handler.c) — the live `plpgsql.extra_warnings`
+    /// GUC bitmask. The runtime too-many-rows / strict-multi-assignment checks
+    /// (`exec_stmt_execsql` / `exec_move_row`) read the *current* session value
+    /// (not the function's compile-time value), so the executor must reach the
+    /// handler-owned GUC. Infallible int read.
+    pub fn plpgsql_extra_warnings() -> int32
+);
+
+seam_core::seam!(
+    /// `plpgsql_extra_errors` (pl_handler.c) — the live `plpgsql.extra_errors`
+    /// GUC bitmask (companion to [`plpgsql_extra_warnings`]).
+    pub fn plpgsql_extra_errors() -> int32
+);
+
+seam_core::seam!(
     /// `type_is_rowtype(typid)` (`lsyscache.c`) — is the type a composite/row
     /// type (or a domain over one)? `exec_stmt_return` uses it to decide whether
     /// a RETURN value of a SETOF/composite function is a row. The executor unit

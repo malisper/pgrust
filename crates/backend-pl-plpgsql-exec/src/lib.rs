@@ -3125,6 +3125,57 @@ fn exec_stmt_assert(
     Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
+/// Resolve a `plpgsql.extra_*` check (`xcheck_bit`) to the ereport level it
+/// requests against the *live* session GUCs: `ERROR` if `extra_errors` carries
+/// the bit, else `WARNING` if `extra_warnings` carries it, else 0 (disabled).
+/// Mirrors C's `if (plpgsql_extra_errors & BIT) ... else if (plpgsql_extra_warnings & BIT) ...`.
+fn extra_check_level(xcheck_bit: int32) -> i32 {
+    if (exec_seams::plpgsql_extra_errors::call() & xcheck_bit) != 0 {
+        types_error::ERROR.0
+    } else if (exec_seams::plpgsql_extra_warnings::call() & xcheck_bit) != 0 {
+        types_error::WARNING.0
+    } else {
+        0
+    }
+}
+
+/// Emit the `strict_multi_assignment` extra-check report at `level` (the
+/// `exec_move_row` "number of source and target fields … does not match"
+/// ereport). A WARNING-level report is emitted in place (and execution
+/// continues); an ERROR-level report is returned to propagate.
+fn emit_strict_multiassignment(level: i32) -> types_error::PgResult<()> {
+    let active = if level == types_error::ERROR.0 {
+        "extra_errors"
+    } else {
+        "extra_warnings"
+    };
+    let msg = "number of source and target fields in assignment does not match".to_string();
+    let detail = format!("strict_multi_assignment check of {active} is active.");
+    let hint = "Make sure the query returns the exact list of columns.".to_string();
+    if level == types_error::ERROR.0 {
+        return Err(types_error::PgError::error(msg)
+            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+            .with_detail(detail)
+            .with_hint(hint));
+    }
+    // WARNING level: report to the client and continue. psql shows no CONTEXT
+    // line for these extra-check warnings (SHOW_CONTEXT default = errors), so
+    // none is attached.
+    exec_seams::raise_ereport::call(exec_seams::RaiseEreport {
+        elog_level: level,
+        err_code: types_error::ERRCODE_DATATYPE_MISMATCH.0,
+        message: msg,
+        detail: Some(detail),
+        hint: Some(hint),
+        column: None,
+        constraint: None,
+        datatype: None,
+        table: None,
+        schema: None,
+        context: None,
+    })
+}
+
 /// `exec_stmt_execsql(estate, stmt)` (pl_exec.c 4208) — execute an embedded SQL
 /// statement (INSERT / UPDATE / DELETE / plain SELECT), optionally with INTO. The
 /// statement-type classification, FOUND setting, INTO no-rows / too-many-rows /
@@ -3137,10 +3188,12 @@ fn exec_stmt_execsql(
     let expr = stmt.sqlstmt.as_deref().expect("EXECSQL carries a sqlstmt");
 
     // plpgsql_extra_errors / plpgsql_extra_warnings & PLPGSQL_XCHECK_TOOMANYROWS:
-    // the optional too-many-rows check. The extra-check GUCs default off and are
-    // owned in the handler layer (not reachable here); the default-disabled state
-    // is level 0 (no extra check).
-    let too_many_rows_level: int32 = 0;
+    // the optional too-many-rows check. C reads the *live* session GUC (not the
+    // function's compile-time value); the handler exposes it through a seam. The
+    // resulting `too_many_rows_level` is the ereport level (ERROR / WARNING / 0).
+    let too_many_rows_level: i32 = extra_check_level(
+        types_plpgsql::PLPGSQL_XCHECK_TOOMANYROWS,
+    );
 
     // setup_param_list + SPI_execute_plan_with_paramlist. The mod_stmt detection
     // (INSERT/UPDATE/DELETE/MERGE) that C computes from SPI_plan_get_plan_sources
@@ -3242,11 +3295,34 @@ fn exec_stmt_execsql(
             exec_move_row_into_target(estate, target, &[])?;
         } else {
             if n > 1 && (stmt.strict || mod_stmt || too_many_rows_level != 0) {
-                return Err(
-                    types_error::PgError::error("query returned more than one row".to_string())
-                        .with_hint("Make sure the query returns a single row, or use LIMIT 1.".to_string())
-                        .with_sqlstate(types_error::ERRCODE_TOO_MANY_ROWS),
-                );
+                // errlevel = (strict || mod_stmt) ? ERROR : too_many_rows_level
+                let errlevel = if stmt.strict || mod_stmt {
+                    types_error::ERROR
+                } else {
+                    types_error::ErrorLevel(too_many_rows_level)
+                };
+                let msg = "query returned more than one row".to_string();
+                let hint =
+                    "Make sure the query returns a single row, or use LIMIT 1.".to_string();
+                if errlevel == types_error::ERROR {
+                    return Err(types_error::PgError::error(msg)
+                        .with_hint(hint)
+                        .with_sqlstate(types_error::ERRCODE_TOO_MANY_ROWS));
+                }
+                // A WARNING-level too-many-rows check: report and continue.
+                exec_seams::raise_ereport::call(exec_seams::RaiseEreport {
+                    elog_level: errlevel.0,
+                    err_code: types_error::ERRCODE_TOO_MANY_ROWS.0,
+                    message: msg,
+                    detail: None,
+                    hint: Some(hint),
+                    column: None,
+                    constraint: None,
+                    datatype: None,
+                    table: None,
+                    schema: None,
+                    context: None,
+                })?;
             }
             // Put the first result row into the target.
             exec_move_row_into_target(estate, target, &result.first_row)?;
@@ -3313,6 +3389,13 @@ fn exec_move_row_into_target(
                 PLpgSQL_datum::Row(r) => (r.nfields as usize, r.varnos.clone()),
                 _ => unreachable!("ROW dtype is a Row datum"),
             };
+            // strict_multiassignment_level (pl_exec.c exec_move_row PLpgSQL_row
+            // branch): the live `plpgsql.extra_*` STRICTMULTIASSIGNMENT check.
+            let strict_multiassignment_level =
+                extra_check_level(types_plpgsql::PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT);
+            // `anum` advances through the source columns as C does, so a target
+            // with no remaining source triggers the missing-source check.
+            let mut anum = 0usize;
             for fno in 0..nfields {
                 let field_dno = varnos[fno];
                 // A `varnos[fno] < 0` marks a dropped column placeholder in C
@@ -3320,25 +3403,39 @@ fn exec_move_row_into_target(
                 if field_dno < 0 {
                     continue;
                 }
-                match columns.get(fno) {
-                    Some(c) => exec_assign_value_byref_impl(
-                        estate,
-                        field_dno,
-                        Datum::from_usize(c.value),
-                        c.byref.clone(),
-                        c.isnull,
-                        c.typeid,
-                        c.typmod,
-                    )?,
-                    None => exec_assign_value_impl(
-                        estate,
-                        field_dno,
-                        Datum::null(),
-                        true,
-                        INVALID_OID,
-                        -1,
-                    )?,
+                match columns.get(anum) {
+                    Some(c) => {
+                        anum += 1;
+                        exec_assign_value_byref_impl(
+                            estate,
+                            field_dno,
+                            Datum::from_usize(c.value),
+                            c.byref.clone(),
+                            c.isnull,
+                            c.typeid,
+                            c.typmod,
+                        )?
+                    }
+                    None => {
+                        // no source for destination column
+                        if strict_multiassignment_level != 0 {
+                            emit_strict_multiassignment(strict_multiassignment_level)?;
+                        }
+                        exec_assign_value_impl(
+                            estate,
+                            field_dno,
+                            Datum::null(),
+                            true,
+                            INVALID_OID,
+                            -1,
+                        )?
+                    }
                 }
+            }
+            // When the strict-multiassignment check is active, ensure there are
+            // no unassigned source attributes (more source columns than fields).
+            if strict_multiassignment_level != 0 && anum < columns.len() {
+                emit_strict_multiassignment(strict_multiassignment_level)?;
             }
         }
         PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
@@ -4018,6 +4115,10 @@ pub fn plpgsql_estate_setup(
 
         readonly_func: func.fn_readonly,
         atomic: true,
+
+        extra_warnings: func.extra_warnings,
+        extra_errors: func.extra_errors,
+        print_strict_params: func.print_strict_params,
 
         exitlabel: None,
         cur_error: None,
