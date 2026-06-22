@@ -416,31 +416,120 @@ fn nonrecursive_term_targetlist<'mcx>(
     Ok(out)
 }
 
-/// `exprLocation((Node *) list)` over a list of raw nodes — the minimum
-/// non-negative child location (-1 if empty / all unknown).
+/// `exprLocation((Node *) list)` over a list of raw nodes — the location of the
+/// first list member that has a (non-negative) location, matching the `T_List`
+/// arm of nodeFuncs.c `exprLocation` (-1 if empty / all unknown).
 fn expr_location_of_list(list: &PgVec<'_, PgBox<'_, Node<'_>>>) -> PgResult<i32> {
-    let mut result = -1i32;
     for n in list.iter() {
         let loc = expr_location_of_node(n)?;
-        if loc < 0 {
-            continue;
-        }
-        if result < 0 || loc < result {
-            result = loc;
+        if loc >= 0 {
+            return Ok(loc);
         }
     }
-    Ok(result)
+    Ok(-1)
 }
 
-/// `exprLocation((Node *) n)` over a raw or analyzed node. Raw grammar nodes
-/// carry no location in this model except via the `Node::Expr` arm; we read the
-/// expression location where present and otherwise -1 (the trimmed-location
-/// fallback used repo-wide).
-fn expr_location_of_node(node: &Node<'_>) -> PgResult<i32> {
-    match node.as_expr() {
-        Some(e) => expr_location(Some(e)),
-        None => Ok(-1),
+/// `leftmostLoc(loc1, loc2)` (nodeFuncs.c): the leftmost (smallest) of two parse
+/// locations, treating -1 (unknown) as "not leftmost".
+fn leftmost_loc(loc1: i32, loc2: i32) -> i32 {
+    if loc1 < 0 {
+        loc2
+    } else if loc2 < 0 {
+        loc1
+    } else if loc1 < loc2 {
+        loc1
+    } else {
+        loc2
     }
+}
+
+/// `exprLocation((Node *) n)` over a raw or analyzed node. The analyzed
+/// `Expr`-family arm is delegated to the shared `expr_location`; the raw grammar
+/// node arms reachable from a recursive query's ORDER BY / LIMIT / OFFSET /
+/// FOR UPDATE decoration (`SortBy`, `A_Const`, `FuncCall`, `ColumnRef`,
+/// `ParamRef`, `A_Expr`, `TypeCast`, `CollateClause`) are handled here, mirroring
+/// the corresponding cases of nodeFuncs.c `exprLocation`. Anything else is -1.
+fn expr_location_of_node(node: &Node<'_>) -> PgResult<i32> {
+    // Raw grammar node arms first: several raw nodes (notably `SubLink`) also
+    // satisfy `as_expr()` via the Node→Expr routing, but the analyzed `Expr`
+    // view has its `location` trimmed to -1 model-wide, while the *raw* node
+    // still carries the real parse position. So match the raw arms (which hold
+    // the live `ParseLoc`) before delegating to the shared `expr_location`.
+    if let Some(s) = node.as_sortby() {
+        // T_SortBy: just use argument's location (ignore operator, if any).
+        return match s.node.as_ref() {
+            Some(inner) => expr_location_of_node(inner.as_ref()),
+            None => Ok(-1),
+        };
+    }
+    if let Some(c) = node.as_a_const() {
+        // T_A_Const.
+        return Ok(c.location);
+    }
+    if let Some(fc) = node.as_funccall() {
+        // T_FuncCall: leftmost of function name and leftmost arg.
+        let mut args_loc = -1i32;
+        for a in fc.args.iter() {
+            let loc = expr_location_of_node(a.as_ref())?;
+            if loc >= 0 {
+                args_loc = loc;
+                break;
+            }
+        }
+        return Ok(leftmost_loc(fc.location, args_loc));
+    }
+    if let Some(cr) = node.as_columnref() {
+        // T_ColumnRef.
+        return Ok(cr.location);
+    }
+    if let Some(pr) = node.as_paramref() {
+        // T_ParamRef.
+        return Ok(pr.location);
+    }
+    if let Some(ae) = node.as_a_expr() {
+        // T_A_Expr: leftmost of operator or left operand.
+        let lloc = match ae.lexpr.as_ref() {
+            Some(l) => expr_location_of_node(l.as_ref())?,
+            None => -1,
+        };
+        return Ok(leftmost_loc(ae.location, lloc));
+    }
+    if let Some(tc) = node.as_typecast() {
+        // T_TypeCast: leftmost of arg, typeName, and cast location.
+        let mut loc = match tc.arg.as_ref() {
+            Some(a) => expr_location_of_node(a.as_ref())?,
+            None => -1,
+        };
+        if let Some(tn) = tc.typeName.as_deref() {
+            loc = leftmost_loc(loc, tn.location);
+        }
+        loc = leftmost_loc(loc, tc.location);
+        return Ok(loc);
+    }
+    if let Some(cc) = node.as_collateclause() {
+        // T_CollateClause: just use argument's location.
+        return match cc.arg.as_ref() {
+            Some(a) => expr_location_of_node(a.as_ref()),
+            None => Ok(-1),
+        };
+    }
+    if let Some(sl) = node.as_sublink() {
+        // T_SubLink (raw): leftmost of the testexpr (if any) and the SubLink's
+        // own location (the keyword/operator token, e.g. the leading `(`). The
+        // analyzed Expr::SubLink view trims `location`, so the raw node is the
+        // only place that still holds it.
+        let test_loc = match sl.testexpr.as_ref() {
+            Some(t) => expr_location_of_node(t.as_ref())?,
+            None => -1,
+        };
+        return Ok(leftmost_loc(test_loc, sl.location));
+    }
+    // Analyzed Expr-family nodes (Const/Var/OpExpr/...) go through the shared
+    // exprLocation port.
+    if let Some(e) = node.as_expr() {
+        return expr_location(Some(e));
+    }
+    Ok(-1)
 }
 
 // ===========================================================================
