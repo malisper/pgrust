@@ -964,10 +964,29 @@ pub fn init_seams() {
     // the owned `CheckpointState` once the XLogCtl shmem driver is ported.
     s::create_checkpoint::set(|flags| {
         let _ = flags;
+        // The WAL-record / XLogCtl-shmem half of a real checkpoint is still
+        // deferred (the #157 WAL-redo keystone), so the durable checkpoint
+        // record is NOT written here. But the storage-sync half of
+        // `CheckPointGuts` — `SyncPreCheckpoint()` / `SyncPostCheckpoint()` —
+        // is fully ported and is independent of the WAL driver. It is the leg
+        // that physically unlinks the lingering 0-length files left behind by
+        // `mdunlink()` (DROP TABLE / ALTER ... SET TABLESPACE / REINDEX
+        // TABLESPACE register an `SYNC_UNLINK_REQUEST` deferred to "next
+        // checkpoint"; see md.c `mdunlinkfork`/sync.c). When this body runs in
+        // the checkpointer, `SyncPreCheckpoint` first absorbs the requests
+        // backends forwarded over shmem, then `SyncPostCheckpoint` removes the
+        // files. Running it here lets `DROP TABLESPACE`'s
+        // `RequestCheckpoint(CHECKPOINT_IMMEDIATE|FORCE|WAIT)` actually clean
+        // out the tablespace directory (tablespace.c `DropTableSpace`), instead
+        // of failing "tablespace is not empty". Faithful to the sync portion of
+        // `CheckPointGuts` (xlog.c:7574); the WAL-record durability remains
+        // honestly skipped (logged below), not faked.
+        backend_storage_sync_seams::sync_pre_checkpoint::call()?;
+        backend_storage_sync_seams::sync_post_checkpoint::call()?;
         backend_utils_error::ereport(types_error::LOG)
             .errmsg(
                 "skipping checkpoint: the WAL checkpoint-record driver (XLogCtl shmem) \
-                 is not yet ported; no checkpoint was performed",
+                 is not yet ported; no checkpoint was performed (pending unlinks flushed)",
             )
             .finish(types_error::ErrorLocation::new(
                 "xlog.c",
