@@ -104,6 +104,10 @@ backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 # `checkExprHasSubLink` (rewriteManip.c) for RelationBuildRowSecurity's
 # RowSecurityPolicy.hassublinks. Seam crate (leaf): acyclic.
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
+# `equal()` over node trees (equalfuncs.c) for equalRSDesc's per-policy
+# qual/with_check_qual comparison in the relcache-rebuild keep_policies test.
+# Seam crate (leaf): acyclic.
+backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 # setRuleCheckAsUser: stamp checkAsUser on a loaded rule's RTEPermissionInfos
 # (view ON SELECT rules check underlying-rel perms as the view owner).
 backend-rewrite-rewriteDefine-seams = { path = "../backend-rewrite-rewriteDefine-seams" }

@@ -22533,6 +22533,7 @@ dependencies = [
  "backend-commands-matview-deps-seams",
  "backend-commands-tablecmds-seams",
  "backend-nodes-core-seams",
+ "backend-nodes-equalfuncs-seams",
  "backend-nodes-read-seams",
  "backend-optimizer-util-plancat-ext-seams",
  "backend-rewrite-rewriteDefine-seams",

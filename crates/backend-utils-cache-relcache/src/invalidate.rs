@@ -277,7 +277,15 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
         // branches yield a correct tree — only the C pointer identity, which
         // Rust does not expose, would differ).
         let keep_rules = old.rd_rules.is_some() == newrel.rd_rules.is_some();
-        let keep_policies = old.rd_has_rsdesc == newrel.rd_has_rsdesc;
+        // C: `keep_policies = equalRSDesc(old->rd_rsdesc, newrel->rd_rsdesc)`
+        // then `SWAPFIELD(RowSecurityDesc *, rd_rsdesc)`. A presence-only match
+        // (`is_some == is_some`) is WRONG: when the policy set changes but both
+        // descriptors are present (e.g. CREATE POLICY adds the first policy to a
+        // freshly-RLS-enabled relation: 0 → 1 policies, both `Some`), the stale
+        // empty descriptor would be preserved and every subsequent query would
+        // see the default-deny `false` qual instead of the new policy. Do the
+        // real `equalRSDesc` content comparison.
+        let keep_policies = equal_rsdesc(&old.rd_rsdesc, &newrel.rd_rsdesc);
         // partkey is immutable once set up, so we can always keep it.
         let keep_partkey = old.rd_has_partkey;
 
@@ -475,6 +483,80 @@ fn equal_tuple_descs(
             true
         }
         (None, None) => true,
+        _ => false,
+    }
+}
+
+/// `equalRSDesc(rsdesc1, rsdesc2)` (relcache.c) over the owned descriptors —
+/// the rebuild's keep-policies decision. Two descriptors are equivalent when
+/// both are absent, or both present with the same policy list (in the
+/// `RelationBuildRowSecurity` build order) where each policy matches per
+/// `equalPolicy`. A presence-only comparison is unsafe (it would preserve a
+/// stale descriptor when policies change but presence does not), so this does
+/// the full content comparison the C code performs.
+fn equal_rsdesc(
+    rs1: &Option<mcx::PgBox<'static, types_relcache_entry::RowSecurityDesc>>,
+    rs2: &Option<mcx::PgBox<'static, types_relcache_entry::RowSecurityDesc>>,
+) -> bool {
+    match (rs1, rs2) {
+        (None, None) => true,
+        (Some(d1), Some(d2)) => {
+            if d1.policies.len() != d2.policies.len() {
+                return false;
+            }
+            // RelationBuildRowSecurity builds policies in a deterministic order,
+            // so a positional `forboth` comparison matches the C `equalRSDesc`.
+            for (p1, p2) in d1.policies.iter().zip(d2.policies.iter()) {
+                if !equal_policy(p1, p2) {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// `equalPolicy(policy1, policy2)` (relcache.c): two policies are equivalent
+/// when their `polcmd`, `hassublinks`, `policy_name`, `roles` (the decoded
+/// `Oid[]`), and `qual`/`with_check_qual` node trees all match. `permissive` is
+/// not compared in C's `equalPolicy`; we mirror that.
+fn equal_policy(
+    p1: &types_relcache_entry::RowSecurityPolicy,
+    p2: &types_relcache_entry::RowSecurityPolicy,
+) -> bool {
+    if p1.polcmd != p2.polcmd
+        || p1.hassublinks != p2.hassublinks
+        || p1.policy_name.as_str() != p2.policy_name.as_str()
+        || p1.roles.len() != p2.roles.len()
+    {
+        return false;
+    }
+    if p1.roles.iter().zip(p2.roles.iter()).any(|(a, b)| a != b) {
+        return false;
+    }
+    // `equal(policy1->qual, policy2->qual)` / `equal(.., with_check_qual)` over
+    // the cached node trees. `None == None` matches the C `equal(NULL, NULL)`.
+    if !equal_opt_node(&p1.qual, &p2.qual) {
+        return false;
+    }
+    if !equal_opt_node(&p1.with_check_qual, &p2.with_check_qual) {
+        return false;
+    }
+    true
+}
+
+/// `equal(a, b)` over two optional cached node trees (the C `equal(NULL, ...)`
+/// convention: both NULL ⇒ equal; exactly one NULL ⇒ not equal).
+fn equal_opt_node(
+    a: &Option<mcx::PgBox<'static, types_nodes::nodes::Node<'static>>>,
+    b: &Option<mcx::PgBox<'static, types_nodes::nodes::Node<'static>>>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => {
+            backend_nodes_equalfuncs_seams::equal_node::call(x, y)
+        }
         _ => false,
     }
 }
