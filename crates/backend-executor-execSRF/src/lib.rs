@@ -414,36 +414,41 @@ fn init_sexpr<'mcx>(
     sexpr.funcReturnsTuple = false;
     sexpr.setArgsValid = false;
 
-    // C (execSRF.c init_sexpr):
+    // C (execSRF.c:749-792 init_sexpr):
     //   /* If function returns set, prepare a resultinfo node for communication */
     //   if (sexpr->func.fn_retset && needDescForSRF)
     //   {
     //       TypeFuncClass functypclass;
     //       Oid          funcrettype;
     //       TupleDesc    tupdesc;
-    //       functypclass = get_expr_result_type(sexpr->expr, &funcrettype, &tupdesc);
+    //       functypclass = get_expr_result_type((Node *) sexpr->expr,
+    //                                           &funcrettype, &tupdesc);
     //       if (functypclass == TYPEFUNC_COMPOSITE ||
     //           functypclass == TYPEFUNC_COMPOSITE_DOMAIN)
     //       {
-    //           sexpr->funcReturnsTuple = true;
+    //           /* Composite data type, e.g. a table's row type */
+    //           Assert(tupdesc);
     //           sexpr->funcResultDesc = CreateTupleDescCopy(tupdesc);
+    //           sexpr->funcReturnsTuple = true;
     //       }
     //       else if (functypclass == TYPEFUNC_SCALAR)
     //       {
-    //           sexpr->funcReturnsTuple = false;
+    //           /* Base data type, i.e. scalar */
     //           tupdesc = CreateTemplateTupleDesc(1);
     //           TupleDescInitEntry(tupdesc, 1, NULL, funcrettype, -1, 0);
-    //           TupleDescInitEntryCollation(tupdesc, 1, exprCollation((Node *) sexpr->expr));
     //           sexpr->funcResultDesc = tupdesc;
+    //           sexpr->funcReturnsTuple = false;
     //       }
     //       else if (functypclass == TYPEFUNC_RECORD)
     //       {
-    //           /* leave funcResultDesc = NULL; nodeFunctionscan will set up */
+    //           /* This will work if function doesn't need an expectedDesc */
+    //           sexpr->funcResultDesc = NULL;
+    //           sexpr->funcReturnsTuple = true;
     //       }
     //       else
     //       {
-    //           /* crummy error message, but parser should have caught this */
-    //           elog(ERROR, "function in FROM has unsupported return type");
+    //           /* Else, we will fail if function needs an expectedDesc */
+    //           sexpr->funcResultDesc = NULL;
     //       }
     //   }
     //
@@ -452,7 +457,11 @@ fn init_sexpr<'mcx>(
     // SCALAR SETOF function called in a targetlist (ProjectSet path, e.g.
     // `SELECT jsonb_array_elements(...)`) reaches `InitMaterializedSRF` with a
     // NULL `expectedDesc` and errors "materialize mode required, but it is not
-    // allowed in this context".
+    // allowed in this context". The RECORD case additionally sets
+    // `funcReturnsTuple = true` so a RECORD-returning SRF in a targetlist (e.g.
+    // `SELECT json_populate_recordset(row(1,2), ...)`) returns each whole row as
+    // a composite Datum (ExecMakeFunctionResultSet's `ExecFetchSlotHeapTupleDatum`
+    // path) rather than extracting only the first column.
     if sexpr.func.fn_retset && need_desc_for_srf {
         let per_query = estate.es_query_cxt;
         // C: get_expr_result_type((Node *) sexpr->expr, &funcrettype, &tupdesc).
@@ -497,15 +506,19 @@ fn init_sexpr<'mcx>(
                 sexpr.funcResultDesc = Some(td);
             }
             Some(types_nodes::funcapi::TypeFuncClass::Record) => {
-                // Indeterminate rowtype — leave funcResultDesc = NULL; the
-                // FunctionScan path resolves a RECORD result from column defs.
+                // Indeterminate rowtype — this will work if the function doesn't
+                // need an expectedDesc. Leave funcResultDesc = NULL but mark
+                // funcReturnsTuple = true: each produced row is returned whole as
+                // a composite Datum (the function supplies the row descriptor via
+                // its materialize-mode setDesc).
+                sexpr.funcResultDesc = None;
+                sexpr.funcReturnsTuple = true;
             }
             _ => {
-                // crummy error message, but parser should have caught this.
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_INTERNAL_ERROR)
-                    .errmsg("function in FROM has unsupported return type")
-                    .into_error());
+                // Else, we will fail if function needs an expectedDesc.
+                // (C leaves funcResultDesc = NULL and does not error here; the
+                // failure, if any, surfaces later when an expectedDesc is needed.)
+                sexpr.funcResultDesc = None;
             }
         }
     }
