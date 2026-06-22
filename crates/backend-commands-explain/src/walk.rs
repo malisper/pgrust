@@ -3242,26 +3242,33 @@ fn show_memoize_info<'es>(
             continue;
         }
 
-        // es->workers_state is unmodelled on the structural slice; ExplainOpenWorker
-        // is a no-op there. mem_peak is set by ExecEndMemoize, no zero check needed.
+        // mem_peak is set by ExecEndMemoize, no zero check needed.
         let mem_peak_kb = bytes_to_kilobytes(si.mem_peak as i64);
+        let cache_hits = si.cache_hits;
+        let cache_misses = si.cache_misses;
+        let cache_evictions = si.cache_evictions;
+        let cache_overflows = si.cache_overflows;
+
+        if es.workers_state.is_some() {
+            fmt::ExplainOpenWorker(n, es)?;
+        }
 
         if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
             fmt::ExplainIndentText(es)?;
             es.str.try_push_str(&format!(
                 "Hits: {}  Misses: {}  Evictions: {}  Overflows: {}  Memory Usage: {}kB\n",
-                si.cache_hits,
-                si.cache_misses,
-                si.cache_evictions,
-                si.cache_overflows,
-                mem_peak_kb,
+                cache_hits, cache_misses, cache_evictions, cache_overflows, mem_peak_kb,
             ))?;
         } else {
-            fmt::ExplainPropertyInteger("Cache Hits", None, si.cache_hits as i64, es)?;
-            fmt::ExplainPropertyInteger("Cache Misses", None, si.cache_misses as i64, es)?;
-            fmt::ExplainPropertyInteger("Cache Evictions", None, si.cache_evictions as i64, es)?;
-            fmt::ExplainPropertyInteger("Cache Overflows", None, si.cache_overflows as i64, es)?;
+            fmt::ExplainPropertyInteger("Cache Hits", None, cache_hits as i64, es)?;
+            fmt::ExplainPropertyInteger("Cache Misses", None, cache_misses as i64, es)?;
+            fmt::ExplainPropertyInteger("Cache Evictions", None, cache_evictions as i64, es)?;
+            fmt::ExplainPropertyInteger("Cache Overflows", None, cache_overflows as i64, es)?;
             fmt::ExplainPropertyInteger("Peak Memory Usage", Some("kB"), mem_peak_kb, es)?;
+        }
+
+        if es.workers_state.is_some() {
+            fmt::ExplainCloseWorker(n, es)?;
         }
     }
 

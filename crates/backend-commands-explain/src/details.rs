@@ -304,7 +304,7 @@ pub fn show_hashagg_info(
 
     // Display stats for each parallel worker.
     if es.analyze {
-        for sinstrument in info.worker_instrument.iter() {
+        for (n, sinstrument) in info.worker_instrument.iter().enumerate() {
             // Skip workers that didn't do anything.
             if sinstrument.hash_mem_peak == 0 {
                 continue;
@@ -312,11 +312,12 @@ pub fn show_hashagg_info(
             let hash_disk_used = sinstrument.hash_disk_used;
             let hash_batches_used = sinstrument.hash_batches_used;
             let mem_peak_kb = bytes_to_kilobytes(sinstrument.hash_mem_peak as i64);
+            let n = n as i32;
 
-            // es->workers_state is unmodelled on the structural slice (the
-            // ExplainOpenWorker/CloseWorker formatting is unmodelled), so worker
-            // data appears as top-level data — matching C's hide_workers
-            // fallback behaviour (cf. show_sort_info).
+            if es.workers_state.is_some() {
+                fmt::ExplainOpenWorker(n, es)?;
+            }
+
             if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
                 fmt::ExplainIndentText(es)?;
                 es.str.try_push_str(&format!(
@@ -337,6 +338,10 @@ pub fn show_hashagg_info(
                 )?;
                 fmt::ExplainPropertyInteger("Peak Memory Usage", Some("kB"), mem_peak_kb, es)?;
                 fmt::ExplainPropertyInteger("Disk Usage", Some("kB"), hash_disk_used as i64, es)?;
+            }
+
+            if es.workers_state.is_some() {
+                fmt::ExplainCloseWorker(n, es)?;
             }
         }
     }
@@ -573,7 +578,9 @@ pub fn show_incremental_sort_info(
     // Per-worker shared_info path: at EXPLAIN ANALYZE time the leader's
     // `shared_info` has been snapshotted into the backend-local `Local` arm by
     // `ExecIncrementalSortRetrieveInstrumentation` (the DSM segment is already
-    // detached). Mirror C's loop over `shared_info->sinfo[0..num_workers]`.
+    // detached). Mirror C's loop over `shared_info->sinfo[0..num_workers]`,
+    // wrapping each worker in ExplainOpenWorker/ExplainCloseWorker for proper
+    // per-worker grouping/indentation.
     if let Some(SharedIncrementalSortInfo::Local {
         num_workers,
         sinfo,
@@ -591,9 +598,10 @@ pub fn show_incremental_sort_info(
                 continue;
             }
 
-            // es->workers_state is unmodelled on the structural slice (the trimmed
-            // ExplainState carries no worker formatting state); the indent-first
-            // decision (workers_state == NULL || verbose) is thus always "true".
+            if es.workers_state.is_some() {
+                fmt::ExplainOpenWorker(n, es)?;
+            }
+
             let indent_first_line = es.workers_state.is_none() || es.verbose;
             show_incremental_sort_group_info(
                 worker_fullsort,
@@ -610,6 +618,10 @@ pub fn show_incremental_sort_info(
             }
             if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
                 es.str.try_push('\n')?;
+            }
+
+            if es.workers_state.is_some() {
+                fmt::ExplainCloseWorker(n, es)?;
             }
         }
     }
@@ -650,10 +662,12 @@ pub fn show_sort_info(
         }
     }
 
-    // Per-worker shared_info (parallel sort): emit each filled slot. The
-    // workers_state/OpenWorker/CloseWorker formatting is unmodelled on the
-    // structural slice, so worker 0's data appears as top-level data (matching
-    // C's hide_workers fallback behaviour).
+    // Per-worker shared_info (parallel sort): emit each filled slot, wrapping
+    // each worker's stats in ExplainOpenWorker/ExplainCloseWorker so TEXT gets a
+    // properly-indented "Worker N:" group and structured formats get a Workers
+    // array. When `es.workers_state` is None (hide_workers / non-parallel), the
+    // OpenWorker/CloseWorker calls are skipped and worker 0's data appears as
+    // top-level data, matching C's hide_workers fallback behaviour.
     // At EXPLAIN ANALYZE time the leader's `shared_info` has been snapshotted
     // into the backend-local `Local` arm by `ExecSortRetrieveInstrumentation`
     // (the DSM segment is already detached). Mirror C's loop over
@@ -676,6 +690,10 @@ pub fn show_sort_info(
             let space_type = tuplesort_space_type_name(sinstrument.spaceType);
             let space_used = sinstrument.spaceUsed;
 
+            if es.workers_state.is_some() {
+                fmt::ExplainOpenWorker(n, es)?;
+            }
+
             if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
                 fmt::ExplainIndentText(es)?;
                 es.str.try_push_str(&format!(
@@ -685,6 +703,10 @@ pub fn show_sort_info(
                 fmt::ExplainPropertyText("Sort Method", sort_method, es)?;
                 fmt::ExplainPropertyInteger("Sort Space Used", Some("kB"), space_used, es)?;
                 fmt::ExplainPropertyText("Sort Space Type", space_type, es)?;
+            }
+
+            if es.workers_state.is_some() {
+                fmt::ExplainCloseWorker(n, es)?;
             }
         }
     }
