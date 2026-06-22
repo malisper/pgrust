@@ -30,37 +30,56 @@
 #![allow(non_upper_case_globals)]
 
 use backend_executor_execAmi_seams as execAmi;
-use backend_executor_execParallel_support_seams as parallel_sup;
 use backend_executor_execProcnode_seams as execProcnode;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
 use backend_access_transam_parallel as parallel;
+use backend_access_transam_parallel as parallel_sup;
 use backend_tcop_postgres_seams as tcop_postgres;
 use backend_utils_init_small_seams as globals;
 use backend_utils_sort_tuplesort_seams as tuplesort;
+use types_parallel::shared_dsm_object;
 
-use mcx::{alloc_in, PgBox};
+use mcx::{alloc_in, PgBox, PgVec};
 use types_error::PgResult;
 use types_execparallel::{
-    ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle, Size,
+    ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
 use types_nodes::execnodes::{ForwardScanDirection, ScanDirectionIsForward};
 use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 use types_nodes::nodesort::{
-    Sort, SortStateData, TuplesortInstrumentation, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE,
-    TUPLESORT_RANDOMACCESS,
+    SharedSortInfo, SharedSortInfoHeader, Sort, SortStateData, TuplesortInstrumentation,
+    TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE, TUPLESORT_RANDOMACCESS,
 };
 use types_nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 
-/// `offsetof(SharedSortInfo, sinstrument)` (execnodes.h): an `int num_workers`
-/// followed by the `TuplesortInstrumentation[]` flexible array, which begins on
-/// an 8-byte boundary (`TuplesortInstrumentation` contains an `int64`). The C
-/// (and c2rust) use the literal byte offset `8`.
-const SHARED_SORT_INFO_HEADER: Size = 8;
+/// `offsetof(SharedSortInfo, sinstrument) + nworkers * sizeof(TuplesortInstrumentation)`
+/// — the byte size of a `SharedSortInfo` carrying `nworkers` per-worker slots.
+/// (`offsetof(SharedSortInfo, sinstrument)` is `sizeof(SharedSortInfoHeader)`
+/// MAXALIGN'd up to `TuplesortInstrumentation`'s alignment.)
+#[inline]
+fn shared_sort_info_size(nworkers: usize) -> usize {
+    use core::mem::{align_of, size_of};
+    let h = size_of::<SharedSortInfoHeader>();
+    let a = align_of::<TuplesortInstrumentation>();
+    let off = (h + a - 1) & !(a - 1);
+    off + nworkers * size_of::<TuplesortInstrumentation>()
+}
 
-/// `sizeof(TuplesortInstrumentation)` — used to size the per-worker shm chunk.
-fn sizeof_instrumentation() -> Size {
-    core::mem::size_of::<TuplesortInstrumentation>()
+/// `&shared_info->sinstrument[worker_index]` — the in-segment address of this
+/// worker's slot in the DSM `SharedSortInfo` flex array.
+#[inline]
+fn sinstrument_slot_cursor(
+    chunk: types_execparallel::SerializeCursor,
+    worker_index: i32,
+) -> types_execparallel::SerializeCursor {
+    use core::mem::{align_of, size_of};
+    let h = size_of::<SharedSortInfoHeader>();
+    let a = align_of::<TuplesortInstrumentation>();
+    let off = (h + a - 1) & !(a - 1);
+    types_execparallel::SerializeCursor(
+        chunk.0 + off + (worker_index as usize) * size_of::<TuplesortInstrumentation>(),
+    )
 }
 
 /// Install this crate's seam implementations. nodeSort owns the inward
@@ -565,19 +584,21 @@ pub fn ExecSortEstimate<'mcx>(
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
     //   if (!node->ss.ps.instrument || pcxt->nworkers == 0) return;
-    if node.ss.ps.instrument.is_none() || parallel_sup::pcxt_nworkers::call(pcxt) == 0 {
+    if node.ss.ps.instrument.is_none() || parallel_sup::pcxt_nworkers(pcxt) == 0 {
         return Ok(());
     }
 
+    let nworkers = parallel_sup::pcxt_nworkers(pcxt) as usize;
+
     //   size = mul_size(pcxt->nworkers, sizeof(TuplesortInstrumentation));
     //   size = add_size(size, offsetof(SharedSortInfo, sinstrument));
-    let nworkers = parallel_sup::pcxt_nworkers::call(pcxt);
-    let size = (nworkers as Size) * sizeof_instrumentation() + SHARED_SORT_INFO_HEADER;
+    let size = shared_dsm_object::estimate_flex(shared_sort_info_size(nworkers));
 
     //   shm_toc_estimate_chunk(&pcxt->estimator, size);
     //   shm_toc_estimate_keys(&pcxt->estimator, 1);
-    parallel_sup::pcxt_estimate_chunk::call(pcxt, size)?;
-    parallel_sup::pcxt_estimate_keys::call(pcxt, 1)?;
+    let estimator = parallel_sup::pcxt_estimator(pcxt);
+    parallel_sup::shm_toc_estimate_chunk(estimator, size);
+    parallel_sup::shm_toc_estimate_keys(estimator, 1);
     Ok(())
 }
 
@@ -603,28 +624,47 @@ pub fn ExecSortInitializeDSM<'mcx>(
 ) -> PgResult<()> {
     // don't need this if not instrumenting or no workers
     //   if (!node->ss.ps.instrument || pcxt->nworkers == 0) return;
-    if node.ss.ps.instrument.is_none() || parallel_sup::pcxt_nworkers::call(pcxt) == 0 {
+    let nworkers = parallel_sup::pcxt_nworkers(pcxt);
+    if node.ss.ps.instrument.is_none() || nworkers == 0 {
         return Ok(());
     }
 
+    let plan_node_id = sort_plan(node)?.plan.plan_node_id;
+
     //   size = offsetof(SharedSortInfo, sinstrument)
     //          + pcxt->nworkers * sizeof(TuplesortInstrumentation);
-    let nworkers = parallel_sup::pcxt_nworkers::call(pcxt);
-    let size = SHARED_SORT_INFO_HEADER + (nworkers as Size) * sizeof_instrumentation();
+    let size = shared_sort_info_size(nworkers as usize);
 
     //   node->shared_info = shm_toc_allocate(pcxt->toc, size);
+    let toc = parallel_sup::pcxt_toc(pcxt);
+    let chunk = parallel_sup::shm_toc_allocate(toc, shared_dsm_object::estimate_flex(size));
+
+    // A parallel query with instrument-bearing workers always has a real DSM
+    // segment.
+    let seg = parallel_sup::pcxt_seg(pcxt)
+        .expect("ExecSortInitializeDSM: instrumenting parallel query without a DSM segment");
+
+    //   /* ensure any unfilled slots will contain zeroes */
     //   memset(node->shared_info, 0, size);
     //   node->shared_info->num_workers = pcxt->nworkers;
+    let (_hdr, _tail) =
+        shared_dsm_object::place_flex::<SharedSortInfoHeader, TuplesortInstrumentation>(
+            seg,
+            chunk,
+            nworkers as usize,
+            SharedSortInfoHeader { num_workers: nworkers },
+            |_i| TuplesortInstrumentation::default(),
+        );
+
     //   shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, node->shared_info);
-    let plan_node_id = sort_plan(node)?.plan.plan_node_id;
-    let _ = (size, plan_node_id, pcxt);
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: SharedSortInfo DSM \
-         allocate + place_and_init + carrier handoff (ExecSortInitializeDSM) — \
-         the merged SortStateData.shared_info is an in-process PgBox<SharedSortInfo> \
-         and cannot hold the DSM SharedRef (SharedRef is unstorable in types-nodes); \
-         same blocker as nodeAgg's ExecAggInitializeDSM; unported"
-    );
+    parallel_sup::shm_toc_insert(toc, plan_node_id as u64, chunk);
+
+    node.shared_info = Some(SharedSortInfo::Dsm {
+        chunk,
+        seg,
+        num_workers: nworkers,
+    });
+    Ok(())
 }
 
 /// `ExecSortInitializeWorker(node, pwcxt)` — attach a worker to DSM space.
@@ -648,34 +688,34 @@ pub fn ExecSortInitializeWorker<'mcx>(
     //
     // The lookup is `noError = true` (missing_ok): when the leader is NOT
     // instrumenting (no EXPLAIN ANALYZE) `ExecSortInitializeDSM` returns early
-    // without inserting any chunk, so this lookup finds nothing and the C
-    // leaves `node->shared_info == NULL`. We faithfully reproduce that arm:
-    // `shared_info = None`, `am_worker = true`. Only when a chunk IS present
-    // (the instrumenting path) would the DSM-resident `SharedSortInfo` carrier
-    // be required — and that carrier is genuinely unported (the merged
-    // `SortStateData.shared_info` is an in-process `PgBox<SharedSortInfo>` which
-    // cannot hold the DSM `SharedRef`; same blocker as nodeAgg's
-    // `ExecAggInitializeWorker`). Defer to the carrier owner only in that case
-    // rather than silently dropping the worker's stats.
+    // without inserting any chunk, so this lookup finds nothing and the C leaves
+    // `node->shared_info == NULL`.
     let plan_node_id = sort_plan(node)?.plan.plan_node_id;
     let toc = parallel::pwcxt_toc(pwcxt);
+    node.am_worker = true;
     match parallel::shm_toc_lookup(toc, plan_node_id as u64, true) {
         None => {
             // Leader was not instrumenting: no shared stats area to attach to.
             node.shared_info = None;
-            node.am_worker = true;
-            Ok(())
         }
-        Some(_chunk) => {
-            node.am_worker = true;
-            panic!(
-                "backend_access_transam_parallel::shared_dsm_object: SharedSortInfo DSM \
-                 attach (ExecSortInitializeWorker) — the in-process PgBox<SharedSortInfo> \
-                 carrier cannot hold the shm_toc_lookup SharedRef; same blocker as nodeAgg's \
-                 ExecAggInitializeWorker; unported"
-            );
+        Some(chunk) => {
+            // Attach to the leader's DSM `SharedSortInfo`: recover num_workers
+            // from the in-segment header. The worker writes ONLY its own
+            // `sinstrument[ParallelWorkerNumber]` slot later (in `ExecSort`).
+            let seg = parallel::pwcxt_seg(pwcxt);
+            let (hdr, _tail) = shared_dsm_object::attach_flex::<
+                SharedSortInfoHeader,
+                TuplesortInstrumentation,
+            >(seg, chunk, 0);
+            let num_workers = hdr.get().num_workers;
+            node.shared_info = Some(SharedSortInfo::Dsm {
+                chunk,
+                seg,
+                num_workers,
+            });
         }
     }
+    Ok(())
 }
 
 /// `ExecSortRetrieveInstrumentation(node)` — transfer sort statistics from DSM
@@ -689,29 +729,45 @@ pub fn ExecSortInitializeWorker<'mcx>(
 /// DSM-resident carrier the Init paths also need. Same blocker as nodeAgg's
 /// `ExecAggRetrieveInstrumentation`; mirror-and-panic until it lands.
 pub fn ExecSortRetrieveInstrumentation<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     node: &mut SortStateData<'mcx>,
 ) -> PgResult<()> {
+    //   SharedSortInfo *si;
     //   if (node->shared_info == NULL) return;
-    if node.shared_info.is_none() {
-        return Ok(());
-    }
+    let (chunk, seg, num_workers) = match node.shared_info {
+        Some(SharedSortInfo::Dsm {
+            chunk,
+            seg,
+            num_workers,
+        }) => (chunk, seg, num_workers),
+        // Already a backend-local copy, or NULL: nothing to retrieve.
+        _ => return Ok(()),
+    };
 
     //   size = offsetof(SharedSortInfo, sinstrument)
     //          + node->shared_info->num_workers * sizeof(TuplesortInstrumentation);
     //   si = palloc(size); memcpy(si, node->shared_info, size); node->shared_info = si;
-    let num_workers = node
-        .shared_info
-        .as_deref()
-        .expect("checked is_some above")
-        .num_workers;
-    let size = SHARED_SORT_INFO_HEADER + (num_workers as Size) * sizeof_instrumentation();
-    let _ = size;
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: SharedSortInfo DSM \
-         copy-out (ExecSortRetrieveInstrumentation) — needs the DSM-resident \
-         shared_info carrier the Init paths also need; same blocker as nodeAgg's \
-         ExecAggRetrieveInstrumentation; unported"
-    );
+    //
+    // The DSM segment is still mapped here (the C runs this before detach). Read
+    // the flex array out of the segment and snapshot it into a backend-local
+    // `PgVec`; `node->shared_info` then becomes the `Local` arm.
+    let (_hdr, tail) =
+        shared_dsm_object::attach_flex::<SharedSortInfoHeader, TuplesortInstrumentation>(
+            seg,
+            chunk,
+            num_workers as usize,
+        );
+
+    let mut copy: PgVec<'mcx, TuplesortInstrumentation> =
+        PgVec::with_capacity_in(num_workers as usize, mcx);
+    for &elem in tail.get().iter() {
+        copy.push(elem);
+    }
+    node.shared_info = Some(SharedSortInfo::Local {
+        num_workers,
+        sinstrument: copy,
+    });
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -738,6 +794,21 @@ fn resolve_sort_state<'mcx>(_node: PlanStateHandle) -> &'mcx mut SortStateData<'
     );
 }
 
+/// `CurrentMemoryContext` (`planstate->state->es_query_cxt`) at the
+/// `ExecSortRetrieveInstrumentation` call site — recovered from the same
+/// unported executor surface that backs `resolve_sort_state`, so it shares that
+/// panic. (The live executor dispatches `ExecSortRetrieveInstrumentation`
+/// directly over its owned `SortState` from `ExecParallelRetrieveInstrumentation`,
+/// recovering the mcx from the node's EState back-link; this handle-shim path is
+/// only reached by a hypothetical pointer-registry caller.)
+fn resolve_retrieve_mcx<'mcx>(_node: PlanStateHandle) -> mcx::Mcx<'mcx> {
+    panic!(
+        "backend-executor-nodeSort: the CurrentMemoryContext for \
+         ExecSortRetrieveInstrumentation's palloc'd copy is recovered from the unported executor \
+         surface (PlanState pointer registry); cannot run yet"
+    );
+}
+
 /// Seam shim for `ExecSortEstimate`.
 fn exec_sort_estimate_shim(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()> {
     ExecSortEstimate(resolve_sort_state(node), pcxt)
@@ -761,7 +832,7 @@ fn exec_sort_initialize_worker_shim(
 
 /// Seam shim for `ExecSortRetrieveInstrumentation`.
 fn exec_sort_retrieve_instrumentation_shim(node: PlanStateHandle) -> PgResult<()> {
-    ExecSortRetrieveInstrumentation(resolve_sort_state(node))
+    ExecSortRetrieveInstrumentation(resolve_retrieve_mcx(node), resolve_sort_state(node))
 }
 
 // ===========================================================================
@@ -814,27 +885,41 @@ fn store_worker_stats<'mcx>(
     node: &mut SortStateData<'mcx>,
     stats: TuplesortInstrumentation,
 ) -> PgResult<()> {
-    // The shared_info container lives in this node's owned tree; the
-    // worker-number index belongs to the parallel subsystem. With the live
-    // SortState resolved here (we hold &mut node), the write is a direct field
-    // store once the worker number is known — but the worker number is owned by
-    // access/parallel.c, so it is obtained via the support seam, and the slot
-    // is populated here.
+    //   si = &node->shared_info->sinstrument[ParallelWorkerNumber];
+    //   tuplesort_get_stats(tuplesortstate, si);
+    //
+    // The worker writes ONLY its own slot in the DSM `SharedSortInfo` flex
+    // array; the worker is the sole writer of that element, satisfying
+    // `with_mut`'s sole-accessor obligation. The worker number is owned by
+    // access/parallel.c (the support seam).
     let worker_number = parallel::parallel_worker_number();
     let shared = node
         .shared_info
-        .as_deref_mut()
+        .as_ref()
         .expect("caller checked shared_info.is_some()");
-    debug_assert!(worker_number >= 0);
-    debug_assert!(worker_number <= shared.num_workers);
-    let idx = worker_number as usize;
-    // The shm-allocated array has num_workers slots, all present (zeroed by the
-    // DSM init). The owned vector mirrors that: ensure the slot exists.
-    if idx < shared.sinstrument.len() {
-        shared.sinstrument[idx] = stats;
-        Ok(())
-    } else {
-        Err(worker_slot_oob(idx, shared.sinstrument.len()))
+    match shared {
+        SharedSortInfo::Dsm {
+            chunk,
+            seg,
+            num_workers,
+        } => {
+            debug_assert!(worker_number >= 0);
+            debug_assert!(worker_number <= *num_workers);
+            if worker_number < 0 || worker_number >= *num_workers {
+                return Err(worker_slot_oob(worker_number as usize, *num_workers as usize));
+            }
+            let elem = sinstrument_slot_cursor(*chunk, worker_number);
+            shared_dsm_object::with_mut::<TuplesortInstrumentation, ()>(*seg, elem, |si| {
+                *si = stats;
+            });
+            Ok(())
+        }
+        // The worker copyback only runs in a parallel worker whose
+        // `ExecSortInitializeWorker` attached the DSM area; a `Local` arm here is
+        // impossible (it only exists in the leader after retrieve).
+        SharedSortInfo::Local { .. } => {
+            Err(worker_slot_oob(worker_number as usize, 0))
+        }
     }
 }
 

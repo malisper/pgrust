@@ -944,6 +944,7 @@ fn ExecParallelReInitializeDSM<'mcx>(
 /// IndexScan/Sort/Hash/Agg/Memoize/BitmapHeap shared-state pull — are not
 /// reached by the `count(*)`/SeqScan path and land with those nodes.)
 fn ExecParallelRetrieveInstrumentation<'mcx>(
+    mcx: Mcx<'mcx>,
     planstate: &mut PlanStateNode<'mcx>,
     sei: types_execparallel::InstrumentationHandle,
 ) -> PgResult<()> {
@@ -966,8 +967,26 @@ fn ExecParallelRetrieveInstrumentation<'mcx>(
         Some(per_worker)
     };
 
+    // Perform any node-type-specific work that needs to be done.
+    //   switch (nodeTag(planstate)) { case T_SortState: ExecSortRetrieveInstrumentation(..); ... }
+    // (The IndexScan/IndexOnlyScan/BitmapIndexScan/IncrementalSort/Hash/Agg/
+    // Memoize/BitmapHeap shared-state pulls land with those nodes; Sort/Hash are
+    // wired here.)
+    // The per-query context the C `Exec*RetrieveInstrumentation` palloc's the
+    // backend-local copy in (`planstate->state->es_query_cxt`), threaded in by
+    // the caller (the owned model does not set the `ps.state` back-link).
+    match planstate {
+        PlanStateNode::Sort(node) => {
+            nodeSort::ExecSortRetrieveInstrumentation(mcx, node)?;
+        }
+        PlanStateNode::Hash(node) => {
+            nodeHash::instrument::ExecHashRetrieveInstrumentation(mcx, node)?;
+        }
+        _ => {}
+    }
+
     for child in planstate.planstate_tree_walker_children_mut() {
-        ExecParallelRetrieveInstrumentation(child, sei)?;
+        ExecParallelRetrieveInstrumentation(mcx, child, sei)?;
     }
     Ok(())
 }
@@ -1066,6 +1085,7 @@ pub fn ExecParallelFinish<'mcx>(pei: &mut ParallelExecutorInfo<'mcx>) -> PgResul
 /// (`node.pei` and `node.ps.lefttree`), so storing a self-reference in `pei`
 /// would be a self-borrow. The caller hands both disjoint field borrows.
 pub fn ExecParallelCleanup<'mcx>(
+    mcx: Mcx<'mcx>,
     pei: &mut ParallelExecutorInfo<'mcx>,
     planstate: &mut PlanStateNode<'mcx>,
 ) -> PgResult<()> {
@@ -1075,7 +1095,7 @@ pub fn ExecParallelCleanup<'mcx>(
     // `planstate->instrument` and stashing the per-worker detail on the node's
     // `worker_instrument` carrier (for EXPLAIN ANALYZE per-worker lines).
     if let Some(sei) = pei.instrumentation {
-        ExecParallelRetrieveInstrumentation(planstate, sei)?;
+        ExecParallelRetrieveInstrumentation(mcx, planstate, sei)?;
     }
     if pei.jit_instrumentation.is_some() {
         panic!(

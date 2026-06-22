@@ -634,7 +634,7 @@ fn exec_shutdown_node_walker<'mcx>(
     match node {
         // case T_GatherState: ExecShutdownGather((GatherState *) node);
         PlanStateNode::Gather(state) => {
-            backend_executor_nodeGather::ExecShutdownGather(state)?;
+            backend_executor_nodeGather::ExecShutdownGather(state, estate)?;
         }
         // case T_ForeignScanState: ExecShutdownForeignScan((ForeignScanState *) node);
         PlanStateNode::ForeignScan(state) => {
@@ -646,7 +646,7 @@ fn exec_shutdown_node_walker<'mcx>(
         }
         // case T_GatherMergeState: ExecShutdownGatherMerge((GatherMergeState *) node);
         PlanStateNode::GatherMerge(state) => {
-            backend_executor_nodeGatherMerge::ExecShutdownGatherMerge(state)?;
+            backend_executor_nodeGatherMerge::ExecShutdownGatherMerge(state, estate)?;
         }
         // case T_HashState: ExecShutdownHash((HashState *) node);
         PlanStateNode::Hash(state) => {

@@ -25,4 +25,5 @@ types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-execparallel = { path = "../types-execparallel" }
+types-parallel = { path = "../types-parallel" }
 mcx = { path = "../mcx" }

@@ -490,7 +490,7 @@ pub fn ExecEndGatherMerge<'mcx>(
     if let Some(outer) = node.ps.lefttree.as_deref_mut() {
         execProcnode::exec_end_node::call(outer, estate)?;
     }
-    ExecShutdownGatherMerge(node)?;
+    ExecShutdownGatherMerge(node, estate)?;
     Ok(())
 }
 
@@ -507,13 +507,19 @@ pub fn ExecEndGatherMerge<'mcx>(
 ///     }
 /// }
 /// ```
-pub fn ExecShutdownGatherMerge<'mcx>(node: &mut GatherMergeStateData<'mcx>) -> PgResult<()> {
+pub fn ExecShutdownGatherMerge<'mcx>(
+    node: &mut GatherMergeStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     exec_shutdown_gather_merge_workers(node)?;
 
     // Now destroy the parallel context.
     if node.pei.is_some() {
         // `pei` (node->pei) and the leader's outerPlanState (node->ps.lefttree)
-        // are disjoint fields, so both can be borrowed mutably at once.
+        // are disjoint fields, so both can be borrowed mutably at once. The
+        // per-query context is threaded in from `estate` for the leader-side
+        // instrumentation copy-out (`planstate->state->es_query_cxt`).
+        let mcx = estate.es_query_cxt;
         let outer = node
             .ps
             .lefttree
@@ -523,7 +529,7 @@ pub fn ExecShutdownGatherMerge<'mcx>(node: &mut GatherMergeStateData<'mcx>) -> P
             .pei
             .as_deref_mut()
             .ok_or_else(|| elog_error("GatherMerge has no parallel info"))?;
-        execParallel::ExecParallelCleanup::call(pei, outer)?;
+        execParallel::ExecParallelCleanup::call(mcx, pei, outer)?;
         node.pei = None;
     }
     Ok(())

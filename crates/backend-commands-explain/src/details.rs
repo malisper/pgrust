@@ -23,7 +23,7 @@ use types_explain::{ExplainFormat, ExplainState};
 
 use types_nodes::nodehash::HashState;
 use types_nodes::nodeincrementalsort::{IncrementalSortGroupInfo, IncrementalSortStateData};
-use types_nodes::nodesort::{SortStateData, TuplesortMethod, TuplesortSpaceType};
+use types_nodes::nodesort::{SharedSortInfo, SortStateData, TuplesortMethod, TuplesortSpaceType};
 
 use backend_commands_explain_format as fmt;
 use backend_utils_sort_tuplesort::{tuplesort_method_name, tuplesort_space_type_name};
@@ -527,9 +527,17 @@ pub fn show_sort_info(
     // workers_state/OpenWorker/CloseWorker formatting is unmodelled on the
     // structural slice, so worker 0's data appears as top-level data (matching
     // C's hide_workers fallback behaviour).
-    if let Some(shared) = sortstate.shared_info.as_deref() {
-        for n in 0..shared.num_workers {
-            let sinstrument = match shared.sinstrument.get(n as usize) {
+    // At EXPLAIN ANALYZE time the leader's `shared_info` has been snapshotted
+    // into the backend-local `Local` arm by `ExecSortRetrieveInstrumentation`
+    // (the DSM segment is already detached). Mirror C's loop over
+    // `shared_info->sinstrument[0..num_workers]`.
+    if let Some(SharedSortInfo::Local {
+        num_workers,
+        sinstrument,
+    }) = sortstate.shared_info.as_ref()
+    {
+        for n in 0..*num_workers {
+            let sinstrument = match sinstrument.get(n as usize) {
                 Some(s) => s,
                 None => break,
             };

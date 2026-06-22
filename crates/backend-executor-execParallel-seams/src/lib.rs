@@ -29,6 +29,7 @@ seam_core::seam!(pub fn ExecParallelFinish<'mcx>(pei: &mut ParallelExecutorInfo<
 /// `pei`: `pei` lives inside the Gather/GatherMerge node-state and the planstate
 /// is a sibling field, so storing it in `pei` would be a self-borrow.
 seam_core::seam!(pub fn ExecParallelCleanup<'mcx>(
+    mcx: Mcx<'mcx>,
     pei: &mut ParallelExecutorInfo<'mcx>,
     planstate: &mut types_nodes::PlanStateNode<'mcx>,
 ) -> PgResult<()>);

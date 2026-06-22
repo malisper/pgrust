@@ -12,6 +12,7 @@ use core::any::Any;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::{AttrNumber, Oid};
 use types_error::PgResult;
+use types_execparallel::SerializeCursor;
 
 use crate::execnodes::{PlanStateData, ScanStateData};
 use crate::execstate_tags::T_SortState;
@@ -66,6 +67,14 @@ pub enum TuplesortSpaceType {
 ///     int64 spaceUsed;
 /// } TuplesortInstrumentation;
 /// ```
+///
+/// `#[repr(C)]` because it is the element type of the `SharedSortInfo`
+/// flexible-array member that lives DIRECTLY in the parallel-query DSM segment
+/// (`ExecSortInitializeDSM` `shm_toc_allocate`s the chunk and each worker writes
+/// its own `sinstrument[ParallelWorkerNumber]` slot into it). Placed/attached
+/// through the typed shared-DSM-object flex primitive
+/// (`shared_dsm_object::place_flex` / `attach_flex`).
+#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct TuplesortInstrumentation {
     /// `TuplesortMethod sortMethod` — sort algorithm used.
@@ -87,6 +96,25 @@ impl Default for TuplesortInstrumentation {
         }
     }
 }
+
+// SAFETY (audited per the `SharedDsmObject` contract):
+//   1. `TuplesortInstrumentation` is `#[repr(C)]` and matches `tuplesort.h`
+//      field-for-field (TuplesortMethod (int), TuplesortSpaceType (int), int64,
+//      in C order; the two `#[repr(i32)]` enums are 4 bytes each).
+//   2. There is NO concurrent mutation of any single element across processes:
+//      each parallel worker writes ONLY its own
+//      `sinstrument[ParallelWorkerNumber]` slot (in `ExecSort`'s copyback), and
+//      the leader reads the whole array only in
+//      `ExecSortRetrieveInstrumentation`, which the C runs after the workers have
+//      detached. The element bytes are therefore never aliased-and-mutated
+//      concurrently, so plain POD scalars satisfy clause 2 by partition.
+//   3. The leader's placement initializer (`ExecSortInitializeDSM`) zero-fills
+//      every element before any worker attaches (`place_flex` writes
+//      `TuplesortInstrumentation::default()` into each slot — a zero method
+//      meaning "still in progress").
+//   4. A shared `&TuplesortInstrumentation` aliasing another process's mapping of
+//      the SAME element is never created concurrently with a write (clause 2).
+unsafe impl types_parallel::SharedDsmObject for TuplesortInstrumentation {}
 
 // ===========================================================================
 // Tuplesortstate carrier (utils/tuplesort.c, private).
@@ -230,6 +258,23 @@ fn copy_vec<'b, T: Copy>(mcx: Mcx<'b>, src: &PgVec<'_, T>) -> PgResult<PgVec<'b,
 // SortState executor node + SharedSortInfo (executor/execnodes.h).
 // ===========================================================================
 
+/// `offsetof(SharedSortInfo, num_workers)`-bearing header of `SharedSortInfo`
+/// (execnodes.h): `{ int num_workers; TuplesortInstrumentation sinstrument[]; }`.
+/// This is the `H` of the `place_flex`/`attach_flex` flexible-array placement;
+/// the `sinstrument[]` tail is the `E = TuplesortInstrumentation` slice.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SharedSortInfoHeader {
+    /// `int num_workers`.
+    pub num_workers: i32,
+}
+
+// SAFETY: `#[repr(C)]` POD header written once by the leader
+// (`ExecSortInitializeDSM`) before any worker attaches, read-only thereafter
+// (workers only read `num_workers`); no concurrent mutation. Matches the C
+// `SharedSortInfo` header field-for-field.
+unsafe impl types_parallel::SharedDsmObject for SharedSortInfoHeader {}
+
 /// `SharedSortInfo` (execnodes.h) — shared-memory container for per-worker sort
 /// information:
 ///
@@ -240,22 +285,48 @@ fn copy_vec<'b, T: Copy>(mcx: Mcx<'b>, src: &PgVec<'_, T>) -> PgResult<PgVec<'b,
 /// } SharedSortInfo;
 /// ```
 ///
-/// The flexible array member is modelled as an owned vector.
-#[derive(Clone, Debug)]
-pub struct SharedSortInfo<'mcx> {
-    /// `int num_workers`.
-    pub num_workers: i32,
-    /// `TuplesortInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER]`.
-    pub sinstrument: PgVec<'mcx, TuplesortInstrumentation>,
+/// In C this is a single `SharedSortInfo *` pointer that is FIRST the
+/// DSM-resident shared area (set in `ExecSortInitializeDSM` / inherited by
+/// workers via `shm_toc_lookup`) and is LATER REPLACED, in
+/// `ExecSortRetrieveInstrumentation`, by a backend-local `palloc`'d copy. Each
+/// worker writes its own `sinstrument[ParallelWorkerNumber]` slot into the DSM
+/// array directly. The two states have different ownership (cross-process DSM
+/// view vs. owned backend-local array), so they are modelled as the two arms.
+#[derive(Debug)]
+pub enum SharedSortInfo<'mcx> {
+    /// The DSM-resident shared area: a cursor to the `shm_toc`-allocated chunk
+    /// (`{ SharedSortInfoHeader; TuplesortInstrumentation[num_workers] }`) plus
+    /// the worker count needed to recover the flex length. Mirrors the leader's
+    /// `node->shared_info = shm_toc_allocate(...)` and the worker's
+    /// `shm_toc_lookup` result.
+    Dsm {
+        /// Real in-segment chunk address (the `shm_toc_allocate`/`shm_toc_lookup`
+        /// return value).
+        chunk: SerializeCursor,
+        /// The DSM segment the chunk lives in, so the retrieve path can
+        /// `attach_flex` the array and the worker copyback can `with_mut` its
+        /// slot before detach.
+        seg: types_execparallel::DsmSegmentHandle,
+        /// `shared_info->num_workers`.
+        num_workers: i32,
+    },
+    /// The backend-local copy `ExecSortRetrieveInstrumentation` makes before the
+    /// DSM segment is detached (`node->shared_info = palloc(size); memcpy(...)`).
+    Local {
+        /// `shared_info->num_workers`.
+        num_workers: i32,
+        /// `TuplesortInstrumentation sinstrument[]` copied out of DSM.
+        sinstrument: PgVec<'mcx, TuplesortInstrumentation>,
+    },
 }
 
 impl<'mcx> SharedSortInfo<'mcx> {
-    /// A freshly allocated container with the flexible array empty (the C
-    /// `shm_toc_allocate` + `memset(0)` before any worker fills a slot).
-    pub fn new_in(mcx: Mcx<'mcx>) -> Self {
-        SharedSortInfo {
-            num_workers: 0,
-            sinstrument: PgVec::new_in(mcx),
+    /// `shared_info->num_workers` — the number of per-worker slots, regardless of
+    /// arm.
+    pub fn num_workers(&self) -> i32 {
+        match self {
+            SharedSortInfo::Dsm { num_workers, .. } => *num_workers,
+            SharedSortInfo::Local { num_workers, .. } => *num_workers,
         }
     }
 }
@@ -301,8 +372,10 @@ pub struct SortStateData<'mcx> {
     /// `bool datumSort` — Datum sort instead of tuple sort?
     pub datumSort: bool,
     /// `SharedSortInfo *shared_info` — one entry per worker. `None` is the C
-    /// `NULL`.
-    pub shared_info: Option<PgBox<'mcx, SharedSortInfo<'mcx>>>,
+    /// `NULL`. Either the DSM-resident shared area (leader after
+    /// `ExecSortInitializeDSM` / worker after `ExecSortInitializeWorker`) or the
+    /// backend-local copy (leader after `ExecSortRetrieveInstrumentation`).
+    pub shared_info: Option<SharedSortInfo<'mcx>>,
 }
 
 impl<'mcx> SortStateData<'mcx> {
