@@ -200,6 +200,16 @@ fn equal_window_func<'a, 'b>(a: &WindowFunc<'a>, b: &WindowFunc<'b>) -> bool {
         && a.winagg == b.winagg
 }
 
+fn equal_window_func_run_condition<'a, 'b>(
+    a: &types_nodes::primnodes::WindowFuncRunCondition<'a>,
+    b: &types_nodes::primnodes::WindowFuncRunCondition<'b>,
+) -> bool {
+    a.opno == b.opno
+        && a.inputcollid == b.inputcollid
+        && a.wfunc_left == b.wfunc_left
+        && equal_opt_expr(a.arg.as_deref(), b.arg.as_deref())
+}
+
 fn equal_merge_support_func(a: &MergeSupportFunc, b: &MergeSupportFunc) -> bool {
     a.msftype == b.msftype && a.msfcollid == b.msfcollid
 }
@@ -1102,6 +1112,9 @@ pub fn equal_expr<'a, 'b>(a: &Expr<'a>, b: &Expr<'b>) -> bool {
         (Expr::Aggref(x), Expr::Aggref(y)) => equal_aggref(x, y),
         (Expr::GroupingFunc(x), Expr::GroupingFunc(y)) => equal_grouping_func(x, y),
         (Expr::WindowFunc(x), Expr::WindowFunc(y)) => equal_window_func(x, y),
+        (Expr::WindowFuncRunCondition(x), Expr::WindowFuncRunCondition(y)) => {
+            equal_window_func_run_condition(x, y)
+        }
         (Expr::MergeSupportFunc(x), Expr::MergeSupportFunc(y)) => equal_merge_support_func(x, y),
         (Expr::SubscriptingRef(x), Expr::SubscriptingRef(y)) => equal_subscripting_ref(x, y),
         (Expr::FuncExpr(x), Expr::FuncExpr(y)) => equal_func_expr(x, y),

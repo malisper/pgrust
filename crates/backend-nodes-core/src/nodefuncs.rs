@@ -1512,6 +1512,9 @@ where
             mut_box!(w.aggfilter);
             mut_vec!(w.runCondition);
         }
+        Expr::WindowFuncRunCondition(w) => {
+            mut_box!(w.arg);
+        }
         Expr::Aggref(a) => {
             // C (expression_tree_mutator, T_Aggref):
             //   MUTATE(newnode->aggdirectargs, ...);   // List of Expr
@@ -1718,6 +1721,7 @@ where
             on_box!(w.aggfilter);
             on_vec!(w.runCondition);
         }
+        Expr::WindowFuncRunCondition(w) => on_box!(w.arg),
         Expr::GroupingFunc(g) => on_vec!(g.args),
         Expr::SubscriptingRef(s) => {
             on_vec_opt!(s.refupperindexpr);

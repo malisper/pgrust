@@ -149,6 +149,57 @@ pub(crate) fn register_support_wfunc_monotonic(
         .insert(prosupport, func)
 }
 
+/// `FRAMEOPTION_START_UNBOUNDED_PRECEDING` (parsenodes.h).
+const FRAMEOPTION_START_UNBOUNDED_PRECEDING: i32 = 0x00020;
+/// `FRAMEOPTION_END_UNBOUNDED_FOLLOWING` (parsenodes.h).
+const FRAMEOPTION_END_UNBOUNDED_FOLLOWING: i32 = 0x00100;
+
+/// `window_row_number_support` / `window_rank_support` /
+/// `window_dense_rank_support` / `window_percent_rank_support` /
+/// `window_cume_dist_support` / `window_ntile_support`, the
+/// `SupportRequestWFuncMonotonic` leg (windowfuncs.c): each of these ranking
+/// window functions is monotonically increasing.
+fn wfunc_monotonic_increasing(_winfnoid: Oid, _wclause: &WindowClause) -> u32 {
+    MONOTONICFUNC_INCREASING
+}
+
+/// `int8inc_support`, the `SupportRequestWFuncMonotonic` leg (int8.c:825), used
+/// by `count(*)`/`count(x)` window functions. With no ORDER BY all rows are
+/// peers (BOTH increasing and decreasing); otherwise the frame bounds determine
+/// monotonicity.
+fn int8inc_support_monotonic(_winfnoid: Oid, wclause: &WindowClause) -> u32 {
+    // No ORDER BY clause then all rows are peers.
+    if wclause.orderClause.is_empty() {
+        return MONOTONICFUNC_BOTH;
+    }
+    let mut monotonic = MONOTONICFUNC_NONE;
+    let frame_options = wclause.frameOptions;
+    // Frame bound is the start of the window => value can never decrease.
+    if frame_options & FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {
+        monotonic |= MONOTONICFUNC_INCREASING;
+    }
+    // Frame bound is the end of the window => value can never decrease.
+    if frame_options & FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0 {
+        monotonic |= MONOTONICFUNC_DECREASING;
+    }
+    monotonic
+}
+
+/// Install the built-in `SupportRequestWFuncMonotonic` kernels under their
+/// `prosupport` OIDs (pg_proc.dat). Mirrors C's set of window-function support
+/// functions that answer the monotonic request. Idempotent.
+pub(crate) fn register_builtin_wfunc_monotonic_kernels() {
+    // Ranking window functions — always monotonically increasing.
+    // 6233 window_row_number_support, 6234 window_rank_support,
+    // 6235 window_dense_rank_support, 6306 window_percent_rank_support,
+    // 6307 window_cume_dist_support, 6308 window_ntile_support.
+    for oid in [6233u32, 6234, 6235, 6306, 6307, 6308] {
+        register_support_wfunc_monotonic(oid as Oid, wfunc_monotonic_increasing);
+    }
+    // 6236 int8inc_support — count(*)/count(x), frame-dependent monotonicity.
+    register_support_wfunc_monotonic(6236 as Oid, int8inc_support_monotonic);
+}
+
 /// Run the `prosupport`'s `SupportRequestWFuncMonotonic` kernel, returning the
 /// monotonic bitmask, or `None` when the support function declines (no
 /// registered kernel = `res == NULL` in C, i.e. `OidFunctionCall1` of a support
@@ -676,11 +727,11 @@ fn recurse_push_qual<'mcx>(
 
 /// `check_and_push_window_quals(subquery, rte, rti, clause, run_cond_attrs)`
 /// (allpaths.c:2454). Returns whether the caller must keep the original qual.
-pub(crate) fn check_and_push_window_quals(
-    mcx: Mcx<'_>,
-    subquery: &mut Query<'_>,
+pub(crate) fn check_and_push_window_quals<'mcx>(
+    mcx: Mcx<'mcx>,
+    subquery: &mut Query<'mcx>,
     _rti: Index,
-    clause: &Expr,
+    clause: &Expr<'mcx>,
     run_cond_attrs: &mut Relids,
 ) -> PgResult<bool> {
     // We're only able to use OpExprs with 2 operands.
@@ -774,12 +825,12 @@ pub(crate) fn check_and_push_window_quals(
 /// (mirrors C's `res == NULL` when `prosupport` doesn't serve this request),
 /// in which case this returns `false` and leaves `*keep_original = true`.
 #[allow(clippy::too_many_arguments)]
-fn find_window_run_conditions(
-    mcx: Mcx<'_>,
-    subquery: &mut Query<'_>,
+fn find_window_run_conditions<'mcx>(
+    mcx: Mcx<'mcx>,
+    subquery: &mut Query<'mcx>,
     attno: AttrNumber,
-    wfunc_node: &Expr,
-    opexpr: &OpExpr,
+    wfunc_node: &Expr<'mcx>,
+    opexpr: &OpExpr<'mcx>,
     wfunc_left: bool,
     keep_original: &mut bool,
     run_cond_attrs: &mut Relids,
@@ -898,28 +949,66 @@ fn find_window_run_conditions(
         }
     }
 
-    if runopexpr.is_some() {
-        // C builds a `WindowFuncRunCondition` node here, appends it to
-        // `wfunc->runCondition`, and records `attno` in `run_cond_attrs`. The
-        // owned node model does not yet carry a `WindowFuncRunCondition` node
-        // (no struct / Node tag / Expr variant), so the run-condition cannot be
-        // constructed faithfully. This branch is *unreachable on every current
-        // path*: it is gated behind a non-NULL `SupportRequestWFuncMonotonic`
-        // result, and the monotonic-support dispatch table
-        // (`register_support_wfunc_monotonic`) has no registered kernels, so
-        // `call_support_wfunc_monotonic` always declines above. The precise
-        // panic marks the genuine boundary (model `WindowFuncRunCondition`,
-        // register a window-function monotonic-support kernel) rather than
-        // silently dropping the optimization.
-        let _ = (runoperator, attno, run_cond_attrs);
-        return Err(PgError::error(
-            "find_window_run_conditions: WindowFuncRunCondition node not yet modeled \
-             (window run-condition pushdown requires a SupportRequestWFuncMonotonic \
-             kernel + the WindowFuncRunCondition node, neither present)",
-        ));
+    if let Some(runopexpr) = runopexpr {
+        // C builds a `WindowFuncRunCondition` node, appends it to
+        // `wfunc->runCondition`, and records `attno` in `run_cond_attrs`.
+        let wfuncrc = types_nodes::primnodes::WindowFuncRunCondition {
+            opno: runoperator,
+            inputcollid: runopexpr.inputcollid,
+            wfunc_left,
+            arg: Some(alloc::boxed::Box::new(otherexpr.clone_in(mcx)?)),
+        };
+
+        // Append to the *real* WindowFunc in the subquery targetList (the clone
+        // `wfunc_node` we matched on above is a throwaway; mutating it would not
+        // be observed). Resolve the tlist slot by attno (resnos are 1-based and
+        // dense, matching C's `list_nth(targetList, attno - 1)`).
+        let tle_idx = (attno as usize)
+            .checked_sub(1)
+            .ok_or_else(|| PgError::error("find_window_run_conditions: bad attno"))?;
+        let tle = subquery
+            .targetList
+            .get_mut(tle_idx)
+            .ok_or_else(|| PgError::error("find_window_run_conditions: attno out of range"))?;
+        match tle.expr.as_deref_mut() {
+            Some(Expr::WindowFunc(w)) => {
+                w.runCondition.push(Expr::WindowFuncRunCondition(wfuncrc));
+            }
+            _ => {
+                return Err(PgError::error(
+                    "find_window_run_conditions: tlist entry at attno is not a WindowFunc",
+                ));
+            }
+        }
+
+        // record that this attno was used in a run condition.
+        let new_attrs = core::mem::take(run_cond_attrs);
+        *run_cond_attrs =
+            relids_add_member(new_attrs, attno as i32 - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER);
+        return Ok(true);
     }
 
     Ok(false)
+}
+
+/// `bms_add_member(a, x)` (bitmapset.c) over the planner `Relids`
+/// (`Option<Box<Bitmapset>>`).
+fn relids_add_member(a: Relids, x: i32) -> Relids {
+    if x < 0 {
+        panic!("negative bitmapset member not allowed");
+    }
+    const BITS_PER_BITMAPWORD: i32 = 64;
+    let wnum = (x / BITS_PER_BITMAPWORD) as usize;
+    let bnum = (x % BITS_PER_BITMAPWORD) as u32;
+    let mut words = match a {
+        None => Vec::new(),
+        Some(b) => b.words,
+    };
+    if wnum >= words.len() {
+        words.resize(wnum + 1, 0);
+    }
+    words[wnum] |= 1u64 << bnum;
+    Some(alloc::boxed::Box::new(types_pathnodes::Bitmapset { words }))
 }
 
 /// `set_opfuncid(opexpr)` (nodeFuncs.c) over the owned OpExpr.

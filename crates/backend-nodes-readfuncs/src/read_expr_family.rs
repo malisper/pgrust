@@ -590,6 +590,21 @@ fn read_window_func<'mcx>(mcx: Mcx<'mcx>) -> PgResult<WindowFunc> {
     })
 }
 
+fn read_window_func_run_condition<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::primnodes::WindowFuncRunCondition<'mcx>> {
+    let opno = read_oid_field()?;
+    let inputcollid = read_oid_field()?;
+    let wfunc_left = read_bool_field()?;
+    let arg = read_opt_box_expr(mcx)?;
+    Ok(types_nodes::primnodes::WindowFuncRunCondition {
+        opno,
+        inputcollid,
+        wfunc_left,
+        arg,
+    })
+}
+
 fn read_merge_support_func() -> PgResult<MergeSupportFunc> {
     let msftype = read_oid_field()?;
     let msfcollid = read_oid_field()?;
@@ -1332,6 +1347,8 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
         b"AGGREF" => read_aggref(mcx).and_then(|n| Node::mk_expr(mcx, Expr::Aggref(n))),
         b"GROUPINGFUNC" => read_grouping_func(mcx).and_then(|n| Node::mk_expr(mcx, Expr::GroupingFunc(n))),
         b"WINDOWFUNC" => read_window_func(mcx).and_then(|n| Node::mk_expr(mcx, Expr::WindowFunc(n))),
+        b"WINDOWFUNCRUNCONDITION" => read_window_func_run_condition(mcx)
+            .and_then(|n| Node::mk_expr(mcx, Expr::WindowFuncRunCondition(n))),
         b"MERGESUPPORTFUNC" => {
             read_merge_support_func().and_then(|n| Node::mk_expr(mcx, Expr::MergeSupportFunc(n)))
         }

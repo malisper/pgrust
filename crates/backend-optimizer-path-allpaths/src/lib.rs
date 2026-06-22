@@ -1089,6 +1089,11 @@ pub fn init_seams() {
     // (allpaths.c:79-82). Install the `conf->variable` accessors into their
     // guc-table slots so the planner (and vacuum) can read them.
     guc::install_allpaths_gucs();
+
+    // Window-function `SupportRequestWFuncMonotonic` kernels (windowfuncs.c /
+    // int8.c), consumed by `find_window_run_conditions` to decide whether a
+    // monotonic window qual can be pushed into the WindowAgg as a run condition.
+    pushdown::register_builtin_wfunc_monotonic_kernels();
 }
 
 /// Seam adapter for `compute_parallel_worker` (the seam takes `&PlannerInfo`;

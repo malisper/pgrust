@@ -5769,10 +5769,10 @@ fn create_one_window_path<'mcx>(
     // window_target starts as input_target; each intermediate WindowAgg adds its
     // window-func outputs; the topmost installs output_target.
     let mut window_target: PathTarget = input_target.clone();
-    // topqual accumulates the lower windows' runconditions (planner.c). With the
-    // WindowFuncRunCondition node unmodeled, runconditions are gated (the loop
-    // below loud-panics if any are present), so topqual stays empty here.
-    let topqual: Vec<types_pathnodes::NodeId> = Vec::new();
+    // topqual accumulates the lower windows' runconditions (planner.c): a
+    // run-condition built for a non-top WindowAgg must still be applied as a qual
+    // on the top WindowAgg.
+    let mut topqual: Vec<types_pathnodes::NodeId> = Vec::new();
     let tlist = root.processed_tlist.clone();
     let n = active_windows.len();
 
@@ -5837,22 +5837,58 @@ fn create_one_window_path<'mcx>(
         let topwindow = is_last;
 
         // Collect WindowFuncRunConditions from each WindowFunc and convert them
-        // into OpExprs (planner.c:4720-4760). The runConditions are populated
-        // only by find_window_run_conditions (a separate planner optimization not
-        // ported here) and the WindowFuncRunCondition node is not modeled, so the
-        // common path is the empty list; a non-empty list loud-panics.
-        let runcondition: Vec<types_pathnodes::NodeId> = Vec::new();
+        // into OpExprs (planner.c:4726-4766). For each WindowFuncRunCondition we
+        // build `<wfunc> op <arg>` (or `<arg> op <wfunc>` when !wfunc_left), a
+        // boolean-returning OpExpr, and append it to `runcondition` (and to
+        // `topqual` when this is not the top window).
+        const BOOLOID: types_core::primitive::Oid = 16;
+        let mcx = run.mcx();
+        let mut runcondition: Vec<types_pathnodes::NodeId> = Vec::new();
         for &wfn in &func_ids {
-            let Some(w) = root.node(wfn).as_windowfunc() else {
-                panic!("create_one_window_path: windowFuncs entry is not a WindowFunc");
+            // Snapshot the WindowFunc and its run-conditions out of the arena so
+            // we can re-borrow `root` mutably for `alloc_node`.
+            let (wfunc_expr, run_conds): (Expr<'mcx>, Vec<types_nodes::primnodes::WindowFuncRunCondition<'mcx>>) = {
+                let Some(w) = root.node(wfn).as_windowfunc() else {
+                    panic!("create_one_window_path: windowFuncs entry is not a WindowFunc");
+                };
+                let mut rcs = Vec::with_capacity(w.runCondition.len());
+                for rc in w.runCondition.iter() {
+                    match rc {
+                        Expr::WindowFuncRunCondition(r) => rcs.push(r.clone_in(mcx)?),
+                        other => panic!(
+                            "create_one_window_path: WindowFunc.runCondition holds a \
+                             non-WindowFuncRunCondition Expr ({:?})",
+                            other.expr_tag()
+                        ),
+                    }
+                }
+                (Expr::WindowFunc(w.clone_in(mcx)?), rcs)
             };
-            let has_run_cond = !w.runCondition.is_empty();
-            if has_run_cond {
-                panic!(
-                    "create_one_window_path: WindowFunc runConditions need the \
-                     WindowFuncRunCondition node model + find_window_run_conditions \
-                     (planner.c) — not ported"
+
+            for wfuncrc in run_conds.into_iter() {
+                let arg = match wfuncrc.arg {
+                    Some(a) => *a,
+                    None => panic!("create_one_window_path: WindowFuncRunCondition has no arg"),
+                };
+                let (leftop, rightop) = if wfuncrc.wfunc_left {
+                    (wfunc_expr.clone_in(mcx)?, arg)
+                } else {
+                    (arg, wfunc_expr.clone_in(mcx)?)
+                };
+                let opexpr = backend_nodes_core::makefuncs::make_opclause(
+                    wfuncrc.opno,
+                    BOOLOID,
+                    false,
+                    leftop,
+                    Some(rightop),
+                    types_core::primitive::InvalidOid,
+                    wfuncrc.inputcollid,
                 );
+                let opexpr_id = root.alloc_node(opexpr);
+                runcondition.push(opexpr_id);
+                if !topwindow {
+                    topqual.push(opexpr_id);
+                }
             }
         }
 

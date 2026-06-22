@@ -1004,6 +1004,35 @@ impl<'mcx> WindowFunc<'mcx> {
     }
 }
 
+/// `WindowFuncRunCondition` (nodes/primnodes.h) — an intermediate `OpExpr`-like
+/// node used by `WindowAgg` to short-circuit execution of monotonic window
+/// functions.
+#[derive(Clone, Debug)]
+pub struct WindowFuncRunCondition<'mcx> {
+    /// `Oid opno` — PG_OPERATOR OID of the operator.
+    pub opno: Oid,
+    /// `Oid inputcollid` — OID of collation that operator should use.
+    pub inputcollid: Oid,
+    /// `bool wfunc_left` — true if the WindowFunc belongs on the left of the
+    /// resulting OpExpr, false if it is on the right.
+    pub wfunc_left: bool,
+    /// `Expr *arg` — the Expr being compared to the WindowFunc.
+    pub arg: Option<Box<Expr<'mcx>>>,
+}
+
+impl<'mcx> WindowFuncRunCondition<'mcx> {
+    /// Deep-copy this `WindowFuncRunCondition` into `mcx` (C: `copyObject`).
+    /// Routes the `arg` child through the sanctioned [`Expr::clone_in`] path.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<WindowFuncRunCondition<'b>> {
+        Ok(WindowFuncRunCondition {
+            opno: self.opno,
+            inputcollid: self.inputcollid,
+            wfunc_left: self.wfunc_left,
+            arg: clone_opt_box_expr(&self.arg, mcx)?,
+        })
+    }
+}
+
 /// `MergeSupportFunc` (nodes/primnodes.h) — `MERGE_ACTION()`.
 #[derive(Clone, Copy, Debug)]
 pub struct MergeSupportFunc {
@@ -1815,6 +1844,8 @@ pub enum Expr<'mcx> {
     GroupingFunc(GroupingFunc<'mcx>),
     /// `T_WindowFunc`.
     WindowFunc(WindowFunc<'mcx>),
+    /// `T_WindowFuncRunCondition`.
+    WindowFuncRunCondition(WindowFuncRunCondition<'mcx>),
     /// `T_SubscriptingRef`.
     SubscriptingRef(SubscriptingRef<'mcx>),
     /// `T_FuncExpr`.
@@ -2429,6 +2460,9 @@ impl<'mcx> Expr<'mcx> {
                 winagg: w.winagg,
                 location: w.location,
             }),
+            Expr::WindowFuncRunCondition(w) => {
+                Expr::WindowFuncRunCondition(w.clone_in(mcx)?)
+            }
             Expr::SubLink(s) => Expr::SubLink(clone_sublink(s, mcx)?),
             Expr::SubPlan(s) => Expr::SubPlan(SubPlanExpr(clone_subplan_static(&s.0, mcx)?)),
             Expr::AlternativeSubPlan(a) => {

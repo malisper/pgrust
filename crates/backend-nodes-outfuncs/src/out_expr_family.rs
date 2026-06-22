@@ -200,6 +200,18 @@ fn out_window_func(buf: &mut String, n: &types_nodes::primnodes::WindowFunc, wl:
     write_location_field(buf, "location", n.location, wl);
 }
 
+fn out_window_func_run_condition(
+    buf: &mut String,
+    n: &types_nodes::primnodes::WindowFuncRunCondition,
+    wl: bool,
+) {
+    buf.push_str("WINDOWFUNCRUNCONDITION");
+    write_oid_field(buf, "opno", n.opno);
+    write_oid_field(buf, "inputcollid", n.inputcollid);
+    write_bool_field(buf, "wfunc_left", n.wfunc_left);
+    write_opt_box_expr(buf, "arg", &n.arg, wl);
+}
+
 fn out_merge_support_func(buf: &mut String, n: &types_nodes::primnodes::MergeSupportFunc, wl: bool) {
     buf.push_str("MERGESUPPORTFUNC");
     write_oid_field(buf, "msftype", n.msftype);
@@ -904,6 +916,7 @@ pub(crate) fn out_expr_body(buf: &mut String, e: &Expr, wl: bool) -> bool {
         Expr::Aggref(n) => out_aggref(buf, n, wl),
         Expr::GroupingFunc(n) => out_grouping_func(buf, n, wl),
         Expr::WindowFunc(n) => out_window_func(buf, n, wl),
+        Expr::WindowFuncRunCondition(n) => out_window_func_run_condition(buf, n, wl),
         Expr::MergeSupportFunc(n) => out_merge_support_func(buf, n, wl),
         Expr::SubscriptingRef(n) => out_subscripting_ref(buf, n, wl),
         Expr::NamedArgExpr(n) => out_named_arg_expr(buf, n, wl),
@@ -965,6 +978,9 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
             Expr::Aggref(n) => crate::framed(buf, |b| out_aggref(b, n, wl)),
             Expr::GroupingFunc(n) => crate::framed(buf, |b| out_grouping_func(b, n, wl)),
             Expr::WindowFunc(n) => crate::framed(buf, |b| out_window_func(b, n, wl)),
+            Expr::WindowFuncRunCondition(n) => {
+                crate::framed(buf, |b| out_window_func_run_condition(b, n, wl))
+            }
             Expr::MergeSupportFunc(n) => crate::framed(buf, |b| out_merge_support_func(b, n, wl)),
             Expr::SubscriptingRef(n) => crate::framed(buf, |b| out_subscripting_ref(b, n, wl)),
             Expr::NamedArgExpr(n) => crate::framed(buf, |b| out_named_arg_expr(b, n, wl)),
