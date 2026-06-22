@@ -167,8 +167,17 @@ fn exec_ready_expr<'mcx>(state: &mut ExprState<'mcx>) -> PgResult<()> {
 /// (expression_tree_walker); here we descend the modeled child links of every
 /// `Expr` variant. Aggref / WindowFunc / GroupingFunc argument lists are NOT
 /// descended into (their args are evaluated separately), matching C, and
-/// SubPlan is handled by accumulating the MULTIEXPR count (not modeled deeply).
-fn expr_setup_walker(node: &Expr, info: &mut ExprSetupInfo) {
+/// SubPlan is handled by collecting MULTIEXPR SubPlans into `multiexprs` (so the
+/// spine can emit steps to run them before any Param referencing their outputs)
+/// and then descending into the SubPlan's args (correlation values), exactly as
+/// the C `expr_setup_walker` does (it `lappend`s MULTIEXPR subplans to
+/// `info->multiexpr_subplans` and lets `expression_tree_walker` recurse on into
+/// `subplan->args`).
+fn expr_setup_walker<'a, 'mcx>(
+    node: &'a Expr<'mcx>,
+    info: &mut ExprSetupInfo,
+    multiexprs: &mut Vec<&'a types_nodes::primnodes::SubPlan<'mcx>>,
+) {
     match node.expr_tag() {
         etag::T_Var => {
             let variable = node.as_var().expect("Var");
@@ -207,48 +216,82 @@ fn expr_setup_walker(node: &Expr, info: &mut ExprSetupInfo) {
         | etag::T_WindowFunc
         | etag::T_MergeSupportFunc => {}
         // Single-arg passthrough / coercion nodes.
-        etag::T_RelabelType => descend_opt(node.expect_relabeltype().arg.as_deref(), info),
-        etag::T_CollateExpr => descend_opt(node.expect_collateexpr().arg.as_deref(), info),
-        etag::T_CoerceViaIO => descend_opt(node.expect_coerceviaio().arg.as_deref(), info),
-        etag::T_ConvertRowtypeExpr => {
-            descend_opt(node.expect_convertrowtypeexpr().arg.as_deref(), info)
+        etag::T_RelabelType => {
+            descend_opt(node.expect_relabeltype().arg.as_deref(), info, multiexprs)
         }
-        etag::T_FieldSelect => descend_opt(node.expect_fieldselect().arg.as_deref(), info),
+        etag::T_CollateExpr => {
+            descend_opt(node.expect_collateexpr().arg.as_deref(), info, multiexprs)
+        }
+        etag::T_CoerceViaIO => {
+            descend_opt(node.expect_coerceviaio().arg.as_deref(), info, multiexprs)
+        }
+        etag::T_ConvertRowtypeExpr => descend_opt(
+            node.expect_convertrowtypeexpr().arg.as_deref(),
+            info,
+            multiexprs,
+        ),
+        etag::T_FieldSelect => {
+            descend_opt(node.expect_fieldselect().arg.as_deref(), info, multiexprs)
+        }
         etag::T_ReturningExpr => descend_opt(
             node.as_returningexpr()
                 .expect("ReturningExpr")
                 .retexpr
                 .as_deref(),
             info,
+            multiexprs,
         ),
-        etag::T_NamedArgExpr => descend_opt(node.expect_namedargexpr().arg.as_deref(), info),
-        etag::T_NullTest => descend_opt(node.expect_nulltest().arg.as_deref(), info),
-        etag::T_BooleanTest => descend_opt(node.expect_booleantest().arg.as_deref(), info),
-        etag::T_CoerceToDomain => descend_opt(node.expect_coercetodomain().arg.as_deref(), info),
-        etag::T_ArrayCoerceExpr => descend_opt(node.expect_arraycoerceexpr().arg.as_deref(), info),
+        etag::T_NamedArgExpr => {
+            descend_opt(node.expect_namedargexpr().arg.as_deref(), info, multiexprs)
+        }
+        etag::T_NullTest => descend_opt(node.expect_nulltest().arg.as_deref(), info, multiexprs),
+        etag::T_BooleanTest => {
+            descend_opt(node.expect_booleantest().arg.as_deref(), info, multiexprs)
+        }
+        etag::T_CoerceToDomain => {
+            descend_opt(node.expect_coercetodomain().arg.as_deref(), info, multiexprs)
+        }
+        etag::T_ArrayCoerceExpr => descend_opt(
+            node.expect_arraycoerceexpr().arg.as_deref(),
+            info,
+            multiexprs,
+        ),
         // Operator / function nodes — descend their argument lists.
-        etag::T_FuncExpr => descend_list(&node.expect_funcexpr().args, info),
+        etag::T_FuncExpr => descend_list(&node.expect_funcexpr().args, info, multiexprs),
         etag::T_OpExpr | etag::T_DistinctExpr | etag::T_NullIfExpr => {
             let e = node
                 .as_opexpr()
                 .or_else(|| node.as_distinctexpr())
                 .or_else(|| node.as_nullifexpr())
                 .expect("OpExpr/DistinctExpr/NullIfExpr");
-            descend_list(&e.args, info)
+            descend_list(&e.args, info, multiexprs)
         }
-        etag::T_BoolExpr => descend_list(&node.expect_boolexpr().args, info),
-        etag::T_CoalesceExpr => descend_list(&node.expect_coalesceexpr().args, info),
-        etag::T_MinMaxExpr => descend_list(&node.expect_minmaxexpr().args, info),
-        etag::T_ArrayExpr => descend_list(&node.expect_arrayexpr().elements, info),
+        etag::T_BoolExpr => descend_list(&node.expect_boolexpr().args, info, multiexprs),
+        etag::T_CoalesceExpr => descend_list(&node.expect_coalesceexpr().args, info, multiexprs),
+        etag::T_MinMaxExpr => descend_list(&node.expect_minmaxexpr().args, info, multiexprs),
+        etag::T_ArrayExpr => descend_list(&node.expect_arrayexpr().elements, info, multiexprs),
         // CASE: arg + each WHEN's (expr,result) + ELSE.
         etag::T_CaseExpr => {
             let e = node.expect_caseexpr();
-            descend_opt(e.arg.as_deref(), info);
+            descend_opt(e.arg.as_deref(), info, multiexprs);
             for w in &e.args {
-                descend_opt(w.expr.as_deref(), info);
-                descend_opt(w.result.as_deref(), info);
+                descend_opt(w.expr.as_deref(), info, multiexprs);
+                descend_opt(w.result.as_deref(), info, multiexprs);
             }
-            descend_opt(e.defresult.as_deref(), info);
+            descend_opt(e.defresult.as_deref(), info, multiexprs);
+        }
+        // SubPlan: collect MULTIEXPR SubPlans so the spine runs them before any
+        // PARAM_MULTIEXPR reading their outputs (C: info->multiexpr_subplans);
+        // then descend into the SubPlan's correlation args, exactly as C's
+        // expression_tree_walker recurses into subplan->args.
+        etag::T_SubPlan => {
+            let sub = &node.expect_subplan().0;
+            if sub.subLinkType == types_nodes::primnodes::SubLinkType::MultiExpr {
+                multiexprs.push(sub);
+            }
+            for arg in sub.args.iter() {
+                expr_setup_walker(&**arg, info, multiexprs);
+            }
         }
         // Remaining node kinds carry children but are routed to owner-family
         // panics in ExecInitExprRec; for the prescan we conservatively don't
@@ -258,16 +301,24 @@ fn expr_setup_walker(node: &Expr, info: &mut ExprSetupInfo) {
 }
 
 /// Helper: walk an optional boxed child expression.
-fn descend_opt(node: Option<&Expr>, info: &mut ExprSetupInfo) {
+fn descend_opt<'a, 'mcx>(
+    node: Option<&'a Expr<'mcx>>,
+    info: &mut ExprSetupInfo,
+    multiexprs: &mut Vec<&'a types_nodes::primnodes::SubPlan<'mcx>>,
+) {
     if let Some(n) = node {
-        expr_setup_walker(n, info);
+        expr_setup_walker(n, info, multiexprs);
     }
 }
 
 /// Helper: walk a `Vec<Expr>` argument list.
-fn descend_list(list: &[Expr], info: &mut ExprSetupInfo) {
+fn descend_list<'a, 'mcx>(
+    list: &'a [Expr<'mcx>],
+    info: &mut ExprSetupInfo,
+    multiexprs: &mut Vec<&'a types_nodes::primnodes::SubPlan<'mcx>>,
+) {
     for n in list {
-        expr_setup_walker(n, info);
+        expr_setup_walker(n, info, multiexprs);
     }
 }
 
@@ -313,6 +364,7 @@ fn exec_push_expr_setup_steps<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
     info: &ExprSetupInfo,
+    multiexprs: &[&types_nodes::primnodes::SubPlan<'mcx>],
 ) -> PgResult<()> {
     let last = &info.last_attnums;
     for (opcode, last_var) in [
@@ -340,11 +392,21 @@ fn exec_push_expr_setup_steps<'mcx>(
         }
     }
 
-    if info.multiexpr_subplans != 0 {
-        panic!(
-            "execExpr-core: MULTIEXPR SubPlan setup not ported (needs execExpr_func_subscript \
-             ExecInitSubPlanExpr + the SubPlan node state)"
-        );
+    // C (ExecPushExprSetupSteps): emit steps to execute any MULTIEXPR SubPlans
+    // appearing in the expression. They must run before any Param referencing
+    // their outputs is read, but after the Var-FETCHSOME steps above (so the
+    // correlation args can be evaluated). There cannot be cross-references
+    // between MULTIEXPR SubPlans, so order among them is irrelevant. The result
+    // is ignored, parked on the ExprState's own result cell.
+    let _ = info.multiexpr_subplans;
+    for subplan in multiexprs {
+        debug_assert!(subplan.subLinkType == types_nodes::primnodes::SubLinkType::MultiExpr);
+        crate::execExpr_func_subscript::exec_init_sub_plan_expr(
+            mcx,
+            subplan,
+            state,
+            STATE_RESULT_CELL,
+        )?;
     }
     Ok(())
 }
@@ -356,8 +418,9 @@ fn exec_create_expr_setup_steps<'mcx>(
     node: &Expr<'mcx>,
 ) -> PgResult<()> {
     let mut info = ExprSetupInfo::default();
-    expr_setup_walker(node, &mut info);
-    exec_push_expr_setup_steps(mcx, state, &info)
+    let mut multiexprs = Vec::new();
+    expr_setup_walker(node, &mut info, &mut multiexprs);
+    exec_push_expr_setup_steps(mcx, state, &info, &multiexprs)
 }
 
 /// `ExecCreateExprSetupSteps(state, (Node *) targetList)` over a projection
@@ -370,12 +433,13 @@ fn exec_create_expr_setup_steps_tlist<'mcx>(
     target_list: &[types_nodes::TargetEntry<'mcx>],
 ) -> PgResult<()> {
     let mut info = ExprSetupInfo::default();
+    let mut multiexprs = Vec::new();
     for tle in target_list {
         if let Some(e) = tle.expr.as_deref() {
-            expr_setup_walker(e, &mut info);
+            expr_setup_walker(e, &mut info, &mut multiexprs);
         }
     }
-    exec_push_expr_setup_steps(mcx, state, &info)
+    exec_push_expr_setup_steps(mcx, state, &info, &multiexprs)
 }
 
 /// `ExecCreateExprSetupSteps(state, (Node *) list)` over a qual list.
@@ -387,13 +451,14 @@ fn exec_create_expr_setup_steps_tlist<'mcx>(
 pub(crate) fn exec_create_expr_setup_steps_list<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
-    nodes: &[Expr],
+    nodes: &[Expr<'mcx>],
 ) -> PgResult<()> {
     let mut info = ExprSetupInfo::default();
+    let mut multiexprs = Vec::new();
     for node in nodes {
-        expr_setup_walker(node, &mut info);
+        expr_setup_walker(node, &mut info, &mut multiexprs);
     }
-    exec_push_expr_setup_steps(mcx, state, &info)
+    exec_push_expr_setup_steps(mcx, state, &info, &multiexprs)
 }
 
 // ExecInitFunc lives in execExpr_func_subscript (this crate's func/subscript
@@ -1822,7 +1887,26 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // Expr enum); the SubPlan tree is the same `'mcx` arena, so it is
             // borrowed directly (the former `'static`→`'mcx` transmute is gone).
             let sub: &types_nodes::primnodes::SubPlan<'mcx> = &subplan.0;
-            crate::execExpr_func_subscript::exec_init_sub_plan_expr(mcx, sub, state, resv)
+            // C (execExpr.c T_SubPlan): real execution of a MULTIEXPR SubPlan has
+            // already been hoisted to a setup step (ExecPushExprSetupSteps), so
+            // here we only emit a dummy NULL in case this tlist element is
+            // assigned somewhere. Running it inline here would set the params
+            // AFTER the PARAM_MULTIEXPR columns (placed earlier in the tlist)
+            // already read them — an off-by-one across rows.
+            if sub.subLinkType == types_nodes::primnodes::SubLinkType::MultiExpr {
+                let scratch = ExprEvalStep {
+                    opcode: ExprEvalOp::EEOP_CONST,
+                    resvalue: resv,
+                    resnull: resv,
+                    d: ExprEvalStepData::ConstVal {
+                        value: DatumV::null(),
+                        isnull: true,
+                    },
+                };
+                expr_eval_push_step(mcx, state, scratch)
+            } else {
+                crate::execExpr_func_subscript::exec_init_sub_plan_expr(mcx, sub, state, resv)
+            }
         }
         etag::T_AlternativeSubPlan => panic!(
             "execExpr-core: AlternativeSubPlan must be replaced by a concrete SubPlan before \
@@ -2839,10 +2923,11 @@ pub fn exec_build_update_projection_impl<'mcx>(
 
     // If evaluating the tlist, incorporate its input requirements too; else
     // we'll just fetch the appropriate number of "outer" columns.
+    let mut deform_multiexprs = Vec::new();
     if eval_target_list {
         for tle in target_list {
             if let Some(e) = tle.expr.as_deref() {
-                expr_setup_walker(e, &mut deform);
+                expr_setup_walker(e, &mut deform, &mut deform_multiexprs);
             }
         }
     } else {
@@ -2850,7 +2935,7 @@ pub fn exec_build_update_projection_impl<'mcx>(
     }
 
     // ExecPushExprSetupSteps(state, &deform);
-    exec_push_expr_setup_steps(mcx, state, &deform)?;
+    exec_push_expr_setup_steps(mcx, state, &deform, &deform_multiexprs)?;
 
     // Generate code to evaluate/assign each non-junk tlist column. forboth()
     // iterates over exactly the non-junk columns (guaranteed by the order check
