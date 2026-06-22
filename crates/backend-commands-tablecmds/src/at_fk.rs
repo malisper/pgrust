@@ -83,7 +83,7 @@ const NoLock: LOCKMODE = 0;
 /// `COMPARE_EQ` / `COMPARE_OVERLAP` (`cmptype.h`) — the AM-independent compare
 /// types we pass to `IndexAmTranslateCompareType`.
 const COMPARE_EQ: i32 = 3;
-const COMPARE_OVERLAP: i32 = 8;
+const COMPARE_OVERLAP: i32 = 7;
 const InvalidStrategy: i16 = 0;
 
 // ===========================================================================
