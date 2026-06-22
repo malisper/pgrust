@@ -238,10 +238,20 @@ pub fn SendRowDescriptionMessage(
         let format: i16;
 
         // If column is a domain, send the base type and typmod instead. Lookup
-        // before sending any ints, for efficiency. (C seeds atttypid/atttypmod
-        // from the descriptor, then overwrites both with getBaseTypeAndTypmod.)
-        let (atttypid, atttypmod) =
+        // before sending any ints, for efficiency. C seeds atttypid/atttypmod
+        // from the descriptor, then calls getBaseTypeAndTypmod(typid, &typmod)
+        // which leaves *typmod unchanged for a non-domain. The lsyscache seam
+        // returns the base type's own typtypmod, so for a non-domain (base ==
+        // att.atttypid) we must thread the descriptor's atttypmod through;
+        // only a real domain resolution replaces it with the base typmod.
+        let (base_typid, base_typmod) =
             backend_utils_cache_lsyscache_seams::get_base_type_and_typmod::call(att.atttypid)?;
+        let atttypid = base_typid;
+        let atttypmod = if base_typid == att.atttypid {
+            att.atttypmod
+        } else {
+            base_typmod
+        };
 
         // Do we have a non-resjunk tlist item?
         while tlist_idx < targetlist.len() && targetlist[tlist_idx].resjunk {
