@@ -16,7 +16,9 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
+use types_nodes::primnodes::Expr;
 use types_nodes::rawnodes::RangeVar;
+use types_rel::Relation;
 use types_statistics::{AnalyzeAttrFetchFunc, VacAttrStats};
 use types_storage::buf::BufferAccessStrategy;
 use types_vacuum::vacuum::VacuumParams;
@@ -78,4 +80,23 @@ seam_core::seam!(
         samplerows: i32,
         totalrows: f64,
     ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `examine_expression(expr, stattarget)` (commands/extended_stats.c:604) —
+    /// pre-analysis of a single CREATE-STATISTICS expression. Builds a
+    /// `VacAttrStats` from the expression tree's type/typmod/collation (NOT a
+    /// column), runs the type-specific `typanalyze` (or `std_typanalyze`), and
+    /// returns it (`Some`) when analyzable, else `None`. Owned by analyze.c
+    /// (it shares the `examine_attribute` internals: `new_vac_attr_stats`,
+    /// `std_typanalyze`, the built-in custom-typanalyze dispatch). The
+    /// extended-statistics build leg reaches it through this seam. `onerel` is
+    /// the relation being analyzed (the resulting `tupDesc` is taken from the
+    /// live `VacAttrStats` by the caller, mirroring lookup_var_attr_stats).
+    pub fn examine_expression<'mcx>(
+        mcx: Mcx<'mcx>,
+        onerel: &Relation<'mcx>,
+        expr: &Expr,
+        stattarget: i32,
+    ) -> PgResult<Option<VacAttrStats<'mcx>>>
 );
