@@ -826,7 +826,12 @@ fn fetch_trigger_tuple<'mcx>(
         let formed = fetched
             .tuple
             .expect("heap_fetch found==true must carry the tuple");
-        let copied = formed.clone_in(mcx)?;
+        let mut copied = formed.clone_in(mcx)?;
+        // heap_fetch sets `tuple->t_tableOid = RelationGetRelid(relation)`; the
+        // owned heap_fetch leaves it 0. Stamp it so the force-store into the
+        // trigger OLD/NEW slot propagates it to slot->tts_tableOid (a WHEN clause
+        // referencing `old.tableoid`/`new.tableoid` reads that header field).
+        copied.tuple.t_tableOid = relid;
         // SAFETY: `copied` is allocated in `mcx` (= estate.es_query_cxt). The
         // side-channel slot payload that borrows this tuple is installed and
         // dropped within the enclosing `after_trigger_execute` call, which runs
@@ -4584,6 +4589,13 @@ fn exec_ar_update_triggers_impl<'mcx>(
         backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
             estate, slot, formed_mcx, false,
         )?;
+        // In C the OLD slot is filled by table_tuple_fetch_row_version, whose
+        // ExecStoreBufferHeapTuple sets slot->tts_tableOid = the relation OID.
+        // Our fetch-then-force-store dance lands the tuple via the BufferTuple
+        // arm of ExecForceStoreHeapTuple, which (like C) does not stamp the
+        // header's tts_tableOid — so set it here. A WHEN clause referencing
+        // `old.tableoid` (e.g. `new.tableoid = old.tableoid`) reads it.
+        estate.slot_mut(slot).tts_tableOid = rel_oid;
         slot
     };
 

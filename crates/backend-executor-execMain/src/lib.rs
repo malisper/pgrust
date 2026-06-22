@@ -1411,14 +1411,24 @@ fn install_get_tuple_for_trigger_seams() {
                 .alias();
             let snapshot_any =
                 Some(types_snapshot::SnapshotData::sentinel(types_snapshot::SnapshotType::SNAPSHOT_ANY));
+            let relid = rel.rd_id;
             let inslot = estate.slot_data_mut(oldslot);
-            backend_access_table_tableam::table_tuple_fetch_row_version(
+            let found = backend_access_table_tableam::table_tuple_fetch_row_version(
                 mcx,
                 &rel,
                 tid,
                 &snapshot_any,
                 inslot,
-            )
+            )?;
+            // table_tuple_fetch_row_version stores via ExecStoreBufferHeapTuple,
+            // which sets slot->tts_tableOid = tuple->t_tableOid (= the relation
+            // OID). A `tableoid` system-column reference in a trigger WHEN clause
+            // (e.g. `new.tableoid = old.tableoid`) reads the slot's tts_tableOid,
+            // so the OLD slot must carry the relation OID, not 0.
+            if found {
+                estate.slot_mut(oldslot).tts_tableOid = relid;
+            }
+            Ok(found)
         },
     );
 }
