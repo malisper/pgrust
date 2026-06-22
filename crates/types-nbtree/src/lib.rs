@@ -380,14 +380,25 @@ pub enum BTPS_State {
 }
 
 /// `BTParallelScanDescData` (`nbtree.c`) — btree-specific shared information
-/// required for a parallel scan. Lives in the DSM region the parallel
+/// required for a parallel scan. Lives IN the DSM chunk the parallel
 /// index-scan infrastructure (`indexam.c` `ParallelIndexScanDesc` +
 /// `OffsetToPointer(parallel_scan, ps_offset_am)`) sets up; the nbtree
 /// `_bt_parallel_*` state machine in `backend-access-nbtree-nbtree` operates on
-/// it. The flexible-array tail (`btps_arrElems[]` plus a flattened skip-array
-/// datum region) is modelled as a separate byte buffer `btps_arrtail` so the
-/// fixed header fields stay addressable; the serialize/restore code indexes it
-/// exactly as C indexes the FAM.
+/// it directly through a `*mut` resolved by `bt_resolve_parallel_scan`. This is
+/// the C design verbatim: the descriptor is `#[repr(C)]` and placed in-chunk,
+/// and the flexible-array tail (`btps_arrElems[FLEXIBLE_ARRAY_MEMBER]` plus the
+/// trailing flattened skip-array datum region) lives immediately after the
+/// header in the SAME chunk — modelled here by the inline zero-length FAM
+/// marker `btps_arrElems`, whose address (`&self.btps_arrElems`) IS the C
+/// `&btps_arrElems[0]`. The serialize/restore code indexes it exactly as C
+/// indexes the FAM.
+///
+/// Every field C mutates concurrently across leader and workers is mutated
+/// while holding `btps_lock` exclusively (the `LWLock`), so the shared
+/// `&self`-via-`*mut` access the resolver hands out is sound for exactly the
+/// reason C's plain-field-under-lock access is — the lock supplies the
+/// exclusion and the ordering. This is why it is a sound [`SharedDsmObject`].
+#[repr(C)]
 #[derive(Debug)]
 pub struct BTParallelScanDescData {
     /// next page to be scanned
@@ -400,38 +411,56 @@ pub struct BTParallelScanDescData {
     pub btps_lock: types_storage::storage::LWLock,
     /// used to synchronize parallel scan
     pub btps_cv: types_condvar::ConditionVariable,
-    /// `btps_arrElems[FLEXIBLE_ARRAY_MEMBER]` plus the trailing flattened
-    /// skip-array datum region, as a raw byte buffer in the DSM area. Indexed
-    /// by [`btps_arr_elem`]/[`set_btps_arr_elem`] for the `int` cur_elem slots
-    /// and by raw offset for the serialized datums.
-    pub btps_arrtail: *mut u8,
+    /// `int btps_arrElems[FLEXIBLE_ARRAY_MEMBER]` — the inline zero-length FAM
+    /// marker. Its address is the base of the in-chunk `btps_arrElems[]` `int`
+    /// cur_elem array followed by the flattened skip-array datum region; the
+    /// chunk is sized for the tail by `btestimateparallelscan`. Accessed via
+    /// [`btps_arr_elem`]/[`set_btps_arr_elem`]/[`btps_datumshared`].
+    pub btps_arrElems: [i32; 0],
 }
+
+// SAFETY: `#[repr(C)]` matching the C `BTParallelScanDescData` field-for-field
+// with an inline `btps_arrElems[FLEXIBLE_ARRAY_MEMBER]`. Every field C mutates
+// concurrently after the launch barrier is mutated under `btps_lock` held
+// exclusively — the in-segment `LWLock` supplies the cross-process exclusion and
+// ordering (exactly as C's plain `btps_pageStatus`/`btps_nextScanPage` fields
+// are written under the lock); `btps_cv` is the in-segment CV. The leader's
+// `btinitparallelscan` placement initializer writes every field before any
+// worker attaches. A `*mut Self` used only under the lock is therefore sound to
+// alias across processes.
+unsafe impl types_parallel::SharedDsmObject for BTParallelScanDescData {}
 
 /// `offsetof(BTParallelScanDescData, btps_arrElems)` — the size of the fixed
 /// header preceding the flexible-array tail in the C DSM struct, used by
-/// `btestimateparallelscan` as the base shared-state size. Two `BlockNumber`
-/// (4+4), the `BTPS_State` enum (4), then the `LWLock` and `ConditionVariable`
-/// (both `MAXALIGN`-padded), with the FAM `int[]` 4-byte aligned. Verified
-/// against the C struct layout: `4+4+4 + sizeof(LWLock) + sizeof(ConditionVariable)`
-/// rounded to the FAM alignment. (Consumed only by the DSM allocator, which is
-/// indexam-owned; the value mirrors the C `offsetof`.)
-pub const BTPARALLEL_HEADER_SIZE: usize = {
-    // BlockNumber x2 + BTPS_State(i32) = 12, then LWLock + ConditionVariable.
-    let base = 4 + 4 + 4;
-    let sync = core::mem::size_of::<types_storage::storage::LWLock>()
-        + core::mem::size_of::<types_condvar::ConditionVariable>();
-    base + sync
-};
+/// `btestimateparallelscan` as the base shared-state size and by the in-place
+/// accessors to locate the FAM. With `#[repr(C)]` and the inline FAM marker this
+/// is exactly `offset_of!`, mirroring the C `offsetof`.
+pub const BTPARALLEL_HEADER_SIZE: usize =
+    core::mem::offset_of!(BTParallelScanDescData, btps_arrElems);
 
 impl BTParallelScanDescData {
+    /// `&btps_arrElems[0]` — the in-chunk base of the flexible-array tail
+    /// (`(char *) self + offsetof(.., btps_arrElems)`).
+    ///
+    /// # Safety
+    /// `self` must be the in-chunk descriptor whose tail was sized by
+    /// `btestimateparallelscan`.
+    #[inline]
+    unsafe fn btps_arrtail(&self) -> *mut u8 {
+        // The address of the inline zero-length FAM marker IS the C
+        // `&btps_arrElems[0]`. Cast through the struct base for a stable
+        // provenance over the whole chunk (the marker is zero-sized).
+        (self as *const Self as *mut u8).add(BTPARALLEL_HEADER_SIZE)
+    }
+
     /// Read `btps_arrElems[i]` (the i-th `int` cur_elem slot at the head of the
     /// flexible-array tail).
     ///
     /// # Safety
     /// `i` must be within the `btps_arrElems[]` region sized by
-    /// `btestimateparallelscan`, and `btps_arrtail` must point at the DSM tail.
+    /// `btestimateparallelscan`, and `self` must be the in-chunk descriptor.
     pub unsafe fn btps_arr_elem(&self, i: usize) -> i32 {
-        let p = self.btps_arrtail as *const i32;
+        let p = self.btps_arrtail() as *const i32;
         core::ptr::read_unaligned(p.add(i))
     }
 
@@ -440,7 +469,7 @@ impl BTParallelScanDescData {
     /// # Safety
     /// See [`btps_arr_elem`].
     pub unsafe fn set_btps_arr_elem(&mut self, i: usize, v: i32) {
-        let p = self.btps_arrtail as *mut i32;
+        let p = self.btps_arrtail() as *mut i32;
         core::ptr::write_unaligned(p.add(i), v);
     }
 
@@ -449,9 +478,9 @@ impl BTParallelScanDescData {
     ///
     /// # Safety
     /// `n` must equal the scan's `numArrayKeys`; the returned pointer aliases
-    /// the DSM tail.
+    /// the in-chunk tail.
     pub unsafe fn btps_datumshared(&self, n: usize) -> *mut u8 {
-        (self.btps_arrtail as *mut i32).add(n) as *mut u8
+        (self.btps_arrtail() as *mut i32).add(n) as *mut u8
     }
 }
 
@@ -652,6 +681,16 @@ pub struct BTScanOpaqueData<'mcx> {
     /// descriptor before each call (it never changes mid-scan).
     pub ignore_killed_tuples: bool,
 
+    /// `scan->parallel_scan` — the in-DSM `ParallelIndexScanDesc` base address
+    /// (C's bare pointer) when this is a parallel scan, else `None`. Mirrored
+    /// onto the opaque state because the `bt_first`/`bt_next`/`_bt_steppage`/
+    /// `_bt_readnextpage` search functions carry only `(rel, &mut so, dir)`, not
+    /// the `IndexScanDesc`; the AM driver sets it from the scan descriptor (via
+    /// `sync_in`) before each call. The nbtree-core search loop drives the
+    /// `_bt_parallel_seize`/`release`/`done`/`primscan_schedule` seams with it
+    /// (mirroring nbtsearch.c's `scan->parallel_scan != NULL` branches).
+    pub parallel_scan: Option<u64>,
+
     /// itemIndex, or -1 if not valid
     pub markItemIndex: i32,
 
@@ -693,6 +732,7 @@ impl<'mcx> BTScanOpaqueData<'mcx> {
             numKilled: 0,
             dropPin: false,
             ignore_killed_tuples: false,
+            parallel_scan: None,
             markItemIndex: -1,
             nsearches: 0,
             currTuples: None,

@@ -38,14 +38,16 @@ pub use types_storage::{Buffer, InvalidBuffer};
 // already depends on `types-tableam`, so there is no dependency cycle.
 pub use types_tableam::genam::{IndexScanInstrumentation, SharedIndexScanInstrumentation};
 pub use types_tableam::relscan::{
-    IndexScanDesc, IndexScanDescData, ParallelIndexScanDescData,
+    IndexScanDesc, IndexScanDescData, ParallelIndexScanDescData, ParallelIndexScanDescHandle,
 };
 
-/// `ParallelIndexScanDesc` — `ParallelIndexScanDescData *`. The canonical
-/// `types_tableam` descriptor carries the shared parallel descriptor as an
-/// `Arc` (DSM-resident); this alias preserves the `PgBox`-shaped name used by
-/// the index-only-scan node's per-backend pool.
-pub type ParallelIndexScanDesc<'mcx> = PgBox<'mcx, ParallelIndexScanDescData>;
+/// `ParallelIndexScanDesc` — C's `ParallelIndexScanDescData *`, the `Copy`
+/// in-DSM pointer handle the executor threads through (the canonical
+/// `types_tableam` [`ParallelIndexScanDescHandle`]). It carries NO Rust
+/// lifetime — like the C bare pointer — but the alias keeps a `<'mcx>` slot so
+/// the seam signatures that historically used `ParallelIndexScanDesc<'mcx>`
+/// continue to parse; the lifetime is simply unused.
+pub type ParallelIndexScanDesc<'mcx> = ParallelIndexScanDescHandle;
 
 /// `IndexRuntimeKeyInfo` (execnodes.h) — info about a scankey whose value must
 /// be evaluated at runtime. The `scan_key` slot the value is written into is

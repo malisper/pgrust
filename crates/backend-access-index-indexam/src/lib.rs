@@ -43,7 +43,10 @@ use types_tableam::genam::{
     IndexBulkDeleteResult, IndexOrderByDistance, IndexScanInstrumentation, IndexVacuumInfo,
     SharedIndexScanInstrumentation,
 };
-use types_tableam::relscan::{IndexScanDesc, IndexScanDescData, ParallelIndexScanDescData};
+use types_tableam::relscan::{
+    IndexScanDesc, IndexScanDescData, ParallelIndexScanDescData, ParallelIndexScanDescHandle,
+    PARALLEL_INDEX_SCAN_DESC_HEADER_SIZE,
+};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, InvalidOid, Oid, RegProcedure};
 use types_tuple::access::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
@@ -88,6 +91,7 @@ pub fn init_seams() {
     seams::index_parallelscan_initialize::set(seam_index_parallelscan_initialize);
     seams::index_parallelrescan::set(seam_index_parallelrescan);
     seams::index_scan_resolve_shared_info::set(seam_index_scan_resolve_shared_info);
+    seams::bt_resolve_parallel_scan::set(seam_bt_resolve_parallel_scan);
 
     // AM-vacuum dispatch consumed by vacuum.c (`vac_bulkdel_one_index` /
     // `vac_cleanup_one_index`). These seams are declared by the vacuum owner
@@ -253,10 +257,9 @@ fn seam_index_beginscan_bitmap<'mcx>(
     index_beginscan_bitmap(mcx, &index_relation, snapshot, Some(instrument), nkeys)
 }
 
-/// `index_beginscan_parallel` seam wrapper. The seam passes the shared
-/// descriptor as a `PgBox` (the node-pool carrier); the C-faithful impl takes an
-/// `Arc<ParallelIndexScanDescData>` (the shared-state model). Bridge by cloning
-/// the inner value into a fresh `Arc`.
+/// `index_beginscan_parallel` seam wrapper. The seam passes the `Copy` in-DSM
+/// pointer handle (C's bare `ParallelIndexScanDesc`); no per-process copy — the
+/// scan attaches to the SAME shared descriptor in leader and every worker.
 fn seam_index_beginscan_parallel<'mcx>(
     mcx: Mcx<'mcx>,
     heap_relation: Relation<'mcx>,
@@ -266,7 +269,6 @@ fn seam_index_beginscan_parallel<'mcx>(
     norderbys: i32,
     pscan: types_nodes::nodeindexonlyscan::ParallelIndexScanDesc<'mcx>,
 ) -> PgResult<IndexScanDesc<'mcx>> {
-    let pscan = std::sync::Arc::new((*pscan).clone());
     index_beginscan_parallel(
         mcx,
         &heap_relation,
@@ -428,31 +430,35 @@ fn seam_index_parallelscan_estimate<'mcx>(
     )
 }
 
-/// `index_parallelscan_initialize` seam wrapper: initialize the supplied
-/// `target` and return it as a `PgBox` (the seam's `ParallelIndexScanDesc`).
+/// `index_parallelscan_initialize` seam wrapper: initialize the descriptor IN
+/// PLACE at the in-DSM chunk base `target_addr` and return the `Copy` handle.
 fn seam_index_parallelscan_initialize<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     heap_relation: Relation<'mcx>,
     index_relation: Relation<'mcx>,
     snapshot: Option<std::rc::Rc<SnapshotData>>,
     instrument: bool,
     parallel_aware: bool,
     nworkers: i32,
-    mut target: ParallelIndexScanDescData,
+    target_addr: usize,
 ) -> PgResult<types_nodes::nodeindexonlyscan::ParallelIndexScanDesc<'mcx>> {
     let snapshot = snapshot
         .map(|rc| (*rc).clone())
         .expect("index_parallelscan_initialize requires a snapshot");
-    index_parallelscan_initialize(
-        &heap_relation,
-        &index_relation,
-        &snapshot,
-        instrument,
-        parallel_aware,
-        nworkers,
-        &mut target,
-    )?;
-    mcx::alloc_in(mcx, target)
+    // SAFETY: `target_addr` is the executor's freshly-`shm_toc_allocate`'d chunk
+    // base, sized by `index_parallelscan_estimate` with the same arguments, not
+    // yet aliased by any worker (the leader is the sole writer pre-launch).
+    unsafe {
+        index_parallelscan_initialize(
+            &heap_relation,
+            &index_relation,
+            &snapshot,
+            instrument,
+            parallel_aware,
+            nworkers,
+            target_addr,
+        )
+    }
 }
 
 /// `index_parallelrescan` seam wrapper.
@@ -469,21 +475,57 @@ fn seam_index_parallelrescan<'mcx>(
 ///
 /// In C the worker resolves the `SharedIndexScanInstrumentation` that the
 /// leader's `index_parallelscan_initialize` memset/initialized inside the
-/// DSM-resident `ParallelIndexScanDesc` blob at byte offset `ps_offset_ins`.
-/// The owned `ParallelIndexScanDescData` carries that region as the value field
-/// `shared_instrument` (populated exactly when `ps_offset_ins != 0`, i.e. the
-/// `instrument` branch the consumer guards this call with), so the resolution is
-/// a clone of that owned region rather than DSM pointer arithmetic.
+/// DSM-resident `ParallelIndexScanDesc` chunk at byte offset `ps_offset_ins`.
+/// This reads `num_workers` + the `IndexScanInstrumentation[num_workers]` tail
+/// straight out of the in-chunk region (`OffsetToPointer(piscan,
+/// ps_offset_ins)`) into an owned struct the worker node holds.
 fn seam_index_scan_resolve_shared_info(
-    piscan: &ParallelIndexScanDescData,
+    piscan: ParallelIndexScanDescHandle,
 ) -> PgResult<SharedIndexScanInstrumentation> {
-    piscan
-        .shared_instrument
-        .clone()
-        .ok_or_else(|| {
-            PgError::error("index parallel scan has no shared instrumentation region".to_string())
-                .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+    let off = piscan.ps_offset_ins();
+    if off == 0 {
+        return Err(PgError::error(
+            "index parallel scan has no shared instrumentation region".to_string(),
+        )
+        .with_sqlstate(ERRCODE_INTERNAL_ERROR));
+    }
+    let base = piscan.base_addr() + off;
+    // SAFETY: `base` is the real in-segment address of the leader-zeroed
+    // `SharedIndexScanInstrumentation` region (`int num_workers` + the FAM of
+    // `IndexScanInstrumentation`), written once before the launch barrier and
+    // read-only here; the chunk was sized for `num_workers` slots.
+    unsafe {
+        let num_workers = core::ptr::read(base as *const i32);
+        let win_base = (base + shared_index_scan_instrumentation_header_size())
+            as *const IndexScanInstrumentation;
+        let mut winstrument = Vec::with_capacity(num_workers.max(0) as usize);
+        for i in 0..num_workers.max(0) as usize {
+            winstrument.push(core::ptr::read(win_base.add(i)));
+        }
+        Ok(SharedIndexScanInstrumentation {
+            num_workers,
+            winstrument,
         })
+    }
+}
+
+/// `bt_resolve_parallel_scan(parallel_handle)` seam wrapper —
+/// `(BTParallelScanDesc) OffsetToPointer(parallel_scan, parallel_scan->ps_offset_am)`.
+///
+/// `parallel_handle` is the in-DSM base address of the `ParallelIndexScanDesc`
+/// chunk (the same shared address in leader and every worker, returned by
+/// `shm_toc_allocate` / `shm_toc_lookup`). Reading `ps_offset_am` from the
+/// in-chunk header and adding it yields the in-DSM address of the AM-specific
+/// `BTParallelScanDescData` tail — the exact pointer C's macro computes. The
+/// nbtree state machine dereferences it under the tail's embedded `btps_lock`.
+fn seam_bt_resolve_parallel_scan(parallel_handle: u64) -> *mut types_nbtree::BTParallelScanDescData {
+    // SAFETY: `parallel_handle` is the real in-segment base of a leader-
+    // initialized `ParallelIndexScanDescData` live for the DSM segment; the
+    // handle exposes its `ps_offset_am` field (write-once-pre-launch).
+    let base = parallel_handle as usize;
+    let handle = unsafe { ParallelIndexScanDescHandle::from_raw(base) };
+    let amtarget = base + handle.ps_offset_am();
+    amtarget as *mut types_nbtree::BTParallelScanDescData
 }
 
 // ===========================================================================
@@ -683,7 +725,7 @@ fn index_beginscan_internal<'mcx>(
     nkeys: i32,
     norderbys: i32,
     snapshot: SnapshotData,
-    pscan: Option<std::sync::Arc<ParallelIndexScanDescData>>,
+    pscan: Option<ParallelIndexScanDescHandle>,
     temp_snap: bool,
 ) -> PgResult<IndexScanDesc<'mcx>> {
     relation_checks(index_relation)?;
@@ -810,7 +852,9 @@ pub fn index_restrpos<'mcx>(mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) 
 /// offset is simply their summed size.
 #[inline]
 fn parallel_index_scan_desc_header_size() -> usize {
-    2 * core::mem::size_of::<types_storage::RelFileLocator>() + 2 * core::mem::size_of::<usize>()
+    // The flat `#[repr(C)]` header size (== `offsetof(.., ps_snapshot_data)`,
+    // where the in-chunk serialized-snapshot tail begins).
+    PARALLEL_INDEX_SCAN_DESC_HEADER_SIZE
 }
 
 /// `offsetof(SharedIndexScanInstrumentation, winstrument)` — the fixed header
@@ -874,21 +918,32 @@ pub fn index_parallelscan_estimate(
 
 /// `index_parallelscan_initialize(heapRelation, indexRelation, snapshot,
 /// instrument, parallel_aware, nworkers, sharedinfo, target)` — initialize the
-/// `ParallelIndexScanDesc` proper and the AM-specific info following it. Call
-/// once in the leader; workers then attach via [`index_beginscan_parallel`].
+/// `ParallelIndexScanDesc` proper and the AM-specific info following it, IN
+/// PLACE at the `shm_toc_allocate`'d chunk whose real in-segment base address is
+/// `target_addr` (the C `ParallelIndexScanDesc target` pointer). Call once in
+/// the leader; workers then attach via [`index_beginscan_parallel`].
 ///
-/// The leader's `*sharedinfo` in C points into `target` at `ps_offset_ins`;
-/// the owned model stores the zeroed `SharedIndexScanInstrumentation` region
-/// in `target.shared_instrument`.
-pub fn index_parallelscan_initialize(
+/// This is the C body verbatim: it writes the flat header at `target`,
+/// serializes the snapshot into the in-chunk `ps_snapshot_data` tail, zeroes the
+/// `SharedIndexScanInstrumentation` region at `OffsetToPointer(target,
+/// ps_offset_ins)`, and calls `aminitparallelscan(OffsetToPointer(target,
+/// ps_offset_am))` so the AM places its `repr(C)` shared state IN the chunk. The
+/// leader is the sole writer pre-launch, so the unique writes through `*mut` are
+/// valid. Returns the `Copy` in-DSM handle.
+///
+/// # Safety
+/// `target_addr` must be the real in-segment base of a chunk sized by
+/// [`index_parallelscan_estimate`] with the same arguments, freshly allocated
+/// and not yet aliased by any worker.
+pub unsafe fn index_parallelscan_initialize(
     heap_relation: &Relation<'_>,
     index_relation: &Relation<'_>,
     snapshot: &SnapshotData,
     instrument: bool,
     parallel_aware: bool,
     nworkers: i32,
-    target: &mut ParallelIndexScanDescData,
-) -> PgResult<()> {
+    target_addr: usize,
+) -> PgResult<ParallelIndexScanDescHandle> {
     debug_assert!(instrument || parallel_aware);
 
     relation_checks(index_relation)?;
@@ -899,12 +954,28 @@ pub fn index_parallelscan_initialize(
     );
     offset = maxalign(offset);
 
+    // target->ps_locator = ...; target->ps_indexlocator = ...; offsets = 0.
+    //
+    // SAFETY: `target_addr` is the leader's freshly-`shm_toc_allocate`'d,
+    // not-yet-aliased chunk base (the function's safety contract); the leader is
+    // the sole writer pre-launch, so this unique `&mut` over the header bytes is
+    // valid.
+    let target = unsafe { &mut *(target_addr as *mut ParallelIndexScanDescData) };
     target.ps_locator = heap_relation.rd_locator;
     target.ps_indexlocator = index_relation.rd_locator;
     target.ps_offset_ins = 0;
     target.ps_offset_am = 0;
-    // SerializeSnapshot(snapshot, target->ps_snapshot_data).
-    target.ps_snapshot_data = snapmgr::serialize_snapshot::call(snapshot)?;
+
+    // SerializeSnapshot(snapshot, target->ps_snapshot_data) — into the in-chunk
+    // tail immediately after the header.
+    let snap_bytes = snapmgr::serialize_snapshot::call(snapshot)?;
+    // SAFETY: the chunk was sized with `EstimateSnapshotSpace(snapshot)` past
+    // the header (see `index_parallelscan_estimate`); the leader is the sole
+    // writer.
+    unsafe {
+        let dst = (target_addr + parallel_index_scan_desc_header_size()) as *mut u8;
+        core::ptr::copy_nonoverlapping(snap_bytes.as_ptr(), dst, snap_bytes.len());
+    }
 
     if instrument {
         target.ps_offset_ins = offset;
@@ -915,25 +986,30 @@ pub fn index_parallelscan_initialize(
         offset = add_size(offset, sharedinfosz);
         offset = maxalign(offset);
 
-        // Set leader's *sharedinfo pointer (into the DSM at ps_offset_ins),
-        // memset it to zero, and initialize num_workers.
-        target.shared_instrument = Some(SharedIndexScanInstrumentation {
-            num_workers: nworkers,
-            winstrument: std::vec![IndexScanInstrumentation::default(); nworkers as usize],
-        });
+        // *sharedinfo = OffsetToPointer(target, ps_offset_ins); memset(0);
+        // (*sharedinfo)->num_workers = nworkers — written in place in the chunk.
+        // SAFETY: chunk sized for `sharedinfosz` at `ps_offset_ins`; sole writer.
+        unsafe {
+            let ins = (target_addr + target.ps_offset_ins) as *mut u8;
+            core::ptr::write_bytes(ins, 0, sharedinfosz);
+            // num_workers is the first `i32` field of SharedIndexScanInstrumentation.
+            core::ptr::write(ins as *mut i32, nworkers);
+        }
     }
 
     // aminitparallelscan is optional; assume no-op if not provided by the AM.
     if parallel_aware {
         if let Some(aminitparallelscan) = indam(index_relation).aminitparallelscan {
             target.ps_offset_am = offset;
-            let mut amtarget = Vec::new();
-            aminitparallelscan(&mut amtarget)?;
-            target.am_specific = Some(amtarget);
+            // amtarget = OffsetToPointer(target, target->ps_offset_am).
+            let amtarget = target_addr + target.ps_offset_am;
+            aminitparallelscan(amtarget)?;
         }
     }
 
-    Ok(())
+    // SAFETY: `target_addr` is the real in-segment base of the leader-initialized
+    // descriptor.
+    Ok(unsafe { ParallelIndexScanDescHandle::from_raw(target_addr) })
 }
 
 /// `index_parallelrescan(scan)` — (re)start a parallel scan of an index.
@@ -959,21 +1035,25 @@ pub fn index_beginscan_parallel<'mcx>(
     instrument: Option<IndexScanInstrumentation>,
     nkeys: i32,
     norderbys: i32,
-    pscan: std::sync::Arc<ParallelIndexScanDescData>,
+    pscan: ParallelIndexScanDescHandle,
 ) -> PgResult<IndexScanDesc<'mcx>> {
     // Assert(RelFileLocatorEquals(heaprel->rd_locator, pscan->ps_locator)) and
     // Assert(RelFileLocatorEquals(indexrel->rd_locator, pscan->ps_indexlocator)).
     debug_assert!(types_storage::RelFileLocatorEquals(
         &heaprel.rd_locator,
-        &pscan.ps_locator
+        &pscan.ps_locator()
     ));
     debug_assert!(types_storage::RelFileLocatorEquals(
         &indexrel.rd_locator,
-        &pscan.ps_indexlocator
+        &pscan.ps_indexlocator()
     ));
 
-    let restored = snapmgr::restore_snapshot::call(&pscan.ps_snapshot_data)?;
+    // snapshot = RestoreSnapshot(pscan->ps_snapshot_data); RegisterSnapshot(...).
+    let restored = snapmgr::restore_snapshot::call(pscan.ps_snapshot_data())?;
     let snapshot = snapmgr::register_snapshot::call(restored)?;
+    // scan = index_beginscan_internal(indexrel, nkeys, norderbys, snapshot,
+    //                                 pscan, true) — `scan->parallel_scan = pscan`
+    // is the SAME shared in-DSM pointer (NO copy).
     let mut scan =
         index_beginscan_internal(mcx, indexrel, nkeys, norderbys, snapshot.clone(), Some(pscan), true)?;
 

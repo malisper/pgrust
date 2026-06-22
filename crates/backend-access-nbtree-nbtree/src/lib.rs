@@ -298,7 +298,7 @@ pub fn bthandler() -> IndexAmRoutine {
         ammarkpos: Some(btmarkpos_am),
         amrestrpos: Some(btrestrpos_am),
         amestimateparallelscan: Some(btestimateparallelscan_am),
-        aminitparallelscan: None,
+        aminitparallelscan: Some(btinitparallelscan),
         amparallelrescan: Some(btparallelrescan_am),
     }
 }
@@ -614,11 +614,20 @@ fn sync_in(scan: &mut IndexScanDescData<'_>) {
         .as_ref()
         .map(IsMVCCSnapshot)
         .unwrap_or(false);
+    // `scan->parallel_scan` — the in-DSM `ParallelIndexScanDesc` base pointer
+    // (C's bare pointer). The nbtree `_bt_parallel_*` state machine reaches the
+    // AM tail via `bt_resolve_parallel_scan(base)` (== `OffsetToPointer(base,
+    // ps_offset_am)`), so carry the chunk base address as the `u64` handle.
+    let parallel_base = scan.parallel_scan.as_ref().map(|h| h.base_addr() as u64);
     let n = nbt(scan);
     n.kill_prior_tuple = kill;
     n.xs_want_itup = want_itup;
     n.heapRelation = heap_present;
     n.xs_snapshot_is_valid = snap_valid;
+    n.parallel_scan = parallel_base;
+    // Also mirror onto the btree-private opaque so the nbtree-core search loop
+    // (which carries only `(rel, &mut so, dir)`) can drive the parallel seize.
+    n.opaque.parallel_scan = parallel_base;
 }
 
 /// `RelationGetIndexScan(indexRelation, nkeys, norderbys)` (genam.c) — allocate
@@ -1297,18 +1306,28 @@ fn _bt_parallel_restore_arrays(btscan: &mut BTParallelScanDescData, so: &mut BTS
     }
 }
 
-/// `btinitparallelscan` — initialize `BTParallelScanDesc` for parallel scan.
-pub fn btinitparallelscan(target_handle: u64) {
-    with_btscan(target_handle, |bt_target| {
-        lwlock::lwlock_initialize::call(
-            &mut bt_target.btps_lock,
-            types_storage::storage::LWTRANCHE_PARALLEL_BTREE_SCAN,
-        );
-        bt_target.btps_nextScanPage = types_core::primitive::InvalidBlockNumber;
-        bt_target.btps_lastCurrPage = types_core::primitive::InvalidBlockNumber;
-        bt_target.btps_pageStatus = BTPS_State::BTPARALLEL_NOT_INITIALIZED;
-        condvar::condition_variable_init::call(&mut bt_target.btps_cv);
-    });
+/// `btinitparallelscan(void *target)` — initialize `BTParallelScanDesc` for a
+/// parallel btree scan, IN PLACE at the AM-specific tail of the parallel
+/// index-scan descriptor chunk. `amtarget` is the raw in-DSM address C reaches
+/// via `OffsetToPointer(target, target->ps_offset_am)`; the leader is the sole
+/// writer pre-launch, so the unique `&mut` over the freshly-allocated chunk
+/// bytes is valid (mirrors C's `(BTParallelScanDesc) target` cast).
+pub fn btinitparallelscan(amtarget: usize) -> PgResult<()> {
+    // SAFETY: `amtarget` is the real in-segment address of the AM-tail chunk
+    // bytes, sized by `btestimateparallelscan`, freshly `shm_toc_allocate`'d and
+    // not yet aliased by any worker (the launch barrier has not released). The
+    // leader is the sole writer, so this `&mut` is unique.
+    let bt_target: &mut BTParallelScanDescData =
+        unsafe { &mut *(amtarget as *mut BTParallelScanDescData) };
+    lwlock::lwlock_initialize::call(
+        &mut bt_target.btps_lock,
+        types_storage::storage::LWTRANCHE_PARALLEL_BTREE_SCAN,
+    );
+    bt_target.btps_nextScanPage = types_core::primitive::InvalidBlockNumber;
+    bt_target.btps_lastCurrPage = types_core::primitive::InvalidBlockNumber;
+    bt_target.btps_pageStatus = BTPS_State::BTPARALLEL_NOT_INITIALIZED;
+    condvar::condition_variable_init::call(&mut bt_target.btps_cv);
+    Ok(())
 }
 
 /// `btparallelrescan()` — reset parallel scan.

@@ -1200,19 +1200,13 @@ mod recurrence_guard {
         // the value field `shared_instrument`, so the worker-side resolution is a
         // clone of that owned region rather than DSM `OffsetToPointer` arithmetic.
         //
-        // STILL PENDING (parallel-scan DSM infrastructure unported):
-        // `bt_resolve_parallel_scan` resolves a `*mut BTParallelScanDescData` into
-        // the DSM-resident parallel scan blob at `ps_offset_am`, which the nbtree
-        // state machine dereferences under the descriptor's embedded `btps_lock`
-        // LWLock. The owned model stores the AM-specific region as a serialized
-        // `Vec<u8>` (`am_specific`), with no live shared `BTParallelScanDescData`
-        // value to hand a `*mut` to across leader/worker. Wiring it faithfully
-        // needs the cross-process DSM shared-memory substrate (a real
-        // `BTParallelScanDescData` in DSM with a working `btps_lock`) — a
-        // tree-wide parallel-scan-infrastructure campaign, not index-AM wiring. A
-        // serial scan never reaches it; it seam-and-panics (mirror-pg-and-panic).
-        // See DESIGN_DEBT.md.
-        ("backend_access_index_indexam", "bt_resolve_parallel_scan"),
+        // `bt_resolve_parallel_scan` is now INSTALLED by the indexam owner: the
+        // parallel index-scan descriptor is a flat in-DSM `#[repr(C)]`
+        // `ParallelIndexScanDescData` placed directly in the `shm_toc` chunk, and
+        // the AM-specific `BTParallelScanDescData` tail is placed IN that chunk by
+        // `btinitparallelscan` (with its `btps_lock`/`btps_cv` constructed in
+        // place). The resolver returns `(BTParallelScanDesc) OffsetToPointer(base,
+        // ps_offset_am)` — the SAME shared DSM address in leader + every worker.
         // (get_table_am_routine / table_relation_toast_am /
         // table_relation_needs_toast_table / table_parallelscan_reinitialize
         // retired: heapam_handler.c (core stage) + tableamapi.c::GetTableAmRoutine

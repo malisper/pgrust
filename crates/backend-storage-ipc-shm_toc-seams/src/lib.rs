@@ -25,30 +25,14 @@ seam_core::seam!(
     pub fn estimate_chunk_and_key(pcxt: ParallelContextHandle, size: usize)
 );
 
-seam_core::seam!(
-    /// `piscan = shm_toc_allocate(pcxt->toc, len);
-    /// index_parallelscan_initialize(...); shm_toc_insert(pcxt->toc,
-    /// plan_node_id, piscan)` (shm_toc.c): allocate the parallel index-scan
-    /// descriptor in the context's DSM TOC and register it under the plan node
-    /// id, returning the live descriptor. Fallible on OOM / `ereport(ERROR)`.
-    pub fn toc_allocate_and_insert_piscan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        pcxt: ParallelContextHandle,
-        plan_node_id: i32,
-        descriptor: types_nodes::ParallelIndexScanDescData,
-    ) -> types_error::PgResult<types_nodes::ParallelIndexScanDesc<'mcx>>
-);
-
-seam_core::seam!(
-    /// `piscan = shm_toc_lookup(pwcxt->toc, plan_node_id, false)` (shm_toc.c):
-    /// retrieve the parallel index-scan descriptor a worker attaches to, by
-    /// plan node id. Fallible on the not-found `ereport(ERROR)` (noError=false).
-    pub fn toc_lookup_piscan<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        pwcxt: ParallelWorkerContextHandle,
-        plan_node_id: i32,
-    ) -> types_error::PgResult<types_nodes::ParallelIndexScanDesc<'mcx>>
-);
+// The parallel index-scan descriptor allocate/insert/lookup is performed by the
+// executor nodes directly through the `backend-access-transam-parallel`
+// `shm_toc_allocate` / `shm_toc_insert` / `shm_toc_lookup` primitives + the
+// `shared_dsm_object` placement keystone (exactly as `nodeSeqscan` places its
+// `ParallelBlockTableScanDescData`), because the descriptor is now a flat in-DSM
+// `#[repr(C)]` object rather than an owned value crossing a seam. The former
+// `toc_allocate_and_insert_piscan` / `toc_lookup_piscan` seams (which trafficked
+// the owned descriptor) are retired in favor of that in-place path.
 
 seam_core::seam!(
     /// `node->biss_SharedInfo = shm_toc_allocate(pcxt->toc, size); shm_toc_insert(

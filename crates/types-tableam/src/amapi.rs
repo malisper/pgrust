@@ -439,9 +439,13 @@ pub struct IndexAmRoutine {
     pub amestimateparallelscan:
         Option<fn(index_relation: &Relation<'_>, nkeys: i32, norderbys: i32) -> PgResult<usize>>,
 
-    /// `aminitparallelscan(target)` — initialize the AM-specific shared state.
-    /// `target` is the AM-specific tail of the parallel descriptor.
-    pub aminitparallelscan: Option<fn(target: &mut Vec<u8>) -> PgResult<()>>,
+    /// `aminitparallelscan(amtarget)` — initialize the AM-specific shared state
+    /// in place. `amtarget` is the raw in-DSM address (a `usize`, mirroring C's
+    /// `void *amtarget = OffsetToPointer(target, target->ps_offset_am)`) of the
+    /// AM-specific tail within the parallel index-scan descriptor chunk. The AM
+    /// casts it to its own `repr(C)` shared struct and placement-initializes it
+    /// directly (the leader is the sole writer pre-launch).
+    pub aminitparallelscan: Option<fn(amtarget: usize) -> PgResult<()>>,
 
     /// `amparallelrescan(scan)`.
     pub amparallelrescan:

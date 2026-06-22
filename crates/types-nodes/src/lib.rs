@@ -170,7 +170,7 @@ pub use nodehash::{
 pub use nodeindexonlyscan::{
     IndexOnlyScan, IndexOnlyScanState, IndexRuntimeKeyInfo, IndexScanDesc, IndexScanDescData,
     IndexScanInstrumentation, IndexScanState, ParallelIndexScanDesc, ParallelIndexScanDescData,
-    ReorderTuple, SharedIndexScanInstrumentation, Buffer, InvalidBuffer,
+    ParallelIndexScanDescHandle, ReorderTuple, SharedIndexScanInstrumentation, Buffer, InvalidBuffer,
 };
 pub use nodeappend::{
     Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,

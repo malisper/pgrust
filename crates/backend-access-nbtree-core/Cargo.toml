@@ -36,6 +36,9 @@ backend-utils-error = { path = "../backend-utils-error" }
 
 # This crate owns these seams (installs them in init_seams()).
 backend-access-nbtree-core-seams = { path = "../backend-access-nbtree-core-seams" }
+# Inward seams the search loop calls for parallel-scan coordination (installed by
+# the sibling backend-access-nbtree-nbtree unit across the module cycle).
+backend-access-nbtree-nbtree-seams = { path = "../backend-access-nbtree-nbtree-seams" }
 # This crate also owns the nbtsort.c build-helper seams (nbtutils.c bodies).
 backend-access-nbtree-build-seams = { path = "../backend-access-nbtree-build-seams" }
 

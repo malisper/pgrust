@@ -365,8 +365,10 @@ pub struct IndexScanDescData<'mcx> {
     pub xs_recheckorderby: bool,
 
     /// `struct ParallelIndexScanDescData *parallel_scan` — parallel-scan
-    /// information, in shared memory (`None` for non-parallel scans).
-    pub parallel_scan: Option<std::sync::Arc<ParallelIndexScanDescData>>,
+    /// information, in shared memory (`None` for non-parallel scans). The
+    /// `Copy` in-DSM pointer handle (C's bare `ParallelIndexScanDesc` pointer);
+    /// no per-process copy.
+    pub parallel_scan: Option<ParallelIndexScanDescHandle>,
 }
 
 /// `IndexScanDesc` — `IndexScanDescData *`.
@@ -397,11 +399,24 @@ impl core::fmt::Debug for IndexScanDescData<'_> {
 }
 
 /// `ParallelIndexScanDescData` (`access/relscan.h`) — shared state for a
-/// parallel index scan, living in DSM in C. The serialized snapshot C stores
-/// in the flexible `ps_snapshot_data[]` tail is the byte buffer here; the
-/// instrumentation and AM-specific regions C places at `ps_offset_ins` /
-/// `ps_offset_am` are carried as owned regions.
-#[derive(Clone, Debug)]
+/// parallel index scan, living IN the DSM chunk in C. This is the flat
+/// `#[repr(C)]` header (`{ ps_locator, ps_indexlocator, ps_offset_ins,
+/// ps_offset_am }`); the serialized snapshot (`ps_snapshot_data[]`
+/// flexible-array tail), the `SharedIndexScanInstrumentation` region (at
+/// `ps_offset_ins`), and the AM-specific region (at `ps_offset_am`) all live
+/// in-chunk immediately after / past the header, exactly as C lays them out via
+/// `OffsetToPointer`. `index_parallelscan_initialize` writes the header and all
+/// tails directly in the `shm_toc`-allocated chunk; a worker reinterprets the
+/// SAME in-segment bytes through a [`ParallelIndexScanDescHandle`].
+///
+/// The header carries no `Vec`/`Option`: process-heap pointers cannot live in
+/// DSM. The two locators are written once by the leader before the launch
+/// barrier and read-only thereafter; `ps_offset_ins`/`ps_offset_am` likewise.
+/// No field is mutated concurrently, so the shared `&self` (or `*mut` used only
+/// by the leader pre-launch / by `OffsetToPointer` consumers) is sound to alias
+/// across processes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ParallelIndexScanDescData {
     /// `RelFileLocator ps_locator` — physical table relation to scan.
     pub ps_locator: RelFileLocator,
@@ -411,27 +426,123 @@ pub struct ParallelIndexScanDescData {
     pub ps_offset_ins: usize,
     /// `Size ps_offset_am` — offset to am-specific structure.
     pub ps_offset_am: usize,
-    /// `char ps_snapshot_data[FLEXIBLE_ARRAY_MEMBER]` — serialized snapshot.
-    pub ps_snapshot_data: StdVec<u8>,
-    /// The `SharedIndexScanInstrumentation` region C places at
-    /// `ps_offset_ins` (present when `index_parallelscan_initialize` was
-    /// called with `instrument=true`).
-    pub shared_instrument: Option<crate::genam::SharedIndexScanInstrumentation>,
-    /// The AM-specific region C places at `ps_offset_am` (present when the AM
-    /// has an `aminitparallelscan`).
-    pub am_specific: Option<StdVec<u8>>,
+    // `char ps_snapshot_data[FLEXIBLE_ARRAY_MEMBER]` — the serialized snapshot
+    // begins at `(char *) self + offsetof(.., ps_snapshot_data)`, i.e.
+    // immediately after this header (it is the inline FAM; see the handle).
 }
 
-impl Default for ParallelIndexScanDescData {
-    fn default() -> Self {
-        ParallelIndexScanDescData {
-            ps_locator: RelFileLocator::default(),
-            ps_indexlocator: RelFileLocator::default(),
-            ps_offset_ins: 0,
-            ps_offset_am: 0,
-            ps_snapshot_data: StdVec::new(),
-            shared_instrument: None,
-            am_specific: None,
+// SAFETY: `#[repr(C)]` matching the C `ParallelIndexScanDescData` header
+// field-for-field. No field is mutated after the launch barrier — the leader
+// writes all four (and the in-chunk tails) before any worker attaches, and they
+// are read-only thereafter. A shared `&Self` aliasing another process's `&Self`
+// over the same bytes is therefore sound.
+unsafe impl SharedDsmObject for ParallelIndexScanDescData {}
+
+/// `offsetof(ParallelIndexScanDescData, ps_snapshot_data)` — the fixed header
+/// size, where the serialized-snapshot flexible-array tail begins. With
+/// `#[repr(C)]` this is exactly `size_of::<ParallelIndexScanDescData>()` (the
+/// header has no trailing FAM member, so its size IS the offset of the tail
+/// bytes that follow it in the chunk).
+pub const PARALLEL_INDEX_SCAN_DESC_HEADER_SIZE: usize =
+    core::mem::size_of::<ParallelIndexScanDescData>();
+
+/// `ParallelIndexScanDesc` (`access/relscan.h`) — C's `ParallelIndexScanDescData
+/// *`, a pointer into DSM bytes. The `Copy` raw-pointer handle the executor
+/// threads through: the in-DSM [`ParallelIndexScanDescData`] header plus the
+/// in-chunk snapshot / instrumentation / AM tails reachable through it via
+/// `OffsetToPointer(self, off)`. The DSM segment that backs it is owned by the
+/// `ParallelContext` and outlives every scan that references it (C's lifetime
+/// relationship), so the handle carries no Rust lifetime — just like the C
+/// pointer.
+#[derive(Clone, Copy)]
+pub struct ParallelIndexScanDescHandle {
+    /// Address of the in-DSM `ParallelIndexScanDescData` header (== the chunk
+    /// base; the C `pscan` pointer).
+    base: *mut ParallelIndexScanDescData,
+}
+
+// SAFETY: the handle is a borrow of a shared DSM segment whose cross-process
+// synchronization is the AM-specific tail's responsibility (the btree tail's
+// `btps_lock`); the header itself is write-once-pre-launch (mirrors
+// `ParallelTableScanDesc: Send`/`Sync`).
+unsafe impl Send for ParallelIndexScanDescHandle {}
+unsafe impl Sync for ParallelIndexScanDescHandle {}
+
+impl ParallelIndexScanDescHandle {
+    /// Build the handle from a `SharedRef` to the leader-placed header (its
+    /// address is the chunk base / the C `pscan` pointer).
+    pub fn from_shared(desc: SharedRef<'_, ParallelIndexScanDescData>) -> Self {
+        ParallelIndexScanDescHandle {
+            base: desc.get() as *const ParallelIndexScanDescData as *mut ParallelIndexScanDescData,
         }
+    }
+
+    /// Build the handle from a raw in-segment base address (e.g. a worker's
+    /// `shm_toc_lookup` result, or the leader's freshly-allocated chunk).
+    ///
+    /// # Safety
+    /// `base` must be the real in-segment address of a leader-initialized
+    /// `ParallelIndexScanDescData` live for the DSM segment.
+    pub unsafe fn from_raw(base: usize) -> Self {
+        ParallelIndexScanDescHandle {
+            base: base as *mut ParallelIndexScanDescData,
+        }
+    }
+
+    /// The chunk base address (the C `pscan` pointer reinterpreted as `usize`).
+    /// `OffsetToPointer(pscan, off)` is `self.base_addr() + off`.
+    #[inline]
+    pub fn base_addr(&self) -> usize {
+        self.base as usize
+    }
+
+    /// `pscan->ps_locator`.
+    #[inline]
+    pub fn ps_locator(&self) -> RelFileLocator {
+        // SAFETY: `base` is a real in-segment address of a leader-initialized
+        // header (handle contract); the field is write-once-pre-launch.
+        unsafe { (*self.base).ps_locator }
+    }
+
+    /// `pscan->ps_indexlocator`.
+    #[inline]
+    pub fn ps_indexlocator(&self) -> RelFileLocator {
+        // SAFETY: see `ps_locator`.
+        unsafe { (*self.base).ps_indexlocator }
+    }
+
+    /// `pscan->ps_offset_ins`.
+    #[inline]
+    pub fn ps_offset_ins(&self) -> usize {
+        // SAFETY: see `ps_locator`.
+        unsafe { (*self.base).ps_offset_ins }
+    }
+
+    /// `pscan->ps_offset_am`.
+    #[inline]
+    pub fn ps_offset_am(&self) -> usize {
+        // SAFETY: see `ps_locator`.
+        unsafe { (*self.base).ps_offset_am }
+    }
+
+    /// `(char *) pscan->ps_snapshot_data` — the serialized snapshot bytes,
+    /// beginning immediately after the header. The serialized snapshot is
+    /// self-delimiting (its own header records `xcnt`/`subxcnt`), so the
+    /// returned slice length is computed from those words — `RestoreSnapshot`
+    /// reads exactly that many bytes regardless of chunk padding.
+    #[inline]
+    pub fn ps_snapshot_data(&self) -> &[u8] {
+        let snap = (self.base as usize + PARALLEL_INDEX_SCAN_DESC_HEADER_SIZE) as *const u8;
+        // SAFETY: leader-written-once before the launch barrier, read-only
+        // thereafter; the bytes live for the DSM segment. The serialized MVCC
+        // snapshot header (24 bytes) is always present.
+        const SERIALIZED_HEADER_LEN: usize = 24;
+        let hdr = unsafe { core::slice::from_raw_parts(snap, SERIALIZED_HEADER_LEN) };
+        let xcnt = u32::from_le_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]) as usize;
+        let subxcnt = i32::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]).max(0) as usize;
+        let total = SERIALIZED_HEADER_LEN + (xcnt + subxcnt) * 4;
+        // SAFETY: as above; `total` is exactly the serialized length the leader
+        // wrote, never larger than the chunk's snapshot region.
+        unsafe { core::slice::from_raw_parts(snap, total) }
     }
 }

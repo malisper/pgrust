@@ -76,6 +76,7 @@ use backend_storage_page::{
 };
 
 use backend_access_common_indextuple_seams as indextuple;
+use backend_access_nbtree_nbtree_seams as btparallel;
 use backend_access_index_indexam_seams as indexam;
 use backend_storage_buffer_bufmgr_seams as bufmgr;
 use backend_utils_cache_lsyscache_seams as lsyscache;
@@ -461,11 +462,61 @@ fn pgstat_count_index_scan<'mcx>(rel: &Relation<'mcx>) {
 fn check_for_interrupts() {}
 
 // ===========================================================================
-// _bt_parallel_* (nbtree.c) — parallel scan is deferred honestly.
+// _bt_parallel_* (nbtree.c) — parallel scan coordination, driven across the
+// nbtree module cycle through the `backend-access-nbtree-nbtree` inward seams.
+// The seams project the C `IndexScanDesc` to `(rel, &mut so, parallel_handle)`;
+// `so.parallel_scan` carries C's `scan->parallel_scan` (the in-DSM base
+// pointer), mirrored onto the opaque by the AM driver's `sync_in`.
 // ===========================================================================
 
-fn bt_parallel_done(_so: &mut BTScanOpaqueData) {
-    // Serial path: nothing to release. (Parallel branches panic before this.)
+/// `_bt_parallel_done(scan)` — mark the parallel scan complete. For a serial
+/// scan (`so.parallel_scan == None`) the seam is a no-op (matches C's
+/// `scan->parallel_scan == NULL` short-circuit inside `_bt_parallel_done`).
+fn bt_parallel_done(so: &mut BTScanOpaqueData) -> PgResult<()> {
+    let handle = so.parallel_scan;
+    btparallel::bt_parallel_done::call(so, handle)
+}
+
+/// `_bt_parallel_seize(scan, &blkno, &lastcurrblkno, first)` — begin advancing
+/// the parallel scan. Returns `(status, blkno, lastcurrblkno)`. Caller must only
+/// reach this with `so.parallel_scan == Some(_)`.
+fn bt_parallel_seize<'mcx>(
+    rel: &Relation<'mcx>,
+    so: &mut BTScanOpaqueData<'mcx>,
+    first: bool,
+) -> PgResult<(bool, BlockNumber, BlockNumber)> {
+    let handle = so
+        .parallel_scan
+        .expect("bt_parallel_seize: parallel_scan must be set");
+    btparallel::bt_parallel_seize::call(rel, so, handle, first)
+}
+
+/// `_bt_parallel_release(scan, next_scan_page, curr_page)` — publish the new
+/// `btps_nextScanPage`. Caller must only reach this with
+/// `so.parallel_scan == Some(_)`.
+fn bt_parallel_release<'mcx>(
+    so: &mut BTScanOpaqueData<'mcx>,
+    next_scan_page: BlockNumber,
+    curr_page: BlockNumber,
+) -> PgResult<()> {
+    let handle = so
+        .parallel_scan
+        .expect("bt_parallel_release: parallel_scan must be set");
+    btparallel::bt_parallel_release::call(so, handle, next_scan_page, curr_page)
+}
+
+/// `_bt_parallel_primscan_schedule(scan, curr_page)` — schedule another
+/// primitive index scan. Caller must only reach this with
+/// `so.parallel_scan == Some(_)`.
+fn bt_parallel_primscan_schedule<'mcx>(
+    rel: &Relation<'mcx>,
+    so: &mut BTScanOpaqueData<'mcx>,
+    curr_page: BlockNumber,
+) -> PgResult<()> {
+    let handle = so
+        .parallel_scan
+        .expect("bt_parallel_primscan_schedule: parallel_scan must be set");
+    btparallel::bt_parallel_primscan_schedule::call(rel, so, handle, curr_page)
 }
 
 // ===========================================================================
@@ -1148,16 +1199,24 @@ pub fn bt_first<'mcx>(
      */
     if !so.qual_ok {
         debug_assert!(!so.needPrimScan);
-        bt_parallel_done(so);
+        bt_parallel_done(so)?;
         return Ok(false);
     }
 
     /*
-     * Parallel scan: serial path is fully ported; the parallel seize is
-     * deferred honestly.
+     * If this is a parallel scan, we must seize the scan.  _bt_readfirstpage
+     * will likely release the parallel scan later on.
      */
-    // (so->currPos parallel seize branch omitted: parallel_scan is never set at
-    // this layer; the AM driver panics before reaching here for parallel scans.)
+    let mut blkno: BlockNumber = InvalidBlockNumber;
+    let mut lastcurrblkno: BlockNumber = InvalidBlockNumber;
+    if so.parallel_scan.is_some() {
+        let (status, b, l) = bt_parallel_seize(rel, so, true)?;
+        if !status {
+            return Ok(false);
+        }
+        blkno = b;
+        lastcurrblkno = l;
+    }
 
     /*
      * Initialize the scan's arrays (if any) for the current scan direction
@@ -1166,6 +1225,22 @@ pub fn bt_first<'mcx>(
      */
     if so.numArrayKeys != 0 && !so.needPrimScan {
         bt_start_array_keys(rel, so, dir);
+    }
+
+    if blkno != InvalidBlockNumber {
+        /*
+         * We anticipated calling _bt_search, but another worker bet us to it.
+         * _bt_readnextpage releases the scan for us (not _bt_readfirstpage).
+         */
+        debug_assert!(so.parallel_scan.is_some());
+        debug_assert!(!so.needPrimScan);
+        debug_assert!(blkno != P_NONE);
+
+        if !_bt_readnextpage(mcx, rel, so, blkno, lastcurrblkno, dir, true)? {
+            return Ok(false);
+        }
+        _bt_returnitem(so);
+        return Ok(true);
     }
 
     /*
@@ -1611,7 +1686,7 @@ pub fn bt_first<'mcx>(
         }
 
         if !BTScanPosIsBuf(so.currPos.buf) {
-            bt_parallel_done(so);
+            bt_parallel_done(so)?;
             return Ok(false);
         }
     }
@@ -1707,6 +1782,19 @@ fn _bt_readpage<'mcx>(
     debug_assert!(BTScanPosIsPinned(&so.currPos));
     debug_assert!(!so.needPrimScan);
 
+    if so.parallel_scan.is_some() {
+        /* allow next/prev page to be read by other worker without delay */
+        if ScanDirectionIsForward(dir) {
+            let next = so.currPos.nextPage;
+            let curr = so.currPos.currPage;
+            bt_parallel_release(so, next, curr)?;
+        } else {
+            let prev = so.currPos.prevPage;
+            let curr = so.currPos.currPage;
+            bt_parallel_release(so, prev, curr)?;
+        }
+    }
+
     predicate_lock_page(rel, so.currPos.currPage);
 
     /* initialize local variables */
@@ -1746,7 +1834,10 @@ fn _bt_readpage<'mcx>(
                     /* Schedule another primitive index scan after all */
                     so.currPos.moreRight = false;
                     so.needPrimScan = true;
-                    /* parallel primscan schedule omitted (serial path) */
+                    if so.parallel_scan.is_some() {
+                        let curr = so.currPos.currPage;
+                        bt_parallel_primscan_schedule(rel, so, curr)?;
+                    }
                     return Ok(false);
                 }
             }
@@ -1850,6 +1941,10 @@ fn _bt_readpage<'mcx>(
                 if so.scanBehind && !bt_scanbehind_checkkeys(rel, so, dir, ftup)? {
                     so.currPos.moreLeft = false;
                     so.needPrimScan = true;
+                    if so.parallel_scan.is_some() {
+                        let curr = so.currPos.currPage;
+                        bt_parallel_primscan_schedule(rel, so, curr)?;
+                    }
                     return Ok(false);
                 }
             }
@@ -2268,13 +2363,23 @@ fn _bt_readnextpage<'mcx>(
             /* most recent _bt_readpage call (for lastcurrblkno) ended scan */
             debug_assert!(so.currPos.currPage == lastcurrblkno && !seized);
             BTScanPosInvalidate(&mut so.currPos);
-            bt_parallel_done(so); /* iff !so->needPrimScan */
+            bt_parallel_done(so)?; /* iff !so->needPrimScan */
             return Ok(false);
         }
 
         debug_assert!(!so.needPrimScan);
 
-        /* parallel scan seize omitted (serial path) */
+        /* parallel scan must never actually visit so->currPos blkno */
+        if !seized && so.parallel_scan.is_some() {
+            let (status, b, l) = bt_parallel_seize(rel, so, false)?;
+            if !status {
+                /* whole scan is now done (or another primitive scan required) */
+                BTScanPosInvalidate(&mut so.currPos);
+                return Ok(false);
+            }
+            blkno = b;
+            lastcurrblkno = l;
+        }
 
         let opaque;
         if ScanDirectionIsForward(dir) {
@@ -2287,7 +2392,7 @@ fn _bt_readnextpage<'mcx>(
             if so.currPos.buf == InvalidBuffer {
                 /* concurrent deletion of leftmost page */
                 BTScanPosInvalidate(&mut so.currPos);
-                bt_parallel_done(so);
+                bt_parallel_done(so)?;
                 return Ok(false);
             }
         }
@@ -2326,7 +2431,9 @@ fn _bt_readnextpage<'mcx>(
             } else {
                 blkno = opaque.btpo_prev;
             }
-            /* parallel release omitted (serial path) */
+            if so.parallel_scan.is_some() {
+                bt_parallel_release(so, blkno, lastcurrblkno)?;
+            }
         }
 
         if found {
@@ -2586,7 +2693,7 @@ fn _bt_endpoint<'mcx>(
          * Empty index. Lock the whole relation (nothing finer exists).
          */
         predicate_lock_relation(rel);
-        bt_parallel_done(so);
+        bt_parallel_done(so)?;
         return Ok(false);
     }
 

@@ -9,7 +9,7 @@
 use types_nodes::nodeindexonlyscan::{
     IndexScanDesc, IndexScanInstrumentation, ParallelIndexScanDesc,
 };
-use types_nodes::{IndexOnlyScanState, ParallelIndexScanDescData};
+use types_nodes::IndexOnlyScanState;
 use types_scan::sdir::ScanDirection;
 use types_tuple::heaptuple::ItemPointerData;
 
@@ -295,9 +295,15 @@ seam_core::seam!(
 seam_core::seam!(
     /// `index_parallelscan_initialize(heaprel, indexrel, snapshot, instrument,
     /// parallel_aware, nworkers, &sharedinfo, target)` (indexam.c): initialize
-    /// the shared parallel index-scan descriptor in DSM, wiring its
-    /// `SharedIndexScanInstrumentation` offset. Returns the initialized
-    /// descriptor. Fallible on OOM / `ereport(ERROR)`.
+    /// the shared parallel index-scan descriptor IN PLACE at the
+    /// `shm_toc_allocate`'d chunk whose real in-segment base address is
+    /// `target_addr` (the C `ParallelIndexScanDesc target` pointer). Writes the
+    /// flat header (`ps_locator`/`ps_indexlocator`/`ps_offset_ins`/
+    /// `ps_offset_am`), serializes the snapshot into the in-chunk
+    /// `ps_snapshot_data` tail, zeroes the `SharedIndexScanInstrumentation`
+    /// region at `ps_offset_ins`, and calls `aminitparallelscan` on the AM tail
+    /// at `ps_offset_am`. The leader is the sole writer pre-launch. Returns the
+    /// `Copy` in-DSM handle. Fallible on OOM / `ereport(ERROR)`.
     pub fn index_parallelscan_initialize<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         heap_relation: types_rel::Relation<'mcx>,
@@ -306,7 +312,7 @@ seam_core::seam!(
         instrument: bool,
         parallel_aware: bool,
         nworkers: i32,
-        target: ParallelIndexScanDescData,
+        target_addr: usize,
     ) -> types_error::PgResult<ParallelIndexScanDesc<'mcx>>
 );
 
@@ -375,8 +381,11 @@ seam_core::seam!(
     /// `ps_offset_ins`. The blob layout / offset arithmetic into shared memory
     /// is owned by the parallel index-scan infrastructure (indexam/genam); the
     /// worker node only assigns the result to `node->ioss_SharedInfo`. The
-    /// owned model returns the live shared struct. Fallible on `ereport(ERROR)`.
+    /// `SharedIndexScanInstrumentation` lives in-chunk at `piscan->ps_offset_ins`
+    /// (the leader's `index_parallelscan_initialize` zeroed it there); this reads
+    /// `num_workers` + the `IndexScanInstrumentation[]` tail back out of DSM into
+    /// an owned struct the worker node holds. Fallible on `ereport(ERROR)`.
     pub fn index_scan_resolve_shared_info<'mcx>(
-        piscan: &types_nodes::ParallelIndexScanDescData,
+        piscan: types_nodes::ParallelIndexScanDescHandle,
     ) -> types_error::PgResult<types_nodes::SharedIndexScanInstrumentation>
 );

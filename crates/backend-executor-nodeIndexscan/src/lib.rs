@@ -63,7 +63,8 @@ use types_core::{AttrNumber, InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
 use types_nodes::nodeindexonlyscan::{
-    IndexRuntimeKeyInfo, IndexScanInstrumentation, IndexScanState, SharedIndexScanInstrumentation,
+    IndexRuntimeKeyInfo, IndexScanInstrumentation, IndexScanState, ParallelIndexScanDescHandle,
+    SharedIndexScanInstrumentation,
 };
 use types_nodes::nodebitmapindexscan::IndexArrayKeyInfo;
 use types_nodes::nodeindexscan::IndexScan;
@@ -1558,7 +1559,16 @@ pub fn ExecIndexScanInitializeDSM<'mcx>(
     let heap_rel = current_rel_alias(node)?;
     let index_rel = index_alias(node)?;
     let nworkers = shm_toc::pcxt_nworkers::call(pcxt);
-    let descriptor = indexam::index_parallelscan_initialize::call(
+
+    // piscan = shm_toc_allocate(pcxt->toc, node->iss_PscanLen);
+    let toc = parallel::pcxt_toc(pcxt);
+    let pscan_cursor = parallel::shm_toc_allocate(toc, node.iss_PscanLen);
+
+    // index_parallelscan_initialize(heapRel, indexRel, snapshot, instrument,
+    //     parallel_aware, nworkers, &node->iss_SharedInfo, piscan) — writes the
+    // descriptor (header + snapshot + instrumentation + AM tail) IN PLACE at the
+    // chunk, returning the `Copy` in-DSM handle.
+    let piscan = indexam::index_parallelscan_initialize::call(
         mcx,
         heap_rel,
         index_rel,
@@ -1566,14 +1576,11 @@ pub fn ExecIndexScanInitializeDSM<'mcx>(
         instrument,
         parallel_aware,
         nworkers,
-        types_nodes::ParallelIndexScanDescData::default(),
+        pscan_cursor.0,
     )?;
-    let piscan = shm_toc::toc_allocate_and_insert_piscan::call(
-        mcx,
-        pcxt,
-        plan_node_id,
-        (*descriptor).clone(),
-    )?;
+
+    // shm_toc_insert(pcxt->toc, plan_node_id, piscan).
+    parallel::shm_toc_insert(toc, plan_node_id as u64, pscan_cursor);
 
     if !parallel_aware {
         return Ok(());
@@ -1630,10 +1637,18 @@ pub fn ExecIndexScanInitializeWorker<'mcx>(
 
     let mcx: Mcx<'mcx> = estate.es_query_cxt;
     let plan_node_id = plan_node_id(node)?;
-    let piscan = shm_toc::toc_lookup_piscan::call(mcx, pwcxt, plan_node_id)?;
+
+    // piscan = shm_toc_lookup(pwcxt->toc, plan_node_id, false) — the worker
+    // recovers the SAME in-DSM `ParallelIndexScanDesc` base the leader placed.
+    let toc = parallel::pwcxt_toc(pwcxt);
+    let pscan_cursor = parallel::shm_toc_lookup(toc, plan_node_id as u64, false)
+        .expect("ExecIndexScanInitializeWorker: shm_toc_lookup(noError=false) returned NULL");
+    // SAFETY: `pscan_cursor.0` is the real in-segment base of the leader-
+    // initialized descriptor (looked up by plan node id), live for the segment.
+    let piscan = unsafe { ParallelIndexScanDescHandle::from_raw(pscan_cursor.0) };
 
     if instrument {
-        let shared = indexam::index_scan_resolve_shared_info::call(&piscan)?;
+        let shared = indexam::index_scan_resolve_shared_info::call(piscan)?;
         node.iss_SharedInfo = Some(mcx::alloc_in(mcx, shared)?);
     }
 
