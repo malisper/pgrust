@@ -1429,6 +1429,31 @@ pub fn range_table_entry_walker(
         }};
     }
 
+    // C: "Walkers might need to examine the RTE node itself either before or
+    // after visiting its contents." Under QTW_EXAMINE_RTES_BEFORE / _AFTER the
+    // walker is invoked ON the RangeTblEntry node (wrapped as Node::RangeTblEntry,
+    // deep-copied into a per-walk scratch context — the same convention the
+    // RTE_SUBQUERY arm uses for its sub-Query). If neither flag is set the walker
+    // is not called on the RTE at all. This is what lets e.g. check_agg_arguments
+    // (parse_agg.c) detect a below-aggregate CTE reference (an RTE_CTE entry in a
+    // sub-Query's range table).
+    fn examine_rte(
+        rte: &types_nodes::parsenodes::RangeTblEntry,
+        walker: &mut dyn FnMut(&Node) -> bool,
+    ) -> bool {
+        let scratch = mcx::MemoryContext::new("range_table_entry_walker rte");
+        let m = scratch.mcx();
+        let built = rte.clone_in(m).and_then(|r| Node::mk_range_tbl_entry(m, r));
+        let result = match &built {
+            Ok(node) => walker(node),
+            Err(_) => false,
+        };
+        result
+    }
+    if flags & QTW_EXAMINE_RTES_BEFORE != 0 && examine_rte(rte, walker) {
+        return true;
+    }
+
     match rte.rtekind {
         RTEKind::RTE_RELATION => {
             if let Some(ts) = rte.tablesample.as_ref() {
@@ -1499,6 +1524,9 @@ pub fn range_table_entry_walker(
         _ => {}
     }
     if list_walk!(rte.securityQuals) {
+        return true;
+    }
+    if flags & QTW_EXAMINE_RTES_AFTER != 0 && examine_rte(rte, walker) {
         return true;
     }
     false
