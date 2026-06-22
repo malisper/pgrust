@@ -134,8 +134,8 @@ pub fn init_seams() {
         },
     );
     backend_optimizer_path_costsize_seams::estimate_multivariate_bucketsize::set(
-        |root, inner_rel, hashclauses| {
-            misc::estimate_multivariate_bucketsize(root, inner_rel, hashclauses)
+        |run, root, inner_rel, hashclauses| {
+            misc::estimate_multivariate_bucketsize(run, root, inner_rel, hashclauses)
         },
     );
     // `estimate_array_length(root, arrayexpr)` (selfuncs.c) — used by costsize.c

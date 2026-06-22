@@ -921,7 +921,8 @@ pub fn final_cost_hashjoin<'mcx>(
         let inner_parent_id = root.path(inner_id).base().parent;
 
         let (mv_bucketsize, otherclauses) =
-            cz::estimate_multivariate_bucketsize::call(root, inner_parent_id, &hashclauses);
+            cz::estimate_multivariate_bucketsize::call(run, root, inner_parent_id, &hashclauses)
+                .expect("estimate_multivariate_bucketsize");
         innerbucketsize = Min(innerbucketsize, mv_bucketsize);
 
         let inner_relids = root.rel(inner_parent_id).relids.clone();

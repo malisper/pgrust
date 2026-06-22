@@ -210,13 +210,22 @@ seam_core::seam!(
     ) -> PgResult<(Selectivity, Selectivity)>
 );
 seam_core::seam!(
-    /// `estimate_multivariate_bucketsize(root, inner_rel, hashclauses, &out)` —
-    /// returns `(bucketsize, remaining_clause_handles)`.
-    pub fn estimate_multivariate_bucketsize(
-        root: &PlannerInfo,
+    /// `estimate_multivariate_bucketsize(root, inner_rel, hashclauses, &out)`
+    /// (selfuncs.c:3801) — returns `(bucketsize, remaining_clause_handles)`.
+    ///
+    /// The full extended-statistics path needs the `&PlannerRun` resolver (to
+    /// fetch the inner RTE's relkind and to drive `estimate_multivariate_ndistinct`)
+    /// and a `&mut PlannerInfo` (the per-clause varinfo build re-interns stripped
+    /// operands into the node arena), so the seam threads both — exactly as
+    /// `estimate_hash_bucket_stats` does. The `final_cost_hashjoin` call site
+    /// already holds `run` + `&mut root`. Fallible because the stats path can
+    /// `ereport`.
+    pub fn estimate_multivariate_bucketsize<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
         inner_rel: RelId,
         hashclauses: &[RinfoId],
-    ) -> (Selectivity, alloc::vec::Vec<RinfoId>)
+    ) -> PgResult<(Selectivity, alloc::vec::Vec<RinfoId>)>
 );
 seam_core::seam!(
     /// `clauses.c:expression_returns_set_rows(root, (Node *) expr)`.

@@ -34,6 +34,14 @@ const PVC_RECURSE_AGGREGATES: i32 = 0x0002;
 const PVC_RECURSE_WINDOWFUNCS: i32 = 0x0008;
 const PVC_RECURSE_PLACEHOLDERS: i32 = 0x0020;
 
+/// `pg_class.h` relkind chars (`rte->relkind` is a `char`/`i8`), as
+/// `estimate_multivariate_bucketsize` filters on the relation-like kinds that
+/// can in principle carry extended statistics.
+const RELKIND_RELATION: i8 = b'r' as i8;
+const RELKIND_MATVIEW: i8 = b'm' as i8;
+const RELKIND_FOREIGN_TABLE: i8 = b'f' as i8;
+const RELKIND_PARTITIONED_TABLE: i8 = b'p' as i8;
+
 /* ---------------------------------------------------------------------------
  * const_node_info — INSTALLED seam (selfuncs.c scalararraysel_containment IsA).
  * ------------------------------------------------------------------------- */
@@ -145,64 +153,211 @@ fn add_unique_group_var<'mcx>(
 /// (selfuncs.c:3801) — try to refine the inner hash-bucket-size estimate using
 /// multivariate ndistinct extended statistics on the inner relation, returning
 /// the (possibly improved) `*innerbucketsize` and the list of clauses that could
-/// NOT be estimated here (the caller estimates those one at a time).
-///
-/// Seam-contract note: the costsize self-seam carries only `(root: &PlannerInfo,
-/// inner_rel, hashclauses)` — it does NOT thread the `&PlannerRun` resolver or a
-/// mutable `PlannerInfo`. The full extended-statistics estimation path needs both
-/// (`estimate_multivariate_ndistinct` takes `run` + `&mut root`, and the
-/// per-clause varinfo construction reads `simple_rte_array` through the run). But
-/// that path is reachable ONLY when an inner-side base relation actually carries
-/// `CREATE STATISTICS` ndistinct objects (`rel->statlist != NIL`). When no
-/// referenced inner relation has extended statistics — the universal case absent
-/// an explicit statistics object — every clause is classified "can't be estimated
-/// here" and pushed to `otherclauses`, `ndistinct` stays 1.0, and
-/// `*innerbucketsize` is left UNCHANGED (the caller's prior 1.0). So this seam
-/// faithfully returns `(1.0, all_hashclauses)` in that case. If an inner relation
-/// does carry extended statistics, the seam must be re-signed to thread `run` +
-/// `&mut` before the multivariate path is expressible; we panic loudly there
-/// rather than silently dropping the refinement.
-pub(crate) fn estimate_multivariate_bucketsize(
-    root: &PlannerInfo,
+/// NOT be estimated here (the caller estimates those one at a time). 1:1 with the
+/// C body.
+pub(crate) fn estimate_multivariate_bucketsize<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     _inner: RelId,
     hashclauses: &[types_pathnodes::RinfoId],
-) -> (f64, alloc::vec::Vec<types_pathnodes::RinfoId>) {
-    let rinfos = hashclauses;
-    // Nothing to do for a single clause (or none).
-    if rinfos.len() <= 1 {
-        return (1.0, rinfos.to_vec());
+) -> PgResult<(f64, alloc::vec::Vec<types_pathnodes::RinfoId>)> {
+    let mcx: Mcx<'mcx> = run.mcx();
+    // C: `List *clauses = list_copy(hashclauses);`
+    let mut clauses: alloc::vec::Vec<types_pathnodes::RinfoId> = hashclauses.to_vec();
+    let mut otherclauses: alloc::vec::Vec<types_pathnodes::RinfoId> = alloc::vec::Vec::new();
+    let mut ndistinct = 1.0f64;
+
+    // Nothing to do for a single clause.
+    if hashclauses.len() <= 1 {
+        return Ok((1.0, hashclauses.to_vec()));
     }
 
-    // The multivariate refinement only fires when an inner-side base relation
-    // carries ndistinct extended statistics. Probe each clause's inner-side
-    // singleton relation; if any has a non-empty statlist, the full path (which
-    // needs the run resolver + &mut root) is required and the stripped seam
-    // can't express it.
-    for &rid in rinfos.iter() {
-        let ri = root.rinfo(rid);
-        let relids = if ri.outer_is_left {
-            &ri.right_relids
-        } else {
-            &ri.left_relids
-        };
-        if let Some(relid) = rel_seams::relids_get_singleton_member::call(relids) {
-            if let Some(Some(rel_id)) = root.simple_rel_array.get(relid as usize) {
-                if !root.rel(*rel_id).statlist.is_empty() {
-                    panic!(
-                        "selfuncs::estimate_multivariate_bucketsize: inner relation carries \
-                         extended (ndistinct) statistics, but the costsize seam strips the \
-                         PlannerRun resolver and mutable PlannerInfo the multivariate path \
-                         needs; re-sign estimate_multivariate_bucketsize to thread (run, &mut \
-                         root) before this is reachable"
-                    );
+    while !clauses.is_empty() {
+        // `varinfos` (with `var` as a stripped, nullingrels-free Expr) parallel
+        // to `origin_rinfos` (the RestrictInfo that produced each varinfo). We
+        // process all clauses of one base relation per outer iteration.
+        let mut varinfos: alloc::vec::Vec<GroupVarInfo<'mcx>> = alloc::vec::Vec::new();
+        let mut origin_rinfos: alloc::vec::Vec<types_pathnodes::RinfoId> = alloc::vec::Vec::new();
+        let mut group_relid: i32 = -1;
+        let mut group_rel: Option<RelId> = None;
+
+        // C `foreach(lc, clauses)` with `foreach_delete_current`: walk the list,
+        // removing each clause we classify (either approve into varinfos or push
+        // to otherclauses). Clauses for a *different* base rel than the group are
+        // left in place for the next outer iteration.
+        let mut remaining: alloc::vec::Vec<types_pathnodes::RinfoId> = alloc::vec::Vec::new();
+        for rinfo_id in core::mem::take(&mut clauses).into_iter() {
+            // Inner side of the join (outer_is_left because clause_sides_match_join
+            // ran on the hash clauses).
+            let (outer_is_left, clause_id) = {
+                let r = root.rinfo(rinfo_id);
+                (r.outer_is_left, r.clause)
+            };
+            let relids = {
+                let r = root.rinfo(rinfo_id);
+                if outer_is_left {
+                    r.right_relids.clone()
+                } else {
+                    r.left_relids.clone()
                 }
+            };
+
+            let singleton = rel_seams::relids_get_singleton_member::call(&relids);
+            let relid = match singleton {
+                Some(rid) => rid,
+                None => {
+                    // This clause can't be estimated with extended statistics.
+                    otherclauses.push(rinfo_id);
+                    continue;
+                }
+            };
+
+            let has_stats = matches!(
+                root.simple_rel_array.get(relid as usize),
+                Some(Some(rel_id)) if !root.rel(*rel_id).statlist.is_empty()
+            );
+            if !has_stats {
+                otherclauses.push(rinfo_id);
+                continue;
+            }
+
+            // This inner-side expression references only one relation with
+            // extended statistics. Pick the inner-side operand of the OpExpr.
+            let expr = op_inner_operand(mcx, root, clause_id, outer_is_left)?;
+
+            // group-forming state machine.
+            if group_relid < 0 {
+                // Extended statistics can only exist on real relation-like RTEs.
+                // Resolve the RTE through the RelOptInfo's relid (rangetable
+                // index), matching C's `root->simple_rte_array[relid]`.
+                let rel_id = root
+                    .simple_rel_array
+                    .get(relid as usize)
+                    .and_then(|o| *o)
+                    .expect("estimate_multivariate_bucketsize: simple_rel_array");
+                let rti = root.rel(rel_id).relid;
+                let rte_relkind = planner_rt_fetch(run, root, rti).relkind;
+                if rte_relkind != RELKIND_RELATION
+                    && rte_relkind != RELKIND_MATVIEW
+                    && rte_relkind != RELKIND_FOREIGN_TABLE
+                    && rte_relkind != RELKIND_PARTITIONED_TABLE
+                {
+                    // Extended statistics can't exist in principle.
+                    otherclauses.push(rinfo_id);
+                    continue;
+                }
+                group_relid = relid;
+                group_rel = Some(rel_id);
+            } else if group_relid != relid {
+                // In group-forming state we ignore other clauses (leave in list).
+                remaining.push(rinfo_id);
+                continue;
+            }
+
+            // Clear nullingrels to correctly match hash keys (see
+            // add_unique_group_var's comment).
+            let outer_join_rels = root.outer_join_rels.clone();
+            let expr = nf::remove_nulling_relids::call(mcx, expr, &outer_join_rels, &None);
+
+            // Detect and exclude exact duplicates from the hash-key list.
+            let mut is_duplicate = false;
+            for vi in varinfos.iter() {
+                if eq::equal_expr::call(&expr, &vi.var) {
+                    is_duplicate = true;
+                    break;
+                }
+            }
+            if is_duplicate {
+                // Skip exact duplicates; don't push to otherclauses either.
+                continue;
+            }
+
+            // Initialize GroupVarInfo. estimate_multivariate_ndistinct only uses
+            // `var` and `rel`, so ndistinct/isdefault are left at defaults.
+            varinfos.push(GroupVarInfo {
+                var: expr,
+                rel: group_rel,
+                ndistinct: 0.0,
+                isdefault: false,
+            });
+            origin_rinfos.push(rinfo_id);
+        }
+        // Surviving (other-rel) clauses carry into the next outer iteration.
+        clauses = remaining;
+
+        if varinfos.len() < 2 {
+            // Multivariate statistics don't apply to single columns (single-col
+            // expression stats not implemented yet). Collect origins as others.
+            otherclauses.extend(origin_rinfos.iter().copied());
+            continue;
+        }
+
+        let group_rel = group_rel.expect("estimate_multivariate_bucketsize: group_rel");
+
+        // Employ the extended statistics. We keep `origin_varinfos` (the original
+        // var exprs paired with origin_rinfos) so we can report which clauses were
+        // NOT consumed by estimate_multivariate_ndistinct.
+        let origin_varinfos: alloc::vec::Vec<Expr<'mcx>> = {
+            let mut v = alloc::vec::Vec::with_capacity(varinfos.len());
+            for vi in varinfos.iter() {
+                v.push(vi.var.clone_in(mcx)?);
+            }
+            v
+        };
+
+        loop {
+            match estimate_multivariate_ndistinct(run, root, Some(group_rel), &mut varinfos)? {
+                Some(mvndistinct) => {
+                    // Use ndistinct consistently with final_cost_hashjoin: keep
+                    // the largest (a lesser number of groups is worse here).
+                    if ndistinct < mvndistinct {
+                        ndistinct = mvndistinct;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        // Collect unmatched clauses as otherclauses: any origin var still present
+        // in `varinfos` (by node identity) was NOT estimated.
+        for (origin_var, &origin_rinfo) in origin_varinfos.iter().zip(origin_rinfos.iter()) {
+            let still_present = varinfos
+                .iter()
+                .any(|vi| eq::equal_expr::call(&vi.var, origin_var));
+            if still_present {
+                otherclauses.push(origin_rinfo);
             }
         }
     }
 
-    // No referenced inner relation has extended statistics: every clause is an
-    // "otherclause", innerbucketsize unchanged.
-    (1.0, rinfos.to_vec())
+    let innerbucketsize = 1.0 / ndistinct;
+    Ok((innerbucketsize, otherclauses))
+}
+
+/// `outer_is_left ? get_rightop(clause) : get_leftop(clause)` — the inner-side
+/// operand of a hash-clause OpExpr, deep-copied into the node arena's `'mcx` so it
+/// can be compared against statistics-object expression nodes and stripped of
+/// nullingrels. The hash clause is always a binary OpExpr.
+fn op_inner_operand<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    clause: NodeId,
+    outer_is_left: bool,
+) -> PgResult<Expr<'mcx>> {
+    use types_nodes::primnodes::Expr as PExpr;
+    // outer_is_left => inner is the RIGHT operand (index 1); else LEFT (index 0).
+    let idx = if outer_is_left { 1usize } else { 0usize };
+    match root.node(clause) {
+        PExpr::OpExpr(op) => op
+            .args
+            .get(idx)
+            .expect("estimate_multivariate_bucketsize: OpExpr missing operand")
+            .clone_in(mcx),
+        other => panic!(
+            "estimate_multivariate_bucketsize: hash clause is not an OpExpr: {:?}",
+            core::mem::discriminant(other)
+        ),
+    }
 }
 
 /// `estimate_num_groups(root, groupExprs, input_rows, NULL, estinfo)`
