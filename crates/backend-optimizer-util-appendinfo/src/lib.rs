@@ -297,6 +297,35 @@ pub fn adjust_appendrel_attrs_run<'mcx>(
     adjust_appendrel_attrs_inner(run, None, root, node, appinfos)
 }
 
+/// `(List *) adjust_appendrel_attrs(root, (Node *) targetList, ...)` over a
+/// TargetEntry handle list (planner.c builds `child_extra.targetList` this way
+/// for partitionwise aggregation, C:8122). Each TargetEntry's `expr` is
+/// deep-copied (`clone_in`) then translated by `appinfos`; `resno`,
+/// `ressortgroupref`, and the other TargetEntry fields are preserved so the
+/// child target list still resolves the same sortgrouprefs. The `run` is
+/// threaded for the whole-row→`RowExpr` branch.
+pub fn adjust_targetlist_by_appinfos<'mcx>(
+    run: Option<&PlannerRun<'mcx>>,
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    handles: &[NodeId],
+    appinfos: &[AppendRelInfo],
+) -> PgResult<Vec<NodeId>> {
+    let mut out = Vec::with_capacity(handles.len());
+    for &h in handles {
+        let te = root.targetentry(h).clone();
+        let expr = root.node(te.expr).clone_in(mcx)?;
+        let new_expr = adjust_appendrel_attrs_run(run, root, expr, appinfos)?;
+        let expr_id = root.alloc_node(new_expr);
+        let new_te = types_pathnodes::TargetEntryNode {
+            expr: expr_id,
+            ..te
+        };
+        out.push(root.alloc_targetentry(new_te));
+    }
+    Ok(out)
+}
+
 /// `adjust_appendrel_attrs` with an explicit long-lived planner-arena [`Mcx`]
 /// (no [`PlannerRun`]) for the non-Var translated_var deep-copy. The run-less
 /// restrictinfo-list path (`adjust_restrictinfo` ->

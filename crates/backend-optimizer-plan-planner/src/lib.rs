@@ -6607,6 +6607,13 @@ fn get_number_of_groups<'mcx>(
     root: &mut PlannerInfo,
     path_rows: f64,
     gd: Option<&mut GroupingSetsData<'mcx>>,
+    // extra->targetList: the target list used to resolve the group-clause
+    // sortgrouprefs into exprs. None means "use root.processed_tlist" (the top
+    // grouping rel); Some carries the per-child translated target list produced
+    // by adjust_appendrel_attrs in the partitionwise recursion, so the group
+    // exprs carry the child's varnos and estimate_num_groups reads the child
+    // partition's ndistinct rather than the parent's (planner.c:3661/4133/7452).
+    target_list_override: Option<&[types_pathnodes::NodeId]>,
 ) -> PgResult<f64> {
     let (has_group_clause, has_grouping_sets, has_aggs, num_grouping_sets) = {
         let parse = run.resolve(root.parse);
@@ -6617,7 +6624,10 @@ fn get_number_of_groups<'mcx>(
             parse.groupingSets.len(),
         )
     };
-    let tlist = root.processed_tlist.clone();
+    let tlist: Vec<types_pathnodes::NodeId> = match target_list_override {
+        Some(t) => t.to_vec(),
+        None => root.processed_tlist.clone(),
+    };
 
     if has_group_clause {
         if has_grouping_sets {
@@ -6842,6 +6852,7 @@ fn create_grouping_paths<'mcx>(
         gd,
         parent_patype,
         None,
+        None,
     )?;
 
     // set_cheapest(grouped_rel) (C:3880).
@@ -6956,6 +6967,11 @@ fn create_ordinary_grouping_paths<'mcx>(
     // parse->havingQual" (the top rel); Some carries the per-child translated
     // qual produced by adjust_appendrel_attrs in the partitionwise recursion.
     having_qual_override: Option<&Expr<'mcx>>,
+    // extra->targetList: the target list used to resolve group-clause
+    // sortgrouprefs. None means "use root.processed_tlist" (the top rel); Some
+    // carries the per-child translated target list (adjust_appendrel_attrs) so
+    // group-count estimates read child partition ndistinct, not the parent's.
+    target_list_override: Option<&[types_pathnodes::NodeId]>,
 ) -> PgResult<Option<RelId>> {
     // If this is the topmost grouping relation or if the parent relation is
     // doing some form of partitionwise aggregation, then we may be able to do it
@@ -6976,7 +6992,7 @@ fn create_ordinary_grouping_paths<'mcx>(
         // (e.g. GROUP BY const), which the partitionwise tests don't exercise.
         let group_clause = root.processed_groupClause.clone();
         if parent_patype == PartitionwiseAggregateType::Full
-            && group_by_has_partkey(root, input_rel, &group_clause)?
+            && group_by_has_partkey(root, input_rel, &group_clause, target_list_override)?
         {
             patype = PartitionwiseAggregateType::Full;
         } else if can_partial_agg(run, root) {
@@ -7069,6 +7085,7 @@ fn create_ordinary_grouping_paths<'mcx>(
             force_rel_creation,
             parent_patype,
             having_qual_override,
+            target_list_override,
         )?;
     }
 
@@ -7087,6 +7104,7 @@ fn create_ordinary_grouping_paths<'mcx>(
             gd.as_deref_mut(),
             patype,
             having_qual_override,
+            target_list_override,
         )?;
     }
 
@@ -7111,7 +7129,8 @@ fn create_ordinary_grouping_paths<'mcx>(
 
     // Estimate number of groups (C:4130). For grouping sets this also fills
     // rollup->numGroups, gs->numGroups, and gd->dNumHashGroups in place.
-    let d_num_groups = get_number_of_groups(run, root, cheapest_rows, gd.as_deref_mut())?;
+    let d_num_groups =
+        get_number_of_groups(run, root, cheapest_rows, gd.as_deref_mut(), target_list_override)?;
 
     // Build final grouping paths (C:4136).
     add_paths_to_grouping_rel(
@@ -7223,9 +7242,15 @@ fn group_by_has_partkey(
     root: &mut PlannerInfo,
     input_rel: RelId,
     group_clause: &[types_pathnodes::NodeId],
+    // extra->targetList: None => root.processed_tlist (top rel); Some => the
+    // per-child translated target list (planner.c:4066).
+    target_list_override: Option<&[types_pathnodes::NodeId]>,
 ) -> PgResult<bool> {
     // groupexprs = get_sortgrouplist_exprs(groupClause, targetList).
-    let tlist = root.processed_tlist.clone();
+    let tlist: Vec<types_pathnodes::NodeId> = match target_list_override {
+        Some(t) => t.to_vec(),
+        None => root.processed_tlist.clone(),
+    };
     let group_expr_ids: Vec<types_pathnodes::NodeId> = group_clause
         .iter()
         .map(|&sgc| {
@@ -7320,6 +7345,11 @@ fn create_partitionwise_grouping_paths<'mcx>(
     mut gd: Option<&mut GroupingSetsData<'mcx>>,
     patype: PartitionwiseAggregateType,
     having_qual_override: Option<&Expr<'mcx>>,
+    // extra->targetList for this (parent) rel: None => root.processed_tlist (top
+    // rel); Some => already-translated target list of a nested partitionwise
+    // child. Each leaf child's target list is this list further translated by
+    // adjust_appendrel_attrs (planner.c:8122).
+    target_list_override: Option<&[types_pathnodes::NodeId]>,
 ) -> PgResult<()> {
     debug_assert!(patype != PartitionwiseAggregateType::None);
     debug_assert!(
@@ -7349,6 +7379,16 @@ fn create_partitionwise_grouping_paths<'mcx>(
             Some(e) => Some(e.clone_in(mcx)?),
             None => None,
         },
+    };
+
+    // extra->targetList for the parent rel: the override if provided (nested
+    // partitionwise child) else root.processed_tlist (top rel). Each leaf child's
+    // targetList is this list translated by adjust_appendrel_attrs (C:8122), so
+    // get_number_of_groups resolves the child's group exprs to child Vars and
+    // reads the child partition's ndistinct.
+    let parent_target_list: Vec<types_pathnodes::NodeId> = match target_list_override {
+        Some(t) => t.to_vec(),
+        None => root.processed_tlist.clone(),
     };
 
     // Add paths for partitionwise aggregation/grouping: walk input_rel->live_parts.
@@ -7414,6 +7454,18 @@ fn create_partitionwise_grouping_paths<'mcx>(
             None => None,
         };
 
+        // Translate the target list for this child (child_extra.targetList,
+        // C:8122). get_number_of_groups uses it to resolve the group exprs to the
+        // child's Vars, so the partial-group estimate reads the child partition's
+        // ndistinct rather than the parent's.
+        let child_target_list = backend_optimizer_util_appendinfo::adjust_targetlist_by_appinfos(
+            Some(run),
+            mcx,
+            root,
+            &parent_target_list,
+            &appinfos,
+        )?;
+
         // child_extra.patype = patype (this rel's value becomes the child's
         // parent value).
         let child_parent_patype = patype;
@@ -7442,6 +7494,7 @@ fn create_partitionwise_grouping_paths<'mcx>(
             gd.as_deref_mut(),
             child_parent_patype,
             child_having.as_ref(),
+            Some(&child_target_list),
         )?;
 
         if let Some(cpg) = child_partially_grouped_rel {
@@ -7825,6 +7878,10 @@ fn create_partial_grouping_paths<'mcx>(
     parent_patype: PartitionwiseAggregateType,
     // extra->havingQual: per-child translated qual (None => parse->havingQual).
     having_qual_override: Option<&Expr<'mcx>>,
+    // extra->targetList: per-child translated target list (None =>
+    // root.processed_tlist), used by get_number_of_groups for the partial-group
+    // count estimate so a child reads its own ndistinct (planner.c:7452/7458).
+    target_list_override: Option<&[types_pathnodes::NodeId]>,
 ) -> PgResult<Option<RelId>> {
     let has_aggs = run.resolve(root.parse).hasAggs;
 
@@ -7902,14 +7959,14 @@ fn create_partial_grouping_paths<'mcx>(
     let d_num_partial_groups = match cheapest_total_path {
         Some(p) => {
             let rows = root.path(p).base().rows;
-            get_number_of_groups(run, root, rows, gd.as_deref_mut())?
+            get_number_of_groups(run, root, rows, gd.as_deref_mut(), target_list_override)?
         }
         None => 0.0,
     };
     let d_num_partial_partial_groups = match cheapest_partial_path {
         Some(p) => {
             let rows = root.path(p).base().rows;
-            get_number_of_groups(run, root, rows, gd.as_deref_mut())?
+            get_number_of_groups(run, root, rows, gd.as_deref_mut(), target_list_override)?
         }
         None => 0.0,
     };
