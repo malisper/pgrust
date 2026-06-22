@@ -1868,6 +1868,102 @@ fn ScanNodeExtractTid<'mcx, 'a>(
     Ok(ScanTidOutcome::Tid(tid))
 }
 
+/// `fetch_cursor_param`'s live-state core (execCurrent.c
+/// `fetch_cursor_param_value` / execExprInterp.c `ExecEvalParamExtern`): read
+/// `econtext->ecxt_param_list_info->params[param_id - 1]` and classify the
+/// param's type. Mirrors `ExecEvalParamExtern`'s param-list navigation: the
+/// `paramInfo != NULL && param_id <= numParams` bound, the dynamic-`paramFetch`
+/// guard (no hook owner is ported — the static array path is the common case,
+/// and PL/pgSQL's owned model materializes its datum snapshot into a static
+/// `params[]` array, so the refcursor portal-name value is already present),
+/// and the `OidIsValid && !isnull` gate. For a `REFCURSOROID` param the `text`
+/// value is detoasted and decoded into `mcx`. `Ok(None)` is the C fall-through
+/// to "no value found for parameter" (no param list, out of range, or
+/// OID-invalid/NULL).
+fn FetchCursorParam<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    econtext: &types_nodes::ExprContext<'mcx>,
+    param_id: i32,
+) -> PgResult<Option<types_nodes::FetchedCursorParam<'mcx>>> {
+    use types_nodes::FetchedCursorParam;
+
+    // paramInfo && paramId > 0 && paramId <= paramInfo->numParams. The caller
+    // (fetch_cursor_param_value) has already checked param_id > 0.
+    let Some(param_info) = econtext.ecxt_param_list_info.as_ref() else {
+        return Ok(None);
+    };
+    if param_id <= 0 || param_id > param_info.num_params {
+        return Ok(None);
+    }
+
+    // give hook a chance in case parameter is dynamic. The owned PL/pgSQL model
+    // builds a static value array (param_fetch == false), so a true hook would
+    // be an unported subsystem — fail loud exactly as ExecEvalParamExtern does.
+    if param_info.param_fetch {
+        panic!(
+            "fetch_cursor_param: dynamic ParamListInfo paramFetch hook invoked, \
+             but no paramFetch owner is ported (the hook lives in an unported \
+             subsystem)"
+        );
+    }
+
+    let prm = &param_info.params[(param_id - 1) as usize];
+    // if (!OidIsValid(prm->ptype) || prm->isnull) -> C falls through to the
+    // "no value found" / not-a-refcursor error in the caller.
+    if prm.ptype == 0 || prm.isnull {
+        return Ok(None);
+    }
+
+    if prm.ptype != types_tuple::heaptuple::REFCURSOROID {
+        return Ok(Some(FetchedCursorParam::WrongType(prm.ptype)));
+    }
+
+    // TextDatumGetCString(prm->value): detoast the refcursor `text` varlena and
+    // decode its (short- or 4-byte-header) payload into `mcx`.
+    let bytes = prm.value.as_ref_bytes();
+    let packed =
+        backend_access_common_detoast_seams::pg_detoast_datum_packed::call(mcx, bytes)?;
+    let p = packed.as_slice();
+    if p.is_empty() {
+        return Err(types_error::PgError::error(
+            "malformed refcursor text varlena in WHERE CURRENT OF parameter".to_string(),
+        ));
+    }
+    // VARDATA_ANY / VARSIZE_ANY_EXHDR: byte 0's low bit marks a 1-byte SHORT
+    // header (length = byte0 >> 1, payload at offset 1); otherwise a 4-byte
+    // header (length word = u32 >> 2, payload at offset 4).
+    let payload: &[u8] = if (p[0] & 0x01) != 0 {
+        let total = (p[0] >> 1) as usize;
+        if total < 1 || total > p.len() {
+            return Err(types_error::PgError::error(
+                "malformed short refcursor text varlena".to_string(),
+            ));
+        }
+        &p[1..total]
+    } else {
+        if p.len() < 4 {
+            return Err(types_error::PgError::error(
+                "malformed refcursor text varlena header".to_string(),
+            ));
+        }
+        let total = (u32::from_ne_bytes([p[0], p[1], p[2], p[3]]) >> 2) as usize;
+        if total < 4 || total > p.len() {
+            return Err(types_error::PgError::error(
+                "malformed refcursor text varlena length".to_string(),
+            ));
+        }
+        &p[4..total]
+    };
+
+    let s = mcx::PgString::from_str_in(
+        core::str::from_utf8(payload).map_err(|_| {
+            types_error::PgError::error("refcursor portal name is not valid UTF-8".to_string())
+        })?,
+        mcx,
+    )?;
+    Ok(Some(FetchedCursorParam::RefCursor(s)))
+}
+
 /// `CheckValidResultRel(resultRelInfo, operation, onConflictAction,
 /// mergeActions)` (execMain.c) — verify the result relation is a valid target
 /// for the command.
@@ -3958,6 +4054,7 @@ pub fn init_seams() {
     seams::check_valid_result_rel::set(CheckValidResultRel);
     seams::exec_get_ancestor_result_rels::set(ExecGetAncestorResultRels);
     seams::scan_node_extract_tid::set(ScanNodeExtractTid);
+    seams::fetch_cursor_param::set(FetchCursorParam);
     seams::eval_plan_qual_init::set(EvalPlanQualInit);
     seams::eval_plan_qual_set_plan_with_row_marks::set(eval_plan_qual_set_plan_with_row_marks);
     seams::link_subplan_planstate::set(link_subplan_planstate);

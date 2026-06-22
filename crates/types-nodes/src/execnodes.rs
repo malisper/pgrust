@@ -216,6 +216,13 @@ pub struct ExprContext<'mcx> {
     pub domainValue_isNull: bool,
     /// `ExprContext_CB *ecxt_callbacks` — registered shutdown callbacks.
     pub ecxt_callbacks: Option<PgBox<'mcx, ExprContext_CB<'mcx>>>,
+    /// `ParamListInfo ecxt_param_list_info` — values of external params. In C
+    /// this aliases the owning EState's `es_param_list_info`; the owned model
+    /// threads the EState explicitly for most readers, but `execCurrentOf`'s
+    /// `WHERE CURRENT OF <param>` path resolves the refcursor portal-name Param
+    /// off this list (the `fetch_cursor_param` seam), so the alias is carried.
+    /// `None` is the C `NULL`.
+    pub ecxt_param_list_info: crate::params::ParamListInfo,
 }
 
 /// `ParamExecData` (params.h):

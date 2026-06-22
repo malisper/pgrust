@@ -513,9 +513,12 @@ fn CreateExprContextInternal<'mcx>(
         // Create working memory for expression evaluation in this context:
         // AllocSetContextCreate(estate->es_query_cxt, "ExprContext", sizes).
         ecxt_per_tuple_memory: per_query.context().new_child("ExprContext"),
-        // ecxt_param_exec_vals / ecxt_param_list_info: the C copies the
-        // EState's pointers; the owned ExprContext does not carry the aliases
-        // (readers take them from the explicitly threaded EState).
+        // ecxt_param_exec_vals: the C copies the EState's pointer; the owned
+        // ExprContext does not carry that alias (readers take it from the
+        // explicitly threaded EState). ecxt_param_list_info: aliased here (C:
+        // econtext->ecxt_param_list_info = estate->es_param_list_info) so the
+        // execCurrentOf WHERE-CURRENT-OF-param path can resolve the refcursor
+        // portal-name Param off the live list. Cheap Rc clone of the Option.
         ecxt_aggvalues: PgVec::new_in(per_query),
         ecxt_aggnulls: PgVec::new_in(per_query),
         caseValue_datum: Datum::null(),
@@ -524,6 +527,7 @@ fn CreateExprContextInternal<'mcx>(
         domainValue_isNull: true,
         // ecxt_estate: the owned model threads the EState explicitly.
         ecxt_callbacks: None,
+        ecxt_param_list_info: estate.es_param_list_info.clone(),
     };
 
     // Link the ExprContext into the EState to ensure it is shut down when the
@@ -603,6 +607,9 @@ pub fn CreateStandaloneExprContext<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ExprContext
         domainValue_isNull: true,
         // ecxt_estate = NULL: a standalone context has no owning EState.
         ecxt_callbacks: None,
+        // No owning EState → no param list (a standalone context evaluates
+        // Param-free expressions; C leaves ecxt_param_list_info NULL).
+        ecxt_param_list_info: None,
     })
 }
 

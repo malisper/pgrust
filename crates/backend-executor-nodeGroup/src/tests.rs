@@ -138,6 +138,7 @@ fn mock_assign_expr_context<'mcx>(
         domainValue_datum: Default::default(),
         domainValue_isNull: true,
         ecxt_callbacks: None,
+        ecxt_param_list_info: None,
     };
     planstate.ps_ExprContext = Some(estate.add_expr_context(econtext)?);
     Ok(())
