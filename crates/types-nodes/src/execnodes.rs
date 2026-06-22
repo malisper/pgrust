@@ -383,13 +383,13 @@ pub struct IndexInfo<'mcx> {
     pub ii_IndexAttrNumbers: [AttrNumber; INDEX_MAX_KEYS as usize],
     /// `List *ii_Expressions` — expr trees for expression entries, or `None`
     /// (the C `NIL`) if none.
-    pub ii_Expressions: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    pub ii_Expressions: Option<PgVec<'mcx, crate::primnodes::Expr<'mcx>>>,
     /// `List *ii_ExpressionsState` — exec state for expressions, or `None`
     /// (the C `NIL`) if none.
     pub ii_ExpressionsState: Option<PgVec<'mcx, ExprState<'mcx>>>,
     /// `List *ii_Predicate` — partial-index predicate, or `None` (the C `NIL`)
     /// if none.
-    pub ii_Predicate: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    pub ii_Predicate: Option<PgVec<'mcx, crate::primnodes::Expr<'mcx>>>,
     /// `ExprState *ii_PredicateState` — exec state for the predicate, or `None`
     /// (the C `NULL`) if none.
     pub ii_PredicateState: Option<PgBox<'mcx, ExprState<'mcx>>>,

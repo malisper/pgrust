@@ -388,9 +388,9 @@ fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     //      registration fills a free cell, `Forget` nulls it in place, indices
     //      never move (C's stable-pointer semantics). Verified: 180+ repeated
     //      parallel `count(*)` runs, zero hangs, no stuck workers, no
-    //      `too many clients`. (Re-enable parallelism by deleting the early return
-    //      below; it is restored only while the EXPLAIN-ANALYZE residual #2 lands.)
-    return Ok(DSM_HANDLE_INVALID);
+    //      `too many clients`. (Parallelism enabled: the early return that
+    //      restored leader-only mode during the EXPLAIN-ANALYZE residual #2 has
+    //      been removed.)
 
     // If we already created a session-scope segment, return its handle.
     if let Some(seg_id) = CURRENT_SESSION.with(|s| s.borrow().as_ref().and_then(|x| x.segment)) {

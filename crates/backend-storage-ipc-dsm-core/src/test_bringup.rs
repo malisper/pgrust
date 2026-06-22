@@ -166,6 +166,25 @@ fn install_substrate_once() {
         // tcop: reset debug_query_string (no statement string under test).
         backend_tcop_postgres_seams::reset_debug_query_string::set(|| {});
 
+        // shmem.c: ShmemAlloc. `CreateLWLocks` now allocates the LWLock array
+        // through `shmem_alloc::call` (the postmaster carves the lock array out
+        // of the main shared segment). Under test there is no main segment, so
+        // hand back a fresh zeroed, `LWLOCK_PADDED_SIZE`(=128)-aligned leaked
+        // buffer of the requested size (leaked for the process lifetime like
+        // genuine shmem). Mirrors the lwlock crate's own unit-test mock.
+        backend_storage_ipc_shmem_seams::shmem_alloc::set(|size| {
+            use std::alloc::{alloc_zeroed, Layout};
+            let layout = Layout::from_size_align(size.max(1), 128).unwrap();
+            // SAFETY: nonzero size.
+            let ptr = unsafe { alloc_zeroed(layout) };
+            if ptr.is_null() {
+                return Err(backend_utils_error::PgError::error(
+                    "ShmemAlloc OOM during DSM test bring-up",
+                ));
+            }
+            Ok(ptr)
+        });
+
         // Publish MainLWLockArray (postmaster path): allocates + initializes the
         // fixed locks, including DynamicSharedMemoryControlLock. Process-global
         // OnceLock, so this is the only allocation site.
