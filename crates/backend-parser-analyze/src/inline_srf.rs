@@ -690,7 +690,7 @@ fn coerce_fn_result_column<'mcx>(
     // ORDER BY/DISTINCT etc); otherwise modify in place if the query allows.
     if tlist_is_modifiable && tlist[src_index].ressortgroupref == 0 {
         let src_expr = match tlist[src_index].expr.as_deref() {
-            Some(e) => e.clone(),
+            Some(e) => e.clone_in(mcx)?,
             None => return Ok(false),
         };
         let exprtype = expr_type(Some(&src_expr))?;
