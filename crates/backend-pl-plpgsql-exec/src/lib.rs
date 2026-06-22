@@ -3295,21 +3295,20 @@ fn exec_stmt_execsql(
         types_plpgsql::PLPGSQL_XCHECK_TOOMANYROWS,
     );
 
-    // setup_param_list + SPI_execute_plan_with_paramlist. The mod_stmt detection
-    // (INSERT/UPDATE/DELETE/MERGE) that C computes from SPI_plan_get_plan_sources
-    // is derived here from the SPI result code the bridge returns (the planned
-    // command type), which is equivalent (and avoids caching plan sources we
-    // don't keep). INTO needs at most one row (two when STRICT/mod/too-many, to
-    // detect the >1 case); without INTO run to completion (tcount = 0).
-    let tcount: i64 = if stmt.into {
-        if stmt.strict || too_many_rows_level != 0 {
-            2
-        } else {
-            1
-        }
-    } else {
-        0
-    };
+    // setup_param_list + SPI_execute_plan_with_paramlist. C computes the row limit
+    // as `(stmt->strict || stmt->mod_stmt) ? 2 : 1` for INTO (else 0), where
+    // `mod_stmt` (INSERT/UPDATE/DELETE/MERGE) is known from the prepared plan's
+    // command type. The owned bridge fuses planning and execution, so the command
+    // type is only known *after* the run — but the limit must be set *before* it,
+    // because the executor stops after `tcount` rows (a `tcount=1` cap on an
+    // `INSERT ... RETURNING ... INTO` would both modify only one row AND hide the
+    // implicit-strict "more than one row" error). Since a modifying statement is
+    // always implicitly strict here, request 2 rows whenever INTO is present (also
+    // covers an explicit STRICT or an active too-many-rows extra-check). A plain
+    // non-strict SELECT INTO still only ever consumes its first row below; the
+    // surplus second row is gated out of the >1 error path (it needs strict /
+    // mod_stmt / the extra-check to fire).
+    let tcount: i64 = if stmt.into { 2 } else { 0 };
 
     let input_collation = INVALID_OID;
     let parse_state = build_plpgsql_parse_state(estate, expr, input_collation)?;
