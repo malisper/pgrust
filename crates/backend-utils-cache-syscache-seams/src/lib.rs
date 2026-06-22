@@ -1477,6 +1477,32 @@ seam_core::seam!(
     pub fn release_stats_tuple(stats_tuple: types_selfuncs::StatsTuple)
 );
 
+seam_core::seam!(
+    /// `statext_expressions_load(stxoid, inh, idx)` (extended_stats.c): load the
+    /// `idx`-th per-expression `pg_statistic` row for an extended-statistics
+    /// object. `SearchSysCache2(STATEXTDATASTXOID, stxoid, inh)` pins the
+    /// `pg_statistic_ext_data` tuple, reads the `stxdexpr` column (a
+    /// `pg_statistic[]` array written by `serialize_expr_stats`), deconstructs
+    /// it, and rebuilds a standalone `pg_statistic` `HeapTuple` from the
+    /// `idx`-th element (C `heap_copytuple(&tmptup)`). The returned handle is a
+    /// *copied* tuple (not a syscache pin), so the caller pairs it with
+    /// [`release_dummy_stats_tuple`] (C `ReleaseDummy` = `pfree`). `Err` on a
+    /// missing tuple (`cache lookup failed`) or an unbuilt EXPRESSIONS kind
+    /// (`requested statistics kind "e" is not yet built`).
+    pub fn statext_expressions_load<'mcx>(
+        mcx: Mcx<'mcx>,
+        stxoid: Oid,
+        inh: bool,
+        idx: usize,
+    ) -> PgResult<Option<types_selfuncs::StatsTuple>>
+);
+
+seam_core::seam!(
+    /// `ReleaseDummy(tuple)` = `pfree(tuple)` for a copied `pg_statistic` tuple
+    /// obtained from [`statext_expressions_load`]: reclaims the copy. Infallible.
+    pub fn release_dummy_stats_tuple(stats_tuple: types_selfuncs::StatsTuple)
+);
+
 // ===========================================================================
 // Additional lsyscache.c projected-row reads (PG 18.3). Each is a
 // `SearchSysCache*` + `GETSTRUCT` field projection owned by syscache.c; a

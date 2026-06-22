@@ -1190,6 +1190,12 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::release_stats_tuple::set(
         projections::release_stats_tuple,
     );
+    backend_utils_cache_syscache_seams::statext_expressions_load::set(
+        projections::statext_expressions_load,
+    );
+    backend_utils_cache_syscache_seams::release_dummy_stats_tuple::set(
+        projections::release_dummy_stats_tuple,
+    );
     backend_utils_cache_syscache_seams::pg_statistic_stanullfrac::set(
         projections::pg_statistic_stanullfrac,
     );
