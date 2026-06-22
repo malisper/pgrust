@@ -2496,6 +2496,21 @@ fn perform_pullup_replace_vars<'mcx>(
             pullup_replace_vars_opt_expr(mcx, root, c, rvcontext, outer_has_sublinks)?;
     }
 
+    // withCheckOptions — C's query_tree_mutator runs MUTATE(query->withCheckOptions)
+    // (nodeFuncs.c:3789), descending into each WithCheckOption->qual. RLS WITH CHECK
+    // quals live here; skipping them leaves virtual-generated-column Vars in the
+    // INSERT/UPDATE WCO unexpanded (rowsecurity: "trying to fetch a virtual
+    // generated column").
+    {
+        let n = parse.withCheckOptions.len();
+        for i in 0..n {
+            let node = core::mem::replace(&mut *parse.withCheckOptions[i], dummy_node(mcx)?);
+            let node =
+                pullup_replace_vars_with_check_option(mcx, root, node, rvcontext, outer_has_sublinks)?;
+            *parse.withCheckOptions[i] = node;
+        }
+    }
+
     // jointree (PHV tracking by location). Take the jointree out so the
     // RangeTblRef arm can mutate sibling LATERAL RTEs in `parse.rtable` without
     // aliasing the jointree we are walking.
@@ -2678,6 +2693,29 @@ fn pullup_replace_vars_merge_action<'mcx>(
         }
         None => Err(types_error::PgError::error(
             "pullup_replace_vars: mergeActionList element is not a MergeAction",
+        )),
+    }
+}
+
+/// Run `pullup_replace_vars` over a `WithCheckOption` node's `qual`
+/// (C: `query_tree_mutator` MUTATE over `query->withCheckOptions`).
+fn pullup_replace_vars_with_check_option<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    node: Node<'mcx>,
+    rvcontext: &mut PullupReplaceVarsContext<'mcx>,
+    outer_has_sublinks: &mut Option<bool>,
+) -> PgResult<Node<'mcx>> {
+    match node.into_withcheckoption() {
+        Some(mut wco) => {
+            if wco.qual.is_some() {
+                let q = wco.qual.take();
+                wco.qual = pullup_replace_vars_opt(mcx, root, q, rvcontext, outer_has_sublinks)?;
+            }
+            Ok(Node::mk_with_check_option(mcx, wco)?)
+        }
+        None => Err(types_error::PgError::error(
+            "pullup_replace_vars: withCheckOptions element is not a WithCheckOption",
         )),
     }
 }
