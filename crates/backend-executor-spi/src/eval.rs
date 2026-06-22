@@ -159,6 +159,24 @@ pub fn spi_eval_expr(
         e
     };
 
+    // Execution-phase decoration for a PL/pgSQL *expression* (`RETURN <expr>`,
+    // `IF <cond>`, an assignment RHS): C evaluates a *simple* expression through
+    // `exec_eval_simple_expr`, which bypasses SPI and runs the cached `ExprState`
+    // directly — so NO `_SPI_error_callback` is on the error_context_stack when a
+    // runtime error (e.g. `division by zero` in `1/x`) is raised, and the
+    // "PL/pgSQL expression \"…\"" context line is therefore NOT attached. (The
+    // outer frame's own `plpgsql_exec_error_callback` still fires, which the
+    // latch reset below re-enables.) The full `spi_error_decorate` line is added
+    // only for parse/analysis-time errors (the prepare phase below), matching C's
+    // simple-expr path where prepare still goes through SPI but execution does
+    // not. A genuinely non-simple expression would run via SPI's `exec_run_select`
+    // and keep the callback; pgrust's expression path corresponds to the simple
+    // case (a scalar one-row SELECT), so we drop the execute-phase context line.
+    let spi_error_no_context = |mut e: types_error::PgError| -> types_error::PgError {
+        e.plpgsql_context_attached = false;
+        e
+    };
+
     // _SPI_prepare_plan: parse + analyze (with the PL/pgSQL parser hooks) +
     // rewrite + complete the cached plan. This records the referenced datum
     // numbers into `parse_state.paramnos`.
@@ -184,7 +202,7 @@ pub fn spi_eval_expr(
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
     }
-    let (processed, raw) = out.map_err(&spi_error_decorate)?;
+    let (processed, raw) = out.map_err(&spi_error_no_context)?;
 
     let _ = plancache::DropCachedPlan(source);
 
