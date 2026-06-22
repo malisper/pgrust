@@ -211,11 +211,26 @@ pub fn inline_sql_function<'mcx>(
         )));
     }
 
+    // Composite (non-RECORD) rettype, whole-tuple-result check (clauses.c:5288).
+    // When the function is declared to return a real composite type but the lone
+    // SELECT tlist entry is a scalar (or any single column that isn't already the
+    // whole composite), check_sql_fn_retval coerces it into the composite's first
+    // column and reports isTupleResult = false. The C inliner then rejects the
+    // not-whole-tuple-result case (`goto fail`) since what's returned is a single
+    // composite column, not the tuple result inlining needs. We mirror that by
+    // declining to inline rather than entering the scalar-coercion leg below
+    // (which would mis-fire a "return type mismatch" error). The whole-tuple case
+    // (src_type == result_type, e.g. the body returns the composite directly)
+    // falls through and inlines normally.
+    let src_type = expr_type(Some(&newexpr))?;
+    if is_rowtype && result_type != RECORDOID && src_type != result_type {
+        return Ok(None);
+    }
+
     // check_sql_fn_retval scalar leg: coerce the tlist expr to rettype
     // (COERCION_ASSIGNMENT / COERCE_IMPLICIT_CAST). On failure C raises a
     // "return type mismatch" error; that error would equally fire at runtime,
     // so we surface it rather than silently declining.
-    let src_type = expr_type(Some(&newexpr))?;
     if src_type != result_type && result_type != RECORDOID {
         let coerced = backend_parser_coerce::coerce_to_target_type(
             mcx,
