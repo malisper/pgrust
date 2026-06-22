@@ -1045,6 +1045,14 @@ pub fn ExplainNode<'es, 'p>(
                 )?;
             }
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_NestLoop => {
             // explain.c:2158: join.joinqual -> "Join Filter"; plan->qual -> "Filter".
@@ -1097,6 +1105,14 @@ pub fn ExplainNode<'es, 'p>(
             let tidcond = build_cond_list(mcx, ts.tidquals.as_ref(), false)?;
             show_scan_qual_owned(es, mcx, plan_node, ancestors, tidcond, "TID Cond")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_TidRangeScan => {
             // explain.c:2127: tidrangequals has AND semantics, so wrap a
@@ -1105,6 +1121,14 @@ pub fn ExplainNode<'es, 'p>(
             let tidcond = build_cond_list(mcx, trs.tidrangequals.as_ref(), true)?;
             show_scan_qual_owned(es, mcx, plan_node, ancestors, tidcond, "TID Cond")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_SampleScan => {
             // explain.c:2004: show_tablesample(((SampleScan *) plan)->tablesample,
@@ -1114,6 +1138,14 @@ pub fn ExplainNode<'es, 'p>(
                 show_tablesample(es, mcx, plan_node, ancestors, tsc)?;
             }
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_Agg | ntag::T_WindowAgg | ntag::T_Group | ntag::T_Result => {
             // explain.c:2197/2208/2215/2237: these upper plan nodes show their
@@ -1126,7 +1158,17 @@ pub fn ExplainNode<'es, 'p>(
         _ => {
             // The generic `Filter` leg (SeqScan / ValuesScan / CteScan /
             // NamedTuplestoreScan / WorkTableScan / SubqueryScan / Gather / etc).
+            // explain.c:2009-2021: `show_scan_qual(plan->qual, "Filter", ...)` then,
+            // if plan->qual, `show_instrumentation_count("Rows Removed by Filter", 1, ...)`.
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
     }
 
