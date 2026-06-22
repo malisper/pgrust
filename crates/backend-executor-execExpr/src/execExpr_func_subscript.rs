@@ -136,6 +136,68 @@ fn testexpr_carrier_mut<'a, 'mcx>(slot: &'a mut Opaque) -> &'a mut TestExprCarri
     }
 }
 
+/// Drain the aggregate/window-function discovery channels of a sub-expression
+/// `ExprState` (a SubPlan's `projLeft` / `projRight` / `testexpr`) into the
+/// enclosing parent `ExprState`.
+///
+/// In C, `ExecInitSubPlan` builds these projections with the SAME parent
+/// `PlanState` (`ExecBuildProjectionInfo(lefttlist, NULL, slot, parent, NULL)`),
+/// so any `Aggref`/`WindowFunc` found while compiling the SubPlan's lefthand
+/// args is appended directly onto `parent->aggs` / `parent->funcs`. The owned
+/// model builds each projection as a self-contained `ExprState` whose
+/// discovery lands on its own `pi_state.found_aggs` / `found_window_funcs`; we
+/// must hoist those into the enclosing compile's `state` so the parent nodeAgg
+/// (`numaggs = max_aggno + 1`) / nodeWindowAgg sees them. Without this, an
+/// aggregate that appears ONLY inside a SubPlan's LHS (e.g.
+/// `(1 = any(array_agg(f1))) = any (select ...)`) is invisible to nodeAgg,
+/// leaving `numaggs = 0` and an empty `ecxt_aggvalues`.
+fn drain_subexpr_found_channels<'mcx>(
+    src: &mut ExprState<'mcx>,
+    dst: &mut ExprState<'mcx>,
+) {
+    if let Some(aggs) = src.found_aggs.take() {
+        match dst.found_aggs.as_mut() {
+            Some(d) => {
+                for a in aggs {
+                    d.push(a);
+                }
+            }
+            None => dst.found_aggs = Some(aggs),
+        }
+    }
+    if let Some(wfs) = src.found_window_funcs.take() {
+        match dst.found_window_funcs.as_mut() {
+            Some(d) => {
+                for w in wfs {
+                    d.push(w);
+                }
+            }
+            None => dst.found_window_funcs = Some(wfs),
+        }
+    }
+}
+
+/// Hoist the agg/window discovery channels collected while building a freshly
+/// built `SubPlanState`'s `projLeft` / `projRight` / `testexpr` sub-expressions
+/// into the enclosing compile's `state` (see [`drain_subexpr_found_channels`]).
+fn drain_subplan_found_channels<'mcx>(
+    sstate: &mut SubPlanState<'mcx>,
+    state: &mut ExprState<'mcx>,
+) {
+    if sstate.projLeft.0.is_some() {
+        let carrier = proj_carrier_mut(&mut sstate.projLeft, ProjectionKind::Left);
+        drain_subexpr_found_channels(&mut carrier.proj.pi_state, state);
+    }
+    if sstate.projRight.0.is_some() {
+        let carrier = proj_carrier_mut(&mut sstate.projRight, ProjectionKind::Right);
+        drain_subexpr_found_channels(&mut carrier.proj.pi_state, state);
+    }
+    if sstate.testexpr.0.is_some() {
+        let carrier = testexpr_carrier_mut(&mut sstate.testexpr);
+        drain_subexpr_found_channels(&mut carrier.state, state);
+    }
+}
+
 /// Pick the named projection's `Opaque` slot off the node.
 fn proj_slot<'a, 'mcx>(node: &'a SubPlanState<'mcx>, which: ProjectionKind) -> &'a Opaque {
     match which {
@@ -887,7 +949,17 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
         estate.es_initplan[idx] = Some(display_sstate);
     }
 
-    let sstate = nodesubplan::exec_init_sub_plan::call(owned_subplan, estate)?;
+    let mut sstate = nodesubplan::exec_init_sub_plan::call(owned_subplan, estate)?;
+
+    // C: ExecInitSubPlan builds projLeft/projRight/testexpr with the SAME parent
+    // PlanState, so any Aggref/WindowFunc in the SubPlan's lefthand args is
+    // appended onto parent->aggs / parent->funcs. The owned model builds each as
+    // a self-contained ExprState; hoist its discovery channels into the enclosing
+    // compile's `state` so the parent nodeAgg/nodeWindowAgg sees an aggregate (or
+    // window func) that appears ONLY inside the SubPlan's LHS — e.g.
+    // `(1 = any(array_agg(f1))) = any (select ...)` — otherwise numaggs stays 0
+    // and ecxt_aggvalues is empty.
+    drain_subplan_found_channels(&mut sstate, state);
 
     // scratch.opcode = EEOP_SUBPLAN; scratch.d.subplan.sstate = sstate;
     let scratch = types_nodes::execexpr::ExprEvalStep {

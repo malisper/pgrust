@@ -701,15 +701,18 @@ fn execTuplesUnequal<'mcx>(
         // functions); collations are hashtable->tab_collations.
         let collation = subplan_hash_table_ref(node, is_nulls).tab_collations.as_ref().unwrap()[i as usize];
         let fn_oid = node.cur_eq_funcs.as_ref().unwrap()[i as usize].fn_oid;
-        // The fmgr owner is un-migrated: the equality function takes/returns
-        // bare words. Bridge the two scalar columns down and the boolean result
-        // back through the canonical value.
-        if !DatumGetBool(&from_word(fmgr::function_call2_coll::call(
+        // FunctionCall2Coll(&eqfunctions[i], collations[i], attr1, attr2). The
+        // equality function's arguments can be by-reference (e.g. text), so they
+        // must cross the fmgr boundary as canonical Datums (not bare words);
+        // bare-word extraction would mis-read a varlena pointer as a scalar.
+        let per_query = estate.es_query_cxt;
+        if !DatumGetBool(&fmgr::function_call2_coll_datum::call(
+            per_query,
             fn_oid,
             collation,
-            word(&attr1.value),
-            word(&attr2.value),
-        )?)) {
+            attr1.value.clone(),
+            attr2.value.clone(),
+        )?) {
             result = true; // they are unequal
             break;
         }

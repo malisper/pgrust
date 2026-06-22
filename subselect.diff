@@ -1,0 +1,367 @@
+64,66c64,66
+<  array 
+< -------
+<      1
+---
+>  ?column? 
+> ----------
+>         1
+70,72c70,72
+<  array 
+< -------
+<      2
+---
+>  ?column? 
+> ----------
+>         2
+76,78c76,78
+<  array 
+< -------
+<      3
+---
+>  ?column? 
+> ----------
+>         3
+356,357c356,357
+<          QUERY PLAN         
+< ----------------------------
+---
+>              QUERY PLAN              
+> -------------------------------------
+359c359
+<    ->  Result
+---
+>    ->  Subquery Scan on "*SELECT* 1"
+361c361,363
+<    ->  Result
+---
+>          ->  Result
+>                Output: '42'
+>    ->  Subquery Scan on "*SELECT* 2"
+363c365,367
+< (5 rows)
+---
+>          ->  Result
+>                Output: '43'
+> (9 rows)
+366,367c370,371
+<      QUERY PLAN     
+< --------------------
+---
+>              QUERY PLAN              
+> -------------------------------------
+369c373
+<    ->  Result
+---
+>    ->  Subquery Scan on "*SELECT* 1"
+370a375,376
+>          ->  Result
+>                Output: '42'
+373c379
+< (5 rows)
+---
+> (7 rows)
+918,923c924
+<  f1 | f2 
+< ----+----
+<  b  | a
+<  b  | 
+< (2 rows)
+< 
+---
+> ERROR:  Datum: scalar accessor called on a by-reference value
+1119c1120
+<                  ->  Seq Scan on exists_tbl_null t2_1
+---
+>                  ->  Seq Scan on exists_tbl_null t2
+1121c1122
+<                  ->  Seq Scan on exists_tbl_def t2_2
+---
+>                  ->  Seq Scan on exists_tbl_def t2
+1127,1128c1128,1129
+<                  ->  Seq Scan on exists_tbl_null t2_4
+<                  ->  Seq Scan on exists_tbl_def t2_5
+---
+>                  ->  Seq Scan on exists_tbl_null t2
+>                  ->  Seq Scan on exists_tbl_def t2
+1176,1185c1177,1187
+<             QUERY PLAN             
+< -----------------------------------
+<  Subquery Scan on ss
+<    Output: ss.x, ss.x
+<    ->  Values Scan on "*VALUES*"
+<          Output: (InitPlan 1).col1
+<          InitPlan 1
+<            ->  Result
+<                  Output: random()
+< (7 rows)
+---
+>                    QUERY PLAN                   
+> ------------------------------------------------
+>  Values Scan on "*VALUES*"
+>    Output: (InitPlan 1).col1, (InitPlan 2).col1
+>    InitPlan 1
+>      ->  Result
+>            Output: random()
+>    InitPlan 2
+>      ->  Result
+>            Output: random()
+> (8 rows)
+1207,1217c1209,1221
+<                                  QUERY PLAN                                 
+< ----------------------------------------------------------------------------
+<  Subquery Scan on ss
+<    Output: ss.x, ss.x
+<    ->  Values Scan on "*VALUES*"
+<          Output: (SubPlan 1)
+<          SubPlan 1
+<            ->  Result
+<                  Output: random()
+<                  One-Time Filter: ("*VALUES*".column1 = "*VALUES*".column1)
+< (8 rows)
+---
+>                               QUERY PLAN                              
+> ----------------------------------------------------------------------
+>  Values Scan on "*VALUES*"
+>    Output: (SubPlan 1), (SubPlan 2)
+>    SubPlan 1
+>      ->  Result
+>            Output: random()
+>            One-Time Filter: ("*VALUES*".column1 = "*VALUES*".column1)
+>    SubPlan 2
+>      ->  Result
+>            Output: random()
+>            One-Time Filter: ("*VALUES*".column1 = "*VALUES*".column1)
+> (10 rows)
+1244,1245c1248,1249
+<                        Output: int4_tbl.f1
+<                        Filter: (int4_tbl.f1 <= o.hundred)
+---
+>                        Output: f1
+>                        Filter: (f1 <= o.hundred)
+1355,1356c1359,1360
+<                        QUERY PLAN                        
+< ---------------------------------------------------------
+---
+>                      QUERY PLAN                      
+> -----------------------------------------------------
+1368c1372
+<                              ->  WorkTable Scan on x x_1
+---
+>                              ->  WorkTable Scan on x
+1447,1448c1451,1452
+<                QUERY PLAN               
+< ----------------------------------------
+---
+>             QUERY PLAN             
+> -----------------------------------
+1452,1453c1456,1457
+<      ->  Values Scan on "*VALUES*_1"
+<            Output: "*VALUES*_1".column1
+---
+>      ->  Values Scan on "*VALUES*"
+>            Output: column1
+1485c1489
+<            Output: a.unique1
+---
+>            Output: unique1
+1875d1878
+<                Sort Method: top-N heapsort  Memory: xxx
+1877c1880
+< (6 rows)
+---
+> (5 rows)
+2305,2306c2308,2309
+<    Output: (COALESCE(t3.q1)), t4.q1, t4.q2
+<    Sort Key: (COALESCE(t3.q1)), t4.q1, t4.q2
+---
+>    Output: ((COALESCE(t3.q1))), t4.q1, t4.q2
+>    Sort Key: ((COALESCE(t3.q1))), t4.q1, t4.q2
+2308c2311
+<          Output: (COALESCE(t3.q1)), t4.q1, t4.q2
+---
+>          Output: ((COALESCE(t3.q1))), t4.q1, t4.q2
+2310,2312c2313,2315
+<          ->  Hash Join
+<                Output: (COALESCE(t3.q1)), t4.q1, t4.q2
+<                Hash Cond: (t2.q2 = t4.q1)
+---
+>          ->  Nested Loop
+>                Output: ((COALESCE(t3.q1))), t4.q1, t4.q2
+>                Join Filter: (t2.q2 = t4.q1)
+2322,2325c2325,2326
+<                ->  Hash
+<                      Output: t4.q1, t4.q2
+<                      ->  Seq Scan on public.int8_tbl t4
+<                            Output: t4.q1, t4.q2
+---
+>                ->  Seq Scan on public.int8_tbl t4
+>                      Output: (COALESCE(t3.q1)), t4.q1, t4.q2
+2330c2331
+< (26 rows)
+---
+> (24 rows)
+2385c2386
+<                Output: t4.q1, t4.q2, ((COALESCE(t3.q1)))
+---
+>                Output: ((COALESCE(t3.q1))), t4.q1, t4.q2
+2397c2398
+<                      Output: t4.q1, t4.q2, (COALESCE(t3.q1))
+---
+>                      Output: (COALESCE(t3.q1)), t4.q1, t4.q2
+2464c2465
+<            Output: subselect_tbl.f1
+---
+>            Output: f1
+2482,2490c2483,2488
+<                   QUERY PLAN                  
+< ----------------------------------------------
+<  CTE Scan on x
+<    Output: x.f1, x.random
+<    Filter: (x.f1 = 1)
+<    CTE x
+<      ->  Seq Scan on public.subselect_tbl
+<            Output: subselect_tbl.f1, random()
+< (6 rows)
+---
+>               QUERY PLAN              
+> --------------------------------------
+>  Seq Scan on public.subselect_tbl
+>    Output: subselect_tbl.f1, random()
+>    Filter: (subselect_tbl.f1 = 1)
+> (3 rows)
+2496,2497c2494,2495
+<                              QUERY PLAN                             
+< --------------------------------------------------------------------
+---
+>                       QUERY PLAN                      
+> ------------------------------------------------------
+2503c2501
+<            Output: ss.f1
+---
+>            Output: f1
+2505c2503
+<                  Output: subselect_tbl.f1, subselect_tbl.ctid
+---
+>                  Output: f1, ctid
+2507c2505
+<                        Output: subselect_tbl.f1, subselect_tbl.ctid
+---
+>                        Output: f1, ctid
+2514,2515c2512,2513
+<                 QUERY PLAN                 
+< -------------------------------------------
+---
+>                 QUERY PLAN                
+> ------------------------------------------
+2521c2519
+<            Output: subselect_tbl.f1, now()
+---
+>            Output: f1, now()
+2561,2562c2559,2560
+<                         QUERY PLAN                        
+< ----------------------------------------------------------
+---
+>                      QUERY PLAN                      
+> -----------------------------------------------------
+2568c2566
+<                  Output: "*VALUES*".column1
+---
+>                  Output: column1
+2570,2571c2568,2569
+<                  Output: (z.a || z1.a)
+<                  Join Filter: (length((z.a || z1.a)) < 5)
+---
+>                  Output: (a || a)
+>                  Join Filter: (length((a || a)) < 5)
+2573,2574c2571,2572
+<                    ->  WorkTable Scan on x x_1
+<                          Output: x_1.a
+---
+>                    ->  WorkTable Scan on x
+>                          Output: a
+2576c2574
+<                        Output: z.a
+---
+>                        Output: a
+2578c2576
+<                        Output: z1.a
+---
+>                        Output: a
+2622,2623c2620,2621
+<                        QUERY PLAN                       
+< --------------------------------------------------------
+---
+>                    QUERY PLAN                   
+> ------------------------------------------------
+2629,2632c2627,2630
+<                  Output: "*VALUES*".column1
+<            ->  WorkTable Scan on x x_1
+<                  Output: (x_1.a || x_1.a)
+<                  Filter: (length((x_1.a || x_1.a)) < 5)
+---
+>                  Output: column1
+>            ->  WorkTable Scan on x
+>                  Output: (a || a)
+>                  Filter: (length((a || a)) < 5)
+2665,2673c2663
+<              QUERY PLAN              
+< -------------------------------------
+<  CTE Scan on x
+<    Output: x.f1
+<    CTE x
+<      ->  Seq Scan on public.int4_tbl
+<            Output: int4_tbl.f1
+< (5 rows)
+< 
+---
+> ERROR:  clean_up_removed_plan_level: moving parent initPlans to the child (SS_compute_initplan_cost) is owned by the subselect cohort and not ported
+2803,2804c2793,2794
+<                                       QUERY PLAN                                       
+< ---------------------------------------------------------------------------------------
+---
+>                              QUERY PLAN                             
+> --------------------------------------------------------------------
+2815,2821c2805,2808
+<                            ->  Result
+<                                  InitPlan 1
+<                                    ->  Limit
+<                                          ->  Index Scan using tenk2_hundred on tenk2 c
+<                                                Index Cond: (hundred IS NOT NULL)
+<                                                Filter: (odd = b.odd)
+< (16 rows)
+---
+>                            ->  Aggregate
+>                                  ->  Seq Scan on tenk2 c
+>                                        Filter: (odd = b.odd)
+> (13 rows)
+2975,2979c2962,2969
+<                                                                     QUERY PLAN                                                                     
+< ---------------------------------------------------------------------------------------------------------------------------------------------------
+<  Seq Scan on onek
+<    Filter: (((sin((two)::double precision) * (four)::double precision) / '-1.5'::real) = ANY ('{0.0015926529164868282,2,42}'::double precision[]))
+< (2 rows)
+---
+>                                                         QUERY PLAN                                                        
+> --------------------------------------------------------------------------------------------------------------------------
+>  Hash Semi Join
+>    Hash Cond: (((sin((onek.two)::double precision) * (onek.four)::double precision) / '-1.5'::real) = "*VALUES*".column1)
+>    ->  Seq Scan on onek
+>    ->  Hash
+>          ->  Values Scan on "*VALUES*"
+> (5 rows)
+2989,2993c2979,2986
+<                                                                      QUERY PLAN                                                                      
+< -----------------------------------------------------------------------------------------------------------------------------------------------------
+<  Seq Scan on onek
+<    Filter: (((sin((two)::double precision) * (four)::double precision) / '-1.5'::real) = ANY ('{0.0015926529164868282,2,NULL}'::double precision[]))
+< (2 rows)
+---
+>                                                         QUERY PLAN                                                        
+> --------------------------------------------------------------------------------------------------------------------------
+>  Hash Semi Join
+>    Hash Cond: (((sin((onek.two)::double precision) * (onek.four)::double precision) / '-1.5'::real) = "*VALUES*".column1)
+>    ->  Seq Scan on onek
+>    ->  Hash
+>          ->  Values Scan on "*VALUES*"
+> (5 rows)
