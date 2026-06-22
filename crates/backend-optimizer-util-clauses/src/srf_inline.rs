@@ -121,9 +121,16 @@ pub fn inline_set_returning_function<'mcx>(
     // The function is an inlinable SQL-language SRF. The body parse / rewrite /
     // single-SELECT querytree validation + parameter substitution core rides the
     // SQL leg seam (owned by backend-parser-analyze).
+    // C installs `sql_inline_error_callback` (clauses.c:5194) over the body
+    // parse/rewrite/validate, so any error raised while inlining carries the
+    // `SQL function "<name>" during inlining` context line (e.g. the
+    // "return type mismatch in function declared to return record" from
+    // check_sql_fn_retval on a bad column-definition list).
     let querytree = match clauses_seam::inline_set_returning_function_sql_body::call(
         mcx, root, rte, func_oid,
-    )? {
+    )
+    .map_err(|e| e.add_context(format!("SQL function \"{}\" during inlining", form.proname)))?
+    {
         Some(q) => q,
         None => return Ok(None),
     };
