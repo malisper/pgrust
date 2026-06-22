@@ -946,7 +946,18 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
         while estate.es_initplan.len() <= idx {
             estate.es_initplan.push(None);
         }
-        estate.es_initplan[idx] = Some(display_sstate);
+        // Keep the FIRST registration for a given plan_id. The same SubPlan
+        // (shared plan_id) is referenced by every inheritance/partition child's
+        // qual, each carrying its own `adjust_appendrel_attrs`-translated `args`
+        // (e.g. correlated `t1_1.a` for the first child, `t1_4.a` for the last).
+        // EXPLAIN prints a SubPlan body once, at its first encounter in the plan
+        // walk (tracked by `es->printed_subplans`); the first plan node init'd is
+        // the first Append child, so its `args` must be the ones the body deparse
+        // resolves. Overwriting here with a later child's copy (t1_4) would make
+        // EXPLAIN deparse the subplan's correlated Var against the wrong child.
+        if estate.es_initplan[idx].is_none() {
+            estate.es_initplan[idx] = Some(display_sstate);
+        }
     }
 
     let mut sstate = nodesubplan::exec_init_sub_plan::call(owned_subplan, estate)?;
