@@ -142,15 +142,10 @@ fn with_my_subscription<R>(f: impl FnOnce(&MySubscriptionState) -> R) -> R {
 // LWLock helpers (LogicalRepWorkerLock).
 // ===========================================================================
 
-#[inline]
-fn worker_lock_acquire(mode: LWLockMode) -> PgResult<()> {
-    lwlock::lwlock_acquire_main::call(LOGICAL_REP_WORKER_LOCK, mode).map(|_| ())
-}
-
-#[inline]
-fn worker_lock_release() -> PgResult<()> {
-    lwlock::lwlock_release_main::call(LOGICAL_REP_WORKER_LOCK)
-}
+// `LogicalRepWorkerLock` is acquired in `AtEOXact_LogicalRepWorkers` directly via
+// the `lwlock_acquire_main` RAII guard (held for the loop, released at C's
+// `LWLockRelease` call site). Wrapping acquire in a guard-discarding helper would
+// release the lock immediately — the bug fixed here.
 
 // ===========================================================================
 // Commit-wakeup family (worker.c:5135 / 5152).
@@ -193,7 +188,12 @@ pub fn AtEOXact_LogicalRepWorkers(is_commit: bool) -> PgResult<()> {
 
     if is_commit && !subids.is_empty() {
         // LWLockAcquire(LogicalRepWorkerLock, LW_SHARED);
-        worker_lock_acquire(LWLockMode::LW_SHARED)?;
+        // Hold the RAII guard for the whole loop: the seam returns a
+        // `MainLWLockGuard` whose `Drop` releases the lock (and is the abort
+        // backstop). Discarding it here would release the lock *immediately*, so
+        // the explicit release below would then hit an unheld lock — the
+        // subscription.sql commit-path `cannot abort transaction` PANIC.
+        let guard = lwlock::lwlock_acquire_main::call(LOGICAL_REP_WORKER_LOCK, LWLockMode::LW_SHARED)?;
 
         // foreach(lc, on_commit_wakeup_workers_subids)
         let result = (|| -> PgResult<()> {
@@ -212,8 +212,9 @@ pub fn AtEOXact_LogicalRepWorkers(is_commit: bool) -> PgResult<()> {
             Ok(())
         })();
 
-        // LWLockRelease(LogicalRepWorkerLock); — released regardless of result.
-        let rel = worker_lock_release();
+        // LWLockRelease(LogicalRepWorkerLock); — released regardless of result
+        // (explicit release at C's call site; surfaces any release error).
+        let rel = guard.release();
         result?;
         rel?;
     }
