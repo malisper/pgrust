@@ -108,6 +108,7 @@ mod pg_available_extensions;
 mod pg_get_aios;
 mod pg_get_backend_memory_contexts;
 mod pg_get_wait_events;
+mod pg_stat_get_wal_receiver;
 mod pg_timezone;
 mod show_all_file_settings;
 mod show_all_settings;
@@ -358,6 +359,9 @@ pub fn init_seams() {
     // show_all_file_settings() (OID 3329): the pg_file_settings view SRF over the
     // parsed config-file ConfigVariable list.
     show_all_file_settings::register_show_all_file_settings();
+    // pg_stat_get_wal_receiver() (OID 3317): the pg_stat_wal_receiver view's
+    // 0-or-1-row table function (NULL when no receiver is running).
+    pg_stat_get_wal_receiver::register_pg_stat_get_wal_receiver();
 }
 
 // ===========================================================================

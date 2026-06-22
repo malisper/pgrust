@@ -139,6 +139,11 @@ backend-utils-adt-misc2 = { path = "../backend-utils-adt-misc2" }
 # 3083): the control-file directory walk + parse + version-graph live in their
 # extension.c owner; this crate drives them over the executor frame.
 backend-commands-extension = { path = "../backend-commands-extension" }
+# pg_stat_get_wal_receiver() (OID 3317): the WalRcv snapshot + field projection
+# lives in its walreceiver.c owner; this crate drives the (0-or-1-row) table
+# function over the executor frame.
+backend-replication-walreceiver = { path = "../backend-replication-walreceiver" }
+types-walreceiver = { path = "../types-walreceiver" }
 # pg_event_trigger_dropped_objects() (OID 3566): the sql_drop SRF core lives in
 # its event_trigger.c owner; this crate drives it over the executor frame.
 backend-commands-event-trigger = { path = "../backend-commands-event-trigger" }
