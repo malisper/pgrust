@@ -35,10 +35,6 @@ use crate::register_srf;
 /// `pg_get_aios()` (OID 6399).
 const PG_GET_AIOS: Oid = 6399;
 
-const INT2OID: Oid = 21;
-const INT4OID: Oid = 23;
-const INT8OID: Oid = 20;
-
 /// `PG_GET_AIOS_COLS` (aio_funcs.c) — 15 output columns.
 const PG_GET_AIOS_COLS: usize = 15;
 
@@ -150,10 +146,6 @@ fn put_aio_row(row: AioRow) -> PgResult<()> {
             Some(b) => values[14] = Datum::from_bool(b),
             None => nulls[14] = true,
         }
-
-        // Silence the unused-const warnings for the column-type OIDs (kept for
-        // documentary parity with the descriptor InitMaterializedSRF builds).
-        let _ = (INT2OID, INT4OID, INT8OID);
 
         materialized_srf_putvalues::call(rsinfo, &values, &nulls)
     })
