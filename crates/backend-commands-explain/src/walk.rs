@@ -840,6 +840,26 @@ pub fn ExplainNode<'es, 'p>(
         show_plan_tlist(es, mcx, plan_node, ancestors)?;
     }
 
+    // unique join (explain.c:1935): for the three Join node types, emit
+    // `Inner Unique`. To avoid being too chatty in TEXT mode, C prints it only in
+    // non-TEXT formats, or in TEXT when VERBOSE and the join actually is
+    // inner-unique.
+    match plan_node.node_tag() {
+        ntag::T_NestLoop | ntag::T_MergeJoin | ntag::T_HashJoin => {
+            let inner_unique = match plan_node.node_tag() {
+                ntag::T_NestLoop => plan_node.expect_nestloop().join.inner_unique,
+                ntag::T_MergeJoin => plan_node.expect_mergejoin().join.inner_unique,
+                _ => plan_node.expect_hashjoin().join.inner_unique,
+            };
+            if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT
+                || (es.verbose && inner_unique)
+            {
+                fmt::ExplainPropertyBool("Inner Unique", inner_unique, es)?;
+            }
+        }
+        _ => {}
+    }
+
     // T_Result: `show_upper_qual(resconstantqual, "One-Time Filter")` runs
     // BEFORE the generic `Filter:` line (explain.c:2234). `show_upper_qual`
     // uses `useprefix = list_length(es->rtable) > 1 || es->verbose`.

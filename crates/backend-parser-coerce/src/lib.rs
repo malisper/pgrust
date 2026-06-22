@@ -1320,13 +1320,19 @@ pub fn coerce_to_specific_type_typmod<'mcx>(
     targetTypmod: i32,
     constructName: &str,
 ) -> PgResult<Expr> {
+    use backend_nodes_core::nodefuncs::expr_location;
+
     let inputTypeId = exprType(Some(&node))?;
     let mut node = node;
+    let mut pstate = pstate;
+    // C: parser_errposition(pstate, exprLocation(node)) — capture the original
+    // node's location up front (the node is consumed by coerce_to_target_type).
+    let node_location = expr_location(Some(&node))?;
 
     if inputTypeId != targetTypeId {
         let newnode = coerce_to_target_type(
             mcx,
-            pstate,
+            pstate.as_deref_mut(),
             node,
             inputTypeId,
             targetTypeId,
@@ -1338,21 +1344,31 @@ pub fn coerce_to_specific_type_typmod<'mcx>(
         match newnode {
             Some(n) => node = n,
             None => {
+                let cursorpos = match pstate.as_deref() {
+                    Some(ps) => parser_errposition::call(ps, node_location)?,
+                    None => 0,
+                };
                 return Err(types_error::PgError::error(format!(
                     "argument of {constructName} must be type {}, not type {}",
                     format_type_be(targetTypeId)?,
                     format_type_be(inputTypeId)?
                 ))
-                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+                .with_cursor_position(cursorpos));
             }
         }
     }
 
     if expression_returns_set(Some(&node)) {
+        let cursorpos = match pstate.as_deref() {
+            Some(ps) => parser_errposition::call(ps, expr_location(Some(&node))?)?,
+            None => 0,
+        };
         return Err(types_error::PgError::error(format!(
             "argument of {constructName} must not return a set"
         ))
-        .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
+        .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+        .with_cursor_position(cursorpos));
     }
 
     Ok(node)
