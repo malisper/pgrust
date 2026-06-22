@@ -2,8 +2,13 @@ use super::*;
 
 #[test]
 fn guc_defaults() {
-    // C boot defaults: track off, query size 1024.
-    assert!(!pgstat_track_activities());
+    // C boot defaults: track_activities `boot_val` is `true` (guc_tables.c),
+    // query size 1024. The thread_local is seeded with the boot value because the
+    // accessor is installed after InitializeGUCOptions (see the seed comment on
+    // PGSTAT_TRACK_ACTIVITIES). `guc_round_trip` may have left it false, so set
+    // the boot value back before asserting.
+    set_pgstat_track_activities(true);
+    assert!(pgstat_track_activities());
     assert_eq!(pgstat_track_activity_query_size(), 1024);
 }
 

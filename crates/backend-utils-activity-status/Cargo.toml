@@ -39,4 +39,5 @@ backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-s
 backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
 backend-libpq-be-secure-seams = { path = "../backend-libpq-be-secure-seams" }
 backend-utils-activity-pgstat-database-seams = { path = "../backend-utils-activity-pgstat-database-seams" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }

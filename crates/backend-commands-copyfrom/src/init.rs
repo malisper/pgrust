@@ -111,8 +111,30 @@ pub fn init_seams() {
         },
     );
 
-    // -- pgstat progress (advisory; no-op) --
-    s::pgstat_progress_update_bytes_processed::set(|_value: i64| -> PgResult<()> { Ok(()) });
+    // -- pgstat progress (real backend-status updates) --
+    use backend_utils_activity_small::backend_progress as progress;
+    use types_pgstat::backend_progress::ProgressCommandType;
+    s::pgstat_progress_update_bytes_processed::set(|value: i64| -> PgResult<()> {
+        // pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, value).
+        progress::pgstat_progress_update_param(crate::PROGRESS_COPY_BYTES_PROCESSED, value);
+        Ok(())
+    });
+    s::pgstat_progress_start_command_copy::set(|relid: Oid| -> PgResult<()> {
+        progress::pgstat_progress_start_command(ProgressCommandType::Copy, relid);
+        Ok(())
+    });
+    s::pgstat_progress_update_param::set(|index: i32, val: i64| -> PgResult<()> {
+        progress::pgstat_progress_update_param(index, val);
+        Ok(())
+    });
+    s::pgstat_progress_update_multi_param::set(|index: &[i32], val: &[i64]| -> PgResult<()> {
+        progress::pgstat_progress_update_multi_param(index, val);
+        Ok(())
+    });
+    s::pgstat_progress_end_command::set(|| -> PgResult<()> {
+        progress::pgstat_progress_end_command();
+        Ok(())
+    });
 
     // -- tuple-descriptor / relcache accessors --
     s::relation_natts::set(|rel: &Relation<'_>| -> PgResult<i32> { Ok(rel.rd_att.natts) });

@@ -102,6 +102,28 @@ seam_core::seam!(
     pub fn pgstat_progress_update_bytes_processed(value: i64) -> PgResult<()>
 );
 
+seam_core::seam!(
+    /// `pgstat_progress_start_command(PROGRESS_COMMAND_COPY, relid)` (copyfrom.c:1824).
+    pub fn pgstat_progress_start_command_copy(relid: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_progress_update_param(index, val)` (copyfrom.c TUPLES_PROCESSED/
+    /// TUPLES_EXCLUDED/TUPLES_SKIPPED).
+    pub fn pgstat_progress_update_param(index: i32, val: i64) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_progress_update_multi_param(nparam, index[], val[])`
+    /// (copyfrom.c:1901 — COMMAND/TYPE/BYTES_TOTAL).
+    pub fn pgstat_progress_update_multi_param(index: &[i32], val: &[i64]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_progress_end_command()` (copyfrom.c:1933).
+    pub fn pgstat_progress_end_command() -> PgResult<()>
+);
+
 /* ===========================================================================
  * Tuple-descriptor / relcache accessors.
  *

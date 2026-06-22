@@ -274,6 +274,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_clear_backend_activity_snapshot()` (`backend_status.c`) — discard
+    /// the per-transaction local backend-status snapshot (`localBackendStatusTable`)
+    /// so the next `pg_stat_activity` / `pg_stat_progress_*` request reads fresh
+    /// shared-memory data. Called by `pgstat_clear_snapshot` (pgstat.c:926).
+    /// Owner: `backend-utils-activity-status`. Frees only; infallible.
+    pub fn pgstat_clear_backend_activity_snapshot()
+);
+
+seam_core::seam!(
     /// `pgstat_reset(kind, dboid, objid)` (`pgstat.c`) — reset one
     /// variable-numbered stats entry to zero (and, for kinds not accessed
     /// across databases, touch the database entry's reset timestamp). `Err`

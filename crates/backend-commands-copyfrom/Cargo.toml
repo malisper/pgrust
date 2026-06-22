@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
+types-pgstat = { path = "../types-pgstat" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
@@ -30,6 +31,7 @@ backend-commands-copyfrom-seams = { path = "../backend-commands-copyfrom-seams" 
 # Direct deps (no cycle): error vocabulary, executor state lifecycle, table AM,
 # heap bulk-insert state, index/constraint machinery reachable directly.
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-nodes-core = { path = "../backend-nodes-core" }

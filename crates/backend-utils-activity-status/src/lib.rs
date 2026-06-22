@@ -279,8 +279,22 @@ fn pgstat_read_activity_complete(before_changecount: i32, after_changecount: i32
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    /// `bool pgstat_track_activities = false;`
-    static PGSTAT_TRACK_ACTIVITIES: Cell<bool> = const { Cell::new(false) };
+    /// `bool pgstat_track_activities` (pgstat.c). Seeded with the C
+    /// `track_activities` `boot_val` (`true`) — NOT the C source-level
+    /// initializer `false`.
+    ///
+    /// This seeding is load-bearing (same discipline as `pgstat_track_counts`):
+    /// `InitializeGUCOptions` applies each `boot_val` via `registry::apply_value`,
+    /// which only writes the owner backing store once the accessor is installed.
+    /// This crate installs its accessor (`set_pgstat_track_activities`) after
+    /// `InitializeGUCOptions` runs, so the boot-time `apply_value` write is
+    /// skipped and the cell keeps whatever it was seeded with. With the old
+    /// `false` seed, `pgstat_track_activities()` read false even though
+    /// `SHOW track_activities` was `on`, so `pgstat_report_activity` set every
+    /// backend's state to `STATE_DISABLED` and `pgstat_progress_*` early-returned
+    /// — the `pg_stat_progress_*` views (e.g. `pg_stat_progress_copy`) were always
+    /// empty.
+    static PGSTAT_TRACK_ACTIVITIES: Cell<bool> = const { Cell::new(true) };
     /// `int pgstat_track_activity_query_size = 1024;`
     static PGSTAT_TRACK_ACTIVITY_QUERY_SIZE: Cell<i32> = const { Cell::new(1024) };
 }
@@ -1279,6 +1293,14 @@ pub fn init_seams() {
             .map(|f| (f.st_backend_type, f.st_procpid))
     });
     seams::track_activities::set(pgstat_track_activities);
+
+    // `pgstat_clear_snapshot()` (pgstat.c:926) forwards to
+    // `pgstat_clear_backend_activity_snapshot()`; install that forward target so
+    // the per-transaction `localBackendStatusTable` snapshot is dropped at the
+    // end of each transaction (else `pg_stat_progress_*` keeps stale data).
+    backend_utils_activity_pgstat_seams::pgstat_clear_backend_activity_snapshot::set(
+        pgstat_clear_backend_activity_snapshot,
+    );
     seams::with_my_beentry::set(seam_impls::with_my_beentry);
     seams::backend_current_activity::set(seam_impls::backend_current_activity);
     seams::pgstat_beinit::set(pgstat_beinit);

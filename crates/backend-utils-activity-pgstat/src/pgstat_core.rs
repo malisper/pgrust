@@ -398,11 +398,15 @@ fn fetch_consistency() -> PgStat_FetchConsistency {
 
 /// `pgstat_clear_snapshot()` (`pgstat.c`) — discard any materialized snapshot:
 /// reset the fixed/custom validity flags, drop the variable-numbered snapshot
-/// hash and its arena, and reset the snapshot mode. (C also forwards to
-/// `pgstat_clear_backend_activity_snapshot()` in `backend_status.c`; that
-/// backend-status snapshot is a separate, already-ported subsystem and is reset
-/// on its own clear path, so no forwarding is needed here.)
+/// hash and its arena, and reset the snapshot mode. C also forwards to
+/// `pgstat_clear_backend_activity_snapshot()` (pgstat.c:926); the backend-status
+/// snapshot (`localBackendStatusTable`) is owned by `backend-utils-activity-status`
+/// and reached through a seam. Without this forward, a backend's
+/// `pg_stat_activity` / `pg_stat_progress_*` view kept the stale snapshot built in
+/// the previous transaction (e.g. each COPY's progress report showed the prior
+/// COPY's values).
 pub fn pgstat_clear_snapshot() {
+    backend_utils_activity_pgstat_seams::pgstat_clear_backend_activity_snapshot::call();
     local::with_local(|l| {
         let snap = &mut l.snapshot;
         snap.mode = PgStat_FetchConsistency::PGSTAT_FETCH_CONSISTENCY_NONE;

@@ -76,6 +76,21 @@ const TABLE_INSERT_FROZEN: i32 = 1 << 2;
 /// `PG_SQL_ASCII` (mb/pg_wchar.h) — encoding id 0.
 const PG_SQL_ASCII: i32 = 0;
 
+/// COPY progress parameter indices (`commands/progress.h`).
+pub(crate) const PROGRESS_COPY_BYTES_PROCESSED: i32 = 0;
+const PROGRESS_COPY_BYTES_TOTAL: i32 = 1;
+const PROGRESS_COPY_TUPLES_PROCESSED: i32 = 2;
+const PROGRESS_COPY_TUPLES_EXCLUDED: i32 = 3;
+const PROGRESS_COPY_COMMAND: i32 = 4;
+const PROGRESS_COPY_TYPE: i32 = 5;
+const PROGRESS_COPY_TUPLES_SKIPPED: i32 = 6;
+/// `PROGRESS_COPY_COMMAND_FROM` — advertised via `PROGRESS_COPY_COMMAND`.
+const PROGRESS_COPY_COMMAND_FROM: i64 = 1;
+const PROGRESS_COPY_TYPE_FILE: i64 = 1;
+const PROGRESS_COPY_TYPE_PROGRAM: i64 = 2;
+const PROGRESS_COPY_TYPE_PIPE: i64 = 3;
+const PROGRESS_COPY_TYPE_CALLBACK: i64 = 4;
+
 const RELKIND_RELATION: u8 = b'r';
 const RELKIND_VIEW: u8 = b'v';
 const RELKIND_MATVIEW: u8 = b'm';
@@ -714,15 +729,29 @@ pub fn BeginCopyFrom<'mcx>(
     cstate.input_buf_index = 0;
     cstate.input_buf_len = 0;
 
+    // initialize progress (copyfrom.c:1823-1826):
+    //   pgstat_progress_start_command(PROGRESS_COMMAND_COPY,
+    //       cstate->rel ? RelationGetRelid(cstate->rel) : InvalidOid);
+    //   cstate->bytes_processed = 0;
+    backend_commands_copyfrom_seams::pgstat_progress_start_command_copy::call(cstate.rel.rd_id)?;
+    cstate.bytes_processed = 0;
+
+    // progress_vals = { PROGRESS_COPY_COMMAND_FROM, type, bytes_total }
+    // (copyfrom.c:1554-1558); the type / bytes_total slots are filled per source.
+    let mut progress_type: i64 = 0;
+    let mut progress_bytes_total: i64 = 0;
+
     // Open the data source (copyfrom.c:1837-1918): a caller-supplied callback
     // takes precedence; else stdin (pipe) or a server-side file.
     let pipe = filename.is_none();
     if let Some(cb) = data_source_cb {
         // C: progress source = COPY_SOURCE_CALLBACK; cstate->copy_src =
         //    COPY_CALLBACK; cstate->data_source_cb = data_source_cb;
+        progress_type = PROGRESS_COPY_TYPE_CALLBACK;
         cstate.copy_file = Some(register_source(CopySourceReader::Callback { cb }));
         cstate.copy_src = CopySource::COPY_CALLBACK;
     } else if pipe {
+        progress_type = PROGRESS_COPY_TYPE_PIPE;
         // C: if (whereToSendOutput == DestRemote) ReceiveCopyBegin(cstate);
         //    else cstate->copy_file = stdin;
         if backend_utils_error::config::where_to_send_output() == types_dest::CommandDest::Remote {
@@ -746,6 +775,7 @@ pub fn BeginCopyFrom<'mcx>(
             // C (copyfrom.c:1856-1865): cstate->copy_file =
             //   OpenPipeStream(cstate->filename, PG_BINARY_R); the NULL check is
             //   the "could not execute command" ereport (folded into the seam).
+            progress_type = PROGRESS_COPY_TYPE_PROGRAM;
             let stream =
                 backend_storage_file_fd_seams::open_pipe_from_program::call(filename)?;
             cstate.copy_file = Some(register_source(CopySourceReader::Pipe { stream }));
@@ -754,6 +784,7 @@ pub fn BeginCopyFrom<'mcx>(
             cstate.copy_src = CopySource::COPY_FILE;
         } else {
         // AllocateFile(filename, PG_BINARY_R) + fstat: read the whole file image.
+        progress_type = PROGRESS_COPY_TYPE_FILE;
         let data =
             backend_storage_file_fd_seams::read_server_file::call(mcx, filename, 0, -1, false)?;
         let data = match data {
@@ -764,9 +795,23 @@ pub fn BeginCopyFrom<'mcx>(
                 )))
             }
         };
+        // progress_vals[2] = st.st_size (copyfrom.c:1897) — the whole-file image
+        // length is the byte total reported by PROGRESS_COPY_BYTES_TOTAL.
+        progress_bytes_total = data.len() as i64;
         cstate.copy_file = Some(register_source(CopySourceReader::File { data, pos: 0 }));
         }
     }
+
+    // pgstat_progress_update_multi_param(3, progress_cols, progress_vals)
+    // (copyfrom.c:1901): publish the COMMAND/TYPE/BYTES_TOTAL parameters.
+    backend_commands_copyfrom_seams::pgstat_progress_update_multi_param::call(
+        &[
+            PROGRESS_COPY_COMMAND,
+            PROGRESS_COPY_TYPE,
+            PROGRESS_COPY_BYTES_TOTAL,
+        ],
+        &[PROGRESS_COPY_COMMAND_FROM, progress_type, progress_bytes_total],
+    )?;
 
     // cstate->routine->CopyFromStart(cstate, tupDesc): the text/CSV start
     // callback. It allocates the line_buf / raw_fields workspace and (for
@@ -858,6 +903,9 @@ pub fn EndCopyFrom(state: CopyFromStateData<'_>) -> PgResult<()> {
             release_source(handle);
         }
     }
+
+    // pgstat_progress_end_command() (copyfrom.c:1933).
+    backend_commands_copyfrom_seams::pgstat_progress_end_command::call()?;
     Ok(())
 }
 
@@ -1177,6 +1225,9 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         backend_commands_trigger_seams::exec_bs_insert_triggers::call(estate, rri)?;
 
         let mut processed: u64 = 0;
+        // int64 excluded — rows filtered out by COPY's WHERE clause
+        // (copyfrom.c:1199, reported via PROGRESS_COPY_TUPLES_EXCLUDED).
+        let mut excluded: i64 = 0;
         loop {
             // ResetPerTupleExprContext(estate);
             backend_executor_execUtils::ResetPerTupleExprContext(estate);
@@ -1210,6 +1261,13 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 if let Some(c) = state.cstate.escontext.as_mut() {
                     c.reset_error_occurred();
                 }
+
+                // Report that this tuple was skipped by the ON_ERROR clause
+                // (copyfrom.c:1164).
+                backend_commands_copyfrom_seams::pgstat_progress_update_param::call(
+                    PROGRESS_COPY_TUPLES_SKIPPED,
+                    state.cstate.num_errors,
+                )?;
 
                 if state.cstate.opts.reject_limit > 0
                     && state.cstate.num_errors > state.cstate.opts.reject_limit
@@ -1249,6 +1307,13 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 if !backend_executor_execExpr_seams::exec_qual::call(
                     qualexpr, econtext, estate,
                 )? {
+                    // Report that this tuple was filtered out by the WHERE
+                    // clause (copyfrom.c:1199).
+                    excluded += 1;
+                    backend_commands_copyfrom_seams::pgstat_progress_update_param::call(
+                        PROGRESS_COPY_TUPLES_EXCLUDED,
+                        excluded,
+                    )?;
                     continue;
                 }
             }
@@ -1449,7 +1514,35 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 )?;
             }
 
+            // We count only tuples not suppressed by a BEFORE INSERT trigger
+            // or FDW; update progress of the COPY command as well
+            // (copyfrom.c:1455).
             processed += 1;
+            backend_commands_copyfrom_seams::pgstat_progress_update_param::call(
+                PROGRESS_COPY_TUPLES_PROCESSED,
+                processed as i64,
+            )?;
+        }
+
+        // copyfrom.c:1470-1477: report the count of rows skipped under ON_ERROR
+        // when any soft errors occurred and the verbosity is at least DEFAULT
+        // (not SILENT). This must fire BEFORE the AFTER STATEMENT triggers
+        // (copyfrom.c:1485) so a statement-level trigger reading
+        // pg_stat_progress_copy sees the NOTICE precede its own output.
+        if state.cstate.opts.on_error != CopyOnErrorChoice::COPY_ON_ERROR_STOP
+            && state.cstate.num_errors > 0
+            && state.cstate.opts.log_verbosity
+                != CopyLogVerbosityChoice::COPY_LOG_VERBOSITY_SILENT
+        {
+            let n = state.cstate.num_errors;
+            let msg = if n == 1 {
+                format!("{n} row was skipped due to data type incompatibility")
+            } else {
+                format!("{n} rows were skipped due to data type incompatibility")
+            };
+            ereport(types_error::NOTICE)
+                .errmsg(msg)
+                .finish(here("CopyFrom"))?;
         }
 
         // FreeBulkInsertState(bistate).
@@ -1490,23 +1583,6 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
 
         processed
     };
-
-    // copyfrom.c:1470-1477: report the count of rows skipped under ON_ERROR when
-    // any soft errors occurred and the verbosity is at least DEFAULT (not SILENT).
-    if state.cstate.opts.on_error != CopyOnErrorChoice::COPY_ON_ERROR_STOP
-        && state.cstate.num_errors > 0
-        && state.cstate.opts.log_verbosity != CopyLogVerbosityChoice::COPY_LOG_VERBOSITY_SILENT
-    {
-        let n = state.cstate.num_errors;
-        let msg = if n == 1 {
-            format!("{n} row was skipped due to data type incompatibility")
-        } else {
-            format!("{n} rows were skipped due to data type incompatibility")
-        };
-        ereport(types_error::NOTICE)
-            .errmsg(msg)
-            .finish(here("CopyFrom"))?;
-    }
 
     // FreeExecutorState(estate);
     backend_executor_execUtils::free_executor_state_in(estate_owned)?;
