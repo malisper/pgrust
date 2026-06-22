@@ -1376,7 +1376,7 @@ pub(crate) fn exec_eval_cleanup(estate: &mut PLpgSQL_execstate) {
 /// `plpgsql_pre_column_ref` walks the live `expr->ns` via `plpgsql_ns_lookup` on
 /// demand; the owned parser hook reads a pre-resolved map instead.)
 fn build_plpgsql_parse_state(
-    estate: &PLpgSQL_execstate,
+    estate: &mut PLpgSQL_execstate,
     expr: &types_plpgsql::PLpgSQL_expr,
     input_collation: Oid,
 ) -> types_error::PgResult<types_nodes::parsestmt::PlpgsqlExprParseState> {
@@ -1449,6 +1449,25 @@ fn build_plpgsql_parse_state(
                     continue;
                 }
                 let rec_name = ns.name.to_ascii_lowercase();
+                // C's `make_datum_param` resolves a RECFIELD's type by first
+                // calling `instantiate_empty_record_variable` on an unassigned
+                // record that has a named composite type, so its declared
+                // rowtype's tupdesc — and thus its fields' types — become known.
+                // Mirror that: give a not-yet-assigned, concretely-composite-typed
+                // record an empty expanded header here, before resolving its
+                // fields. A RECORD-typed (rectypeid == RECORDOID) unassigned
+                // record stays uninstantiated (its field types are genuinely
+                // indeterminate until first assignment), so skip it silently —
+                // the C error only fires when such a field is actually used.
+                let needs_instantiate = match &estate.datums[rec_dno as usize] {
+                    PLpgSQL_datum::Rec(rec) => {
+                        rec.erh.is_none() && rec.rectypeid != RECORDOID
+                    }
+                    _ => false,
+                };
+                if needs_instantiate {
+                    trigger::instantiate_empty_record_variable_impl(estate, rec_dno)?;
+                }
                 let handle = match &estate.datums[rec_dno as usize] {
                     PLpgSQL_datum::Rec(rec) => rec.erh.as_ref().map(|h| h.0).unwrap_or(0),
                     _ => 0,
@@ -1466,32 +1485,50 @@ fn build_plpgsql_parse_state(
                     pending_keys.push((rec_name.clone(), info));
                 }
                 // Field references (`rec.field`) — each RECFIELD child datum.
-                for d in estate.datums.iter() {
-                    if let PLpgSQL_datum::Recfield(rf) = d {
-                        if rf.recparentno != rec_dno {
-                            continue;
+                // Collect the field (dno, name) pairs first so the immutable
+                // `estate.datums` borrow ends before we resolve types (which may
+                // mutably re-borrow estate via the erh side-table).
+                let rec_fields: std::vec::Vec<(int32, std::string::String)> = estate
+                    .datums
+                    .iter()
+                    .filter_map(|d| match d {
+                        PLpgSQL_datum::Recfield(rf) if rf.recparentno == rec_dno => {
+                            Some((rf.dno, rf.fieldname.clone()))
                         }
-                        let key = format!("{}.{}", rec_name, rf.fieldname.to_ascii_lowercase());
-                        if names.contains_key(&key) {
-                            continue;
-                        }
-                        let finfo = if handle != 0 {
-                            resolve_recfield_finfo(handle, &rf.fieldname)?
-                        } else {
-                            None
-                        };
-                        // When the field type cannot be resolved (no live header
-                        // or absent field), fall back to the compiled finfo / a
-                        // text-ish default so the Param still binds; the runtime
-                        // fetch reads the real value.
-                        let (typeid, typmod, collation) = match finfo {
-                            Some(fi) => (fi.ftypeid, fi.ftypmod, fi.fcollation),
-                            None => (rf.finfo.ftypeid, rf.finfo.ftypmod, rf.finfo.fcollation),
-                        };
-                        let info = PlpgsqlParamInfo { dno: rf.dno, typeid, typmod, collation };
-                        names.insert(key.clone(), info.clone());
-                        pending_keys.push((key, info));
+                        _ => None,
+                    })
+                    .collect();
+                for (rf_dno, fieldname) in rec_fields {
+                    let key = format!("{}.{}", rec_name, fieldname.to_ascii_lowercase());
+                    if names.contains_key(&key) {
+                        continue;
                     }
+                    let finfo = if handle != 0 {
+                        resolve_recfield_finfo(handle, &fieldname)?
+                    } else {
+                        None
+                    };
+                    // When the field type cannot be resolved (handle == 0 means an
+                    // unassigned RECORD variable, whose field types are genuinely
+                    // indeterminate; or an absent field), fall back to the compiled
+                    // finfo so the Param still binds. The runtime fetch / assign
+                    // path raises the proper "record is not assigned yet" error if
+                    // such a field is actually used. (We can't error eagerly here:
+                    // the namespace registers *every* field of every record, not
+                    // just the ones this expression references.)
+                    let (typeid, typmod, collation) = match finfo {
+                        Some(fi) => (fi.ftypeid, fi.ftypmod, fi.fcollation),
+                        None => {
+                            let rf_finfo = match &estate.datums[rf_dno as usize] {
+                                PLpgSQL_datum::Recfield(rf) => rf.finfo.clone(),
+                                _ => Default::default(),
+                            };
+                            (rf_finfo.ftypeid, rf_finfo.ftypmod, rf_finfo.fcollation)
+                        }
+                    };
+                    let info = PlpgsqlParamInfo { dno: rf_dno, typeid, typmod, collation };
+                    names.insert(key.clone(), info.clone());
+                    pending_keys.push((key, info));
                 }
             }
             types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_LABEL => {
@@ -2219,25 +2256,28 @@ fn exec_assign_value_byref_impl(
                 (rf.recparentno, rf.fieldname.clone())
             };
 
-            // Resolve the parent record's live expanded header.
+            // Resolve the parent record's live expanded header. C's
+            // `exec_assign_value` DTYPE_RECFIELD calls
+            // `instantiate_empty_record_variable` when the parent record has no
+            // live header, giving a named-composite-typed record an empty
+            // expanded record of its declared type (a row of NULLs) so the field
+            // assignment has somewhere to land. A RECORD-typed unassigned record
+            // errors there with "record is not assigned yet".
+            {
+                let needs_instantiate = match &estate.datums[recparentno as usize] {
+                    PLpgSQL_datum::Rec(rec) => rec.erh.is_none(),
+                    _ => panic!("RECFIELD parent is not a REC datum"),
+                };
+                if needs_instantiate {
+                    trigger::instantiate_empty_record_variable_impl(estate, recparentno)?;
+                }
+            }
             let handle = {
                 let PLpgSQL_datum::Rec(rec) = &estate.datums[recparentno as usize] else {
                     panic!("RECFIELD parent is not a REC datum");
                 };
                 rec.erh.as_ref().map(|h| h.0).unwrap_or(0)
             };
-            if handle == 0 {
-                return Err(
-                    types_error::PgError::error(format!(
-                        "record \"{}\" is not assigned yet",
-                        record_name_for(estate, recparentno)
-                    ))
-                    .with_detail(
-                        "The tuple structure of a not-yet-assigned record is indeterminate."
-                            .to_string(),
-                    ),
-                );
-            }
 
             // Resolve the field by NAME against the live tupdesc.
             let Some(finfo) = resolve_recfield_finfo(handle, &fieldname)? else {

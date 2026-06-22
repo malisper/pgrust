@@ -432,6 +432,59 @@ pub fn exec_move_row_into_record_impl(
     Ok(())
 }
 
+/// `instantiate_empty_record_variable(estate, rec)` (pl_exec.c:8533) — give a
+/// not-yet-assigned record variable an empty expanded record of its declared
+/// composite type, so its tupdesc (and hence its fields' types) become known.
+///
+/// C errors out if the record has no named composite type
+/// (`rec->rectypeid == RECORDOID`), because the structure of an unassigned
+/// RECORD variable is indeterminate. For a record declared with a concrete
+/// composite type (e.g. `r avg_state`), it builds an expanded record from that
+/// type via `make_expanded_record_from_typeid` and installs it as the live
+/// header — the record then reads as a row of NULLs and its fields resolve.
+///
+/// Returns `Ok(())` having installed the header (or having left an already-live
+/// header untouched); errors with the C "record is not assigned yet" message
+/// for a RECORD-typed variable.
+pub fn instantiate_empty_record_variable_impl(
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+) -> types_error::PgResult<()> {
+    let (already_live, rectypeid, refname) = match &estate.datums[target_dno as usize] {
+        PLpgSQL_datum::Rec(rec) => (
+            rec.erh.is_some(),
+            rec.rectypeid,
+            rec.refname.clone(),
+        ),
+        _ => panic!("instantiate_empty_record_variable: datum {target_dno} is not a REC"),
+    };
+    if already_live {
+        return Ok(());
+    }
+
+    // C: if (rec->rectypeid == RECORDOID) ereport(ERROR, errcode object_not_in_
+    // prerequisite_state, "record \"%s\" is not assigned yet", ...).
+    if rectypeid == RECORDOID {
+        return Err(types_error::PgError::error(format!(
+            "record \"{refname}\" is not assigned yet"
+        ))
+        .with_detail(
+            "The tuple structure of a not-yet-assigned record is indeterminate.".to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
+    }
+
+    let ctx = Box::new(MemoryContext::new("PL/pgSQL expanded record"));
+    let header: ExpandedRecordHeader<'static> = {
+        let mcx: Mcx<'static> =
+            unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
+        er::make_expanded_record_from_typeid(mcx, rectypeid, -1)?
+    };
+    let handle = ErhHandle(crate::erh_table::register(ctx, header));
+    set_rec_erh(estate, target_dno, Some(handle));
+    Ok(())
+}
+
 /// Set (or clear) a REC datum's expanded-header handle.
 fn set_rec_erh(estate: &mut PLpgSQL_execstate, dno: int32, handle: Option<ErhHandle>) {
     match &mut estate.datums[dno as usize] {
