@@ -6380,13 +6380,22 @@ fn transform_json_behavior<'mcx>(
                     location,
                 )?;
                 let Some(c) = coerced else {
-                    return Err(ereport(ERROR)
+                    let mut builder = ereport(ERROR)
                         .errcode(ERRCODE_CANNOT_COERCE)
                         .errmsg(alloc::format!(
                             "cannot cast behavior expression of type {} to {}",
                             format_type_be(etype).unwrap_or_else(|_| String::from("?")),
                             format_type_be(ret_typid).unwrap_or_else(|_| String::from("?"))
-                        ))
+                        ));
+                    // C: provide a HINT when the expression comes from a DEFAULT
+                    // clause.
+                    if btype == JsonBehaviorType::JSON_BEHAVIOR_DEFAULT {
+                        builder = builder.errhint(alloc::format!(
+                            "You will need to explicitly cast the expression to type {}.",
+                            format_type_be(ret_typid).unwrap_or_else(|_| String::from("?"))
+                        ));
+                    }
+                    return Err(builder
                         .errposition(parser_errposition(pstate, eloc))
                         .into_error());
                 };

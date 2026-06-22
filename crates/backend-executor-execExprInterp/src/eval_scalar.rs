@@ -1272,8 +1272,12 @@ pub fn ExecEvalConstraintNotNull<'mcx>(
     // .escontext is a parked opaque address (the soft-error sink is not threaded
     // here yet); NULL (0) is the hard-throw case, matching the common path.
     let _ = estate;
-    let resulttype = match &step_data(state, op) {
-        ExprEvalStepData::DomainCheck { resulttype, .. } => *resulttype,
+    let (resulttype, escontext_id) = match &step_data(state, op) {
+        ExprEvalStepData::DomainCheck {
+            resulttype,
+            escontext,
+            ..
+        } => (*resulttype, *escontext),
         _ => unreachable!("ExecEvalConstraintNotNull: step is not an EEOP_DOMAIN_NOTNULL"),
     };
 
@@ -1290,11 +1294,23 @@ pub fn ExecEvalConstraintNotNull<'mcx>(
         // errmsg uses format_type_be, not the bare OID).
         let typename =
             backend_utils_adt_format_type_seams::format_type_be_owned::call(resulttype)?;
-        return Err(PgError::error(format!(
+        let err = PgError::error(format!(
             "domain {} does not allow null values",
             typename
         ))
-        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION));
+        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION);
+        // C: `errsave((Node *) op->d.domaincheck.escontext, ...)`. Soft-fail
+        // into a JsonExpr behavior coercion's escontext when present.
+        if let Some(id) = escontext_id {
+            let js = &mut state.json_states.states.as_mut().unwrap()[id.0 as usize];
+            if js.escontext.details_wanted() {
+                js.escontext.save(err);
+            } else {
+                js.escontext.mark_error_occurred();
+            }
+            return Ok(());
+        }
+        return Err(err);
     }
     Ok(())
 }
@@ -1322,12 +1338,12 @@ pub fn ExecEvalConstraintCheck<'mcx>(
     // and format_type_be is not a dep, so the type name is rendered from the
     // OID; the constraint-violation behavior is faithful.
     let _ = estate;
-    let (checkvalue_id, resulttype, constraintname) = match &step_data(state, op) {
+    let (checkvalue_id, resulttype, constraintname, escontext_id) = match &step_data(state, op) {
         ExprEvalStepData::DomainCheck {
             checkvalue,
             resulttype,
             constraintname,
-            ..
+            escontext,
         } => (
             *checkvalue,
             *resulttype,
@@ -1335,6 +1351,7 @@ pub fn ExecEvalConstraintCheck<'mcx>(
                 .as_ref()
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
+            *escontext,
         ),
         _ => unreachable!("ExecEvalConstraintCheck: step is not an EEOP_DOMAIN_CHECK"),
     };
@@ -1349,11 +1366,25 @@ pub fn ExecEvalConstraintCheck<'mcx>(
         // errmsg uses format_type_be, not the bare OID).
         let typename =
             backend_utils_adt_format_type_seams::format_type_be_owned::call(resulttype)?;
-        return Err(PgError::error(format!(
+        let err = PgError::error(format!(
             "value for domain {} violates check constraint \"{}\"",
             typename, constraintname
         ))
-        .with_sqlstate(ERRCODE_CHECK_VIOLATION));
+        .with_sqlstate(ERRCODE_CHECK_VIOLATION);
+        // C: `errsave((Node *) op->d.domaincheck.escontext, ...)`. With a soft
+        // sink (a JsonExpr ON ERROR / ON EMPTY behavior coercion), record the
+        // error into the JsonExprState's escontext and continue;
+        // ExecEvalJsonCoercionFinish rethrows it wrapped. Without a sink, throw.
+        if let Some(id) = escontext_id {
+            let js = &mut state.json_states.states.as_mut().unwrap()[id.0 as usize];
+            if js.escontext.details_wanted() {
+                js.escontext.save(err);
+            } else {
+                js.escontext.mark_error_occurred();
+            }
+            return Ok(());
+        }
+        return Err(err);
     }
     Ok(())
 }

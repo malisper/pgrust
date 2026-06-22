@@ -1140,9 +1140,14 @@ pub enum ExprEvalStepData<'mcx> {
         checkvalue: ResultCellId,
         /// OID of domain type
         resulttype: Oid,
-        /// `ErrorSaveContext *escontext` — parked until the soft-error sink is
-        /// threaded here (opaque address).
-        escontext: usize,
+        /// `ErrorSaveContext *escontext` — the soft-error sink (C:
+        /// `op->d.domaincheck.escontext = state->escontext`). When a
+        /// `CoerceToDomain` is compiled inside a `JsonExpr` ON ERROR / ON EMPTY
+        /// behavior expression, `state.escontext` is `Some(jsestate)`, so a
+        /// CHECK/NOTNULL violation is recorded softly into that
+        /// [`JsonExprState`]'s escontext and `ExecEvalJsonCoercionFinish` wraps
+        /// it; `None` is the C `NULL` escontext = throw hard.
+        escontext: Option<JsonExprStateId>,
     },
     /// `hashdatum_initvalue` — for EEOP_HASHDATUM_SET_INITVAL.
     HashDatumInitValue { init_value: Datum<'mcx> },

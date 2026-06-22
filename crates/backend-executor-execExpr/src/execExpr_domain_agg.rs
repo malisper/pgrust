@@ -197,11 +197,11 @@ pub fn exec_init_coerce_to_domain<'mcx>(
         constraintname: None,
         checkvalue: STATE_RESULT_CELL, // "NULL" sentinel; replaced on first CHECK
         resulttype: ctest_resulttype,
-        // C: scratch->d.domaincheck.escontext = state->escontext. DomainCheck's
-        // escontext is still the parked-opaque sink (its EEOP_DOMAIN_CHECK
-        // interpreter path keeps the sink unthreaded); the JSON soft-error sink
-        // now flows via state.escontext: Option<JsonExprStateId>, not a usize.
-        escontext: 0,
+        // C: scratch->d.domaincheck.escontext = state->escontext. When this
+        // CoerceToDomain is compiled inside a JsonExpr ON ERROR / ON EMPTY
+        // behavior expression, state.escontext is Some(jsestate), so a domain
+        // CHECK violation steers ON ERROR softly instead of throwing hard.
+        escontext: state.escontext,
     };
 
     // ExecInitExprRec(ctest->arg, state, resv, resnull); — evaluate the argument
