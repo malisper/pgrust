@@ -659,3 +659,25 @@ seam_core::seam!(
         hasperiod: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RI_PartitionRemove_Check(&trig, fk_rel, pk_rel)` (ri_triggers.c), as
+    /// invoked from `ATDetachCheckNoForeignKeyRefs` (tablecmds.c) during DETACH
+    /// PARTITION. Verifies that detaching the partition `pk_rel` (the referenced
+    /// side of a parented FK identified by `constraint_oid`) does not orphan any
+    /// row in the referencing table `fk_rel`. Owned by the trigger manager
+    /// because it installs the current-trigger side-channel (a synthetic
+    /// `Trigger` carrying the constraint identity — C's stack `Trigger trig =
+    /// {0}`) the RI proc reads; the actual partition-overlap query lives in
+    /// `backend-utils-adt-ri-triggers` and is reached via its own seam. On any
+    /// referencing row that would be orphaned, raises the standard FK-violation
+    /// `ereport(ERROR)` (`Err`). **Installed by `backend-commands-trigger`.**
+    pub fn detach_partition_remove_check<'mcx>(
+        mcx: Mcx<'mcx>,
+        conname: &str,
+        fk_rel: &types_rel::Relation<'mcx>,
+        partition: &types_rel::Relation<'mcx>,
+        pkind_oid: Oid,
+        constraint_oid: Oid,
+    ) -> PgResult<()>
+);

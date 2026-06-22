@@ -1766,6 +1766,176 @@ fn GetForeignKeyActionTriggers<'mcx>(
     Ok((delete_trigger_oid, update_trigger_oid))
 }
 
+// ===========================================================================
+// DetachPartitionForeignKeys (the inherited-FK loop of DetachPartitionFinalize)
+// ===========================================================================
+
+/// The inherited-foreign-key loop of `DetachPartitionFinalize` (tablecmds.c:21118
+/// onward): for each FK of the (now-detaching) `part_rel` that is an inherited
+/// child of the partitioned parent's constraint (and whose parent isn't itself
+/// in the list), de-parent the partition's constraint + its check triggers and
+/// re-create the action triggers on the referenced table via
+/// `addFkRecurseReferenced`. This is the symmetric counterpart of
+/// `CloneFkReferenced` (which links them up on ATTACH).
+pub(crate) fn DetachPartitionForeignKeys<'mcx>(
+    mcx: Mcx<'mcx>,
+    part_rel: &Relation<'mcx>,
+) -> PgResult<()> {
+    // fks = copyObject(RelationGetFKeyList(partRel));
+    let fks = backend_utils_cache_relcache::derived::RelationGetFKeyList(part_rel.rd_id)?;
+    if fks.is_empty() {
+        return Ok(());
+    }
+
+    let trigrel = backend_access_table_table_seams::table_open::call(
+        mcx,
+        TriggerRelationId,
+        RowExclusiveLock,
+    )?;
+
+    // Collect all the constraint OIDs first; we skip in the loop below those
+    // constraints whose parents are listed here.
+    let fkoids: Vec<Oid> = fks.iter().map(|fk| fk.conoid).collect();
+
+    for fk in fks.iter() {
+        let row = backend_utils_cache_syscache_seams::search_constraint_form_by_oid::call(
+            fk.conoid,
+        )?
+        .ok_or_else(|| {
+            backend_utils_error::ereport(ERROR)
+                .errmsg_internal(format!("cache lookup failed for constraint {}", fk.conoid))
+                .into_error()
+        })?;
+        let conform = row.form;
+
+        // Consider only inherited foreign keys, and only if their parents aren't
+        // in the list.
+        if conform.contype != CONSTRAINT_FOREIGN
+            || !OidIsValid(conform.conparentid)
+            || fkoids.contains(&conform.conparentid)
+        {
+            continue;
+        }
+
+        // The constraint on this table must be marked no longer a child of the
+        // parent's constraint, as do its check triggers.
+        backend_catalog_pg_constraint::ConstraintSetParentConstraint(
+            mcx,
+            fk.conoid,
+            InvalidOid,
+            InvalidOid,
+        )?;
+
+        // Look up the partition's "check" triggers for the ENFORCED constraint
+        // being detached and detach them from the parent triggers. NOT ENFORCED
+        // constraints do not have these triggers.
+        if fk.conenforced {
+            let (insert_trigger_oid, update_trigger_oid) = GetForeignKeyCheckTriggers(
+                mcx,
+                &trigrel,
+                fk.conoid,
+                fk.confrelid,
+                fk.conrelid,
+            )?;
+            debug_assert!(OidIsValid(insert_trigger_oid));
+            backend_commands_trigger::set_parent::TriggerSetParentTrigger(
+                mcx,
+                &trigrel,
+                insert_trigger_oid,
+                InvalidOid,
+                part_rel.rd_id,
+            )?;
+            debug_assert!(OidIsValid(update_trigger_oid));
+            backend_commands_trigger::set_parent::TriggerSetParentTrigger(
+                mcx,
+                &trigrel,
+                update_trigger_oid,
+                InvalidOid,
+                part_rel.rd_id,
+            )?;
+        }
+
+        // Lastly, create the action triggers on the referenced table, using
+        // addFkRecurseReferenced (which recurses to the referenced table's
+        // partitions if it is partitioned). No addFkConstraint() is needed
+        // because the pg_constraint row already exists.
+        {
+            let tuple = backend_utils_cache_syscache_seams::search_constraint_tuple_by_oid::call(
+                mcx, fk.conoid,
+            )?
+            .ok_or_else(|| {
+                backend_utils_error::ereport(ERROR)
+                    .errmsg_internal(format!("cache lookup failed for constraint {}", fk.conoid))
+                    .into_error()
+            })?;
+            let arrays = backend_catalog_pg_constraint::DeconstructFkConstraintRow(
+                mcx, &tuple, true, true, true, true,
+            )?;
+            let numfks = arrays.numfks as usize;
+            let conkey = &arrays.conkey;
+            let confkey = &arrays.confkey;
+            let conpfeqop = arrays.pf_eq_oprs.as_deref().unwrap_or(&[]);
+            let conppeqop = arrays.pp_eq_oprs.as_deref().unwrap_or(&[]);
+            let conffeqop = arrays.ff_eq_oprs.as_deref().unwrap_or(&[]);
+            let numfkdelsetcols = arrays.num_fk_del_set_cols as usize;
+            let confdelsetcols = arrays.fk_del_set_cols.as_deref().unwrap_or(&[]);
+
+            // Synthetic Constraint node: contype=FOREIGN, skip_validation=true,
+            // fk_attrs = the partition's column names (for the constraint name).
+            let mut fkconstraint = crate::mergeattr::empty_constraint(mcx, ConstrType::CONSTR_FOREIGN)?;
+            fkconstraint.conname = Some(PgString::from_str_in(conform.conname_str(), mcx)?);
+            fkconstraint.deferrable = conform.condeferrable;
+            fkconstraint.initdeferred = conform.condeferred;
+            fkconstraint.is_enforced = conform.conenforced;
+            fkconstraint.skip_validation = true;
+            fkconstraint.initially_valid = conform.convalidated;
+            fkconstraint.pktable = None;
+            fkconstraint.fk_matchtype = conform.confmatchtype;
+            fkconstraint.fk_upd_action = conform.confupdtype;
+            fkconstraint.fk_del_action = conform.confdeltype;
+            fkconstraint.old_pktable_oid = InvalidOid;
+            fkconstraint.location = -1;
+            for i in 0..numfks {
+                let att = part_rel.rd_att.attr((conkey[i] - 1) as usize);
+                let name = String::from_utf8_lossy(att.attname.name_str()).into_owned();
+                fkconstraint.fk_attrs.push(make_string(mcx, &name)?);
+            }
+
+            let refd_rel = backend_access_table_table_seams::table_open::call(
+                mcx,
+                fk.confrelid,
+                ShareRowExclusiveLock,
+            )?;
+
+            addFkRecurseReferenced(
+                mcx,
+                &fkconstraint,
+                part_rel,
+                &refd_rel,
+                conform.conindid,
+                fk.conoid,
+                numfks,
+                &confkey[..numfks],
+                &conkey[..numfks],
+                conpfeqop,
+                conppeqop,
+                conffeqop,
+                numfkdelsetcols,
+                confdelsetcols,
+                true,
+                InvalidOid,
+                InvalidOid,
+                conform.conperiod,
+            )?;
+
+            refd_rel.close(NoLock)?; // keep lock till end of xact
+        }
+    }
+
+    trigrel.close(RowExclusiveLock)?;
+    Ok(())
+}
+
 /// `GetForeignKeyCheckTriggers(trigrel, conoid, confrelid, conrelid, ...)`
 /// (tablecmds.c:12131) — the insert/update "check" triggers of the given
 /// constraint on the FK side.

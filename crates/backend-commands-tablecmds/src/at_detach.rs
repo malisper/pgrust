@@ -154,6 +154,18 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
     // constraints.
     RemoveInheritance(mcx, &partRel, rel, false)?;
 
+    // Ensure foreign keys still hold after this detach.
+    //
+    // C runs this with NO intervening CommandCounterIncrement after
+    // RemoveInheritance, so the pg_inherits row it just deleted is not yet
+    // command-visible: `RI_PartitionRemove_Check`'s `RelationGetPartitionQual`
+    // (→ get_partition_parent → pg_inherits scan) still finds the partition's
+    // parent and can build the partition-constraint WHERE clause. We must
+    // preserve that ordering — bumping the command counter here would expose the
+    // delete and make get_partition_parent fail with "could not find tuple for
+    // parent of relation".
+    ATDetachCheckNoForeignKeyRefs(mcx, &partRel)?;
+
     // Make RemoveInheritance's pg_attribute updates (the per-column attinhcount
     // decrements) visible before DetachPartitionFinalize's identity-drop loop
     // re-updates the same pg_attribute tuples via ATExecDropIdentity. Without
@@ -163,9 +175,6 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
     // serving the pre-decrement tuple version; our owned-snapshot model needs
     // the explicit command-counter bump to get the same effect.)
     backend_access_transam_xact::CommandCounterIncrement()?;
-
-    // Ensure foreign keys still hold after this detach.
-    ATDetachCheckNoForeignKeyRefs(mcx, &partRel)?;
 
     // Detaching the partition might involve TOAST table access, so ensure we
     // have a valid snapshot.
@@ -370,28 +379,140 @@ fn DisinheritAttributes<'mcx>(
 }
 
 // ===========================================================================
-// ATDetachCheckNoForeignKeyRefs (tablecmds.c)
+// GetParentedForeignKeyRefs (tablecmds.c:21942)
 // ===========================================================================
 
-/// `ATDetachCheckNoForeignKeyRefs(partition)` (tablecmds.c) — verify that
-/// detaching this partition does not leave a referencing table with rows whose
-/// FK now points at no partition. Unported; a genuine no-op when the partition
-/// is not referenced by any foreign key, a precise error otherwise.
+/// `GetParentedForeignKeyRefs(partition)` (tablecmds.c:21942) — collect the OIDs
+/// of all FK constraints that reference `partition` (i.e. `confrelid ==
+/// partition`) and that are themselves sub-constraints of a larger FK
+/// (`conparentid` valid). These are the constraints that must be re-checked /
+/// removed when the partition leaves the key space of a partitioned PK.
+fn GetParentedForeignKeyRefs<'mcx>(
+    mcx: Mcx<'mcx>,
+    partition: &Relation<'mcx>,
+) -> PgResult<Vec<Oid>> {
+    use types_catalog::pg_constraint as pc;
+
+    // If no indexes, or no columns are referenceable by FKs, avoid the scan.
+    let idxlist = backend_utils_cache_relcache::derived::RelationGetIndexList(partition.rd_id)?;
+    if idxlist.is_empty() {
+        return Ok(Vec::new());
+    }
+    let keyattrs = backend_utils_cache_relcache::derived::RelationGetIndexAttrBitmap(
+        partition.rd_id,
+        backend_utils_cache_relcache::derived::IndexAttrBitmapKind::Keys,
+    )?;
+    if keyattrs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Search for constraints referencing this table.
+    let pg_constraint = backend_access_table_table_seams::table_open::call(
+        mcx,
+        backend_catalog_objectaddress::consts::ConstraintRelationId,
+        types_storage::lock::AccessShareLock,
+    )?;
+
+    let mut key0 = types_scan::scankey::ScanKeyData::empty();
+    backend_access_common_scankey::ScanKeyInit(
+        &mut key0,
+        pc::Anum_pg_constraint_confrelid,
+        types_scan::scankey::BTEqualStrategyNumber,
+        types_core::fmgr::F_OIDEQ,
+        types_tuple::backend_access_common_heaptuple::Datum::from_oid(partition.rd_id),
+    )?;
+    let mut key1 = types_scan::scankey::ScanKeyData::empty();
+    backend_access_common_scankey::ScanKeyInit(
+        &mut key1,
+        pc::Anum_pg_constraint_contype,
+        types_scan::scankey::BTEqualStrategyNumber,
+        types_core::fmgr::F_CHAREQ,
+        types_tuple::backend_access_common_heaptuple::Datum::from_char(pc::CONSTRAINT_FOREIGN),
+    )?;
+    let keys = [key0, key1];
+
+    // XXX This is a seqscan, as we don't have a usable index (InvalidOid +
+    // index_ok=false ⇒ heap scan, as C's genam does for indexId == InvalidOid).
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &pg_constraint,
+        types_core::primitive::InvalidOid,
+        false,
+        None,
+        &keys,
+    )?;
+
+    let mut constraints: Vec<Oid> = Vec::new();
+    while let Some(tup) =
+        backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+    {
+        let cols = backend_access_common_heaptuple::heap_deform_tuple(
+            mcx,
+            &tup.tuple,
+            &pg_constraint.rd_att,
+            &tup.data,
+        )?;
+        let col = |attno: i16| cols[attno as usize - 1].0.clone();
+        let conparentid = col(pc::Anum_pg_constraint_conparentid).as_oid();
+        let conoid = col(pc::Anum_pg_constraint_oid).as_oid();
+
+        // We only need to process constraints that are part of larger ones.
+        if !OidIsValid(conparentid) {
+            continue;
+        }
+        constraints.push(conoid);
+    }
+    drop(scan);
+    pg_constraint.close(types_storage::lock::AccessShareLock)?;
+
+    Ok(constraints)
+}
+
+// ===========================================================================
+// ATDetachCheckNoForeignKeyRefs (tablecmds.c:21995)
+// ===========================================================================
+
+/// `ATDetachCheckNoForeignKeyRefs(partition)` (tablecmds.c:21995) — during
+/// DETACH PARTITION, verify that any foreign keys pointing to the partitioned
+/// table (via a parented FK whose child references this partition) would not
+/// become invalid; an error is raised if any referenced values exist.
 fn ATDetachCheckNoForeignKeyRefs<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     partition: &Relation<'mcx>,
 ) -> PgResult<()> {
-    let has_fkeys = backend_utils_cache_relcache::derived::relation_has_foreign_keys(partition.rd_id)?;
-    if has_fkeys {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(
-                "DETACH PARTITION of a partition involved in foreign keys is not yet supported \
-                 (ATDetachCheckNoForeignKeyRefs / inherited-FK detach unported)"
-                    .to_string(),
-            )
-            .into_error());
+    let constraints = GetParentedForeignKeyRefs(mcx, partition)?;
+
+    for &constr_oid in constraints.iter() {
+        let row = backend_utils_cache_syscache_seams::search_constraint_form_by_oid::call(
+            constr_oid,
+        )?
+        .ok_or_else(|| elog(format!("cache lookup failed for constraint {constr_oid}")))?;
+        let constr_form = row.form;
+
+        debug_assert!(OidIsValid(constr_form.conparentid));
+        debug_assert!(constr_form.confrelid == partition.rd_id);
+
+        // Prevent data changes into the referencing table until commit.
+        let rel = backend_access_table_table_seams::table_open::call(
+            mcx,
+            constr_form.conrelid,
+            types_storage::lock::ShareLock,
+        )?;
+
+        // Run RI_PartitionRemove_Check through the trigger manager, which
+        // installs the synthetic-trigger side-channel (C's stack
+        // `Trigger trig = {0}` with the constraint identity) the RI proc reads.
+        backend_commands_trigger_seams::detach_partition_remove_check::call(
+            mcx,
+            constr_form.conname_str(),
+            &rel,
+            partition,
+            constr_form.conindid,
+            constr_form.oid,
+        )?;
+
+        rel.close(NoLock)?;
     }
+
     Ok(())
 }
 
@@ -420,24 +541,38 @@ fn DetachPartitionFinalize<'mcx>(
     // Drop any triggers that were cloned on creation/attach.
     DropClonedTriggersFromPartition(mcx, partRel.rd_id)?;
 
-    // Detach inherited foreign keys. When the partition carries no foreign keys
-    // (the common case) there is nothing to do. When it has some, the
-    // inherited-FK detach rework (RelationGetFKeyList + addFkRecurseReferenced)
-    // is unported.
-    if backend_utils_cache_relcache::derived::relation_has_foreign_keys(partRel.rd_id)? {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(
-                "DETACH PARTITION of a partition with inherited foreign keys is not yet supported \
-                 (the addFkRecurseReferenced action-trigger rework is unported)"
-                    .to_string(),
-            )
-            .into_error());
-    }
+    // Detach any foreign keys that are inherited. This includes creating
+    // additional action triggers on the referenced tables (addFkRecurseReferenced).
+    crate::at_fk::DetachPartitionForeignKeys(mcx, partRel)?;
 
-    // GetParentedForeignKeyRefs(partRel): sub-constraints on the referenced side.
-    // Unported; the FK-presence check above already gates the only way a
-    // partition acquires such refs, so this is a no-op here.
+    // Any sub-constraints that are in the referenced-side of a larger constraint
+    // have to be removed. This partition is no longer part of the key space of
+    // the constraint.
+    for constr_oid in GetParentedForeignKeyRefs(mcx, partRel)? {
+        backend_catalog_pg_constraint::ConstraintSetParentConstraint(
+            mcx,
+            constr_oid,
+            types_core::primitive::InvalidOid,
+            types_core::primitive::InvalidOid,
+        )?;
+        backend_catalog_pg_depend_seams::deleteDependencyRecordsForClass::call(
+            backend_catalog_objectaddress::consts::ConstraintRelationId,
+            constr_oid,
+            backend_catalog_objectaddress::consts::ConstraintRelationId,
+            types_catalog::catalog_dependency::DEPENDENCY_INTERNAL.as_char(),
+        )?;
+        backend_access_transam_xact::CommandCounterIncrement()?;
+
+        let constraint =
+            object_address_set(backend_catalog_objectaddress::consts::ConstraintRelationId, constr_oid);
+        backend_catalog_dependency_seams::perform_deletion::call(
+            constraint.classId,
+            constraint.objectId,
+            constraint.objectSubId,
+            types_nodes::parsenodes::DROP_RESTRICT,
+            0,
+        )?;
+    }
 
     // Now we can detach indexes (tablecmds.c:21309-21341). For each of the
     // partition's indexes that is a child of a partitioned index, set its parent

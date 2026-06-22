@@ -339,6 +339,12 @@ pub fn init_seams() {
     // the set-based initial check and the per-row check-on-insert trigger.
     backend_utils_adt_ri_triggers_seams::ri_initial_check::set(triggers::ri_initial_check);
     backend_utils_adt_ri_triggers_seams::ri_fkey_check_ins::set(triggers::ri_fkey_check_ins);
+    // DETACH PARTITION's referencing-row check (ATDetachCheckNoForeignKeyRefs),
+    // called by the trigger manager (which installs the synthetic-trigger
+    // side-channel) through `-seams` to avoid a dependency cycle.
+    backend_utils_adt_ri_triggers_seams::ri_partition_remove_check::set(
+        triggers::ri_partition_remove_check,
+    );
     // `AfterTriggerSaveEvent` (trigger manager) consults these through `-seams`
     // to skip queueing an FK-enforcement event it can prove will pass, exactly
     // as C's trigger.c does. They are not optimizations: without the skip, a

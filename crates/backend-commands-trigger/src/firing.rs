@@ -1132,6 +1132,59 @@ pub fn validate_foreign_key_constraint<'mcx>(
     Ok(())
 }
 
+/// `ATDetachCheckNoForeignKeyRefs`'s per-constraint leg (tablecmds.c): install
+/// the synthetic-trigger side-channel (C's stack `Trigger trig = {0}` with
+/// `tgname`/`tgconstrrelid = partition`/`tgconstrindid`/`tgconstraint` filled
+/// in) and run `RI_PartitionRemove_Check`. Lives with the trigger manager for
+/// the same reason as [`validate_foreign_key_constraint`]: the RI proc reads its
+/// `Trigger` off the current-trigger side-channel.
+pub fn detach_partition_remove_check<'mcx>(
+    mcx: Mcx<'mcx>,
+    conname: &str,
+    fk_rel: &types_rel::Relation<'mcx>,
+    partition: &types_rel::Relation<'mcx>,
+    pkind_oid: Oid,
+    constraint_oid: Oid,
+) -> PgResult<()> {
+    // Synthetic Trigger carrying the constraint identity; the partition is the
+    // referenced (PK) side, so its OID rides as tgconstrrelid.
+    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+        let boxed = trigger_box_clone(mcx, conname, partition.rd_id, pkind_oid, constraint_oid)?;
+        // SAFETY: allocated in `mcx`; borrowed only for this call's duration.
+        unsafe { core::mem::transmute(boxed) }
+    };
+
+    // tg_relation for the RI proc's relname/attr reads: the referencing
+    // relation, aliased (refcount bump) for the call's duration.
+    let tg_relation: types_rel::Relation<'static> = {
+        let aliased = fk_rel.alias();
+        // SAFETY: query-context lifetime extension, as in `validate_foreign_key_constraint`.
+        unsafe { core::mem::transmute(aliased) }
+    };
+
+    let trigdata = TriggerData {
+        type_: T_TriggerData,
+        tg_event: 0,
+        tg_relation: Some(tg_relation),
+        tg_trigtuple: None,
+        tg_newtuple: None,
+        tg_trigger: Some(trigger_box),
+        tg_trigslot: None,
+        tg_newslot: None,
+        tg_oldtable: None,
+        tg_newtable: None,
+        tg_updatedcols: None,
+    };
+    let _td_guard = CurrentTriggerGuard::install(trigdata);
+
+    backend_utils_adt_ri_triggers_seams::ri_partition_remove_check::call(
+        mcx,
+        types_ri_triggers::TriggerRef(crate::ri_accessors::CURRENT),
+        fk_rel,
+        partition,
+    )
+}
+
 /// Build the synthetic FK-validation `Trigger` (the C `Trigger trig = {0}` with
 /// the constraint-identity fields filled in), used per row in the
 /// fire-the-trigger fallback of [`validate_foreign_key_constraint`].
@@ -6037,6 +6090,11 @@ pub fn init_seams() {
     // FK phase-3 validation scan (validateForeignKeyConstraint), called from
     // ALTER TABLE ADD/ALTER CONSTRAINT through tablecmds.
     s::validate_foreign_key_constraint::set(validate_foreign_key_constraint);
+
+    // DETACH PARTITION referencing-row check (ATDetachCheckNoForeignKeyRefs),
+    // called from tablecmds; installs the synthetic-trigger side-channel the RI
+    // RI_PartitionRemove_Check proc reads.
+    s::detach_partition_remove_check::set(detach_partition_remove_check);
 
     // DDL name lookup (deferred catalog-read leg).
     s::get_trigger_oid::set(get_trigger_oid_impl);

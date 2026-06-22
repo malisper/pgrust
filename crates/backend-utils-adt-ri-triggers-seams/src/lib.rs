@@ -34,6 +34,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RI_PartitionRemove_Check(trigger, fk_rel, pk_rel)` (ri_triggers.c) —
+    /// during DETACH PARTITION, verify (via a set-based SPI query joining the
+    /// referencing table to the partition being detached and applying the
+    /// partition constraint) that no referencing row would be orphaned by the
+    /// detach. Raises the standard FK-violation `ereport(ERROR)` on a violation.
+    /// The `trigger` handle resolves off the current-trigger side-channel (its
+    /// `tgconstraint` identifies the FK, `tgconstrrelid` the partition).
+    /// **Installed by `backend-utils-adt-ri-triggers`.**
+    pub fn ri_partition_remove_check<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        trigger: types_ri_triggers::TriggerRef,
+        fk_rel: &types_rel::Relation<'mcx>,
+        pk_rel: &types_rel::Relation<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `RI_FKey_check_ins(fcinfo)` (ri_triggers.c) — the FK check-on-INSERT
     /// trigger, fired per row by the phase-3 validation scan as if the row had
     /// just been inserted. Raises the standard FK-violation error if the row's
