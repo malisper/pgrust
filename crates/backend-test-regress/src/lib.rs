@@ -530,11 +530,16 @@ fn fc_test_relpath(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         GetRelationPath, PROCNUMBER_CHARS, REL_PATH_STR_MAXLEN,
     };
 
-    let max_backends = backend_utils_init_small_seams::max_backends::call();
+    // C: regress.c uses the *compile-time* MAX_BACKENDS constant (postmaster.h
+    // / procnumber.h: `(1U << 18) - 1`), NOT the runtime GetMaxBackends() value.
+    // The whole point of the test is to assert the static relpath.h sizing
+    // constants (PROCNUMBER_CHARS / REL_PATH_STR_MAXLEN) stay in sync with that
+    // constant, so it must be the constant here too.
+    const MAX_BACKENDS: u32 = types_storage::storage::MAX_BACKENDS;
 
     // C: if ((int) ceil(log10(MAX_BACKENDS)) != PROCNUMBER_CHARS)
     //        elog(WARNING, "mismatch between MAX_BACKENDS and PROCNUMBER_CHARS");
-    if (max_backends as f64).log10().ceil() as i32 != PROCNUMBER_CHARS as i32 {
+    if (MAX_BACKENDS as f64).log10().ceil() as i32 != PROCNUMBER_CHARS as i32 {
         warn("mismatch between MAX_BACKENDS and PROCNUMBER_CHARS");
     }
 
@@ -544,7 +549,7 @@ fn fc_test_relpath(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         OID_MAX,
         OID_MAX,
         OID_MAX,
-        max_backends - 1,
+        (MAX_BACKENDS - 1) as i32,
         types_core::primitive::ForkNumber::INIT_FORKNUM,
     );
 
