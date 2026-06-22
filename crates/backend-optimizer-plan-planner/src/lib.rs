@@ -8874,6 +8874,21 @@ fn apply_scanjoin_target_to_paths<'mcx>(
         )?;
     }
 
+    // Consider generating Gather or Gather Merge paths (C:8060-8069). We must
+    // only do this if the relation is parallel safe, and we don't do it for
+    // child rels (IS_OTHER_REL) to avoid creating multiple Gather nodes within
+    // the same plan. This must happen after all paths have been generated and
+    // before set_cheapest, since one of the generated paths may turn out to be
+    // the cheapest one. This is the postponed gather-path generation for the
+    // topmost scan/join rel (set_rel_pathlist skips it for the topmost rel).
+    if root.rel(rel).consider_parallel
+        && root.rel(rel).reloptkind != types_pathnodes::RELOPT_OTHER_MEMBER_REL
+        && root.rel(rel).reloptkind != types_pathnodes::RELOPT_OTHER_JOINREL
+        && root.rel(rel).reloptkind != types_pathnodes::RELOPT_OTHER_UPPER_REL
+    {
+        backend_optimizer_path_allpaths::generate_useful_gather_paths(root, run, rel, false)?;
+    }
+
     // We may have added paths (replacing existing ones with projection paths),
     // so recompute the rel's cheapest-path info (C:8043). Without this, the
     // rel's cheapest_total_path still points at a path that is no longer in the
