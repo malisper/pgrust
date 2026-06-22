@@ -1347,6 +1347,17 @@ fn remove_self_join_rel<'mcx>(
     // Replace varno in all the query structures (except RangeTblRef).
     crate::change_relids::change_relids_in_query(run, root.parse, ctx)?;
 
+    // C's `simple_rte_array[rti]` aliases `parse->rtable` pointers, so the walk
+    // above is automatically reflected there. In this repo `simple_rte_array`
+    // holds *cloned* RTEs in a separate run store; re-apply the same relid
+    // substitution to those copies so a LATERAL subquery/function/values RTE that
+    // referenced the removed relation is rewritten before `set_subquery_pathlist`
+    // reads it to derive nestloop params (else: `non-LATERAL parameter required`).
+    {
+        let simple_rte_array = root.simple_rte_array.clone();
+        crate::change_relids::change_relids_in_simple_rte_array(run, &simple_rte_array, ctx);
+    }
+
     // Replace links in the planner info: full relid rename across SpecialJoinInfo
     // sets / semi_rhs_exprs, PlaceHolderVars, all EquivalenceClasses, the
     // attr_needed reset-to-relation-0 floor, and lateral_vars (subst > 0,
