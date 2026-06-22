@@ -120,11 +120,18 @@ pub fn call_support_rows(prosupport: Oid, funcid: Oid, node: &Expr) -> PgResult<
 pub const GENERATE_SERIES_INT4_SUPPORT: Oid = 3994;
 /// `generate_series_int8_support` is 3995.
 pub const GENERATE_SERIES_INT8_SUPPORT: Oid = 3995;
+/// `generate_series_timestamp_support` is 6354 (covers both the timestamp and
+/// timestamptz series, whose pg_proc rows share this prosupport).
+pub const GENERATE_SERIES_TIMESTAMP_SUPPORT: Oid = 6354;
 
 /// Register the built-in support-rows kernels in the dispatch table.
 pub fn register_builtin_support_rows() {
     register_support_rows(GENERATE_SERIES_INT4_SUPPORT, generate_series_int4_support_rows);
     register_support_rows(GENERATE_SERIES_INT8_SUPPORT, generate_series_int8_support_rows);
+    register_support_rows(
+        GENERATE_SERIES_TIMESTAMP_SUPPORT,
+        generate_series_timestamp_support_rows,
+    );
 }
 
 /// Read the `i64`-valued constant from a (const-folded) argument `Expr`. Returns
@@ -205,6 +212,99 @@ fn generate_series_support_rows(node: &Expr, is_int8: bool) -> PgResult<Option<f
     // This equation works for either sign of step.
     if step != 0.0 {
         Ok(Some(((finish - start + step) / step).floor()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// `DAYS_PER_MONTH` (datatype/timestamp.h).
+const DAYS_PER_MONTH: f64 = 30.0;
+/// `USECS_PER_DAY` (datatype/timestamp.h).
+const USECS_PER_DAY: f64 = 86_400_000_000.0;
+/// `TIMESTAMP_NOT_FINITE(t)` — `±infinity` are `PG_INT64_MIN`/`PG_INT64_MAX`.
+fn timestamp_not_finite(t: i64) -> bool {
+    t == i64::MIN || t == i64::MAX
+}
+
+/// `generate_series_timestamp_support`'s `SupportRequestRows` estimate
+/// (timestamp.c:6849). Shared by the timestamp and timestamptz series (same
+/// prosupport). The C path is `start = arg1; finish = arg2; step = arg3;` then,
+/// for finite endpoints with no `finish - start` overflow, `diff =
+/// timestamp_mi(finish, start)` and `rows = floor(ddiff / dstep + 1.0)` where
+/// the `INTERVAL_TO_MICROSECONDS` of `diff`/`step` is `(month*30 + day)*USECS_PER_DAY
+/// + time`. `timestamp_mi` produces an interval with `month = 0`, `time =
+/// finish - start`, then `interval_justify_hours` rolls whole days from `time`
+/// into `day`; since `day*USECS_PER_DAY + time` reconstructs the same total, the
+/// diff's microsecond value is exactly `finish - start`. So we compute it
+/// directly, skipping the justify round-trip.
+fn generate_series_timestamp_support_rows(_funcid: Oid, node: &Expr) -> PgResult<Option<f64>> {
+    // if (is_funcclause(req->node)) — be paranoid.
+    let Some(fexpr) = node.as_funcexpr() else {
+        return Ok(None);
+    };
+    if fexpr.args.len() < 3 {
+        return Ok(None);
+    }
+
+    // C: arg{1,2,3} = estimate_expression_value(req->root, l{initial,second,third}(args)).
+    // The argument Exprs may still be unfolded casts (e.g. `TIMESTAMPTZ '...'`
+    // is a CoerceViaIO/FuncExpr until folded), so run them through
+    // estimate_expression_value — exactly as the numeric series support does —
+    // before classifying them as Const. The fold runs in a transient context.
+    let cx = mcx::MemoryContext::new("generate_series_timestamp_support rows");
+    let mcx = cx.mcx();
+    let arg1 = crate::fold::estimate_expression_value(mcx, fexpr.args[0].clone_in(mcx)?)?;
+    let arg2 = crate::fold::estimate_expression_value(mcx, fexpr.args[1].clone_in(mcx)?)?;
+    let arg3 = crate::fold::estimate_expression_value(mcx, fexpr.args[2].clone_in(mcx)?)?;
+
+    let c1 = arg1.as_const();
+    let c2 = arg2.as_const();
+    let c3 = arg3.as_const();
+
+    // If any argument is a constant NULL, zero rows are returned.
+    if matches!(&c1, Some(c) if c.constisnull)
+        || matches!(&c2, Some(c) if c.constisnull)
+        || matches!(&c3, Some(c) if c.constisnull)
+    {
+        return Ok(Some(0.0));
+    }
+
+    // Otherwise, all three must be non-NULL constants to compute; else decline.
+    let (Some(c1), Some(c2), Some(c3)) = (c1, c2, c3) else {
+        return Ok(None);
+    };
+
+    let start = c1.constvalue.as_i64();
+    let finish = c2.constvalue.as_i64();
+
+    // Prechecks that would make timestamp_mi raise an ERROR: infinite endpoints
+    // or a `finish - start` i64 overflow. Return no estimate (decline) rather
+    // than error out in a support function.
+    if timestamp_not_finite(start)
+        || timestamp_not_finite(finish)
+        || finish.checked_sub(start).is_none()
+    {
+        return Ok(None);
+    }
+    let ddiff = (finish - start) as f64;
+
+    // INTERVAL_TO_MICROSECONDS(step) over the 16-byte Interval image (time:i64,
+    // day:i32, month:i32 — little-endian, the same layout the executor's
+    // `arg_interval` reads).
+    let image = c3.constvalue.as_ref_bytes();
+    if image.len() < 16 {
+        return Ok(None);
+    }
+    let step_time = i64::from_le_bytes(image[0..8].try_into().expect("interval image >= 16 bytes"));
+    let step_day = i32::from_le_bytes(image[8..12].try_into().expect("interval image >= 16 bytes"));
+    let step_month =
+        i32::from_le_bytes(image[12..16].try_into().expect("interval image >= 16 bytes"));
+    let dstep = (step_month as f64 * DAYS_PER_MONTH + step_day as f64) * USECS_PER_DAY
+        + step_time as f64;
+
+    // This equation works for either sign of step.
+    if dstep != 0.0 {
+        Ok(Some((ddiff / dstep + 1.0).floor()))
     } else {
         Ok(None)
     }
