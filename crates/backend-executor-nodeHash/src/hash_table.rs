@@ -21,7 +21,6 @@ use types_nodes::nodehash::{
 };
 use types_nodes::nodehash::Hash as HashPlan;
 use types_nodes::nodehash::ParallelHashJoinState;
-use backend_utils_mmgr_dsa_seams as dsa;
 use types_tuple::backend_access_common_heaptuple::FormedMinimalTuple;
 use types_tuple::heaptuple::{MinimalTupleData, HEAP_TUPLE_HAS_MATCH};
 
@@ -204,31 +203,26 @@ pub fn ExecHashTableCreate<'mcx>(
     let skew_table = hash_node.skewTable;
     let parallel = state.parallel_state.is_some();
     // state->parallel_state->nparticipants - 1 (parallel only); 0 in serial.
-    // The participant count lives in the DSA-resident ParallelHashJoinState,
-    // reached through the per-query DSA area (es_query_dsa) by resolving the
-    // parallel_state dsa_pointer — exactly as C reads
-    // state->parallel_state->nparticipants (a plain field on the backend-local
-    // mapping of the shared struct). Serial joins (no parallel_state) pass 0.
+    // In C, `state->parallel_state` is a `ParallelHashJoinState *` — a plain
+    // backend-local pointer into the DSM segment obtained by `shm_toc_lookup`
+    // (worker) / `shm_toc_allocate` (leader); `nparticipants` is a direct
+    // field deref, NOT a dsa_pointer resolution. The owned model stores that
+    // same backend-local segment address in `parallel_state` (see
+    // `ExecHashJoin{Initialize,}Worker`/`InitializeDSM`, which write
+    // `chunk.0`), so deref it directly here. Resolving it through
+    // `dsa_get_address` (treating the raw segment address as a dsa_pointer)
+    // splits it into a bogus segment-index/offset and reads garbage — the
+    // immediate cause of a 0 `nparticipants` and the downstream
+    // `pg_prevpower2_size_t is undefined for 0` panic. Serial joins (no
+    // parallel_state) pass 0.
     let parallel_workers = match state.parallel_state {
         Some(dp) => {
-            // area = state->ps.state->es_query_dsa
-            //
-            // C reaches the per-query DSA area through the Hash node's EState
-            // back-link (`state->ps.state`). The owned model threads the live
-            // `EState` explicitly into `ExecHashTableCreate`, so read
-            // `es_query_dsa` directly off the threaded `estate` — this is the
-            // same object the parallel-worker entry (`ParallelQueryMain`) sets
-            // `es_query_dsa` on before the executor run, avoiding any reliance
-            // on a possibly-stale captured back-pointer.
-            let area = estate
-                .es_query_dsa
-                .expect("ExecHashTableCreate: parallel hash but es_query_dsa is NULL");
-            let cursor = dsa::dsa_get_address::call(area, dp);
-            // SAFETY: dp resolves to a live ParallelHashJoinState in the
-            // attached DSM segment for the duration of the join (the C
-            // invariant); we only read the scalar nparticipants field.
+            // SAFETY: `dp` is the backend-local address of the live
+            // ParallelHashJoinState in the attached DSM segment (valid for the
+            // duration of the join, the C invariant); we only read the scalar
+            // nparticipants field.
             let pstate =
-                unsafe { &*(cursor.0 as *const ParallelHashJoinState) };
+                unsafe { &*(dp as usize as *const ParallelHashJoinState) };
             pstate.nparticipants - 1
         }
         None => 0,
@@ -287,7 +281,13 @@ pub fn ExecHashTableCreate<'mcx>(
             spaceAllowedSkew,
             chunks: None,
             current_chunk: None,
-            area: None,
+            // hashtable->area = state->ps.state->es_query_dsa;
+            // C reaches the per-query DSA area through the Hash node's EState
+            // back-link; the owned model threads the live EState explicitly, so
+            // read es_query_dsa off it directly (the same object
+            // ParallelQueryMain sets es_query_dsa on before the executor run).
+            // None for a serial join (es_query_dsa is NULL outside parallel).
+            area: estate.es_query_dsa,
             parallel_state: state.parallel_state,
             batches: PgVec::new_in(mcx),
             current_chunk_shared: types_execparallel::DsaPointer::default(),

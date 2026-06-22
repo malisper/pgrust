@@ -147,12 +147,18 @@ fn dsa_get_addr(area: types_execparallel::DsaAreaHandle, dp: DsaPointer) -> usiz
 #[inline]
 #[allow(clippy::mut_from_ref)]
 fn pstate_mut<'a>(hashtable: &HashJoinTableData<'_>) -> &'a mut ParallelHashJoinState {
-    let area = hashtable.area.expect("parallel hash: area is None");
+    // `parallel_state` holds the backend-local address of the
+    // ParallelHashJoinState in the DSM segment (from `shm_toc_lookup` /
+    // `shm_toc_allocate`), exactly C's `ParallelHashJoinState *`. It is a
+    // direct pointer, NOT a dsa_pointer — deref it directly rather than
+    // resolving it through `dsa_get_address` (which would split the raw
+    // segment address into a bogus segment-index/offset). The struct's inner
+    // `batches`/`old_batches`/... fields ARE real dsa_pointers, resolved
+    // separately via `dsa_get_addr`.
     let ps = hashtable
         .parallel_state
         .expect("parallel hash: parallel_state is None");
-    let addr = dsa_get_addr(area, ps);
-    unsafe { &mut *(addr as *mut ParallelHashJoinState) }
+    unsafe { &mut *(ps as usize as *mut ParallelHashJoinState) }
 }
 
 #[inline]
