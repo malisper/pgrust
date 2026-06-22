@@ -289,12 +289,25 @@ fn rel_is_partitioned(root: &PlannerInfo, rel: RelId) -> bool {
 }
 
 /// Convert a partprune-core local pruning step to the plan-data carrier step.
-fn step_to_carrier<'mcx>(step: &PartitionPruneStep<'mcx>) -> CarrierStep<'mcx> {
-    match step {
+///
+/// The Op step's `exprs` may hold a transient planner node (a `SubPlan` or an
+/// `AlternativeSubPlan`, e.g. an `EXISTS(...)` sublink in a join-pruning qual)
+/// whose derived `Clone` panics; deep-copy each expr through `Expr::clone_in`
+/// (`copyObject` shape). setrefs later resolves any AlternativeSubPlan in the
+/// step expr to the chosen subplan (`fix_partprune_steps`).
+fn step_to_carrier<'mcx>(
+    mcx: Mcx<'mcx>,
+    step: &PartitionPruneStep<'mcx>,
+) -> PgResult<CarrierStep<'mcx>> {
+    Ok(match step {
         PartitionPruneStep::Op(op) => CarrierStep::Op(CarrierStepOp {
             step_id: op.step_id,
             opstrategy: op.opstrategy,
-            exprs: op.exprs.clone(),
+            exprs: op
+                .exprs
+                .iter()
+                .map(|e| e.clone_in(mcx))
+                .collect::<PgResult<Vec<Expr<'mcx>>>>()?,
             cmpfns: op.cmpfns.clone(),
             nullkeys: ints_to_rawbms(&op.nullkeys),
         }),
@@ -306,7 +319,7 @@ fn step_to_carrier<'mcx>(step: &PartitionPruneStep<'mcx>) -> CarrierStep<'mcx> {
             },
             source_stepids: c.source_stepids.clone(),
         }),
-    }
+    })
 }
 
 /// Pack a list of small non-negative ints into a `bitmapword[]` `RawBms`
@@ -582,7 +595,11 @@ fn make_partitionedrel_pruneinfo<'mcx>(
         // Startup steps only matter if there's a mutable op/arg.
         let initial_pruning_steps: Vec<CarrierStep<'mcx>> =
             if gctx_initial.has_mutable_op || gctx_initial.has_mutable_arg {
-                gctx_initial.steps.iter().map(step_to_carrier).collect()
+                gctx_initial
+                    .steps
+                    .iter()
+                    .map(|s| step_to_carrier(mcx, s))
+                    .collect::<PgResult<Vec<_>>>()?
             } else {
                 Vec::new()
             };
@@ -610,7 +627,11 @@ fn make_partitionedrel_pruneinfo<'mcx>(
             // Detect which exec Params actually got used.
             let paramids = get_partkey_exec_paramids(&gctx_exec.steps);
             if !paramids.is_empty() {
-                exec_pruning_steps = gctx_exec.steps.iter().map(step_to_carrier).collect();
+                exec_pruning_steps = gctx_exec
+                    .steps
+                    .iter()
+                    .map(|s| step_to_carrier(mcx, s))
+                    .collect::<PgResult<Vec<_>>>()?;
                 execparamids = bms_to_rawbms(&paramids);
             }
         }
@@ -1201,7 +1222,7 @@ fn gen_partprune_steps_internal<'mcx>(
                             arg_stepids,
                             PartitionPruneCombineOp::Union,
                         );
-                        result.push(step_ref(context, step));
+                        result.push(step_ref(context, step)?);
                     }
                     continue;
                 }
@@ -1293,13 +1314,13 @@ fn gen_partprune_steps_internal<'mcx>(
     {
         let nk = bms_to_vec(&nullkeys);
         let step = gen_prune_step_op(context, InvalidStrategy as i32, false, Vec::new(), Vec::new(), nk);
-        result.push(step_ref(context, step));
+        result.push(step_ref(context, step)?);
     } else if generate_opsteps {
         let opsteps = gen_prune_steps_from_opexps(context, &keyclauses, &nullkeys)?;
         result.extend(opsteps);
     } else if notnullkeys.len() as i32 == partnatts {
         let step = gen_prune_step_op(context, InvalidStrategy as i32, false, Vec::new(), Vec::new(), Vec::new());
-        result.push(step_ref(context, step));
+        result.push(step_ref(context, step)?);
     }
 
     // Multiple steps under an AND -> add a final INTERSECT combine.
@@ -1307,22 +1328,78 @@ fn gen_partprune_steps_internal<'mcx>(
         let step_ids: Vec<i32> = result.iter().map(|s| s.step_id()).collect();
         let final_id =
             gen_prune_step_combine(context, step_ids, PartitionPruneCombineOp::Intersect);
-        result.push(step_ref(context, final_id));
+        result.push(step_ref(context, final_id)?);
     }
 
     Ok(result)
 }
 
+/// Deep-clone a `PartitionPruneStep`. The `Op.exprs` list may carry a transient
+/// planner node (`SubPlan` / `AlternativeSubPlan`, e.g. an `EXISTS(...)` sublink
+/// in a join-pruning qual) whose derived `Expr::Clone` panics by design; copy
+/// each expr through `Expr::clone_in` (`copyObject` shape).
+fn clone_prune_step<'mcx>(
+    mcx: Mcx<'mcx>,
+    step: &PartitionPruneStep<'mcx>,
+) -> PgResult<PartitionPruneStep<'mcx>> {
+    Ok(match step {
+        PartitionPruneStep::Op(op) => PartitionPruneStep::Op(PruneStepOp {
+            step_id: op.step_id,
+            opstrategy: op.opstrategy,
+            exprs: op
+                .exprs
+                .iter()
+                .map(|e| e.clone_in(mcx))
+                .collect::<PgResult<Vec<Expr<'mcx>>>>()?,
+            cmpfns: op.cmpfns.clone(),
+            nullkeys: op.nullkeys.clone(),
+        }),
+        PartitionPruneStep::Combine(c) => PartitionPruneStep::Combine(c.clone()),
+    })
+}
+
+/// Deep-clone a `PartClauseInfo` (its `expr` may be a transient planner node).
+fn clone_pci<'mcx>(
+    mcx: Mcx<'mcx>,
+    pc: &PartClauseInfo<'mcx>,
+) -> PgResult<PartClauseInfo<'mcx>> {
+    Ok(PartClauseInfo {
+        keyno: pc.keyno,
+        opno: pc.opno,
+        op_is_ne: pc.op_is_ne,
+        expr: pc.expr.clone_in(mcx)?,
+        cmpfn: pc.cmpfn,
+        op_strategy: pc.op_strategy,
+    })
+}
+
+/// Deep-clone a list of `PartClauseInfo`.
+fn clone_pci_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    list: &[PartClauseInfo<'mcx>],
+) -> PgResult<Vec<PartClauseInfo<'mcx>>> {
+    list.iter().map(|pc| clone_pci(mcx, pc)).collect()
+}
+
+/// Deep-clone a list of `Expr` (each may be a transient planner node).
+fn clone_expr_list<'mcx>(mcx: Mcx<'mcx>, list: &[Expr<'mcx>]) -> PgResult<Vec<Expr<'mcx>>> {
+    list.iter().map(|e| e.clone_in(mcx)).collect()
+}
+
 /// Return the just-generated step (looked up by id from context.steps), cloned
 /// for inclusion in a result list. The C code returns the step pointer; here we
-/// clone the owned value out of the steps store.
-fn step_ref<'mcx>(context: &GeneratePruningStepsContext<'_, 'mcx>, step_id: i32) -> PartitionPruneStep<'mcx> {
-    context
+/// clone the owned value out of the steps store (deep clone — the step's exprs
+/// may be transient planner nodes).
+fn step_ref<'mcx>(
+    context: &GeneratePruningStepsContext<'_, 'mcx>,
+    step_id: i32,
+) -> PgResult<PartitionPruneStep<'mcx>> {
+    let step = context
         .steps
         .iter()
         .find(|s| s.step_id() == step_id)
-        .expect("step_ref: step id not found")
-        .clone()
+        .expect("step_ref: step id not found");
+    clone_prune_step(context.mcx, step)
 }
 
 /// `gen_prune_step_op(...)` (partprune.c:1342). Appends a step to context.steps
@@ -1399,7 +1476,7 @@ fn gen_prune_steps_from_opexps<'mcx>(
         }
 
         for pc in clauselist {
-            let mut pc = pc.clone();
+            let mut pc = clone_pci(context.mcx, pc)?;
             if pc.op_strategy == InvalidStrategy as i32 {
                 let (op_strategy, _lt, _rt) = get_op_opfamily_properties(
                     pc.opno,
@@ -1410,7 +1487,7 @@ fn gen_prune_steps_from_opexps<'mcx>(
             }
             match strategy {
                 PARTITION_STRATEGY_LIST | PARTITION_STRATEGY_RANGE => {
-                    btree_clauses[pc.op_strategy as usize].push(pc.clone());
+                    btree_clauses[pc.op_strategy as usize].push(clone_pci(context.mcx, &pc)?);
                     if pc.op_strategy == BTLessStrategyNumber as i32
                         || pc.op_strategy == BTGreaterStrategyNumber as i32
                     {
@@ -1421,7 +1498,7 @@ fn gen_prune_steps_from_opexps<'mcx>(
                     if pc.op_strategy != HT_EQUAL_STRATEGY_NUMBER {
                         return Err(PgError::error("invalid clause for hash partitioning"));
                     }
-                    hash_clauses[pc.op_strategy as usize].push(pc.clone());
+                    hash_clauses[pc.op_strategy as usize].push(clone_pci(context.mcx, &pc)?);
                 }
                 _ => return Err(PgError::error("invalid partition strategy")),
             }
@@ -1434,19 +1511,19 @@ fn gen_prune_steps_from_opexps<'mcx>(
 
     match strategy {
         PARTITION_STRATEGY_LIST | PARTITION_STRATEGY_RANGE => {
-            let eq_clauses = btree_clauses[BTEqualStrategyNumber as usize].clone();
-            let le_clauses = btree_clauses[BTLessEqualStrategyNumber as usize].clone();
-            let ge_clauses = btree_clauses[BTGreaterEqualStrategyNumber as usize].clone();
+            let eq_clauses = clone_pci_list(context.mcx, &btree_clauses[BTEqualStrategyNumber as usize])?;
+            let le_clauses = clone_pci_list(context.mcx, &btree_clauses[BTLessEqualStrategyNumber as usize])?;
+            let ge_clauses = clone_pci_list(context.mcx, &btree_clauses[BTGreaterEqualStrategyNumber as usize])?;
 
             for strat in 1..=BT_MAX_STRATEGY_NUMBER {
-                let strat_clauses = btree_clauses[strat as usize].clone();
+                let strat_clauses = clone_pci_list(context.mcx, &btree_clauses[strat as usize])?;
                 for pc in &strat_clauses {
                     if pc.keyno == 0 {
                         let pc_steps = get_steps_using_prefix(
                             context,
                             strat,
                             pc.op_is_ne,
-                            pc.expr.clone(),
+                            pc.expr.clone_in(context.mcx)?,
                             pc.cmpfn,
                             &[],
                             &[],
@@ -1468,7 +1545,7 @@ fn gen_prune_steps_from_opexps<'mcx>(
                         while eq_idx < eq_clauses.len() {
                             let eqpc = &eq_clauses[eq_idx];
                             if eqpc.keyno == keyno {
-                                prefix.push(eqpc.clone());
+                                prefix.push(clone_pci(context.mcx, eqpc)?);
                                 pk_has_clauses = true;
                                 eq_idx += 1;
                             } else {
@@ -1482,7 +1559,7 @@ fn gen_prune_steps_from_opexps<'mcx>(
                             while le_idx < le_clauses.len() {
                                 let lepc = &le_clauses[le_idx];
                                 if lepc.keyno == keyno {
-                                    prefix.push(lepc.clone());
+                                    prefix.push(clone_pci(context.mcx, lepc)?);
                                     pk_has_clauses = true;
                                     le_idx += 1;
                                 } else {
@@ -1497,7 +1574,7 @@ fn gen_prune_steps_from_opexps<'mcx>(
                             while ge_idx < ge_clauses.len() {
                                 let gepc = &ge_clauses[ge_idx];
                                 if gepc.keyno == keyno {
-                                    prefix.push(gepc.clone());
+                                    prefix.push(clone_pci(context.mcx, gepc)?);
                                     pk_has_clauses = true;
                                     ge_idx += 1;
                                 } else {
@@ -1517,7 +1594,7 @@ fn gen_prune_steps_from_opexps<'mcx>(
                             context,
                             strat,
                             pc.op_is_ne,
-                            pc.expr.clone(),
+                            pc.expr.clone_in(context.mcx)?,
                             pc.cmpfn,
                             &[],
                             &prefix,
@@ -1530,7 +1607,7 @@ fn gen_prune_steps_from_opexps<'mcx>(
             }
         }
         PARTITION_STRATEGY_HASH => {
-            let eq_clauses = hash_clauses[HT_EQUAL_STRATEGY_NUMBER as usize].clone();
+            let eq_clauses = clone_pci_list(context.mcx, &hash_clauses[HT_EQUAL_STRATEGY_NUMBER as usize])?;
             if !eq_clauses.is_empty() {
                 // Locate the clause for the greatest column.
                 let last_keyno = eq_clauses.last().unwrap().keyno;
@@ -1542,7 +1619,7 @@ fn gen_prune_steps_from_opexps<'mcx>(
                         first_last_idx = idx;
                         break;
                     }
-                    prefix.push(pc.clone());
+                    prefix.push(clone_pci(context.mcx, pc)?);
                 }
                 let nk = bms_to_vec(nullkeys);
                 for pc in &eq_clauses[first_last_idx..] {
@@ -1550,7 +1627,7 @@ fn gen_prune_steps_from_opexps<'mcx>(
                         context,
                         HT_EQUAL_STRATEGY_NUMBER,
                         false,
-                        pc.expr.clone(),
+                        pc.expr.clone_in(context.mcx)?,
                         pc.cmpfn,
                         &nk,
                         &prefix,
@@ -1589,7 +1666,7 @@ fn get_steps_using_prefix<'mcx>(
             alloc::vec![step_lastcmpfn],
             step_nullkeys.to_vec(),
         );
-        return Ok(alloc::vec![step_ref(context, step)]);
+        return Ok(alloc::vec![step_ref(context, step)?]);
     }
 
     get_steps_using_prefix_recurse(
@@ -1642,8 +1719,8 @@ fn get_steps_using_prefix_recurse<'mcx>(
             if pc.keyno != cur_keyno {
                 break;
             }
-            let mut step_exprs1 = step_exprs.to_vec();
-            step_exprs1.push(pc.expr.clone());
+            let mut step_exprs1 = clone_expr_list(context.mcx, step_exprs)?;
+            step_exprs1.push(pc.expr.clone_in(context.mcx)?);
             let mut step_cmpfns1 = step_cmpfns.to_vec();
             step_cmpfns1.push(pc.cmpfn);
 
@@ -1667,9 +1744,9 @@ fn get_steps_using_prefix_recurse<'mcx>(
         let mut idx = start;
         while idx < prefix.len() {
             let pc = &prefix[idx];
-            let mut step_exprs1 = step_exprs.to_vec();
-            step_exprs1.push(pc.expr.clone());
-            step_exprs1.push(step_lastexpr.clone());
+            let mut step_exprs1 = clone_expr_list(context.mcx, step_exprs)?;
+            step_exprs1.push(pc.expr.clone_in(context.mcx)?);
+            step_exprs1.push(step_lastexpr.clone_in(context.mcx)?);
             let mut step_cmpfns1 = step_cmpfns.to_vec();
             step_cmpfns1.push(pc.cmpfn);
             step_cmpfns1.push(step_lastcmpfn);
@@ -1682,7 +1759,7 @@ fn get_steps_using_prefix_recurse<'mcx>(
                 step_cmpfns1,
                 step_nullkeys.to_vec(),
             );
-            result.push(step_ref(context, step));
+            result.push(step_ref(context, step)?);
             idx += 1;
         }
     }
@@ -1811,14 +1888,19 @@ fn match_opexpr_to_partition_key<'mcx>(
     let mut opno = opclause.opno;
     let expr: Expr;
 
+    // The matched comparison value can be a transient planner node (a `SubPlan`
+    // / `AlternativeSubPlan`, e.g. an `EXISTS(...)` sublink in a join-pruning
+    // qual) whose derived `Expr::Clone` panics by design; deep-copy through
+    // `Expr::clone_in` (`copyObject` shape). setrefs later resolves any
+    // AlternativeSubPlan in the step expr to the chosen subplan.
     if node_equal(leftop, partkey)? {
-        expr = rightop.clone();
+        expr = rightop.clone_in(context.mcx)?;
     } else if node_equal(rightop, partkey)? {
         opno = get_commutator(opno)?;
         if !oid_is_valid(opno) {
             return Ok(PartClauseMatchStatus::Unsupported);
         }
-        expr = leftop.clone();
+        expr = leftop.clone_in(context.mcx)?;
     } else {
         return Ok(PartClauseMatchStatus::NoMatch);
     }

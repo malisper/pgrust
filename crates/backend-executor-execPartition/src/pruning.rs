@@ -452,10 +452,17 @@ pub(crate) fn CreatePartitionPruneState<'mcx>(
                 // Clone the steps into the Opaque payload (List *). The payload is
                 // the `'static`-erased plan-tree form (`Opaque` is `Any`/`'static`).
                 let steps: alloc::vec::Vec<PartitionPruneStep<'static>> = clone_steps(
+                    mcx,
                     &pruneinfo_ref(&estate.es_part_prune_infos[pruneinfo_index]).prune_infos[i][j]
                         .initial_pruning_steps,
-                );
-                pprune.initial_pruning_steps = Opaque(Some(alloc::boxed::Box::new(steps.clone())));
+                )?;
+                let steps_for_opaque: alloc::vec::Vec<PartitionPruneStep<'static>> = clone_steps(
+                    mcx,
+                    &pruneinfo_ref(&estate.es_part_prune_infos[pruneinfo_index]).prune_infos[i][j]
+                        .initial_pruning_steps,
+                )?;
+                pprune.initial_pruning_steps =
+                    Opaque(Some(alloc::boxed::Box::new(steps_for_opaque)));
                 // InitPartitionPruneContext(&pprune->initial_context,
                 //     pprune->initial_pruning_steps, partdesc, partkey, NULL,
                 //     econtext);
@@ -485,24 +492,27 @@ pub(crate) fn CreatePartitionPruneState<'mcx>(
                 // Still record the steps so present_parts walk below is gated
                 // on the same condition as C (pinfo->initial_pruning_steps).
                 let steps = clone_steps(
+                    mcx,
                     &pruneinfo_ref(&estate.es_part_prune_infos[pruneinfo_index]).prune_infos[i][j]
                         .initial_pruning_steps,
-                );
+                )?;
                 pprune.initial_pruning_steps = Opaque(Some(alloc::boxed::Box::new(steps)));
             }
 
             if has_exec && !explain_generic {
                 let steps = clone_steps(
+                    mcx,
                     &pruneinfo_ref(&estate.es_part_prune_infos[pruneinfo_index]).prune_infos[i][j]
                         .exec_pruning_steps,
-                );
+                )?;
                 pprune.exec_pruning_steps = Opaque(Some(alloc::boxed::Box::new(steps)));
                 do_exec_prune = true;
             } else if has_exec {
                 let steps = clone_steps(
+                    mcx,
                     &pruneinfo_ref(&estate.es_part_prune_infos[pruneinfo_index]).prune_infos[i][j]
                         .exec_pruning_steps,
-                );
+                )?;
                 pprune.exec_pruning_steps = Opaque(Some(alloc::boxed::Box::new(steps)));
             }
 
@@ -1164,8 +1174,29 @@ fn oid_is_valid(oid: Oid) -> bool {
 
 /// Deep-clone a pruning-step list (C: the steps are aliased from the plan; the
 /// owned-model `Opaque` payload carries an independent copy).
-fn clone_steps<'a>(steps: &'_ [PartitionPruneStep<'a>]) -> alloc::vec::Vec<PartitionPruneStep<'a>> {
-    steps.to_vec()
+///
+/// A step's `exprs` list can carry a transient planner node (a resolved
+/// `SubPlan`, e.g. the chosen child of an `AlternativeSubPlan` from an
+/// `EXISTS(...)` sublink in a join-pruning qual) whose derived `Clone` panics by
+/// design; deep-copy each expr through `Expr::clone_in` (`copyObject` shape).
+/// The exprs are allocated in `mcx` (the executor query arena, which outlives
+/// the resulting Opaque payload) and the result is erased to the caller's
+/// lifetime per the established invariant-`PartitionPruneStep` erase convention.
+fn clone_steps<'a>(
+    mcx: Mcx<'_>,
+    steps: &'_ [PartitionPruneStep<'_>],
+) -> PgResult<alloc::vec::Vec<PartitionPruneStep<'a>>> {
+    let mut out = alloc::vec::Vec::with_capacity(steps.len());
+    for s in steps {
+        let cloned = s.clone_in(mcx)?;
+        // SAFETY: lifetime-parameter-only erase to the caller's `'a`; the cloned
+        // exprs are owned (moved into `mcx`-allocated boxes) and `mcx` outlives
+        // every use of the returned list (cf. the `partpruneinfo_into_static`
+        // and `Expr::clone_in` arena round-trip convention).
+        let erased: PartitionPruneStep<'a> = unsafe { core::mem::transmute(cloned) };
+        out.push(erased);
+    }
+    Ok(out)
 }
 
 /// Downcast an `&Opaque` pruning-steps payload to the step list, deep-cloning

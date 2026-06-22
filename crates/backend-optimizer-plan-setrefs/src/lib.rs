@@ -649,8 +649,15 @@ fn register_partpruneinfo<'mcx>(
         part_prune_index >= 0 && (part_prune_index as usize) < root.partPruneInfos.len()
     );
     // Move the carrier out of root.partPruneInfos (C aliases by pointer; the
-    // owned model takes ownership and appends to glob).
-    let mut pinfo = root.partPruneInfos[part_prune_index as usize].clone();
+    // owned model takes ownership and appends to glob). Deep-copy through
+    // `clone_in` (not the derived `.clone()`): a pruning-step expr may carry a
+    // transient planner node (a `SubPlan` / `AlternativeSubPlan`, e.g. an
+    // `EXISTS(...)` sublink in a join-pruning qual) whose derived `Expr::Clone`
+    // panics by design. `fix_partprune_steps` below then resolves any
+    // AlternativeSubPlan to the chosen subplan.
+    let mut pinfo = types_nodes::partprune_carrier::partpruneinfo_into_static(
+        root.partPruneInfos[part_prune_index as usize].clone_in(mcx)?,
+    );
 
     pinfo.relids = offset_rawbms(&pinfo.relids, rtoffset);
 
