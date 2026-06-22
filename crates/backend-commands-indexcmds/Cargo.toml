@@ -42,6 +42,7 @@ backend-access-index-amapi = { path = "../backend-access-index-amapi" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
+backend-catalog-pg-class-seams = { path = "../backend-catalog-pg-class-seams" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }

@@ -350,9 +350,13 @@ pub fn DefineIndex<'mcx>(
         x if x == RELKIND_RELATION || x == RELKIND_MATVIEW || x == RELKIND_PARTITIONED_TABLE => {}
         _ => {
             let name = rel.rd_rel.relname.as_str().to_string();
+            let detail = backend_catalog_pg_class_seams::errdetail_relkind_not_supported::call(
+                rel.rd_rel.relkind,
+            )?;
             return Err(ereport(ERROR)
                 .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!("cannot create index on relation \"{name}\""))
+                .errdetail(detail)
                 .into_error());
         }
     }

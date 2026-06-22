@@ -32,6 +32,7 @@ backend-catalog-pg-shdepend-seams = { path = "../backend-catalog-pg-shdepend-sea
 backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-parser-parse-func-seams = { path = "../backend-parser-parse-func-seams" }
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
 backend-foreign-foreign-seams = { path = "../backend-foreign-foreign-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

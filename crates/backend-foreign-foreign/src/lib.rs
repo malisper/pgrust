@@ -979,6 +979,7 @@ fn untransform_options<'mcx>(
                 None => None,
             },
             defaction: types_foreigncmds::DEFELEM_UNSPEC,
+            location: -1,
         });
     }
     Ok(out)
@@ -1382,6 +1383,15 @@ pub fn init_seams() {
     );
     backend_optimizer_util_plancat_ext_seams::foreign_table_access_restricted::set(|| {
         (guc::restrict_nonsystem_relation_kind::call() & RESTRICT_RELKIND_FOREIGN_TABLE) != 0
+    });
+    // `GetFdwRoutineForRelation(relation, true) != NULL` (plancat.c). The C
+    // resolves the FDW routine (raising if the wrapper has no handler) and
+    // stores presence in `RelOptInfo::has_fdwroutine`; it is never NULL on
+    // success, so a clean resolve yields `true`.
+    backend_optimizer_util_plancat_ext_seams::rel_has_fdwroutine::set(|relid| {
+        let ctx = mcx::MemoryContext::new("rel_has_fdwroutine");
+        GetFdwRoutineForRelation(ctx.mcx(), relid)?;
+        Ok(true)
     });
 
     inward::get_foreign_data_wrapper::set(|mcx, fdwid| {
