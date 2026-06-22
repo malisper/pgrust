@@ -1024,9 +1024,11 @@ pub(crate) fn exec_init_whole_row_var<'mcx>(
     //    else if (variable->varreturningtype == VAR_RETURNING_NEW)
     //        state->flags |= EEO_FLAG_HAS_NEW;
     //
-    // The keystone `Var` does not yet carry `varreturningtype`; it defaults to
-    // VAR_RETURNING_DEFAULT, so neither flag is set (matching the common path).
-    let varreturningtype = VarReturningType::VAR_RETURNING_DEFAULT;
+    // The `Var` carries `varreturningtype` (PG18 RETURNING OLD/NEW): a whole-row
+    // OLD/NEW var (e.g. RETURNING old / new over the target) must stamp the
+    // EEO_FLAG_HAS_OLD/HAS_NEW flag so EEOP_WHOLEROW selects ecxt_oldtuple /
+    // ecxt_newtuple at runtime (ExecEvalWholeRowVar). Mirror the C exactly.
+    let varreturningtype = variable.varreturningtype;
     match varreturningtype {
         VarReturningType::VAR_RETURNING_OLD => state.flags |= EEO_FLAG_HAS_OLD,
         VarReturningType::VAR_RETURNING_NEW => state.flags |= EEO_FLAG_HAS_NEW,
