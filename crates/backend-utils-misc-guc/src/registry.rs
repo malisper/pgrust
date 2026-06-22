@@ -845,14 +845,28 @@ pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
             if let Some(slot) = conf.show_hook {
                 return (slot.get())();
             }
-            let v = conf.value.unwrap_or(conf.reset_val);
+            // C `ShowGUCOption` reads `*conf->variable` live; when an owner
+            // installed the storage accessor, read through it so a direct write
+            // to the bound variable (e.g. xact.c's `XactReadOnly =
+            // s->prevXactReadOnly` at subxact end, which bypasses the GUC
+            // machinery) is reflected — without this SHOW returned the stale
+            // cached `conf.value`.
+            let v = if conf.variable.installed() {
+                conf.variable.read()
+            } else {
+                conf.value.unwrap_or(conf.reset_val)
+            };
             if v { "on".to_string() } else { "off".to_string() }
         }
         GucVariable::Int(conf) => {
             if let Some(slot) = conf.show_hook {
                 return (slot.get())();
             }
-            let mut result: i64 = conf.value.unwrap_or(conf.reset_val) as i64;
+            let mut result: i64 = if conf.variable.installed() {
+                conf.variable.read() as i64
+            } else {
+                conf.value.unwrap_or(conf.reset_val) as i64
+            };
             let mut unit = "";
             if use_units && result > 0 && (conf.gen.flags & GUC_UNIT) != 0 {
                 let (v, u) = convert_int_from_base_unit(result, conf.gen.flags & GUC_UNIT);
@@ -865,7 +879,11 @@ pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
             if let Some(slot) = conf.show_hook {
                 return (slot.get())();
             }
-            let mut result: f64 = conf.value.unwrap_or(conf.reset_val);
+            let mut result: f64 = if conf.variable.installed() {
+                conf.variable.read()
+            } else {
+                conf.value.unwrap_or(conf.reset_val)
+            };
             let mut unit = "";
             if use_units && result > 0.0 && (conf.gen.flags & GUC_UNIT) != 0 {
                 let (v, u) = convert_real_from_base_unit(result, conf.gen.flags & GUC_UNIT);
@@ -878,8 +896,13 @@ pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
             if let Some(slot) = conf.show_hook {
                 return (slot.get())();
             }
-            match conf.value.as_ref() {
-                Some(Some(s)) if !s.is_empty() => s.clone(),
+            let v = if conf.variable.installed() {
+                conf.variable.read()
+            } else {
+                conf.value.clone().flatten()
+            };
+            match v {
+                Some(s) if !s.is_empty() => s,
                 _ => String::new(),
             }
         }
@@ -887,7 +910,11 @@ pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
             if let Some(slot) = conf.show_hook {
                 return (slot.get())();
             }
-            let v = conf.value.unwrap_or(conf.reset_val);
+            let v = if conf.variable.installed() {
+                conf.variable.read()
+            } else {
+                conf.value.unwrap_or(conf.reset_val)
+            };
             config_enum_lookup_by_value(conf, v).unwrap_or("?").to_string()
         }
     }
