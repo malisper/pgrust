@@ -197,12 +197,20 @@ fn latest_lineno() -> i32 {
 
 /// `plpgsql_compile_error_callback` (pl_comp.c) — the "near line N" fallback
 /// the error_context_stack callback adds for any error raised during a compile.
-/// Mirrors the callback's final `errcontext(...)`: applied once, and only if the
-/// parse phase did not already attach the (transposed) "compilation of …" line.
+/// Mirrors the callback body: if `function_parse_error_transpose` reported a
+/// syntax-error *position* (a cursor/internal position survives the transpose),
+/// the callback returns without any "near line N" context; otherwise it falls
+/// back to `errcontext("compilation of … near line %d", plpgsql_latest_lineno)`.
+/// Applied at most once (deduped against the line the parse phase may have added).
 fn add_compile_error_context(e: PgError) -> PgError {
     if e.context()
         .is_some_and(|c| c.contains("compilation of PL/pgSQL function"))
     {
+        return e;
+    }
+    // C: `if (function_parse_error_transpose(proc_source)) return;` — a reported
+    // syntax-error position suppresses the "near line N" fallback.
+    if e.cursor_position.unwrap_or(0) > 0 || e.internal_position.unwrap_or(0) > 0 {
         return e;
     }
     if let Some(funcname) = plpgsql_error_funcname() {
