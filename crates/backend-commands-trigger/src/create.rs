@@ -153,8 +153,30 @@ pub fn CreateTriggerFiringOn<'mcx>(
             return wrong_type(&relname, "is a table", "Tables cannot have INSTEAD OF triggers.");
         }
     } else if relkind == RELKIND_PARTITIONED_TABLE {
+        // Partitioned tables can't have INSTEAD OF triggers
         if stmt.timing != pt::TRIGGER_TYPE_BEFORE && stmt.timing != pt::TRIGGER_TYPE_AFTER {
             return wrong_type(&relname, "is a table", "Tables cannot have INSTEAD OF triggers.");
+        }
+
+        // FOR EACH ROW triggers have further restrictions.
+        if stmt.row {
+            // Disallow use of transition tables.
+            //
+            // Note that we have another restriction about transition tables in
+            // partitions (search for 'has_superclass' below).  The check here is
+            // just to protect from the fact that if we allowed it here, the
+            // creation would succeed for a partitioned table with no partitions,
+            // but would be blocked by the other restriction when the first
+            // partition was created, which is very unfriendly behavior.
+            if !stmt.transitionRels.is_empty() {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg(format!("\"{relname}\" is a partitioned table"))
+                    .errdetail(
+                        "ROW triggers with transition tables are not supported on partitioned tables.",
+                    )
+                    .into_error());
+            }
         }
     } else if relkind == RELKIND_VIEW {
         if stmt.timing != pt::TRIGGER_TYPE_INSTEAD && stmt.row {
