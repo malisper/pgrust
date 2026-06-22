@@ -1338,11 +1338,19 @@ fn ATPostAlterTypeParse<'mcx>(
                 TryReuseIndex(mcx, old_id, &mut istmt)?;
             }
             istmt.reset_default_tblspc = true;
-            // keep the index's comment: idxcomment = GetComment(oldId, ...).
-            // GetComment is unported here; a NULL comment is a no-op, but a
-            // non-NULL comment would be silently dropped. For the reachable
-            // (no-comment) path this is faithful; flag if a comment exists.
-            check_no_comment(old_id, RelationRelationId)?;
+            // keep the index's comment: idxcomment = GetComment(oldId,
+            // RelationRelationId, 0). DefineIndex applies stmt->idxcomment via
+            // CreateComments after building the rebuilt index, so a comment on
+            // the old index survives ALTER COLUMN TYPE.
+            istmt.idxcomment = match backend_commands_tablecmds_seams::get_comment::call(
+                mcx,
+                old_id,
+                RelationRelationId,
+                0,
+            )? {
+                Some(c) => Some(mcx::PgString::from_str_in(&c, mcx)?),
+                None => None,
+            };
 
             let newcmd = AlterTableCmd {
                 subtype: AlterTableType::AT_ReAddIndex,
@@ -1383,7 +1391,18 @@ fn ATPostAlterTypeParse<'mcx>(
                         if rewrite == 0 {
                             TryReuseIndex(mcx, indoid, &mut indstmt)?;
                         }
-                        check_no_comment(indoid, RelationRelationId)?;
+                        // keep any comment on the index:
+                        // indstmt->idxcomment = GetComment(indoid, RelationRelationId, 0).
+                        indstmt.idxcomment =
+                            match backend_commands_tablecmds_seams::get_comment::call(
+                                mcx,
+                                indoid,
+                                RelationRelationId,
+                                0,
+                            )? {
+                                Some(c) => Some(mcx::PgString::from_str_in(&c, mcx)?),
+                                None => None,
+                            };
                         indstmt.reset_default_tblspc = true;
                         let idxname = indstmt.idxname.as_ref().map(|s| s.to_string());
 
@@ -1541,8 +1560,18 @@ fn ATPostAlterTypeParse<'mcx>(
                 .clone_in(mcx)?
                 .into_createstatsstmt()
                 .expect("ATPostAlterTypeParse: CreateStatsStmt node");
-            // keep the statistics object's comment (no-op without a comment).
-            check_no_comment(old_id, StatisticExtRelationId)?;
+            // keep the statistics object's comment:
+            // stmt->stxcomment = GetComment(oldId, StatisticExtRelationId, 0).
+            let mut stmt = stmt;
+            stmt.stxcomment = match backend_commands_tablecmds_seams::get_comment::call(
+                mcx,
+                old_id,
+                StatisticExtRelationId,
+                0,
+            )? {
+                Some(c) => Some(mcx::PgString::from_str_in(&c, mcx)?),
+                None => None,
+            };
             let newcmd = AlterTableCmd {
                 subtype: AlterTableType::AT_ReAddStatistics,
                 name: None,
@@ -1598,19 +1627,6 @@ fn TryReuseIndex<'mcx>(
         }
         irel.close(NoLock)?;
     }
-    Ok(())
-}
-
-/// `GetComment(objid, classid, 0)` returning NULL is the common case for a
-/// rebuilt object; a non-NULL comment would need the unported AT_ReAddComment
-/// executor leg, so stop loudly if one exists. GetComment itself is not yet
-/// ported in this crate's reach; we conservatively assume no comment and verify
-/// via the comment syscache when available — for now treat as no-comment.
-fn check_no_comment(_objid: Oid, _classid: Oid) -> PgResult<()> {
-    // GetComment is unported here. The reachable test path has no comments on
-    // the rebuilt indexes/constraints, so this is a faithful no-op. If a comment
-    // exists it would be silently lost, so this is the exact C site to revisit
-    // when GetComment / AT_ReAddComment land.
     Ok(())
 }
 
