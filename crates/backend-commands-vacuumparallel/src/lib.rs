@@ -848,6 +848,12 @@ fn shared_snapshot(shared: &PVShared) -> SharedSnapshot {
 
 /// `parallel_vacuum_compute_workers(indrels, nindexes, nrequested,
 /// will_parallel_vacuum)` (vacuumparallel.c:548).
+//
+// `unreachable_code` is allowed because parallel vacuum is gated to serial via
+// an early `return Ok(0)` (see the gate comment + DESIGN_DEBT.md). The faithful
+// worker-count computation is retained below the gate so it can be re-enabled
+// unchanged once the cross-process DSM port lands.
+#[allow(unreachable_code)]
 fn parallel_vacuum_compute_workers<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     indrels: &[Oid],
@@ -865,6 +871,22 @@ fn parallel_vacuum_compute_workers<'mcx>(
     if !vac::is_under_postmaster_pv::call()? || vac::max_parallel_maintenance_workers::call()? == 0 {
         return Ok(0);
     }
+
+    /*
+     * Parallel vacuum is gated to serial. vacuumparallel.c's shared state
+     * (ParallelVacuumState / the shared per-index stats DSM segment) currently
+     * lives in process-private / thread-local memory that real fork(2) workers
+     * cannot inherit, so launching parallel index-vacuum workers hangs the
+     * leader (workers can't see the leader's shared vacuum state). VACUUM
+     * output is identical serial vs parallel (parallel index vacuum is a
+     * perf-only optimization that splits index work across workers; rows,
+     * stats and results are unchanged), so returning 0 here — exactly as C
+     * does when max_parallel_maintenance_workers = 0 or parallelism is
+     * unavailable — degrades to a correct serial vacuum. Un-gate when the
+     * shared state is ported to a genuine cross-process DSM carrier. See
+     * DESIGN_DEBT.md ("Parallel vacuum gated to serial").
+     */
+    return Ok(0);
 
     /*
      * Compute the number of indexes that can participate in parallel vacuum.
