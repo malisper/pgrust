@@ -134,23 +134,49 @@ pub fn init_seams() {
     );
 }
 
-/// `AtSubCommit_Portals(mySubid, parentSubid, parentLevel, parentXactOwner)`
-/// with the owner argument dissolved.
+/// `AtSubCommit_Portals(mySubid, parentSubid, parentLevel, parentXactOwner)`.
+///
+/// C's `CommitSubTransaction` passes `s->parent->curTransactionOwner`. At this
+/// call site `CurrentResourceOwner == s->curTransactionOwner` (the subxact's own
+/// owner is released later), so `parentXactOwner` is its parent. A portal
+/// created in this subtransaction (e.g. a `DECLARE CURSOR` inside a savepoint
+/// that is then `RELEASE`d) has its resource owner reparented to
+/// `parentXactOwner`, so the pins it still holds are released at the parent's
+/// (eventually top) commit rather than orphaned.
 fn at_subcommit_portals(
     my_subid: SubTransactionId,
     parent_subid: SubTransactionId,
     parent_level: i32,
 ) -> PgResult<()> {
-    crate::AtSubCommit_Portals(my_subid, parent_subid, parent_level, ResourceOwner::default())
+    let my_xact_owner = backend_utils_resowner_seams::lock_current_resource_owner::call()
+        .unwrap_or_default();
+    let parent_xact_owner = if my_xact_owner.is_null() {
+        ResourceOwner::default()
+    } else {
+        backend_utils_resowner_seams::resource_owner_get_parent::call(my_xact_owner)
+    };
+    crate::AtSubCommit_Portals(my_subid, parent_subid, parent_level, parent_xact_owner)
 }
 
-/// `AtSubAbort_Portals(mySubid, parentSubid, myXactOwner, parentXactOwner)`
-/// with the owner arguments dissolved.
+/// `AtSubAbort_Portals(mySubid, parentSubid, myXactOwner, parentXactOwner)`.
+///
+/// C's `AbortSubTransaction` passes `s->curTransactionOwner` and
+/// `s->parent->curTransactionOwner`. At this call site (`AbortSubTransaction`,
+/// after `AtSubAbort_ResourceOwner`) `CurrentResourceOwner == s->
+/// curTransactionOwner`, so we read it as `myXactOwner` and take its parent as
+/// `parentXactOwner`. These owners are load-bearing: `AtSubAbort_Portals`
+/// reattaches a failed upper-level portal's resource owner to `myXactOwner` so
+/// the buffer pins / relation refs it still holds are released during this
+/// subtransaction's resource-owner cleanup. Threading NULL here orphaned those
+/// pins (e.g. a cursor that erred mid-FETCH inside a savepoint leaked its heap
+/// page pin to top-commit, surfacing as `buffer refcount leak`).
 fn at_subabort_portals(my_subid: SubTransactionId, parent_subid: SubTransactionId) -> PgResult<()> {
-    crate::AtSubAbort_Portals(
-        my_subid,
-        parent_subid,
-        ResourceOwner::default(),
-        ResourceOwner::default(),
-    )
+    let my_xact_owner = backend_utils_resowner_seams::lock_current_resource_owner::call()
+        .unwrap_or_default();
+    let parent_xact_owner = if my_xact_owner.is_null() {
+        ResourceOwner::default()
+    } else {
+        backend_utils_resowner_seams::resource_owner_get_parent::call(my_xact_owner)
+    };
+    crate::AtSubAbort_Portals(my_subid, parent_subid, my_xact_owner, parent_xact_owner)
 }
