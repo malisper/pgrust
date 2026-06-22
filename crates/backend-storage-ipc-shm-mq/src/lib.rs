@@ -1522,6 +1522,20 @@ mod seam_layer {
                 .expect("live shm_mq_handle id")
         }
 
+        /// Raw pointer to the live `ShmMqHandle` for this id, valid as long as
+        /// the slot is not `take`n. The `PgBox`-owned `ShmMqHandle` is a stable
+        /// heap allocation; `insert`/`take`/`push` only move the `Option<PgBox>`
+        /// slot entries, never the pointed-to handle — so the pointer survives
+        /// re-entrant registry mutation on *other* ids. Used by `shm_mq_receive`
+        /// / `shm_mq_send` so the `REGISTRY` `RefCell` borrow is NOT held across
+        /// the interrupt-checking `real_receive`/`real_send` (which can fire the
+        /// SIGUSR1 parallel-message handler, which itself re-enters
+        /// `shm_mq_receive` on the error queue → another `with_registry`). See
+        /// the e7ad34c60 re-entrancy precedent.
+        fn handle_ptr(&mut self, h: ShmMqAttachHandle) -> *mut ShmMqHandle<'static> {
+            &mut **self.get_mut(h) as *mut ShmMqHandle<'static>
+        }
+
         fn get(&self, h: ShmMqAttachHandle) -> &PgBox<'static, ShmMqHandle<'static>> {
             self.slots[Self::idx(h)]
                 .as_ref()
@@ -1621,24 +1635,34 @@ mod seam_layer {
         mqh: ShmMqAttachHandle,
     ) -> PgResult<(Option<ShmMqResult>, alloc::vec::Vec<u8>)> {
         // C: `shm_mq_receive(error_mqh, &nbytes, &data, true)` — non-blocking.
-        // The payload borrows the queue/reassembly buffer; copy it out (within
-        // the registry borrow) for the caller, which re-parses it in its own
-        // context. Empty on any non-success result.
-        with_registry(|r| {
-            // SAFETY: the registry holds a live, attached handle for this id.
-            let (res, data) = unsafe { real_receive(r.get_mut(mqh), true) }?;
-            let result = match res {
-                SHM_MQ_SUCCESS => Some(ShmMqResult::Success),
-                SHM_MQ_WOULD_BLOCK => Some(ShmMqResult::WouldBlock),
-                SHM_MQ_DETACHED => Some(ShmMqResult::Detached),
-            };
-            let owned = if result == Some(ShmMqResult::Success) {
-                data.to_vec()
-            } else {
-                alloc::vec::Vec::new()
-            };
-            Ok((result, owned))
-        })
+        // The payload borrows the queue/reassembly buffer; copy it out for the
+        // caller, which re-parses it in its own context. Empty on any
+        // non-success result.
+        //
+        // The `REGISTRY` borrow is released BEFORE calling `real_receive`: that
+        // call runs CHECK_FOR_INTERRUPTS internally, so the SIGUSR1
+        // parallel-message handler can fire and re-enter `shm_mq_receive` on the
+        // error queue (another `with_registry`). Holding the borrow across it
+        // panicked `RefCell already borrowed` (e7ad34c60 re-entrancy class).
+        // We instead resolve a stable raw handle pointer under a short borrow,
+        // then operate on it with no borrow held.
+        let h = with_registry(|r| r.handle_ptr(mqh));
+        // SAFETY: `h` points at the live, attached `ShmMqHandle` for this id;
+        // it is a stable `PgBox` heap allocation that re-entrant registry
+        // mutation on other ids does not move, and this id is not detached
+        // until after this call returns.
+        let (res, data) = unsafe { real_receive(&mut *h, true) }?;
+        let result = match res {
+            SHM_MQ_SUCCESS => Some(ShmMqResult::Success),
+            SHM_MQ_WOULD_BLOCK => Some(ShmMqResult::WouldBlock),
+            SHM_MQ_DETACHED => Some(ShmMqResult::Detached),
+        };
+        let owned = if result == Some(ShmMqResult::Success) {
+            data.to_vec()
+        } else {
+            alloc::vec::Vec::new()
+        };
+        Ok((result, owned))
     }
 
     fn shm_mq_detach(mqh: ShmMqAttachHandle) {
@@ -1655,14 +1679,18 @@ mod seam_layer {
         nowait: bool,
         force_flush: bool,
     ) -> PgResult<ShmMqResult> {
-        with_registry(|r| {
-            // SAFETY: the registry holds a live, attached handle for this id.
-            let res = unsafe { real_send(r.get_mut(mqh), &data, nowait, force_flush) }?;
-            Ok(match res {
-                SHM_MQ_SUCCESS => ShmMqResult::Success,
-                SHM_MQ_WOULD_BLOCK => ShmMqResult::WouldBlock,
-                SHM_MQ_DETACHED => ShmMqResult::Detached,
-            })
+        // Release the REGISTRY borrow before `real_send`: a blocking send runs
+        // CHECK_FOR_INTERRUPTS, which can fire the SIGUSR1 parallel-message
+        // handler that re-enters `shm_mq_receive` (another `with_registry`).
+        // See `handle_ptr` / the e7ad34c60 re-entrancy precedent.
+        let h = with_registry(|r| r.handle_ptr(mqh));
+        // SAFETY: `h` points at the live, attached handle for this id (a stable
+        // PgBox heap allocation not moved by re-entrant registry mutation).
+        let res = unsafe { real_send(&mut *h, &data, nowait, force_flush) }?;
+        Ok(match res {
+            SHM_MQ_SUCCESS => ShmMqResult::Success,
+            SHM_MQ_WOULD_BLOCK => ShmMqResult::WouldBlock,
+            SHM_MQ_DETACHED => ShmMqResult::Detached,
         })
     }
 
@@ -1670,21 +1698,25 @@ mod seam_layer {
         mqh: ShmMqAttachHandle,
         nowait: bool,
     ) -> PgResult<(Option<ShmMqResult>, alloc::vec::Vec<u8>)> {
-        with_registry(|r| {
-            // SAFETY: the registry holds a live, attached handle for this id.
-            let (res, data) = unsafe { real_receive(r.get_mut(mqh), nowait) }?;
-            let result = match res {
-                SHM_MQ_SUCCESS => Some(ShmMqResult::Success),
-                SHM_MQ_WOULD_BLOCK => Some(ShmMqResult::WouldBlock),
-                SHM_MQ_DETACHED => Some(ShmMqResult::Detached),
-            };
-            let owned = if result == Some(ShmMqResult::Success) {
-                data.to_vec()
-            } else {
-                alloc::vec::Vec::new()
-            };
-            Ok((result, owned))
-        })
+        // Release the REGISTRY borrow before `real_receive` (which runs
+        // CHECK_FOR_INTERRUPTS when blocking): the SIGUSR1 parallel-message
+        // handler can re-enter `shm_mq_receive` (another `with_registry`).
+        // See `handle_ptr` / the e7ad34c60 re-entrancy precedent.
+        let h = with_registry(|r| r.handle_ptr(mqh));
+        // SAFETY: `h` points at the live, attached handle for this id (a stable
+        // PgBox heap allocation not moved by re-entrant registry mutation).
+        let (res, data) = unsafe { real_receive(&mut *h, nowait) }?;
+        let result = match res {
+            SHM_MQ_SUCCESS => Some(ShmMqResult::Success),
+            SHM_MQ_WOULD_BLOCK => Some(ShmMqResult::WouldBlock),
+            SHM_MQ_DETACHED => Some(ShmMqResult::Detached),
+        };
+        let owned = if result == Some(ShmMqResult::Success) {
+            data.to_vec()
+        } else {
+            alloc::vec::Vec::new()
+        };
+        Ok((result, owned))
     }
 
     pub fn install() {
