@@ -333,6 +333,15 @@ int_var!(
     3
 ); // HUGE_PAGES_UNKNOWN
 
+// compute_query_id (queryjumble.h ComputeQueryIdType): OFF=0, ON=1, AUTO=2
+// (boot), REGRESS=3. The enum GUC's backing `int` — read by IsQueryIdEnabled().
+int_var!(
+    I_compute_query_id,
+    compute_query_id,
+    set_compute_query_id,
+    2
+); // COMPUTE_QUERY_ID_AUTO
+
 // ---- real GUCs (guc_tables.c) -------------------------------------------
 
 real_var!(R_phony_random_seed, phony_random_seed, set_phony_random_seed, 0.0);

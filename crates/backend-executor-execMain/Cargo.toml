@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
+# pgstat_report_query_id (execMain.c:132): advertise the running query's queryId
+# into pg_stat_activity at ExecutorStart.
+backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }

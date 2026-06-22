@@ -9652,6 +9652,7 @@ dependencies = [
  "backend-rewrite-rewritehandler",
  "backend-tcop-dest-seams",
  "backend-tcop-postgres-seams",
+ "backend-utils-activity-status-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-partcache",
  "backend-utils-cache-relcache-seams",
@@ -12602,6 +12603,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-queryjumble"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-queryjumble-seams",
+ "backend-utils-misc-guc-tables",
+ "common-hashfn",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-nodes-queryjumble-seams"
 version = "0.0.0"
 dependencies = [
@@ -13978,6 +13992,7 @@ dependencies = [
  "backend-commands-functioncmds-seams",
  "backend-nodes-core",
  "backend-nodes-outfuncs",
+ "backend-nodes-queryjumble-seams",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-clauses-seams",
  "backend-optimizer-util-vars",
@@ -25285,6 +25300,7 @@ dependencies = [
  "backend-nodes-equalfuncs",
  "backend-nodes-extensible",
  "backend-nodes-outfuncs",
+ "backend-nodes-queryjumble",
  "backend-nodes-readfuncs",
  "backend-optimizer-path-allpaths",
  "backend-optimizer-path-costsize",

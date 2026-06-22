@@ -49,6 +49,19 @@ fn elog_error(msg: impl Into<alloc::string::String>) -> types_error::PgError {
     ereport(ERROR).errmsg_internal(msg.into()).into_error()
 }
 
+/// `if (IsQueryIdEnabled()) jstate = JumbleQuery(query);` (analyze.c) — the
+/// tail of `parse_analyze_*`. Under `compute_query_id`, jumble the analyzed
+/// query and store the resulting 64-bit id into `query.queryId` (which the
+/// planner copies into `PlannedStmt.queryId`, and `ExecutorStart` reports into
+/// `pg_stat_activity`). The `post_parse_analyze_hook` is NULL by default, so the
+/// `JumbleState` is not needed here (the hook would consume it).
+fn maybe_jumble_query(query: &mut Query<'_>) {
+    use backend_nodes_queryjumble_seams as queryjumble;
+    if queryjumble::is_query_id_enabled::call() {
+        query.queryId = queryjumble::jumble_query_compute::call(query);
+    }
+}
+
 /// `pstate->p_queryEnv = queryEnv` — set the parse state's query environment from
 /// the per-backend query-environment home (the live AFTER-trigger transition-table
 /// env, if any). C threads `queryEnv` explicitly through `parse_analyze_*`; the
@@ -101,12 +114,14 @@ pub fn parse_analyze_fixedparams<'mcx>(
     // AFTER trigger's transition-table ENRs (OLD/NEW TABLE) resolve by name.
     set_query_env_from_home(mcx, &mut pstate)?;
 
-    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+    let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
-    // IsQueryIdEnabled() -> JumbleQuery(query): query-id jumbling is a separate
-    // unported subsystem; the hook (post_parse_analyze_hook) is NULL by default.
-    // pgstat_report_query_id is a no-op for queryId == 0. None of these change
-    // the returned Query in the default configuration.
+    // if (IsQueryIdEnabled()) jstate = JumbleQuery(query);  (analyze.c)
+    // Under compute_query_id this sets query.queryId; the planner copies it into
+    // PlannedStmt.queryId and ExecutorStart reports it into pg_stat_activity.
+    // The post_parse_analyze_hook is NULL by default, so the JumbleState is not
+    // consumed here.
+    maybe_jumble_query(&mut query);
 
     backend_parser_small1::free_parsestate(pstate)?;
 
@@ -207,21 +222,19 @@ pub fn parse_analyze_varparams<'mcx>(
 
     // pstate->p_queryEnv = queryEnv;  (milestone caller passes None)
 
-    let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
+    let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
     // make sure all is well with parameter types
     backend_parser_small1::check_variable_parameters(&pstate, &query)?;
 
-    // IsQueryIdEnabled() -> JumbleQuery(query): query-id jumbling is a separate
-    // unported subsystem (queryId stays 0, jstate stays NULL).
-    //
+    // if (IsQueryIdEnabled()) jstate = JumbleQuery(query);  (analyze.c)
+    maybe_jumble_query(&mut query);
+
     //   if (post_parse_analyze_hook)
     //       (*post_parse_analyze_hook) (pstate, query, jstate);
     // The post_parse_analyze_hook is a per-backend `fn` pointer extensions install
     // (NULL by default). With no extension loaded it is unset, so this is a no-op
-    // — exactly the C `if (hook)` guard falling through. (The portalcmds consumer
-    // models the same call through the `run_post_parse_analyze_hook` seam over its
-    // trimmed ParseState/Query view; that seam is the canonical NULL-hook no-op.)
+    // — exactly the C `if (hook)` guard falling through.
 
     backend_parser_small1::free_parsestate(pstate)?;
 

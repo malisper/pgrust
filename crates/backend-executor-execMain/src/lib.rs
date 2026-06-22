@@ -479,6 +479,14 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
 /// `ExecutorStart(queryDesc, eflags)` — the hookable entry; routes to
 /// [`standard_ExecutorStart`] (no `ExecutorStart_hook` consumer yet).
 pub fn ExecutorStart(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
+    // execMain.c:124-132 — In some cases (an EXECUTE statement or an execute
+    // message with the extended query protocol) the query_id won't have been
+    // reported, so do it now. Harmless to report multiple times: the call is
+    // ignored if the top-level query_id was already reported.
+    //   pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
+    let query_id = query_desc.work.with(|w| w.plannedstmt.queryId);
+    backend_utils_activity_status_seams::pgstat_report_query_id::call(query_id as u64, false);
+
     standard_ExecutorStart(query_desc, eflags)
 }
 

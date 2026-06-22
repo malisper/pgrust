@@ -68,6 +68,15 @@ pub struct JumbleState {
     _private: (),
 }
 
+impl JumbleState {
+    /// Construct the opaque placeholder (the `JumbleQuery` seam's return value
+    /// for the DECLARE-CURSOR path, which threads it into the NULL-by-default
+    /// `post_parse_analyze_hook` and never inspects it).
+    pub fn opaque() -> Self {
+        JumbleState { _private: () }
+    }
+}
+
 /// `DeclareCursorStmt` (`nodes/parsenodes.h`) — `DECLARE CURSOR`.
 pub struct DeclareCursorStmt {
     /// `char *portalname`.

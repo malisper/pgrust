@@ -476,6 +476,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::huge_pages,
         set: backing::set_huge_pages,
     });
+    vars::compute_query_id.install(GucVarAccessors {
+        get: backing::compute_query_id,
+        set: backing::set_compute_query_id,
+    });
     vars::huge_pages_status.install(GucVarAccessors {
         get: backing::huge_pages_status,
         set: backing::set_huge_pages_status,

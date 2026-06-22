@@ -1,0 +1,18 @@
+[package]
+name = "backend-nodes-queryjumble"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_nodes_queryjumble"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
+types-core = { path = "../types-core" }
+common-hashfn = { path = "../common-hashfn" }
+backend-nodes-queryjumble-seams = { path = "../backend-nodes-queryjumble-seams" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

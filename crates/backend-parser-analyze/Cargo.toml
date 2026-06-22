@@ -23,6 +23,11 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-outfuncs = { path = "../backend-nodes-outfuncs" }
 
+# Query-jumble (queryId) machinery: IsQueryIdEnabled() + JumbleQuery() over the
+# canonical Query, called at the end of parse analysis (analyze.c) under
+# compute_query_id. Seam decls only (impl is the queryjumble unit).
+backend-nodes-queryjumble-seams = { path = "../backend-nodes-queryjumble-seams" }
+
 # Inward seam contract owned by this crate.
 backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 
