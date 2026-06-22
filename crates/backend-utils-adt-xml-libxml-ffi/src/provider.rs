@@ -943,8 +943,12 @@ fn serialize_with_options(
             return Ok(out);
         }
 
-        // Indent-serialize.
-        let result = serialize_indented(doc, data, parse_as_document, content_nodes);
+        // Indent-serialize.  C trims the trailing newline based on the *requested*
+        // xmloption (xmloption_arg), NOT the parsed type — so a CONTENT request that
+        // parses as a DOCUMENT (e.g. `<!DOCTYPE a><a/>`) keeps the trailing newline.
+        let requested_document = matches!(xmloption_arg, XmlOptionType::XMLOPTION_DOCUMENT);
+        let result =
+            serialize_indented(doc, data, parse_as_document, requested_document, content_nodes);
         xmlFreeDoc(doc);
         result
     }
@@ -954,6 +958,7 @@ unsafe fn serialize_indented(
     doc: *mut xmlDoc,
     data: &[u8],
     parse_as_document: bool,
+    requested_document: bool,
     content_nodes: *mut xmlNode,
 ) -> PgResult<Vec<u8>> {
     let buf = xmlBufferCreate();
@@ -1039,8 +1044,11 @@ unsafe fn serialize_indented(
     };
     xmlBufferFree(buf);
 
-    // xmlDocContentDumpOutput may add a trailing newline for documents.
-    let out = if parse_as_document {
+    // xmlDocContentDumpOutput may add a trailing newline; C trims it only when the
+    // *requested* xmloption was DOCUMENT (xml.c:822 — `xmloption_arg`), not the
+    // parsed type.  A CONTENT request keeps the trailing newline via
+    // xmlBuffer_to_xmltype.
+    let out = if requested_document {
         let mut end = bytes.len();
         while end > 0 && (bytes[end - 1] == b'\n' || bytes[end - 1] == b'\r') {
             end -= 1;
