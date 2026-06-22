@@ -1324,18 +1324,33 @@ pub fn after_trigger_end_query(estate: &mut EStateData<'_>) -> PgResult<()> {
         });
         let mut events = with_after_triggers(|at| std::mem::take(&mut at.query_stack[qd].events));
         let fire_result = after_trigger_invoke_events(&mut events, firing_id, estate, false);
-        with_after_triggers(|at| {
+        // Firing a trigger could have queued MORE events at this same query
+        // depth (e.g. an RI/FK enforcement trigger's cascade DML, run with
+        // EXEC_FLAG_SKIP_TRIGGERS, appends its own AFTER ROW events here). C's
+        // afterTriggerInvokeEvents walks the live linked list to its current
+        // tail, so it sees those appends within the one call; our snapshot
+        // `events` Vec does not, so the appended events sit on the stack. Merge
+        // them back into `events` and, if any are not yet DONE, force another
+        // re-drive iteration (mark + invoke) so they fire too — with the
+        // CommandCounterIncrement inside the cascade SPI substatements giving
+        // each round visibility of the prior round's row changes.
+        let appended_unfired = with_after_triggers(|at| {
             let appended = std::mem::take(&mut at.query_stack[qd].events);
+            let mut unfired = false;
             for ev in appended.events {
                 let sidx = (ev.ate_flags & AFTER_TRIGGER_OFFSET) as usize;
                 if let Some(shared) = appended.shared.get(sidx).cloned() {
+                    if (ev.ate_flags & (AFTER_TRIGGER_DONE | AFTER_TRIGGER_IN_PROGRESS)) == 0 {
+                        unfired = true;
+                    }
                     crate::queue::after_trigger_add_event(&mut events, ev, &shared);
                 }
             }
             at.query_stack[qd].events = events;
+            unfired
         });
         let all_fired = fire_result?;
-        if all_fired {
+        if all_fired && !appended_unfired {
             break;
         }
     }
