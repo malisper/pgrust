@@ -90,6 +90,14 @@ pub struct MatSrfSink {
     /// indeterminate RECORD (no column-definition list). Empty when the callee
     /// did not supply a descriptor (the caller's `expectedDesc` is then used).
     pub set_desc_cols: Vec<MatDescCol>,
+    /// `rsinfo->expectedDesc` columns (name/type/typmod/collation) -- the
+    /// descriptor the CALLER (FunctionScan) built from a column-definition list.
+    /// A `RETURNS [SETOF] record` SQL function reads this via
+    /// `get_call_result_type`/`internal_get_result_type` (TYPEFUNC_RECORD branch)
+    /// to learn the target rowtype its body output must be coerced to (e.g. the
+    /// `t(f1 numeric(4,2), f2 text)` coldeflist). Empty when the caller supplied
+    /// no expectedDesc (the indeterminate-RECORD targetlist case).
+    pub expected_desc_cols: Vec<MatDescCol>,
     /// The accumulated materialized rows (`rsinfo->setResult`, the tuplestore).
     pub rows: Vec<MatRow>,
     /// Whether the callee actually ran in materialize mode and filled the sink

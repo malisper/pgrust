@@ -643,6 +643,40 @@ fn resolve_call_result_type<'mcx>(
     let resolved =
         backend_utils_fmgr_funcapi_seams::get_expr_result_type::call(mcx, Some(&node))?;
     let rt = resolved.result_type_id.unwrap_or(rettype);
+    // For a `RETURNS [SETOF] record` function `get_expr_result_type` returns
+    // TYPEFUNC_RECORD with NO tupdesc (the rowtype is indeterminate from the call
+    // expression alone). C's `internal_get_result_type` resolves it from the
+    // caller's `rsinfo->expectedDesc` — the FunctionScan column-definition list.
+    // In the owned model that descriptor is carried on the active materialize
+    // sink (`expected_desc_cols`). Rebuild it here so `check_sql_fn_retval`
+    // coerces the body's output columns to the declared coldeflist types (e.g.
+    // int -> numeric(4,2)) instead of leaving them un-coerced.
+    if resolved.result_tuple_desc.is_none() {
+        let cols = types_fmgr::mat_srf::with_top(|sink| {
+            sink.map(|s| s.expected_desc_cols.clone()).unwrap_or_default()
+        });
+        if !cols.is_empty() {
+            let td = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, cols.len() as i32)?;
+            let mut td = mcx::alloc_in(mcx, td)?;
+            for (i, col) in cols.iter().enumerate() {
+                backend_access_common_tupdesc::TupleDescInitEntry(
+                    &mut td,
+                    (i + 1) as i16,
+                    Some(col.name.as_str()),
+                    col.typid,
+                    col.typmod,
+                    0,
+                )?;
+                backend_access_common_tupdesc::TupleDescInitEntryCollation(
+                    &mut td,
+                    (i + 1) as i16,
+                    col.collation,
+                )?;
+            }
+            td.tdtypeid = RECORDOID;
+            return Ok((rt, Some(td)));
+        }
+    }
     Ok((rt, resolved.result_tuple_desc))
 }
 

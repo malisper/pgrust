@@ -53,3 +53,7 @@ backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 # get_expr_result_type: resolve the call-time (polymorphic) result tupdesc for check_sql_fn_retval
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+# Build a RECORD result tupdesc from the FunctionScan coldeflist (carried on the
+# materialize sink as expected_desc_cols) when get_expr_result_type returns the
+# indeterminate TYPEFUNC_RECORD — the call-time rettupdesc for check_sql_fn_retval.
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }

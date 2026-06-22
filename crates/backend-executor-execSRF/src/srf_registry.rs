@@ -150,6 +150,37 @@ fn dispatch_user_setof<'mcx>(
     // if the callee `ereport(ERROR)`s (unwinds).
     let guard = types_fmgr::mat_srf::push(allowed_modes);
 
+    // Carry the caller's `expectedDesc` (the FunctionScan coldeflist) columns
+    // into the sink so a `RETURNS [SETOF] record` SQL function can resolve its
+    // target rowtype via `get_call_result_type` (C's `internal_get_result_type`
+    // reads `rsinfo->expectedDesc` for the TYPEFUNC_RECORD case). Without this
+    // the body's output (e.g. int columns) is never coerced to the declared
+    // coldeflist (e.g. numeric(4,2)) and the materialized row mismatches the
+    // descriptor at deform time.
+    if let Some(rsi) = fcinfo.resultinfo.as_ref() {
+        if let Some(exp) = rsi.expectedDesc.as_deref() {
+            let cols: alloc::vec::Vec<types_fmgr::mat_srf::MatDescCol> = (0..exp
+                .natts
+                .max(0) as usize)
+                .map(|i| {
+                    let a = &exp.attrs[i];
+                    types_fmgr::mat_srf::MatDescCol {
+                        name: alloc::string::String::from_utf8_lossy(a.attname.name_str())
+                            .into_owned(),
+                        typid: a.atttypid,
+                        typmod: a.atttypmod,
+                        collation: a.attcollation,
+                    }
+                })
+                .collect();
+            types_fmgr::mat_srf::with_top(|sink| {
+                if let Some(sink) = sink {
+                    sink.expected_desc_cols = cols;
+                }
+            });
+        }
+    }
+
     // The call-expression node `ExecMakeTableFunctionResult` stamped onto the
     // frame's `flinfo->fn_expr` (`fmgr_info_set_expr`). The by-OID re-dispatch
     // below re-resolves the `FmgrInfo` and would otherwise drop it; thread it

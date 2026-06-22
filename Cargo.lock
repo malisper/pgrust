@@ -10200,6 +10200,7 @@ name = "backend-executor-functions"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-tupdesc",
  "backend-access-transam-xact-seams",
  "backend-catalog-pg-proc-seams",
  "backend-executor-execMain",
