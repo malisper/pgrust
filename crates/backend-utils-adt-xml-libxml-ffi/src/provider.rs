@@ -310,6 +310,41 @@ struct xmlErrorHdr {
     node: *mut c_void,
 }
 
+/// Prefix of libxml2's `struct _xmlParserCtxt` (`parser.h`) through the `input`
+/// field. The layout up to `input` is ABI-stable across libxml2 2.x:
+/// `sax`, `userData`, `myDoc` (pointers), `wellFormed`, `replaceEntities`
+/// (ints), `version`, `encoding` (pointers), `standalone`, `html` (ints), then
+/// `input`. `error->ctxt` points at one of these when the diagnostic comes from
+/// the parser; we read `ctxt->input` to reconstruct the file-context lines.
+#[repr(C)]
+struct xmlParserCtxtHdr {
+    sax: *mut c_void,
+    user_data: *mut c_void,
+    my_doc: *mut c_void,
+    well_formed: c_int,
+    replace_entities: c_int,
+    version: *const c_uchar,
+    encoding: *const c_uchar,
+    standalone: c_int,
+    html: c_int,
+    input: *mut xmlParserInputHdr,
+}
+
+/// Prefix of libxml2's `struct _xmlParserInput` (`parser.h`) through the fields
+/// `xmlParserPrintFileContextInternal` reads (`base`, `cur`, `end`). ABI-stable.
+#[repr(C)]
+struct xmlParserInputHdr {
+    buf: *mut c_void,
+    filename: *const c_char,
+    directory: *const c_char,
+    base: *const c_uchar,
+    cur: *const c_uchar,
+    end: *const c_uchar,
+    length: c_int,
+    line: c_int,
+    col: c_int,
+}
+
 // `xmlErrorDomain` values used by `xml_errorHandler`.
 const XML_FROM_NONE: c_int = 0;
 const XML_FROM_PARSER: c_int = 1;
@@ -369,6 +404,73 @@ fn append_line_separator(buf: &mut String) {
     if !buf.is_empty() {
         buf.push('\n');
     }
+}
+
+/// Port of libxml2's `xmlParserPrintFileContextInternal` (`error.c`). Builds the
+/// two context lines `xmlParserPrintFileContext` would print: the offending
+/// source line (window of up to 80 chars ending at the error position) followed
+/// by a line of blanks (tabs preserved) and a `^` under the error column.
+/// Returns the two lines joined by newlines (no trailing newline kept by the
+/// caller's chop), or `None` if the input has no current position.
+unsafe fn parser_print_file_context(input: *const xmlParserInputHdr) -> Option<String> {
+    let cur0 = (*input).cur;
+    let base = (*input).base;
+    if cur0.is_null() || base.is_null() {
+        return None;
+    }
+
+    // The buffer is NUL-terminated; bound forward scans by `end` defensively.
+    let end = (*input).end;
+    let at = |p: *const c_uchar| -> u8 { *p };
+
+    let mut cur = cur0;
+    // skip backwards over any end-of-lines
+    while cur > base && (at(cur) == b'\n' || at(cur) == b'\r') {
+        cur = cur.sub(1);
+    }
+    // search backwards for beginning-of-line (to max buffer size: 80)
+    let mut n: usize = 0;
+    while {
+        let cont = n < 80 && cur > base && at(cur) != b'\n' && at(cur) != b'\r';
+        n += 1;
+        cont
+    } {
+        cur = cur.sub(1);
+    }
+    if at(cur) == b'\n' || at(cur) == b'\r' {
+        cur = cur.add(1);
+    }
+    // error column relative to line start
+    let col = cur0 as usize - cur as usize;
+
+    // copy selected text (up to 80 chars) to a buffer
+    let mut content: Vec<u8> = Vec::with_capacity(81);
+    while at(cur) != 0
+        && at(cur) != b'\n'
+        && at(cur) != b'\r'
+        && content.len() < 80
+        && (end.is_null() || cur < end)
+    {
+        content.push(at(cur));
+        cur = cur.add(1);
+    }
+
+    let mut out = String::new();
+    out.push_str(&String::from_utf8_lossy(&content));
+    out.push('\n');
+
+    // blank line with the problem pointer: replace each char before `col` with
+    // a space (tabs kept as tabs), then a caret.
+    let mut caret: Vec<u8> = Vec::with_capacity(col + 1);
+    let mut i = 0usize;
+    while i < col && i < 79 && i < content.len() {
+        caret.push(if content[i] == b'\t' { b'\t' } else { b' ' });
+        i += 1;
+    }
+    caret.push(b'^');
+    out.push_str(&String::from_utf8_lossy(&caret));
+
+    Some(out)
 }
 
 /// Port of `xml_errorHandler` (xml.c). Buffers the libxml diagnostic into the
@@ -455,7 +557,33 @@ unsafe extern "C" fn xml_error_handler(_user_data: *mut c_void, error: *mut c_vo
     } else {
         msg.push_str("(no message provided)");
     }
-    // (xmlParserPrintFileContext context lines intentionally omitted — see note.)
+
+    // Append the parser file-context lines (the offending source line plus a
+    // caret pointing at the column), exactly as C's xml_errorHandler does via
+    // xmlParserPrintFileContext (xml.c:2197-2212). C redirects libxml's generic
+    // error handler to appendStringInfo and calls xmlParserPrintFileContext on
+    // ctxt->input; we instead reconstruct the same two lines from the parser
+    // input buffer (port of libxml2's xmlParserPrintFileContextInternal), which
+    // is byte-for-byte identical and avoids registering a C-variadic callback.
+    let ctxt = (*err).ctxt;
+    if !ctxt.is_null() {
+        let input = (*(ctxt as *const xmlParserCtxtHdr)).input;
+        if !input.is_null() {
+            if let Some(ctx) = parser_print_file_context(input) {
+                // appendStringInfoLineSeparator(errorBuf): strip trailing
+                // newlines, then add one if non-empty, before the context.
+                while msg.ends_with('\n') {
+                    msg.pop();
+                }
+                if !msg.is_empty() {
+                    msg.push('\n');
+                }
+                msg.push_str(&ctx);
+            }
+        }
+    }
+
+    // chopStringInfoNewlines(errorBuf) — strip trailing newlines.
     while msg.ends_with('\n') {
         msg.pop();
     }
