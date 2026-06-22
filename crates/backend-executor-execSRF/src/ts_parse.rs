@@ -75,10 +75,14 @@ fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     match fcinfo.ref_arg(i) {
         Some(FmgrArgRef::Varlena(b)) => {
             let image = b.as_slice();
-            if image.len() >= VARHDRSZ {
-                &image[VARHDRSZ..]
-            } else {
-                &[]
+            // `VARDATA_ANY`: skip ONE header byte for a short (1-byte, low-bit-set)
+            // header, else `VARHDRSZ`. A small stored text reaches an fmgr arg
+            // verbatim once `SHORT_VARLENA_PACKING` is on; a fixed 4-byte strip
+            // would drop three payload bytes. No-op while the flag is off.
+            match image.first() {
+                Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+                Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+                _ => &[],
             }
         }
         _ => panic!("ts_parse/ts_token_type: text argument missing from the by-ref lane"),

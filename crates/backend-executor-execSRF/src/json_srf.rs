@@ -89,7 +89,15 @@ fn arg_json_payload(fcinfo: &FunctionCallInfoBaseData<'_>, index: usize) -> Vec<
         Some(FmgrArgRef::Varlena(b)) => b.as_slice(),
         _ => panic!("json SRF: json argument {index} missing from by-ref lane"),
     };
-    let payload = if image.len() >= 4 { &image[4..] } else { image };
+    // `VARDATA_ANY`: skip ONE header byte for a short (1-byte, low-bit-set)
+    // header, else `VARHDRSZ`. A small stored json/text reaches an fmgr arg
+    // verbatim once `SHORT_VARLENA_PACKING` is on; a fixed 4-byte strip would drop
+    // three payload bytes. No-op while the flag is off (every value is 4-byte).
+    let payload: &[u8] = match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= 4 => &image[4..],
+        _ => &[],
+    };
     payload.to_vec()
 }
 

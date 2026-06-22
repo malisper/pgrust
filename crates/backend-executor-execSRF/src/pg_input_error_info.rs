@@ -48,11 +48,14 @@ fn arg_text_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("pg_input_error_info: text arg missing from the by-ref lane");
-    // `VARDATA_ANY`: skip the 4-byte header on the header-ful image.
-    if image.len() >= 4 {
-        &image[4..]
-    } else {
-        &[]
+    // `VARDATA_ANY`: skip ONE header byte for a short (1-byte, low-bit-set)
+    // header, else `VARHDRSZ`. A small stored text reaches an fmgr arg verbatim
+    // once `SHORT_VARLENA_PACKING` is on; a fixed 4-byte strip would drop three
+    // payload bytes. No-op while the flag is off (every value is 4-byte).
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= 4 => &image[4..],
+        _ => &[],
     }
 }
 
