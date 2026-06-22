@@ -1267,10 +1267,14 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 }
 
                 // ExecConstraints: if the relation has constraints, check them.
+                // The C `CopyFromErrorCallback` is active across the whole row
+                // body, so a constraint violation here carries the COPY context
+                // line (copyfrom.c:251); attach it on error propagation.
                 if relation_alias(estate, result_rel_info).rd_att.constr.is_some() {
                     backend_executor_execMain_seams::exec_constraints::call(
                         estate, result_rel_info, myslot,
-                    )?;
+                    )
+                    .map_err(|e| e.add_context(copy_from_error_context(&state.cstate)))?;
                 }
 
                 // Also check the tuple against the partition constraint, if there
