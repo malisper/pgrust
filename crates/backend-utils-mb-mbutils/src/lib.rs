@@ -1397,6 +1397,11 @@ pub fn init_seams() {
     seams::pg_database_encoding_max_length::set(pg_database_encoding_max_length);
     seams::get_database_encoding::set(GetDatabaseEncoding);
     seams::get_database_encoding_name::set(GetDatabaseEncodingName);
+    // libpq's get_database_encoding_name (fe-connect.c, via the encoding
+    // subsystem) — same backing routine, returning an owned String.
+    interfaces_libpq_fe_seams::get_database_encoding_name::set(|| {
+        GetDatabaseEncodingName().into()
+    });
     // NOTE: `is_encoding_supported_by_icu` is declared in this seam crate but is
     // `common/encnames.c` logic (it reads `pg_enc2icu_tbl`), not mbutils.c. Its
     // real owner is the encnames unit (`common-extra-encnames-fgram`), which now

@@ -930,14 +930,30 @@ fn subscription_exists<'mcx>(mcx: Mcx<'mcx>, dbid: Oid, name: &str) -> PgResult<
     }
 }
 
-/// The C `walrcv_connect` failure `ereport` — raised in a regression context
-/// where no publisher is reachable. `err` is the libpq connection error; we use
-/// the faithful "could not connect" message.
-fn walrcv_connect_failed(subname: &str, _conninfo: &str, _must_use_password: bool) -> PgError {
+/// The C `walrcv_connect` failure `ereport` (subscriptioncmds.c:713-719) — raised
+/// in a regression context where no publisher is reachable. We actually attempt
+/// `walrcv_connect`; on the expected failure its `*err` string carries the real
+/// libpq diagnostic (e.g. `invalid port number: "-1"`), which we splice into the
+/// `could not connect to the publisher: %s` message exactly as C does.
+fn walrcv_connect_failed(subname: &str, conninfo: &str, must_use_password: bool) -> PgError {
+    // wrconn = walrcv_connect(conninfo, true, true, must_use_password, subname, &err);
+    let err = match backend_replication_libpqwalreceiver::libpqrcv_connect(
+        conninfo,
+        /* replication = */ true,
+        /* logical = */ true,
+        must_use_password,
+        Some(subname),
+    ) {
+        // libpqrcv_connect's own ereport(ERROR) (e.g. "password is required").
+        Err(e) => return e,
+        // Normal failure: conn == None, *err set.
+        Ok(res) => res.err.unwrap_or_else(|| "connection to server failed".to_string()),
+    };
+
     ereport(ERROR)
         .errcode(ERRCODE_CONNECTION_FAILURE)
         .errmsg(format!(
-            "subscription \"{subname}\" could not connect to the publisher: connection to server failed"
+            "subscription \"{subname}\" could not connect to the publisher: {err}"
         ))
         .into_error()
 }
@@ -1213,6 +1229,16 @@ pub fn AlterSubscription<'mcx>(
 
             if opts.refresh {
                 refresh_preconditions(mcx, &rel, &tup, &sub, opts.copy_data, is_top_level)?;
+
+                // PreventInTransactionBlock must run before any publisher
+                // connection (AlterSubscription_refresh).
+                if let Err(e) = utility_seams::prevent_in_transaction_block::call(
+                    is_top_level,
+                    "ALTER SUBSCRIPTION with refresh",
+                ) {
+                    return alter_fail(mcx, rel, tup, e);
+                }
+
                 // AlterSubscription_refresh requires a publisher connection.
                 return alter_fail(mcx, rel, tup, refresh_needs_publisher());
             }
@@ -1232,6 +1258,16 @@ pub fn AlterSubscription<'mcx>(
 
             if opts.refresh {
                 refresh_preconditions_addrop(mcx, &rel, &tup, &sub, opts.copy_data, isadd, is_top_level)?;
+
+                // PreventInTransactionBlock must run before any publisher
+                // connection (AlterSubscription_refresh).
+                if let Err(e) = utility_seams::prevent_in_transaction_block::call(
+                    is_top_level,
+                    "ALTER SUBSCRIPTION with refresh",
+                ) {
+                    return alter_fail(mcx, rel, tup, e);
+                }
+
                 return alter_fail(mcx, rel, tup, refresh_needs_publisher());
             }
         }

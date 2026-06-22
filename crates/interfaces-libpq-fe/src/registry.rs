@@ -169,29 +169,60 @@ struct ResolvedOptions {
 /// Pair up the parallel `keys` / `vals` arrays into the options we read. An
 /// unknown key is ignored (libpq would error on it during conninfo parsing,
 /// but here the caller already validated keys; we only consume what we use).
-fn resolve_options(keys: &[String], vals: &[Option<String>]) -> ResolvedOptions {
+/// Whether `dbname` is a recognized connection string (URI or `key=value`
+/// form), mirroring libpq's `recognized_connection_string` (fe-connect.c).
+fn recognized_connection_string(dbname: &str) -> bool {
+    crate::conninfo_parse::uri_prefix_length(dbname) != 0 || dbname.contains('=')
+}
+
+/// `connectOptions2`'s expand_dbname leg: when `dbname` is itself a connection
+/// string, parse it via `conninfo_parse` and apply its options in place (later
+/// explicit keys still override). A parse error is surfaced verbatim (e.g.
+/// `invalid port number: "-1"` validation happens via the parsed `port` below).
+fn resolve_options_expanded(
+    keys: &[String],
+    vals: &[Option<String>],
+    expand_dbname: bool,
+) -> Result<ResolvedOptions, String> {
     let mut o = ResolvedOptions::default();
     for (k, v) in keys.iter().zip(vals.iter()) {
         let val = match v {
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
         };
-        match k.as_str() {
-            "host" => o.host = Some(val),
-            "hostaddr" => o.hostaddr = Some(val),
-            "port" => o.port = Some(val),
-            "user" => o.user = Some(val),
-            "dbname" => o.dbname = Some(val),
-            "password" => o.password = Some(val),
-            "replication" => o.replication = Some(val),
-            "application_name" => o.application_name = Some(val),
-            "fallback_application_name" => o.fallback_application_name = Some(val),
-            "options" => o.options = Some(val),
-            "client_encoding" => o.client_encoding = Some(val),
-            _ => {}
+        if expand_dbname && k == "dbname" && recognized_connection_string(&val) {
+            // PQconninfoParse: a syntax error here is reported as-is.
+            let opts = crate::conninfo_parse::pq_conninfo_parse(&val)
+                .map_err(|e| e.unwrap_or_else(|| "out of memory".to_string()))?;
+            for opt in &opts {
+                if let Some(ref ov) = opt.val {
+                    if !ov.is_empty() {
+                        apply_option(&mut o, &opt.keyword, ov.clone());
+                    }
+                }
+            }
+            continue;
         }
+        apply_option(&mut o, k, val);
     }
-    o
+    Ok(o)
+}
+
+fn apply_option(o: &mut ResolvedOptions, k: &str, val: String) {
+    match k {
+        "host" => o.host = Some(val),
+        "hostaddr" => o.hostaddr = Some(val),
+        "port" => o.port = Some(val),
+        "user" => o.user = Some(val),
+        "dbname" => o.dbname = Some(val),
+        "password" => o.password = Some(val),
+        "replication" => o.replication = Some(val),
+        "application_name" => o.application_name = Some(val),
+        "fallback_application_name" => o.fallback_application_name = Some(val),
+        "options" => o.options = Some(val),
+        "client_encoding" => o.client_encoding = Some(val),
+        _ => {}
+    }
 }
 
 /// The default Postgres TCP port (`DEF_PGPORT`).
@@ -271,10 +302,16 @@ fn seam_exec_status(s: ExecStatusType) -> SeamExecStatus {
 fn libpqsrv_connect_params(
     keys: Vec<String>,
     vals: Vec<Option<String>>,
-    _expand_dbname: bool,
+    expand_dbname: bool,
     _wait_event_info: u32,
 ) -> PgConnId {
-    let o = resolve_options(&keys, &vals);
+    let o = match resolve_options_expanded(&keys, &vals, expand_dbname) {
+        Ok(o) => o,
+        Err(e) => {
+            record_connect_error(e);
+            return 0;
+        }
+    };
 
     let transport = match open_socket(&o) {
         Ok(t) => t,

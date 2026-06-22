@@ -23341,6 +23341,7 @@ dependencies = [
  "backend-utils-mb-mbutils-seams",
  "common-encnames-seams",
  "common-wchar",
+ "interfaces-libpq-fe-seams",
  "mcx",
  "seam-core",
  "types-core",

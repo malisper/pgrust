@@ -36,6 +36,9 @@ backend-utils-adt-name = { path = "../backend-utils-adt-name" }
 
 # inward seams this crate owns + installs
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+# libpq's get_database_encoding_name resolves through the encoding subsystem
+# (mbutils) — install that seam here, its authoritative owner.
+interfaces-libpq-fe-seams = { path = "../interfaces-libpq-fe-seams" }
 # SetMessageEncoding/pg_any_to_server are mbutils.c routines, but pg_locale.c's
 # seam crate homes their declarations; this crate (their real owner) installs them.
 backend-utils-adt-pg-locale-env-seams = { path = "../backend-utils-adt-pg-locale-env-seams" }

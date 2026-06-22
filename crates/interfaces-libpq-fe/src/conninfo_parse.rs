@@ -72,7 +72,7 @@ const PQ_CONNINFO_KEYWORDS: &[&str] = &[
 
 /// `uri_prefix_length(connstr)` (fe-connect.c) — non-zero if the string starts
 /// with `postgresql://` or `postgres://`.
-fn uri_prefix_length(s: &str) -> usize {
+pub(crate) fn uri_prefix_length(s: &str) -> usize {
     const URIS: [&str; 2] = ["postgresql://", "postgres://"];
     for p in URIS {
         if s.starts_with(p) {
@@ -145,8 +145,9 @@ fn conninfo_parse(conninfo: &str) -> Result<Vec<ConninfoOption>, Option<String>>
 
         // Check that there is a following '='.
         if !have_eq {
+            // libpq_append_error appends a trailing newline to the buffer.
             return Err(Some(format!(
-                "missing \"=\" after \"{pname}\" in connection info string"
+                "missing \"=\" after \"{pname}\" in connection info string\n"
             )));
         }
         // Consume the '='.
@@ -165,7 +166,7 @@ fn conninfo_parse(conninfo: &str) -> Result<Vec<ConninfoOption>, Option<String>>
             loop {
                 if i >= n {
                     return Err(Some(
-                        "unterminated quoted string in connection info string".to_string(),
+                        "unterminated quoted string in connection info string\n".to_string(),
                     ));
                 }
                 if bytes[i] == '\\' {
@@ -205,7 +206,7 @@ fn conninfo_parse(conninfo: &str) -> Result<Vec<ConninfoOption>, Option<String>>
 
         // conninfo_storeval: validate the keyword.
         if !conninfo_find(&pname) {
-            return Err(Some(format!("invalid connection option \"{pname}\"")));
+            return Err(Some(format!("invalid connection option \"{pname}\"\n")));
         }
 
         // Store (the last value for a duplicated keyword wins, as in C).
