@@ -231,6 +231,19 @@ struct SharedHeader {
     n_locks_used: i32,
     /// Live PROCLOCK count.
     n_proclocks_used: i32,
+    /// Spinlock word guarding the two pool free-lists (`lock_free_head` /
+    /// `proclock_free_head`) and the live counters. The per-tag hash buckets are
+    /// already serialized by the tag's partition LWLock (a tag maps to exactly
+    /// one partition, and same-bucket implies same-partition because the bucket's
+    /// low bits equal the partition index), but the free-lists and counters are
+    /// a *single* shared resource crossing all partitions: a backend mutating a
+    /// lock in partition A and another in partition B hold different partition
+    /// LWLocks yet both pop/push the same free-list. Without this dedicated lock
+    /// the concurrent pops lose updates and corrupt the list (parallel-worker
+    /// crash: `out of shared PROCLOCK entries` with the list reporting empty
+    /// while thousands of slots are free). 0 = unlocked, 1 = locked. Mirrors C
+    /// dynahash's per-freelist `mutex` spinlock.
+    freelist_lock: i32,
 }
 
 /// Round `x` up to `MAXIMUM_ALIGNOF` (8) so each sub-array starts aligned.
@@ -293,6 +306,7 @@ pub(crate) fn shmem_init(base: *mut u8, found: bool, n_locks: usize, n_proclocks
         (*hdr).n_proclocks = n_proclocks as i32;
         (*hdr).n_locks_used = 0;
         (*hdr).n_proclocks_used = 0;
+        (*hdr).freelist_lock = 0;
 
         // Bucket heads = NIL.
         let lb = base.add(offs.lock_buckets) as *mut i32;
@@ -399,6 +413,39 @@ impl SharedLockTable {
         unsafe { self.proclock_pool().add(idx as usize) }
     }
 
+    /// View of the header's `freelist_lock` word as an atomic (the word lives in
+    /// shmem; every backend reaches the SAME bytes at the same VA).
+    fn freelist_lock_word(&self) -> &core::sync::atomic::AtomicI32 {
+        unsafe {
+            let p = core::ptr::addr_of_mut!((*self.hdr()).freelist_lock);
+            core::sync::atomic::AtomicI32::from_ptr(p)
+        }
+    }
+
+    /// Acquire the free-list spinlock (CAS 0 -> 1 with a spin-wait), run `f`,
+    /// then release. This is the dedicated lock for the cross-partition free-list
+    /// + counter mutations; it is INDEPENDENT of the partition LWLocks (a backend
+    /// may already hold a partition lock — that does not exclude another backend
+    /// operating in a different partition from touching the shared free-list).
+    fn with_freelist_lock<R>(&self, f: impl FnOnce() -> R) -> R {
+        let w = self.freelist_lock_word();
+        // Spin until we win the 0 -> 1 transition. The critical section is a
+        // handful of pointer writes, so unbounded spinning is fine (matches the
+        // C dynahash freelist spinlock, which is similarly tiny).
+        loop {
+            if w
+                .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        let out = f();
+        w.store(0, Ordering::Release);
+        out
+    }
+
     /// Find the LOCK slot index for `tag`, or NIL.
     fn find_lock(&self, tag: &LOCKTAG) -> i32 {
         let b = bucket_of(tag, self.n_buckets());
@@ -455,27 +502,33 @@ impl SharedLockTable {
             let b = bucket_of(tag, self.n_buckets());
             (*s).next = *self.lock_buckets().add(b);
             *self.lock_buckets().add(b) = idx;
-            (*self.hdr()).n_locks_used += 1;
         }
     }
 
     fn alloc_lock(&mut self) -> i32 {
-        unsafe {
+        // Pop the free-list head + bump the live counter atomically w.r.t. other
+        // backends operating in different partitions (the free-list is shared
+        // across all partitions; the partition LWLock does not exclude them).
+        self.with_freelist_lock(|| unsafe {
             let head = (*self.hdr()).lock_free_head;
             assert!(head != NIL, "out of shared LOCK entries");
             (*self.hdr()).lock_free_head = (*self.lock_at(head)).next;
+            (*self.hdr()).n_locks_used += 1;
             head
-        }
+        })
     }
 
     fn free_lock(&mut self, idx: i32) {
         unsafe {
             let s = self.lock_at(idx);
             (*s).used = 0;
+        }
+        self.with_freelist_lock(|| unsafe {
+            let s = self.lock_at(idx);
             (*s).next = (*self.hdr()).lock_free_head;
             (*self.hdr()).lock_free_head = idx;
             (*self.hdr()).n_locks_used -= 1;
-        }
+        });
     }
 
     /// Remove the LOCK entry for `tag` (the C `hash_search(HASH_REMOVE)`). The
@@ -648,7 +701,6 @@ impl SharedLockTable {
             let b = bucket_of(tag, self.n_buckets());
             (*s).next = *self.proclock_buckets().add(b);
             *self.proclock_buckets().add(b) = idx;
-            (*self.hdr()).n_proclocks_used += 1;
         }
         let lidx = self.find_lock(tag);
         if lidx != NIL {
@@ -657,22 +709,29 @@ impl SharedLockTable {
     }
 
     fn alloc_proclock(&mut self) -> i32 {
-        unsafe {
+        // See `alloc_lock`: the PROCLOCK free-list + counter cross all partitions
+        // and must be mutated under the dedicated free-list spinlock, not merely
+        // the (per-partition) lock the caller holds.
+        self.with_freelist_lock(|| unsafe {
             let head = (*self.hdr()).proclock_free_head;
             assert!(head != NIL, "out of shared PROCLOCK entries");
             (*self.hdr()).proclock_free_head = (*self.proclock_at(head)).next;
+            (*self.hdr()).n_proclocks_used += 1;
             head
-        }
+        })
     }
 
     fn free_proclock(&mut self, idx: i32) {
         unsafe {
             let s = self.proclock_at(idx);
             (*s).used = 0;
+        }
+        self.with_freelist_lock(|| unsafe {
+            let s = self.proclock_at(idx);
             (*s).next = (*self.hdr()).proclock_free_head;
             (*self.hdr()).proclock_free_head = idx;
             (*self.hdr()).n_proclocks_used -= 1;
-        }
+        });
     }
 
     /// Remove a PROCLOCK, returning its prior `ProcLock` value (the C
