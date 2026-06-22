@@ -602,6 +602,36 @@ pub(crate) fn attach_plpgsql_context(
     e
 }
 
+/// The exec-entry-point flavor of [`attach_plpgsql_context`]
+/// (`plpgsql_exec_function` / `plpgsql_exec_event_trigger` boundary).
+///
+/// In C every active plpgsql frame has its own `plpgsql_exec_error_callback` on
+/// `error_context_stack`, and *all* of them run at report time — so a nested
+/// call (e.g. an event trigger fired by a `DROP` run from a plpgsql `EXECUTE`)
+/// produces one context line per frame, innermost→outermost. The owned model
+/// attaches lazily on propagation; `plpgsql_context_attached` guards a *single*
+/// frame from attaching twice (its BEGIN/EXCEPTION block boundary at the
+/// subxact PG_CATCH already attached this frame's line, so its own entry
+/// boundary must not re-add it). But that guard must be released here so the
+/// *next outer* frame can still attach its own line. So: if this frame already
+/// attached (flag set), consume the flag and pass through; otherwise attach this
+/// frame's line. Either way leave the flag clear for the enclosing frame.
+pub(crate) fn attach_plpgsql_context_at_entry(
+    mut e: types_error::PgError,
+    estate: &PLpgSQL_execstate,
+    fn_signature: &str,
+) -> types_error::PgError {
+    if e.plpgsql_context_attached {
+        // This frame's exception-block boundary already added its line; clear
+        // the flag so the enclosing frame attaches its own.
+        e.plpgsql_context_attached = false;
+        return e;
+    }
+    e.add_context_line(plpgsql_exec_error_context(estate, fn_signature));
+    // Leave the flag clear: this frame is done; the enclosing frame attaches next.
+    e
+}
+
 // ===========================================================================
 // Active error-context stack (`error_context_stack` analogue)
 //
@@ -4383,7 +4413,7 @@ pub fn plpgsql_exec_function(
     Ok(result)
     })();
 
-    body.map_err(|e| attach_plpgsql_context(e, &estate, &func.fn_signature))
+    body.map_err(|e| attach_plpgsql_context_at_entry(e, &estate, &func.fn_signature))
 }
 
 /// `coerce_function_result_tuple(estate, tupdesc)` (pl_exec.c 824) — coerce the
@@ -4529,7 +4559,7 @@ pub fn plpgsql_exec_event_trigger(
     Ok(())
     })();
 
-    body.map_err(|e| attach_plpgsql_context(e, &estate, &func.fn_signature))
+    body.map_err(|e| attach_plpgsql_context_at_entry(e, &estate, &func.fn_signature))
 }
 
 // ===========================================================================
