@@ -6587,6 +6587,7 @@ dependencies = [
  "backend-commands-collationcmds-seams",
  "backend-commands-comment-seams",
  "backend-commands-dbcommands-seams",
+ "backend-commands-tablecmds-seams",
  "backend-commands-user-seams",
  "backend-parser-parse-type",
  "backend-tcop-utility-out-seams",

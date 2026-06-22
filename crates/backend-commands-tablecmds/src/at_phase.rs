@@ -1831,7 +1831,17 @@ fn ATExecCmd<'mcx>(
                 mcx, &names, def,
             )?;
         }
-        AT_ReAddComment => unported("ReAdd COMMENT (CommentObject)"),
+        AT_ReAddComment => {
+            // address = CommentObject((CommentStmt *) cmd->def);
+            let stmt = cmd
+                .def
+                .as_deref()
+                .expect("AT_ReAddComment: cmd.def is NULL")
+                .as_commentstmt()
+                .expect("AT_ReAddComment: cmd.def is not a CommentStmt");
+            _address =
+                backend_commands_tablecmds_seams::comment_object::call(mcx, stmt)?;
+        }
         AT_AddIndexConstraint => {
             // ATExecAddIndexConstraint(tab, rel, (IndexStmt *) cmd->def, lockmode).
             let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");

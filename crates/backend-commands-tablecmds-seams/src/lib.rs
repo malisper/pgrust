@@ -846,3 +846,30 @@ seam_core::seam!(
         new_constraint: &types_nodes::nodes::Node<'mcx>,
     ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
 );
+
+seam_core::seam!(
+    /// `GetComment(oid, classoid, subid)` (commands/comment.c): read an object's
+    /// comment from `pg_description`, returning `None` for no comment.
+    /// `RebuildConstraintComment` (tablecmds.c:15843) calls this to preserve a
+    /// rebuilt constraint's comment across `ALTER COLUMN TYPE` / `ALTER TYPE ...
+    /// ALTER ATTRIBUTE`. The body lives in `backend-commands-comment`, which
+    /// installs the seam (tablecmds cannot take a comment dependency without a
+    /// cycle).
+    pub fn get_comment<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        oid: Oid,
+        classoid: Oid,
+        subid: i32,
+    ) -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
+    /// `CommentObject((CommentStmt *) cmd->def)` (commands/comment.c) — the
+    /// `AT_ReAddComment` executor leg of `ATExecCmd` (tablecmds.c:5484) that
+    /// recreates a rebuilt constraint's comment. The body lives in
+    /// `backend-commands-comment`, which installs the seam.
+    pub fn comment_object<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        stmt: &types_nodes::ddlnodes::CommentStmt<'mcx>,
+    ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
+);

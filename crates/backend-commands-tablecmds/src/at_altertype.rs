@@ -1385,6 +1385,7 @@ fn ATPostAlterTypeParse<'mcx>(
                         }
                         check_no_comment(indoid, RelationRelationId)?;
                         indstmt.reset_default_tblspc = true;
+                        let idxname = indstmt.idxname.as_ref().map(|s| s.to_string());
 
                         let newcmd = AlterTableCmd {
                             subtype: AlterTableType::AT_ReAddIndex,
@@ -1400,9 +1401,21 @@ fn ATPostAlterTypeParse<'mcx>(
                         wqueue[tab_idx].subcmds[crate::at_phase::AT_PASS_OLD_INDEX as usize]
                             .push(node);
 
-                        // recreate any comment on the constraint (no-op for a
-                        // constraint without a comment; GetComment unported).
-                        RebuildConstraintComment(old_id, None)?;
+                        // recreate any comment on the constraint:
+                        // RebuildConstraintComment(tab, AT_PASS_OLD_INDEX, oldId,
+                        //                          rel, NIL, indstmt->idxname).
+                        if let Some(idxname) = idxname {
+                            RebuildConstraintComment(
+                                mcx,
+                                wqueue,
+                                tab_idx,
+                                crate::at_phase::AT_PASS_OLD_INDEX,
+                                old_id,
+                                Some(&rel),
+                                None,
+                                &idxname,
+                            )?;
+                        }
                     }
                     AlterTableType::AT_AddConstraint => {
                         let mut con = subcmd
@@ -1441,7 +1454,16 @@ fn ATPostAlterTypeParse<'mcx>(
                         // a primary key, transformTableConstraint added an unnamed
                         // not-null constraint here; skip in that case.
                         if let Some(name) = conname {
-                            RebuildConstraintComment(old_id, Some(&name))?;
+                            RebuildConstraintComment(
+                                mcx,
+                                wqueue,
+                                tab_idx,
+                                crate::at_phase::AT_PASS_OLD_CONSTR,
+                                old_id,
+                                Some(&rel),
+                                None,
+                                &name,
+                            )?;
                         }
                     }
                     other => {
@@ -1453,9 +1475,67 @@ fn ATPostAlterTypeParse<'mcx>(
                 }
             }
         } else if stm_tag == ntag::T_AlterDomainStmt {
-            // Domain ADD CONSTRAINT rebuild — not reached from the table-column
-            // path; the AT_ReAddDomainConstraint executor leg is unported.
-            unported("ATPostAlterTypeParse AlterDomainStmt (AT_ReAddDomainConstraint)");
+            // Domain ADD CONSTRAINT rebuild (tablecmds.c:15783). Reached when an
+            // ALTER TYPE ... ALTER ATTRIBUTE rewrites a composite type that a
+            // domain is based on: RememberConstraintForRebuilding saved an
+            // AlterDomainStmt re-adding the domain's pre-existing CHECK; turn it
+            // into an AT_ReAddDomainConstraint command on AT_PASS_OLD_CONSTR.
+            let ads = stm
+                .as_alterdomainstmt()
+                .expect("ATPostAlterTypeParse: T_AlterDomainStmt node");
+            if ads.subtype == b'C' as i8 {
+                // con->conname is used only to recreate the constraint comment.
+                let con = ads
+                    .def
+                    .as_deref()
+                    .expect("AlterDomainStmt.def is NULL")
+                    .as_constraint()
+                    .expect("AlterDomainStmt.def is not a Constraint");
+                let conname = con.conname.as_ref().map(|s| s.to_string());
+                // stmt->typeName: domain namelist used by RebuildConstraintComment.
+                let mut domname: PgVec<'mcx, mcx::PgString<'mcx>> = PgVec::new_in(mcx);
+                for n in ads.typeName.iter() {
+                    let s = n
+                        .as_string()
+                        .expect("AlterDomainStmt.typeName element is not a String");
+                    domname.push(mcx::PgString::from_str_in(s.sval.as_str(), mcx)?);
+                }
+
+                let stmt_clone = mcx::alloc_in(mcx, stm.clone_in(mcx)?)?;
+                let newcmd = AlterTableCmd {
+                    subtype: AlterTableType::AT_ReAddDomainConstraint,
+                    name: None,
+                    num: 0,
+                    newowner: None,
+                    def: Some(stmt_clone),
+                    behavior: types_nodes::parsenodes::DropBehavior::Restrict,
+                    missing_ok: false,
+                    recurse: false,
+                };
+                let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
+                wqueue[tab_idx].subcmds[crate::at_phase::AT_PASS_OLD_CONSTR as usize].push(node);
+
+                // recreate any comment on the constraint:
+                // RebuildConstraintComment(tab, AT_PASS_OLD_CONSTR, oldId, NULL,
+                //                          stmt->typeName, con->conname).
+                if let Some(name) = conname {
+                    RebuildConstraintComment(
+                        mcx,
+                        wqueue,
+                        tab_idx,
+                        crate::at_phase::AT_PASS_OLD_CONSTR,
+                        old_id,
+                        None,
+                        Some(&domname),
+                        &name,
+                    )?;
+                }
+            } else {
+                return Err(types_error::PgError::error(format!(
+                    "unexpected statement subtype: {}",
+                    ads.subtype
+                )));
+            }
         } else if stm_tag == ntag::T_CreateStatsStmt {
             let stmt = stm
                 .clone_in(mcx)?
@@ -1534,13 +1614,106 @@ fn check_no_comment(_objid: Oid, _classid: Oid) -> PgResult<()> {
     Ok(())
 }
 
-/// `RebuildConstraintComment(tab, pass, objid, rel, NIL, conname)`
-/// (tablecmds.c:15843) — recreate any comment on a rebuilt constraint. The
-/// comment lookup (`GetComment`) is unported; without a comment this is a no-op,
-/// which is faithful for the reachable path.
-fn RebuildConstraintComment(_objid: Oid, _conname: Option<&str>) -> PgResult<()> {
+/// `RebuildConstraintComment(tab, pass, objid, rel, domname, conname)`
+/// (tablecmds.c:15843) — recreate any comment on a rebuilt constraint. Reads the
+/// constraint's existing comment (`GetComment`); if there is one, builds a
+/// `CommentStmt` (OBJECT_TABCONSTRAINT when a `rel` is given, else
+/// OBJECT_DOMCONSTRAINT using the domain `domname` namelist) and queues an
+/// `AT_ReAddComment` command on the given pass. `GetComment` and the
+/// `AT_ReAddComment`/`CommentObject` executor leg live in
+/// `backend-commands-comment` (reached through the tablecmds-seams seams).
+fn RebuildConstraintComment<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, crate::at_phase::AlteredTableInfo<'mcx>>,
+    tab_idx: usize,
+    pass: i32,
+    objid: Oid,
+    rel: Option<&Relation<'mcx>>,
+    domname: Option<&[mcx::PgString<'mcx>]>,
+    conname: &str,
+) -> PgResult<()> {
     // comment_str = GetComment(objid, ConstraintRelationId, 0); if NULL return.
-    // GetComment is unported; assume NULL (no comment) → nothing queued.
+    let comment_str = backend_commands_tablecmds_seams::get_comment::call(
+        mcx,
+        objid,
+        ConstraintRelationId,
+        0,
+    )?;
+    let Some(comment_str) = comment_str else {
+        return Ok(());
+    };
+
+    // Helper: build a String value node holding `s` in the arena.
+    let mk_str = |s: &str| -> PgResult<types_nodes::nodes::NodePtr<'mcx>> {
+        let sn = types_nodes::value::StringNode {
+            sval: mcx::PgString::from_str_in(s, mcx)?,
+        };
+        mcx::alloc_in(mcx, Node::mk_string(mcx, sn)?)
+    };
+
+    // Build the CommentStmt, copying input data for safety.
+    let object: Node<'mcx> = if let Some(rel) = rel {
+        // OBJECT_TABCONSTRAINT: list_make3(schema, relname, conname)
+        let nsp = backend_utils_cache_lsyscache::namespace_range_index_pubsub::get_namespace_name(
+            mcx,
+            rel.rd_rel.relnamespace,
+        )?
+        .ok_or_else(|| {
+            types_error::PgError::error("RebuildConstraintComment: namespace not found")
+        })?;
+        let mut list: PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+        list.push(mk_str(nsp.as_str())?);
+        list.push(mk_str(rel.name())?);
+        list.push(mk_str(conname)?);
+        Node::mk_list(mcx, list)?
+    } else {
+        // OBJECT_DOMCONSTRAINT: list_make2(makeTypeNameFromNameList(domname), conname)
+        let domname =
+            domname.expect("RebuildConstraintComment: domname required for domain constraint");
+        let mut tn_names: PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+        for s in domname.iter() {
+            tn_names.push(mk_str(s.as_str())?);
+        }
+        // makeTypeNameFromNameList(names): names + location -1, typemod -1.
+        let typename = types_nodes::rawnodes::TypeName {
+            names: tn_names,
+            typeOid: InvalidOid,
+            setof: false,
+            pct_type: false,
+            typmods: PgVec::new_in(mcx),
+            typemod: -1,
+            arrayBounds: PgVec::new_in(mcx),
+            location: -1,
+        };
+        let mut list: PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+        list.push(mcx::alloc_in(mcx, Node::mk_type_name(mcx, typename)?)?);
+        list.push(mk_str(conname)?);
+        Node::mk_list(mcx, list)?
+    };
+
+    let objtype = if rel.is_some() {
+        types_nodes::parsenodes::ObjectType::Tabconstraint
+    } else {
+        types_nodes::parsenodes::ObjectType::Domconstraint
+    };
+    let cmt = types_nodes::ddlnodes::CommentStmt {
+        objtype,
+        object: Some(mcx::alloc_in(mcx, object)?),
+        comment: Some(mcx::PgString::from_str_in(&comment_str, mcx)?),
+    };
+
+    let newcmd = AlterTableCmd {
+        subtype: AlterTableType::AT_ReAddComment,
+        name: None,
+        num: 0,
+        newowner: None,
+        def: Some(mcx::alloc_in(mcx, Node::mk_comment_stmt(mcx, cmt)?)?),
+        behavior: types_nodes::parsenodes::DropBehavior::Restrict,
+        missing_ok: false,
+        recurse: false,
+    };
+    let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
+    wqueue[tab_idx].subcmds[pass as usize].push(node);
     Ok(())
 }
 

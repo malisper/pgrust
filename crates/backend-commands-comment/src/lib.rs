@@ -690,6 +690,25 @@ pub fn init_seams() {
             Some(comment),
         )
     });
+
+    // RebuildConstraintComment (tablecmds.c:15843) reads a rebuilt constraint's
+    // comment via GetComment, and the AT_ReAddComment executor leg recreates it
+    // via CommentObject. Both bodies live here; tablecmds installs neither
+    // (cannot depend on this crate without a cycle).
+    backend_commands_tablecmds_seams::get_comment::set(GetComment);
+    backend_commands_tablecmds_seams::comment_object::set(re_add_comment_object_seam);
+}
+
+/// `CommentObject((CommentStmt *) cmd->def)` (tablecmds.c:5485) for the
+/// `AT_ReAddComment` executor leg. Unlike the utility dispatcher, the
+/// `RebuildConstraintComment` queue already holds an arena `CommentStmt`, so
+/// no node decode/owning conversion is needed.
+fn re_add_comment_object_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::ddlnodes::CommentStmt<'mcx>,
+) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+    let owned = arena_commentstmt_to_owned(stmt)?;
+    CommentObject(mcx, &owned)
 }
 
 #[cfg(test)]
