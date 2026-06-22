@@ -331,6 +331,17 @@ impl LocalBufferManager {
             backend_storage_page::PageSetChecksumInplace(&mut page, tag.blockNum);
         }
 
+        // FlushLocalBuffer(bufHdr, NULL): when no SMgrRelation was supplied, C
+        // does `reln = smgropen(BufTagGetRelFileLocator(&tag), MyProcNumber)`
+        // before the write (localbuf.c:196). Ensure the smgr cache entry exists
+        // (idempotent) so smgrwrite doesn't hit "md operation on an unopened
+        // SMgrRelation" — e.g. the SET TABLESPACE pre-copy flush, where the
+        // temp relation may not be open in this backend's smgr cache.
+        smgr_seam::smgr_open::call(
+            rlocator,
+            backend_utils_init_small_seams::my_proc_number::call(),
+        )?;
+
         // And write...
         {
             let storage = self.storage.borrow();
@@ -342,6 +353,15 @@ impl LocalBufferManager {
                 &storage.blocks[block_index][..],
             )?;
         }
+
+        // pgstat_count_io_op_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL,
+        // IOOP_WRITE, io_start, 1, BLCKSZ) (localbuf.c:213) — record the
+        // temp-relation write into pg_stat_io.
+        backend_storage_buffer_bufmgr_seams::count_io_op_temp::call(
+            types_pgstat::activity_pgstat::IOOp::IOOP_WRITE,
+            1,
+            types_core::BLCKSZ as u64,
+        );
 
         // Mark not-dirty.
         self.TerminateLocalBufferIO(bufid, true, 0, false)?;
@@ -403,6 +423,15 @@ impl LocalBufferManager {
         // Remove the victim buffer from the hashtable and mark as invalid.
         if self.state(victim_bufid) & BM_TAG_VALID != 0 {
             self.InvalidateLocalBuffer(victim_bufid, false)?;
+
+            // pgstat_count_io_op(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL,
+            // IOOP_EVICT, 1, 0) (localbuf.c:298) — a valid temp buffer was
+            // recycled to make room for another block.
+            backend_storage_buffer_bufmgr_seams::count_io_op_temp::call(
+                types_pgstat::activity_pgstat::IOOp::IOOP_EVICT,
+                1,
+                0,
+            );
         }
 
         Ok(Self::buffer_for_index(victim_bufid))
@@ -547,6 +576,14 @@ impl LocalBufferManager {
             extend_by,
             false,
         )?;
+
+        // pgstat_count_io_op_time(IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL,
+        // IOOP_EXTEND, io_start, extend_by, extend_by * BLCKSZ) (localbuf.c:461).
+        backend_storage_buffer_bufmgr_seams::count_io_op_temp::call(
+            types_pgstat::activity_pgstat::IOOp::IOOP_EXTEND,
+            extend_by as u64,
+            extend_by as u64 * types_core::BLCKSZ as u64,
+        );
 
         for buf in buffers.iter().take(extend_by as usize) {
             let buf_hdr = -*buf - 1;

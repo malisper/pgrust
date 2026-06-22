@@ -827,6 +827,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_count_io_op[_time](IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL,
+    /// io_op, ..., cnt, bytes)` (localbuf.c:213/298/461, bufmgr.c:1641 temp
+    /// read) — record `cnt` I/O operations of kind `io_op` (WRITE / EVICT /
+    /// EXTEND / READ) against the backend-local temp-relation buffer pool,
+    /// totalling `bytes` bytes. Temp-relation I/O is always IOCONTEXT_NORMAL
+    /// (no buffer-access strategy ring). Owned by pgstat-io; infallible,
+    /// stats-only.
+    pub fn count_io_op_temp(
+        io_op: types_pgstat::activity_pgstat::IOOp,
+        cnt: u64,
+        bytes: u64,
+    )
+);
+
+seam_core::seam!(
     /// `pgstat_count_buffer_read(rel)` (bufmgr.c:1166) — bump the per-relation
     /// `pgstat_info->counts.blocks_fetched` for a block request on a relcache
     /// relation (counted on both hits and misses, but only when a relcache entry
@@ -1154,6 +1169,18 @@ seam_core::seam!(
     /// relation. Installed by the local-buffer owner (panic-until-owner). `Err`
     /// carries the localbuf `ereport(ERROR)`s.
     pub fn drop_relation_all_local_buffers(
+        rlocator: types_storage::RelFileLocator,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `FlushRelationBuffers`'s `RelationUsesLocalBuffers(rel)` branch
+    /// (bufmgr.c:4942 / localbuf.c) — write out every dirty page of a temp
+    /// relation from this backend's local buffer pool (the SET TABLESPACE
+    /// rewrite's pre-copy flush, which counts IOOP_WRITE against
+    /// IOOBJECT_TEMP_RELATION). Installed by the local-buffer owner
+    /// (panic-until-owner). `Err` carries the localbuf write `ereport(ERROR)`s.
+    pub fn flush_relation_local_buffers(
         rlocator: types_storage::RelFileLocator,
     ) -> types_error::PgResult<()>
 );

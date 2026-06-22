@@ -326,6 +326,12 @@ fn drop_relation_all_local_buffers(rlocator: types_storage::RelFileLocator) -> P
     local_mgr_get_or_create().DropRelationAllLocalBuffers(rlocator)
 }
 
+/// `FlushRelationBuffers`'s `RelationUsesLocalBuffers(rel)` branch — flush every
+/// dirty page of the temp relation from this backend's local buffer pool.
+fn flush_relation_local_buffers(rlocator: types_storage::RelFileLocator) -> PgResult<()> {
+    local_mgr_get_or_create().FlushRelationLocalBuffers(rlocator)
+}
+
 /// Install this crate's inward seams: the two `BufferAccessStrategy` bufmgr
 /// seams, plus the local-buffer (localbuf.c) dispatch seams the shared buffer
 /// manager calls on its `BufferIsLocal` branches and the transaction/proc-exit
@@ -350,6 +356,9 @@ pub fn init_seams() {
     );
     backend_storage_buffer_bufmgr_seams::drop_relation_all_local_buffers::set(
         drop_relation_all_local_buffers,
+    );
+    backend_storage_buffer_bufmgr_seams::flush_relation_local_buffers::set(
+        flush_relation_local_buffers,
     );
 
     // Local-buffer dispatch declared in the support-seams crate (the

@@ -780,6 +780,14 @@ impl BufferManager {
             smgr::smgrreadv(rlocator, fork_num, block_num, &mut bufs, 1)
         })?;
 
+        // WaitReadBuffers IOOP_READ accounting for temp relations (bufmgr.c:1641
+        // io_object = IOOBJECT_TEMP_RELATION): one read op of BLCKSZ bytes.
+        sb::count_io_op_temp::call(
+            types_pgstat::activity_pgstat::IOOp::IOOP_READ,
+            1,
+            types_core::primitive::BLCKSZ as u64,
+        );
+
         // Verify the just-read page (the synchronous form of the RBM
         // PageIsVerified gate). Local buffers are never shared, so no content
         // lock is involved.

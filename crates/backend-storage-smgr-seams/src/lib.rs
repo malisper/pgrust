@@ -16,6 +16,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `smgropen(rlocator, backend)` (smgr.c) — ensure the SMgrRelation cache
+    /// entry for this relation file locator exists in THIS backend's smgr cache
+    /// (idempotent). The localbuf temp-flush path (`FlushLocalBuffer(bufHdr,
+    /// NULL)` = `smgropen(BufTagGetRelFileLocator(&tag), MyProcNumber)`) needs
+    /// the entry before `smgrwrite`, mirroring bufmgr's defensive `smgropen`
+    /// before a `FlushBuffer` write. `Err` carries the file-layer
+    /// `ereport(ERROR)`s.
+    pub fn smgr_open(
+        rlocator: RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `ProcessBarrierSmgrRelease()` (smgr.c) — close all smgr file handles
     /// for the PROCSIGNAL_BARRIER_SMGRRELEASE barrier. Returns true when the
     /// barrier was absorbed; an `ereport(ERROR)` from the file layer is the

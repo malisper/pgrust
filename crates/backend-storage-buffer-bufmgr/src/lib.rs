@@ -597,6 +597,14 @@ fn flush_relations_all_buffers(
 /// buffer of the one relation. The owned relcache mirror carries the relation's
 /// `rd_locator`, which is all `FlushRelationBuffers` needs.
 fn flush_relation_buffers(rel: &types_rel::Relation) -> types_error::PgResult<()> {
+    // if (RelationUsesLocalBuffers(rel)) { ...local-pool scan... return; }
+    // (bufmgr.c:4942) — the temp-relation arm writes the dirty pages from this
+    // backend's local buffer pool (the SET TABLESPACE rewrite's pre-copy flush).
+    if rel.rd_rel.relpersistence == types_core::catalog::RELPERSISTENCE_TEMP {
+        return backend_storage_buffer_bufmgr_seams::flush_relation_local_buffers::call(
+            rel.rd_locator,
+        );
+    }
     BufferManager::global_expect().FlushRelationBuffers(&rel.rd_locator)
 }
 

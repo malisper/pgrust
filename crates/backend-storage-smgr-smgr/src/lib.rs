@@ -567,6 +567,11 @@ pub fn init_seams() {
         // smgrwrite(reln, forknum, blocknum, buffer, /*skipFsync*/ false).
         smgrwrite(RelFileLocatorBackend { locator: rlocator, backend }, forknum, blocknum, src, false)
     });
+    smgr_seam::smgr_open::set(|rlocator, backend| {
+        // smgropen(rlocator, backend) — idempotent cache insert (discard handle).
+        smgropen(rlocator, backend)?;
+        Ok(())
+    });
     smgr_seam::smgr_zeroextend::set(|rlocator, backend, forknum, blocknum, nblocks, skip_fsync| {
         smgrzeroextend(RelFileLocatorBackend { locator: rlocator, backend }, forknum, blocknum, nblocks as i32, skip_fsync)
     });

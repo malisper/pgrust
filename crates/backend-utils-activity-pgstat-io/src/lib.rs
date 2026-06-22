@@ -754,4 +754,16 @@ pub fn init_seams() {
             bytes,
         );
     });
+    // Temp-relation I/O (localbuf.c FlushLocalBuffer / GetLocalVictimBuffer /
+    // ExtendBufferedRelLocal + the bufmgr temp read-miss path) — record `cnt`
+    // ops of kind `io_op` against IOOBJECT_TEMP_RELATION, IOCONTEXT_NORMAL.
+    backend_storage_buffer_bufmgr_seams::count_io_op_temp::set(|io_op, cnt, bytes| {
+        pgstat_count_io_op(
+            IOObject::IOOBJECT_TEMP_RELATION,
+            IOContext::IOCONTEXT_NORMAL,
+            io_op,
+            cnt as u32,
+            bytes,
+        );
+    });
 }
