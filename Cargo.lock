@@ -20991,11 +20991,13 @@ dependencies = [
 name = "backend-utils-adt-network-selfuncs"
 version = "0.0.0"
 dependencies = [
+ "backend-nodes-core",
  "backend-utils-adt-network",
  "backend-utils-adt-network-seams",
  "backend-utils-adt-selfuncs-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-fmgr-support-seams",
  "mcx",
  "types-core",
  "types-datum",

@@ -1573,10 +1573,20 @@ fn index_condition_support(
     (result, true)
 }
 
-/// Install the `oid_function_call1_index_support` planner-support seam with the
-/// like_support.c pattern-operator index-condition support.
+/// Register the like_support.c pattern-operator index-condition support kernel
+/// under its five pattern-support `prosupport` OIDs and install the OID-keyed
+/// dispatcher on the `oid_function_call1_index_support` planner-support seam.
+///
+/// The dispatcher is keyed by `prosupport` OID (mirroring C's by-OID support
+/// dispatch); each support-bearing crate registers its decomposed kernel
+/// (network_subset_support registers from `backend-utils-adt-network-selfuncs`),
+/// so installing the dispatcher here no longer monopolizes the single seam slot.
 pub fn init_support_seam() {
-    backend_utils_fmgr_support_seams::oid_function_call1_index_support::set(
-        index_condition_support,
-    );
+    use backend_utils_fmgr_support_seams::index_support_registry as reg;
+    reg::register_index_condition(F_TEXTLIKE_SUPPORT, index_condition_support);
+    reg::register_index_condition(F_TEXTICLIKE_SUPPORT, index_condition_support);
+    reg::register_index_condition(F_TEXTREGEXEQ_SUPPORT, index_condition_support);
+    reg::register_index_condition(F_TEXTICREGEXEQ_SUPPORT, index_condition_support);
+    reg::register_index_condition(F_TEXT_STARTS_WITH_SUPPORT, index_condition_support);
+    reg::install_dispatch();
 }

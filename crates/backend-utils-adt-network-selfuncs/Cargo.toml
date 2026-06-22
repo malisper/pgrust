@@ -25,3 +25,10 @@ backend-utils-adt-network-seams = { path = "../backend-utils-adt-network-seams" 
 backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+# Node construction (make_const / make_opclause) for the network_subset_support
+# index-condition `OpExpr` trees; owner ported, depend directly. No cycle:
+# backend-nodes-core does not depend on the network crates.
+backend-nodes-core = { path = "../backend-nodes-core" }
+# The OID-keyed `SupportRequestIndexCondition` registry where this crate
+# registers `network_subset_support`'s decomposed kernel + installs the dispatch.
+backend-utils-fmgr-support-seams = { path = "../backend-utils-fmgr-support-seams" }

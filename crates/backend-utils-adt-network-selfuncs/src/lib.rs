@@ -97,10 +97,15 @@ use backend_utils_cache_lsyscache_seams::{
 };
 use backend_utils_fmgr_fmgr_seams::function_call2_coll_datum;
 
-/// Install every seam this crate owns. This crate owns no inward seams (its
-/// fmgr entry points are reached through fmgr dispatch, not a cross-cycle seam),
-/// so there is nothing to install.
-pub fn init_seams() {}
+pub mod planner_support;
+
+/// Install every seam this crate owns. Register `network_subset_support`'s
+/// decomposed `SupportRequestIndexCondition` kernel in the OID-keyed
+/// index-condition registry and (idempotently) install the dispatcher on the
+/// `oid_function_call1_index_support` seam.
+pub fn init_seams() {
+    planner_support::init_support_seam();
+}
 
 /* ---------------------------------------------------------------------------
  * Operator OIDs (catalog/pg_operator.dat oid values).

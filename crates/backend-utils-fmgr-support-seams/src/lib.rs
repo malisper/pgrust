@@ -16,6 +16,8 @@ use types_core::primitive::Oid;
 use types_nodes::primnodes::Expr;
 use types_pathnodes::{IndexOptInfo, NodeId, PlannerInfo};
 
+pub mod index_support_registry;
+
 seam_core::seam!(
     /// `OidFunctionCall1(prosupport, &SupportRequestIndexCondition{...})`
     /// (supportnodes.h / fmgr.c) — invoke the operator/function's planner
