@@ -2483,14 +2483,18 @@ fn exec_stmt_getdiag(
                 )?;
             }
             K::PLPGSQL_GETDIAG_ROUTINE_OID => {
-                // estate->func->fn_oid — the func back-reference is opaque in the
-                // owned model; this is rarely used and not reachable from the
-                // current execstate carrier. Mirror C and raise.
-                return Err(types_error::PgError::error(
-                    "GET DIAGNOSTICS ... PG_ROUTINE_OID not yet supported \
-                     (opaque func back-reference)"
-                        .to_string(),
-                ));
+                // exec_assign_value(target, ObjectIdGetDatum(estate->func->fn_oid),
+                //                   false, OIDOID, -1). fn_oid is carried directly
+                // on the execstate (InvalidOid for an inline/anonymous DO block).
+                const OIDOID: Oid = 26;
+                exec_assign_value_impl(
+                    estate,
+                    di.target,
+                    Datum::from_oid(estate.fn_oid),
+                    false,
+                    OIDOID,
+                    -1,
+                )?;
             }
             // CURRENT-area context strings: the error/call-context stack is not
             // modeled in the owned execstate yet; STACKED context comes from
@@ -4197,6 +4201,7 @@ pub fn plpgsql_estate_setup(
     PLpgSQL_execstate {
         func: None, // opaque back-ref; the comp↔exec handle is set when needed
         fn_signature: func.fn_signature.clone(),
+        fn_oid: func.fn_oid,
         trigdata: None,
         evtrigdata: None,
 

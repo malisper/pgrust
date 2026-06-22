@@ -1096,6 +1096,11 @@ pub struct PLpgSQL_execstate {
     /// carried directly so the error-context line can be built without
     /// dereferencing the opaque `func` back-reference.
     pub fn_signature: String,
+    /// `func->fn_oid` — the executing function's OID, carried directly (like
+    /// `fn_signature`) so `GET DIAGNOSTICS ... = PG_ROUTINE_OID` can read it
+    /// without dereferencing the opaque `func` back-reference. An inline
+    /// (anonymous DO) block has `InvalidOid` here, matching C.
+    pub fn_oid: Oid,
 
     pub trigdata: Option<TriggerData>,        // if regular trigger
     pub evtrigdata: Option<EventTriggerData>, // if event trigger
