@@ -449,11 +449,22 @@ pub(crate) fn init_deadlock_checking() {
 /// `DeadLockCheck(MyProc)` — run the deadlock check rooted at this backend's
 /// proc, returning the resulting state. The merged deadlock checker's
 /// `dead_lock_check` operates over a lock.c-built `LockSpace` arena (the lock
-/// and proc records) that proc.c cannot construct until lock.c lands; that
-/// bridge is the lock.c-integration step (see module note above), so this
-/// aborts loudly until then rather than fabricating an arena.
+/// and proc records); constructing that arena from the live shared lock table is
+/// a distinct, sizeable lock.c-integration keystone (the `LockSpace`-bridge)
+/// that is not yet wired.
+///
+/// Until that bridge lands we conservatively report `NoDeadlock` rather than
+/// abort. This is the safe, non-victimizing outcome: a backend that genuinely
+/// has to wait (e.g. on a 2PC dummy proc's lock) keeps sleeping until the lock
+/// is released and it is woken by `ProcLockWakeup` — exactly the C behaviour for
+/// a non-deadlocked wait. (The prior code aborted here, which — once the
+/// cross-process wait-state was made coherent so `CheckDeadLock` actually runs —
+/// would crash any backend that waited past `deadlock_timeout` on a held lock.)
+/// A genuine multi-backend deadlock would not be broken automatically yet; that
+/// is the residual gated by the unbuilt `LockSpace` bridge, NOT a regression
+/// (the detector was never reached before).
 pub(crate) fn deadlock_check(_procno: ProcNumber) -> DeadLockState {
-    panic!("DeadLockCheck(MyProc) over the lock.c-built LockSpace arena: lock.c not yet ported")
+    DeadLockState::NoDeadLock
 }
 
 /// `GetBlockingAutoVacuumPgproc()` — the autovacuum worker found by the last

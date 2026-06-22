@@ -262,6 +262,83 @@ static SHARED_PROC_PER_PROC_STATUS_FLAGS: AtomicPtr<u8> = AtomicPtr::new(core::p
 /// checks.
 static SHARED_PROC_PER_PROC_STATUS_FLAGS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Base of the genuinely-shared per-proc `PGPROC.waitLockMode` array (one `i32`
+/// LOCKMODE per proc — the heavyweight-lock mode the backend is blocked on). Set
+/// by [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.waitLockMode` lives in the shared PGPROC block. A backend that
+/// blocks in `ProcSleep` stores its awaited mode here (`JoinWaitQueue`); the
+/// *other* backend that releases the conflicting lock reads it
+/// (`ProcLockWakeup`/`JoinWaitQueue` walk the wait queue and call
+/// `proc->waitLockMode`) to decide whether the waiter can now be granted. With
+/// the field fork-private, the waker reads its own stale COW image (`0` ==
+/// invalid mode), grants the waiter the *wrong* mode and never clears the real
+/// wait — e.g. a `DROP TABLE` blocked on a 2PC dummy proc's AccessExclusiveLock
+/// hangs forever after `COMMIT PREPARED`. So this word lives in genuine shmem,
+/// the same idiom as [`SHARED_PROC_PIDS`].
+static SHARED_PROC_WAIT_LOCK_MODE: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_WAIT_LOCK_MODE`] (`total_procs`), for bounds checks.
+static SHARED_PROC_WAIT_LOCK_MODE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc `PGPROC.waitStatus` array (one `u32`
+/// [`ProcWaitStatus`] per proc). Set by [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.waitStatus` lives in the shared PGPROC block. The waker writes
+/// `proc->waitStatus = PROC_WAIT_STATUS_OK` (`ProcWakeup`) and the blocked
+/// backend reads its own `MyProc->waitStatus` each `ProcSleep` loop iteration to
+/// learn it was granted. With the field fork-private the cross-process write is
+/// invisible: the waiter's latch is set, it wakes, re-reads its own stale
+/// `WAITING` image and sleeps again — the same 2PC-dummy-proc hang. So this word
+/// lives in genuine shmem, the same idiom as [`SHARED_PROC_PIDS`].
+static SHARED_PROC_WAIT_STATUS: AtomicPtr<u32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_WAIT_STATUS`] (`total_procs`), for bounds checks.
+static SHARED_PROC_WAIT_STATUS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc `PGPROC.heldLocks` array (one `i32`
+/// LOCKMASK per proc — the conflict-mask of locks the blocked backend already
+/// holds on the awaited object). Set by [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.heldLocks` lives in the shared PGPROC block and is read
+/// cross-process by `JoinWaitQueue` (a newly-arriving waiter inspects each
+/// existing waiter's `heldLocks` to position itself / detect a dining-philosopher
+/// deadlock). Fork-private storage makes that walk read stale images. So this
+/// word lives in genuine shmem, the same idiom as [`SHARED_PROC_PIDS`].
+static SHARED_PROC_HELD_LOCKS: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_HELD_LOCKS`] (`total_procs`), for bounds checks.
+static SHARED_PROC_HELD_LOCKS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc `PGPROC.waitLock` array. One
+/// `[u8; LOCKTAG_WIRE]` LOCKTAG image per proc, preceded by nothing — a parallel
+/// `SHARED_PROC_WAITING` flag records whether the slot is live (the lock the
+/// backend is blocked on, or "not waiting"). Set by [`InitProcGlobal`], NULL
+/// until then.
+///
+/// In C `PGPROC.waitLock`/`links` live in the shared PGPROC block and the lock's
+/// `waitProcs` dclist threads through `proc->links`, so the backend that releases
+/// a conflicting lock can identify which lock each queued waiter awaits and the
+/// `dlist_node_is_detached(&proc->links)` guard reads a coherent value. In this
+/// port the wait queue is modeled in the shared lock-table state, but the
+/// per-proc "which lock am I waiting on / am I still queued" answer was read from
+/// the fork-private PGPROC — so the waker saw a stale "detached" image, returned
+/// early from `ProcWakeup` without setting the waiter's latch, and the blocked
+/// backend hung. So this word lives in genuine shmem, the same idiom as
+/// [`SHARED_PROC_PIDS`].
+static SHARED_PROC_WAIT_LOCK: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_WAIT_LOCK`] in procs (`total_procs`).
+static SHARED_PROC_WAIT_LOCK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc "is this backend queued on a heavyweight
+/// lock" flag (`u8`: 1 == waiting, 0 == not). Companion to
+/// [`SHARED_PROC_WAIT_LOCK`]; encodes whether `waitLock`/`links` are live.
+static SHARED_PROC_WAITING: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_WAITING`] (`total_procs`), for bounds checks.
+static SHARED_PROC_WAITING_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Base of the genuinely-shared dense `ProcGlobal->xids[]` array (one
 /// `TransactionId` per `pgxactoff` slot — the cache-dense mirror of every live
 /// backend's `PGPROC.xid` that `GetSnapshotData` scans). Set by
@@ -1132,6 +1209,189 @@ pub(crate) fn set_proc_xmin_shared(procno: ProcNumber, xmin: TransactionId) {
     shared_xmin_slot(procno).store(xmin, AtomicOrdering::Relaxed);
 }
 
+/// `&ProcGlobal->allProcs[procno].waitLockMode` over the genuinely-shared
+/// per-proc waitLockMode array (`i32` LOCKMODE). Panics if `InitProcGlobal` has
+/// not run or `procno` is out of range.
+fn shared_wait_lock_mode_slot(procno: ProcNumber) -> &'static AtomicI32 {
+    let base = SHARED_PROC_WAIT_LOCK_MODE.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC waitLockMode array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_WAIT_LOCK_MODE_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC waitLockMode index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `i32` words of genuine shared memory and
+    // `idx < count`; the awaited lock partition LWLock serializes access, atomics
+    // make the per-word access well-defined.
+    unsafe { AtomicI32::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].waitLockMode` — read the canonical (shared)
+/// word, visible to the backend releasing a conflicting lock.
+pub(crate) fn proc_wait_lock_mode_shared(procno: ProcNumber) -> i32 {
+    shared_wait_lock_mode_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].waitLockMode = mode` — write the canonical
+/// (shared) word (the blocked backend advertising its awaited mode).
+pub(crate) fn set_proc_wait_lock_mode_shared(procno: ProcNumber, mode: i32) {
+    shared_wait_lock_mode_slot(procno).store(mode, AtomicOrdering::Relaxed);
+}
+
+/// `&ProcGlobal->allProcs[procno].waitStatus` over the genuinely-shared per-proc
+/// waitStatus array (`u32` [`ProcWaitStatus`]). Panics if `InitProcGlobal` has
+/// not run or `procno` is out of range.
+fn shared_wait_status_slot(procno: ProcNumber) -> &'static AtomicU32 {
+    let base = SHARED_PROC_WAIT_STATUS.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC waitStatus array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_WAIT_STATUS_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC waitStatus index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u32` words of genuine shared memory and
+    // `idx < count`; the awaited lock partition LWLock serializes the
+    // waker's write, atomics make the waiter's loop-read well-defined.
+    unsafe { AtomicU32::from_ptr(base.add(idx) as *mut u32) }
+}
+
+/// `ProcGlobal->allProcs[procno].waitStatus` — read the canonical (shared) word.
+pub(crate) fn proc_wait_status_shared(procno: ProcNumber) -> u32 {
+    shared_wait_status_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].waitStatus = status` — write the canonical
+/// (shared) word (the waker granting/erroring a blocked backend).
+pub(crate) fn set_proc_wait_status_shared(procno: ProcNumber, status: u32) {
+    shared_wait_status_slot(procno).store(status, AtomicOrdering::Relaxed);
+}
+
+/// `&ProcGlobal->allProcs[procno].heldLocks` over the genuinely-shared per-proc
+/// heldLocks array (`i32` LOCKMASK). Panics if `InitProcGlobal` has not run or
+/// `procno` is out of range.
+fn shared_held_locks_slot(procno: ProcNumber) -> &'static AtomicI32 {
+    let base = SHARED_PROC_HELD_LOCKS.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC heldLocks array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_HELD_LOCKS_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC heldLocks index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `i32` words of genuine shared memory and
+    // `idx < count`; the awaited lock partition LWLock serializes access.
+    unsafe { AtomicI32::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].heldLocks` — read the canonical (shared) word.
+pub(crate) fn proc_held_locks_shared(procno: ProcNumber) -> i32 {
+    shared_held_locks_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].heldLocks = mask` — write the canonical
+/// (shared) word.
+pub(crate) fn set_proc_held_locks_shared(procno: ProcNumber, mask: i32) {
+    shared_held_locks_slot(procno).store(mask, AtomicOrdering::Relaxed);
+}
+
+/// Per-proc wire width of a LOCKTAG in [`SHARED_PROC_WAIT_LOCK`]
+/// (`4+4+4+2+1+1 = 16` bytes, the fields encoded explicitly — the struct has no
+/// guaranteed `repr(C)` layout, so we serialize field-by-field).
+const WAIT_LOCK_WIRE: usize = 16;
+
+fn shared_wait_lock_base() -> *mut u8 {
+    let base = SHARED_PROC_WAIT_LOCK.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC waitLock array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_WAIT_LOCK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(count > 0, "shared PGPROC waitLock array empty");
+    base
+}
+
+fn shared_waiting_slot(procno: ProcNumber) -> &'static core::sync::atomic::AtomicU8 {
+    let base = SHARED_PROC_WAITING.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC waiting flag array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_WAITING_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC waiting index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u8` words of genuine shared memory and
+    // `idx < count`; the awaited lock partition LWLock serializes access.
+    unsafe { core::sync::atomic::AtomicU8::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].waitLock` — read the canonical (shared) awaited
+/// LOCKTAG, or `None` when the backend is not queued on a heavyweight lock. This
+/// is the cross-process source of truth for `dlist_node_is_detached(&proc->links)`
+/// and `proc->waitLock` reads in the wakeup / deadlock paths.
+pub(crate) fn proc_wait_lock_shared(procno: ProcNumber) -> Option<types_storage::lock::LOCKTAG> {
+    if shared_waiting_slot(procno).load(AtomicOrdering::Relaxed) == 0 {
+        return None;
+    }
+    let idx = procno as usize;
+    let count = SHARED_PROC_WAIT_LOCK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(idx < count, "PGPROC waitLock index {idx} out of range (count {count})");
+    let base = shared_wait_lock_base();
+    let mut buf = [0u8; WAIT_LOCK_WIRE];
+    // SAFETY: `base` addresses `count * WAIT_LOCK_WIRE` shmem bytes; `idx < count`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            base.add(idx * WAIT_LOCK_WIRE),
+            buf.as_mut_ptr(),
+            WAIT_LOCK_WIRE,
+        );
+    }
+    Some(types_storage::lock::LOCKTAG {
+        locktag_field1: u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]),
+        locktag_field2: u32::from_ne_bytes([buf[4], buf[5], buf[6], buf[7]]),
+        locktag_field3: u32::from_ne_bytes([buf[8], buf[9], buf[10], buf[11]]),
+        locktag_field4: u16::from_ne_bytes([buf[12], buf[13]]),
+        locktag_type: buf[14],
+        locktag_lockmethodid: buf[15],
+    })
+}
+
+/// `ProcGlobal->allProcs[procno].waitLock = tag` (with the companion
+/// `links`/queued flag) — write the canonical (shared) awaited LOCKTAG, or clear
+/// it (`None`) when the backend leaves the wait queue.
+pub(crate) fn set_proc_wait_lock_shared(
+    procno: ProcNumber,
+    tag: Option<types_storage::lock::LOCKTAG>,
+) {
+    let idx = procno as usize;
+    let count = SHARED_PROC_WAIT_LOCK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(idx < count, "PGPROC waitLock index {idx} out of range (count {count})");
+    let base = shared_wait_lock_base();
+    if let Some(t) = tag {
+        let mut buf = [0u8; WAIT_LOCK_WIRE];
+        buf[0..4].copy_from_slice(&t.locktag_field1.to_ne_bytes());
+        buf[4..8].copy_from_slice(&t.locktag_field2.to_ne_bytes());
+        buf[8..12].copy_from_slice(&t.locktag_field3.to_ne_bytes());
+        buf[12..14].copy_from_slice(&t.locktag_field4.to_ne_bytes());
+        buf[14] = t.locktag_type;
+        buf[15] = t.locktag_lockmethodid;
+        // SAFETY: `base` addresses `count * WAIT_LOCK_WIRE` shmem bytes; `idx < count`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buf.as_ptr(),
+                base.add(idx * WAIT_LOCK_WIRE),
+                WAIT_LOCK_WIRE,
+            );
+        }
+        // Publish the payload before flipping the live flag.
+        core::sync::atomic::fence(AtomicOrdering::Release);
+        shared_waiting_slot(procno).store(1, AtomicOrdering::Relaxed);
+    } else {
+        shared_waiting_slot(procno).store(0, AtomicOrdering::Relaxed);
+    }
+}
+
 /// `&ProcGlobal->allProcs[procno].databaseId` over the genuinely-shared per-proc
 /// databaseId array (`Oid`/`u32`). Panics if `InitProcGlobal` has not run or
 /// `procno` is out of range.
@@ -1310,6 +1570,87 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     }
     SHARED_PROC_PER_PROC_STATUS_FLAGS.store(psf_ptr, AtomicOrdering::Relaxed);
     SHARED_PROC_PER_PROC_STATUS_FLAGS_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.waitLockMode array (the heavyweight-lock mode the backend
+    // is blocked on in ProcSleep). In C this is part of the shared PGPROC block;
+    // the backend releasing a conflicting lock walks the wait queue and reads each
+    // waiter's `proc->waitLockMode` (ProcLockWakeup/JoinWaitQueue) to decide
+    // whether to grant. Fork-private storage makes the waker read a stale `0`
+    // (invalid mode) and never wake the real waiter — e.g. a DROP blocked on a 2PC
+    // dummy proc's lock hangs after COMMIT PREPARED. MemSet(0) matches the C
+    // PGPROC block (NoLock); JoinWaitQueue stamps the real mode before sleeping.
+    let wlm_size = mul_size(total_procs, size_of::<i32>());
+    let (wlm_ptr, wlm_found) =
+        shmem::shmem_init_struct::call("PGPROC waitLockMode words", wlm_size)?;
+    let wlm_ptr = wlm_ptr as *mut i32;
+    if !wlm_found {
+        // SAFETY: `wlm_ptr` addresses `wlm_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(wlm_ptr as *mut u8, 0, wlm_size) };
+    }
+    SHARED_PROC_WAIT_LOCK_MODE.store(wlm_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_WAIT_LOCK_MODE_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.waitStatus array (PROC_WAIT_STATUS_*). In C this is part of
+    // the shared PGPROC block; the waker writes PROC_WAIT_STATUS_OK and the
+    // blocked backend reads its own MyProc->waitStatus each ProcSleep loop to
+    // learn it was granted. Fork-private storage makes the cross-process write
+    // invisible, so the waiter never exits the loop. MemSet(0) ==
+    // PROC_WAIT_STATUS_OK, matching the C PGPROC block; JoinWaitQueue sets WAITING
+    // before sleeping.
+    let wst_size = mul_size(total_procs, size_of::<u32>());
+    let (wst_ptr, wst_found) =
+        shmem::shmem_init_struct::call("PGPROC waitStatus words", wst_size)?;
+    let wst_ptr = wst_ptr as *mut u32;
+    if !wst_found {
+        // SAFETY: `wst_ptr` addresses `wst_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(wst_ptr as *mut u8, 0, wst_size) };
+    }
+    SHARED_PROC_WAIT_STATUS.store(wst_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_WAIT_STATUS_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.heldLocks array (conflict-mask of locks the blocked backend
+    // already holds on the awaited object). In C part of the shared PGPROC block;
+    // read cross-process by JoinWaitQueue's wait-queue walk. MemSet(0) matches the
+    // C PGPROC block.
+    let hl_size = mul_size(total_procs, size_of::<i32>());
+    let (hl_ptr, hl_found) =
+        shmem::shmem_init_struct::call("PGPROC heldLocks words", hl_size)?;
+    let hl_ptr = hl_ptr as *mut i32;
+    if !hl_found {
+        // SAFETY: `hl_ptr` addresses `hl_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(hl_ptr as *mut u8, 0, hl_size) };
+    }
+    SHARED_PROC_HELD_LOCKS.store(hl_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_HELD_LOCKS_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.waitLock array (the LOCKTAG of the heavyweight lock the
+    // backend is blocked on) plus its companion "queued" flag. In C the lock's
+    // waitProcs dclist threads through `proc->links` in the shared PGPROC block,
+    // so the backend releasing a conflicting lock identifies each waiter's lock
+    // and the `dlist_node_is_detached(&proc->links)` guard reads a coherent value.
+    // Fork-private storage makes the waker see a stale "detached"/NULL image and
+    // skip waking the waiter — the 2PC-dummy-proc DROP hang. MemSet(0): the flag
+    // defaults to "not waiting"; the payload is stamped before the flag is raised.
+    let wl_size = mul_size(total_procs, WAIT_LOCK_WIRE);
+    let (wl_ptr, wl_found) = shmem::shmem_init_struct::call("PGPROC waitLock words", wl_size)?;
+    let wl_ptr = wl_ptr as *mut u8;
+    if !wl_found {
+        // SAFETY: `wl_ptr` addresses `wl_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(wl_ptr, 0, wl_size) };
+    }
+    SHARED_PROC_WAIT_LOCK.store(wl_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_WAIT_LOCK_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    let wq_size = mul_size(total_procs, size_of::<u8>());
+    let (wq_ptr, wq_found) =
+        shmem::shmem_init_struct::call("PGPROC waiting flag words", wq_size)?;
+    let wq_ptr = wq_ptr as *mut u8;
+    if !wq_found {
+        // SAFETY: `wq_ptr` addresses `wq_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(wq_ptr, 0, wq_size) };
+    }
+    SHARED_PROC_WAITING.store(wq_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_WAITING_COUNT.store(total_procs, AtomicOrdering::Relaxed);
 
     // Dense ProcGlobal mirror arrays (xids[] / subxidStates[] / statusFlags[]),
     // one element per pgxactoff slot. In C these are part of the PGPROC

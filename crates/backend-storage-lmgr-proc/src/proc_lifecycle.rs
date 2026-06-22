@@ -88,6 +88,9 @@ fn init_my_proc_common(proc: &mut PGPROC, procno: ProcNumber, regular: bool) {
     proc.waitLock = None;
     proc.waitProcLock = None;
     proc.waitStart.write(0);
+    // Clear the cross-process awaited-lock / queued flag for this (possibly
+    // reused) slot, matching the fresh PGPROC the C InitProcess sees.
+    crate::proc_shmem::set_proc_wait_lock_shared(procno, None);
 
     // USE_ASSERT_CHECKING: last process should have released all locks; the
     // myProcLocks partitions must already be empty — assertion-only, omitted.
@@ -314,6 +317,8 @@ pub fn InitAuxiliaryProcess(_mcx: Mcx<'_>) -> PgResult<()> {
         proc.waitStart.write(0);
         // USE_ASSERT_CHECKING: myProcLocks partitions must be empty — omitted.
     });
+    // Clear the cross-process awaited-lock / queued flag for this aux slot.
+    crate::proc_shmem::set_proc_wait_lock_shared(aux_procno, None);
 
     // Mirror the canonical xmin/databaseId/statusFlags into the genuinely-shared
     // per-proc arrays (real shmem PGPROC fields read cross-process).

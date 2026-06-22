@@ -523,19 +523,27 @@ fn proc_lock_group_leader(procno: ProcNumber) -> ProcNumber {
 }
 
 fn set_proc_held_locks(procno: ProcNumber, mask: types_storage::lock::LOCKMASK) {
+    // heldLocks is read cross-process by JoinWaitQueue's wait-queue walk, so the
+    // canonical store is the genuinely-shared array (the fork-private PGPROC field
+    // is kept in sync for any same-process reader).
+    crate::proc_shmem::set_proc_held_locks_shared(procno, mask);
     with_proc_by_number(procno, |p| p.heldLocks = mask);
 }
 
 fn proc_held_locks(procno: ProcNumber) -> types_storage::lock::LOCKMASK {
-    with_proc_by_number(procno, |p| p.heldLocks)
+    crate::proc_shmem::proc_held_locks_shared(procno)
 }
 
 fn proc_wait_lock_mode(procno: ProcNumber) -> types_storage::lock::LOCKMODE {
-    with_proc_by_number(procno, |p| p.waitLockMode)
+    // The backend releasing a conflicting lock reads this cross-process to decide
+    // whether the waiter can be granted; read the canonical shared word.
+    crate::proc_shmem::proc_wait_lock_mode_shared(procno)
 }
 
 fn proc_wait_status(procno: ProcNumber) -> ProcWaitStatus {
-    with_proc_by_number(procno, |p| p.waitStatus)
+    // Written cross-process by the waker (ProcWakeup); read the canonical shared
+    // word so the blocked backend observes the grant.
+    crate::proc_shmem::proc_wait_status_shared(procno)
 }
 
 fn set_proc_wait_fields(
@@ -547,6 +555,16 @@ fn set_proc_wait_fields(
     // `MyProc->{waitLock = lock; waitProcLock = proclock; waitLockMode =
     //  lockmode; waitStatus = PROC_WAIT_STATUS_WAITING;}` — waitLock/waitProcLock
     // modeled by the lock's LOCKTAG / the holder's ProcNumber (see PGPROC).
+    // waitLock, waitLockMode and waitStatus are read cross-process by the waker,
+    // so their canonical store is the genuinely-shared array (the fork-private
+    // fields stay in sync for same-process readers). Stamp the awaited LOCKTAG
+    // last so the "queued" flag is raised only once the mode/status are published.
+    crate::proc_shmem::set_proc_wait_lock_mode_shared(procno, lockmode);
+    crate::proc_shmem::set_proc_wait_status_shared(
+        procno,
+        types_storage::storage::PROC_WAIT_STATUS_WAITING,
+    );
+    crate::proc_shmem::set_proc_wait_lock_shared(procno, Some(lock));
     with_proc_by_number(procno, |p| {
         p.waitLock = Some(lock);
         p.waitProcLock = Some(holder);
@@ -565,14 +583,22 @@ fn proc_wait_start(procno: ProcNumber) -> TimestampTz {
 }
 
 fn proc_wait_link_is_detached(procno: ProcNumber) -> bool {
-    // `dlist_node_is_detached(&GetPGProcByNumber(procno)->links)`: a node is
-    // detached when both links are NULL (zero).
-    with_proc_by_number(procno, |p| p.links.prev.is_none() && p.links.next.is_none())
+    // `dlist_node_is_detached(&GetPGProcByNumber(procno)->links)`: in C the lock's
+    // waitProcs dclist threads through `proc->links`, so "detached" == "not queued
+    // on a lock". This port models queue membership in the shared lock table; the
+    // cross-process source of truth is the shared waitLock/queued flag (the
+    // fork-private `links` image is stale to a remote waker).
+    crate::proc_shmem::proc_wait_lock_shared(procno).is_none()
 }
 
 fn wakeup_proc_clear_wait(procno: ProcNumber, status: ProcWaitStatus) {
     // ProcWakeup's state reset: clear waitLock/waitProcLock, set waitStatus, and
-    // `pg_atomic_write_u64(&proc->waitStart, 0)`.
+    // `pg_atomic_write_u64(&proc->waitStart, 0)`. waitLock and waitStatus are read
+    // by the blocked backend (and other backends) cross-process, so clear/set the
+    // canonical shared words so the grant/error and dequeue become visible and the
+    // waiter exits its loop.
+    crate::proc_shmem::set_proc_wait_status_shared(procno, status);
+    crate::proc_shmem::set_proc_wait_lock_shared(procno, None);
     with_proc_by_number(procno, |p| {
         p.waitLock = None;
         p.waitProcLock = None;
@@ -582,20 +608,24 @@ fn wakeup_proc_clear_wait(procno: ProcNumber, status: ProcWaitStatus) {
 }
 
 fn proc_unlinked_from_wait_queue(procno: ProcNumber) -> bool {
-    // `MyProc->links.prev == NULL || MyProc->links.next == NULL`.
-    with_proc_by_number(procno, |p| p.links.prev.is_none() || p.links.next.is_none())
+    // `MyProc->links.prev == NULL || MyProc->links.next == NULL` — i.e. no longer
+    // queued. Read the cross-process shared queued flag (see
+    // `proc_wait_link_is_detached`).
+    crate::proc_shmem::proc_wait_lock_shared(procno).is_none()
 }
 
 fn proc_is_waiting_on_lock(procno: ProcNumber) -> bool {
-    with_proc_by_number(procno, |p| p.waitLock.is_some())
+    crate::proc_shmem::proc_wait_lock_shared(procno).is_some()
 }
 
 fn proc_wait_lock_tag(procno: ProcNumber) -> types_storage::lock::LOCKTAG {
-    // `MyProc->waitLock->tag` — the LOCKTAG identifying the awaited lock (the
-    // value `waitLock` is modeled by). Panics if not waiting, mirroring the C
-    // deref of a NULL waitLock.
-    with_proc_by_number(procno, |p| {
-        p.waitLock.expect("proc_wait_lock_tag: MyProc->waitLock is NULL")
+    // `MyProc->waitLock->tag` — the LOCKTAG identifying the awaited lock. Read the
+    // canonical shared word (cross-process visible). Panics if not waiting,
+    // mirroring the C deref of a NULL waitLock.
+    crate::proc_shmem::proc_wait_lock_shared(procno).unwrap_or_else(|| {
+        with_proc_by_number(procno, |p| {
+            p.waitLock.expect("proc_wait_lock_tag: MyProc->waitLock is NULL")
+        })
     })
 }
 
