@@ -27,6 +27,7 @@ use backend_utils_mb::{
     check_encoding_conversion_args, report_invalid_encoding, report_untranslatable_char,
 };
 use backend_utils_mb_conv_string_helpers::ConversionResult;
+use backend_utils_mb_conv_string_helpers::make_conversion_builtin;
 use common_wchar::pg_encoding_verifymbchar;
 use types_wchar::encoding::{pg_enc, PG_EUC_JP, PG_MULE_INTERNAL, PG_SJIS};
 
@@ -34,7 +35,83 @@ mod tables;
 use tables::IBMKANJI;
 
 /// Convention no-op: this crate installs no inward seams.
-pub fn init_seams() {}
+/// Bridge a fgram-typed conversion `PgResult` into the real
+/// `types_error::PgResult` the fmgr-builtin dispatcher expects. The
+/// `ConversionResult` payload is the shared real type; only the error
+/// universe differs, so map it by message + sqlstate.
+fn into_real(
+    r: PgResult<ConversionResult>,
+) -> types_error_real::PgResult<ConversionResult> {
+    r.map_err(|e| types_error_real::PgError::error(e.message().to_string()))
+}
+
+fn adapt_euc_jp_to_sjis(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    src: &[u8],
+    no_error: bool,
+) -> types_error_real::PgResult<ConversionResult> {
+    into_real(euc_jp_to_sjis(src_encoding, dest_encoding, src, no_error))
+}
+
+fn adapt_sjis_to_euc_jp(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    src: &[u8],
+    no_error: bool,
+) -> types_error_real::PgResult<ConversionResult> {
+    into_real(sjis_to_euc_jp(src_encoding, dest_encoding, src, no_error))
+}
+
+fn adapt_euc_jp_to_mic(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    src: &[u8],
+    no_error: bool,
+) -> types_error_real::PgResult<ConversionResult> {
+    into_real(euc_jp_to_mic(src_encoding, dest_encoding, src, no_error))
+}
+
+fn adapt_sjis_to_mic(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    src: &[u8],
+    no_error: bool,
+) -> types_error_real::PgResult<ConversionResult> {
+    into_real(sjis_to_mic(src_encoding, dest_encoding, src, no_error))
+}
+
+fn adapt_mic_to_euc_jp(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    src: &[u8],
+    no_error: bool,
+) -> types_error_real::PgResult<ConversionResult> {
+    into_real(mic_to_euc_jp(src_encoding, dest_encoding, src, no_error))
+}
+
+fn adapt_mic_to_sjis(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    src: &[u8],
+    no_error: bool,
+) -> types_error_real::PgResult<ConversionResult> {
+    into_real(mic_to_sjis(src_encoding, dest_encoding, src, no_error))
+}
+
+/// Register the ported conversion procedures as fmgr builtins so
+/// `fmgr_info` resolves their proc OIDs to the in-process Rust bodies
+/// instead of `dlopen`ing `$libdir/euc_jp_and_sjis`.
+pub fn init_seams() {
+    backend_utils_fmgr_core::register_builtins_native([
+        make_conversion_builtin(4324, "euc_jp_to_sjis", adapt_euc_jp_to_sjis),
+        make_conversion_builtin(4325, "sjis_to_euc_jp", adapt_sjis_to_euc_jp),
+        make_conversion_builtin(4326, "euc_jp_to_mic", adapt_euc_jp_to_mic),
+        make_conversion_builtin(4327, "sjis_to_mic", adapt_sjis_to_mic),
+        make_conversion_builtin(4328, "mic_to_euc_jp", adapt_mic_to_euc_jp),
+        make_conversion_builtin(4329, "mic_to_sjis", adapt_mic_to_sjis),
+    ]);
+}
 
 // ---------------------------------------------------------------------------
 // Constants from euc_jp_and_sjis.c and mb/pg_wchar.h.

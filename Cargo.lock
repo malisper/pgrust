@@ -8973,6 +8973,7 @@ name = "backend-conv-cyrillic-and-mic"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -8984,8 +8985,10 @@ name = "backend-conv-euc-cn-and-mic"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error-fgram",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
+ "types-error",
  "types-wchar",
 ]
 
@@ -8994,9 +8997,11 @@ name = "backend-conv-euc-jp-and-sjis"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error-fgram",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
  "common-wchar",
+ "types-error",
  "types-wchar",
 ]
 
@@ -9005,9 +9010,11 @@ name = "backend-conv-euc-kr-and-mic"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error-fgram",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
  "common-wchar",
+ "types-error",
  "types-wchar",
 ]
 
@@ -9016,9 +9023,11 @@ name = "backend-conv-euc-tw-and-big5"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error-fgram",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
  "common-wchar",
+ "types-error",
  "types-wchar",
 ]
 
@@ -9027,9 +9036,11 @@ name = "backend-conv-euc2004-sjis2004"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error-fgram",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-fgram",
  "common-wchar",
+ "types-error",
  "types-wchar",
 ]
 
@@ -9038,6 +9049,7 @@ name = "backend-conv-latin-and-mic"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9049,6 +9061,7 @@ name = "backend-conv-latin2-and-win1250"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9060,6 +9073,7 @@ name = "backend-conv-utf8-and-big5"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9071,6 +9085,7 @@ name = "backend-conv-utf8-and-cyrillic"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9082,6 +9097,7 @@ name = "backend-conv-utf8-and-euc-cn"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9120,6 +9136,7 @@ name = "backend-conv-utf8-and-euc-tw"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9131,6 +9148,7 @@ name = "backend-conv-utf8-and-euc2004"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "backend-utils-mb-mbutils-seams",
  "types-error",
@@ -9141,6 +9159,7 @@ dependencies = [
 name = "backend-conv-utf8-and-gb18030"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9151,6 +9170,7 @@ dependencies = [
 name = "backend-conv-utf8-and-gbk"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9185,6 +9205,7 @@ dependencies = [
 name = "backend-conv-utf8-and-johab"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9195,6 +9216,7 @@ dependencies = [
 name = "backend-conv-utf8-and-sjis"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9205,6 +9227,7 @@ dependencies = [
 name = "backend-conv-utf8-and-sjis2004"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9215,6 +9238,7 @@ dependencies = [
 name = "backend-conv-utf8-and-uhc"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",
@@ -9226,6 +9250,7 @@ name = "backend-conv-utf8-and-win"
 version = "0.0.0"
 dependencies = [
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-conv-string-helpers",
  "common-wchar",
  "types-error",

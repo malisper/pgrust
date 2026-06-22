@@ -19,10 +19,47 @@ use backend_utils_mb::{
     check_encoding_conversion_args, report_invalid_encoding, report_untranslatable_char,
 };
 use backend_utils_mb_conv_string_helpers::ConversionResult;
+use backend_utils_mb_conv_string_helpers::make_conversion_builtin;
 use types_wchar::encoding::{pg_enc, PG_EUC_CN, PG_MULE_INTERNAL};
 
 /// Convention no-op: this crate installs no inward seams.
-pub fn init_seams() {}
+/// Bridge a fgram-typed conversion `PgResult` into the real
+/// `types_error::PgResult` the fmgr-builtin dispatcher expects. The
+/// `ConversionResult` payload is the shared real type; only the error
+/// universe differs, so map it by message + sqlstate.
+fn into_real(
+    r: PgResult<ConversionResult>,
+) -> types_error_real::PgResult<ConversionResult> {
+    r.map_err(|e| types_error_real::PgError::error(e.message().to_string()))
+}
+
+fn adapt_euc_cn_to_mic(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    src: &[u8],
+    no_error: bool,
+) -> types_error_real::PgResult<ConversionResult> {
+    into_real(euc_cn_to_mic(src_encoding, dest_encoding, src, no_error))
+}
+
+fn adapt_mic_to_euc_cn(
+    src_encoding: pg_enc,
+    dest_encoding: pg_enc,
+    src: &[u8],
+    no_error: bool,
+) -> types_error_real::PgResult<ConversionResult> {
+    into_real(mic_to_euc_cn(src_encoding, dest_encoding, src, no_error))
+}
+
+/// Register the ported conversion procedures as fmgr builtins so
+/// `fmgr_info` resolves their proc OIDs to the in-process Rust bodies
+/// instead of `dlopen`ing `$libdir/euc_cn_and_mic`.
+pub fn init_seams() {
+    backend_utils_fmgr_core::register_builtins_native([
+        make_conversion_builtin(4322, "euc_cn_to_mic", adapt_euc_cn_to_mic),
+        make_conversion_builtin(4323, "mic_to_euc_cn", adapt_mic_to_euc_cn),
+    ]);
+}
 
 /// `LC_GB2312_80` (mb/pg_wchar.h) — MULE_INTERNAL charset leading byte for
 /// GB2312. Value verified against pgrust-pg-ffi-fgram.

@@ -32,7 +32,8 @@ mod tables;
 
 use backend_utils_error::PgResult;
 use backend_utils_mb_conv_string_helpers::{
-    latin2mic, latin2mic_with_table, local2local, mic2latin, mic2latin_with_table, ConversionResult,
+    latin2mic, latin2mic_with_table, local2local, make_conversion_builtin, mic2latin,
+    mic2latin_with_table, ConversionResult,
 };
 use backend_utils_mb_mbutils_seams::check_encoding_conversion_args;
 use tables::{
@@ -384,9 +385,34 @@ pub fn win866_to_iso(
     local2local(src, PG_WIN866, PG_ISO_8859_5, &WIN8662ISO, no_error)
 }
 
-/// This crate owns no inward seams (conversions are dispatched via the
-/// `pg_conversion` catalog, mirroring the C module).
-pub fn init_seams() {}
+/// Register the twenty ported conversion procedures as fmgr builtins
+/// (`cyrillic_and_mic`, `pg_proc.dat` OIDs 4302-4321) so that `fmgr_info`
+/// resolves their proc OIDs to the in-process Rust bodies instead of
+/// `dlopen`ing `$libdir/cyrillic_and_mic` — the C bodies have no C ABI here.
+pub fn init_seams() {
+    backend_utils_fmgr_core::register_builtins_native([
+        make_conversion_builtin(4302, "koi8r_to_mic", koi8r_to_mic),
+        make_conversion_builtin(4303, "mic_to_koi8r", mic_to_koi8r),
+        make_conversion_builtin(4304, "iso_to_mic", iso_to_mic),
+        make_conversion_builtin(4305, "mic_to_iso", mic_to_iso),
+        make_conversion_builtin(4306, "win1251_to_mic", win1251_to_mic),
+        make_conversion_builtin(4307, "mic_to_win1251", mic_to_win1251),
+        make_conversion_builtin(4308, "win866_to_mic", win866_to_mic),
+        make_conversion_builtin(4309, "mic_to_win866", mic_to_win866),
+        make_conversion_builtin(4310, "koi8r_to_win1251", koi8r_to_win1251),
+        make_conversion_builtin(4311, "win1251_to_koi8r", win1251_to_koi8r),
+        make_conversion_builtin(4312, "koi8r_to_win866", koi8r_to_win866),
+        make_conversion_builtin(4313, "win866_to_koi8r", win866_to_koi8r),
+        make_conversion_builtin(4314, "win866_to_win1251", win866_to_win1251),
+        make_conversion_builtin(4315, "win1251_to_win866", win1251_to_win866),
+        make_conversion_builtin(4316, "iso_to_koi8r", iso_to_koi8r),
+        make_conversion_builtin(4317, "koi8r_to_iso", koi8r_to_iso),
+        make_conversion_builtin(4318, "iso_to_win1251", iso_to_win1251),
+        make_conversion_builtin(4319, "win1251_to_iso", win1251_to_iso),
+        make_conversion_builtin(4320, "iso_to_win866", iso_to_win866),
+        make_conversion_builtin(4321, "win866_to_iso", win866_to_iso),
+    ]);
+}
 
 #[cfg(test)]
 mod tests;
