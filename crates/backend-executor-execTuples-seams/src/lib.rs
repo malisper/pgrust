@@ -309,6 +309,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecForceStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c) over the
+    /// payload-bearing `&mut SlotData` a table-AM modify callback holds directly
+    /// (not an `EState` pool id). Stores a heap tuple into ANY slot kind,
+    /// performing the format conversion the slot requires — used by
+    /// `heapam_tuple_insert`/`heapam_tuple_update` to write the heap-modify-
+    /// stamped tuple (new xmin/cmin/infomask) back into the result slot so
+    /// RETURNING reads the new row's system columns, mirroring C's in-place
+    /// mutation of the slot's own `hslot->tuple` pointer.
+    pub fn exec_force_store_heap_tuple_payload<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+        should_free: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecStorePinnedBufferHeapTuple(tuple, slot, buffer)` (execTuples.c):
     /// like [`exec_store_buffer_heap_tuple`] but *transfers* an existing pin on
     /// `buffer` into the slot instead of taking a fresh one — the store

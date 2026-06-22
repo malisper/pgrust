@@ -447,6 +447,15 @@ fn seam_exec_store_heap_tuple<'mcx>(
     crate::slot_store_fetch::ExecStoreHeapTuple(tuple, slot, should_free)
 }
 
+fn seam_exec_force_store_heap_tuple_payload<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+    should_free: bool,
+) -> PgResult<()> {
+    crate::slot_store_fetch::ExecForceStoreHeapTuple(mcx, tuple, slot, should_free)
+}
+
 /// Seam `exec_store_pinned_buffer_heap_tuple` — `ExecStorePinnedBufferHeapTuple`.
 /// Like the buffer store but transfers an existing pin (the `heap_fetch`
 /// `userbuf` in `heapam_fetch_row_version`). Forwards to the owner body.
@@ -1043,6 +1052,7 @@ pub fn init_seams() {
     seams::exec_store_minimal_tuple::set(seam_exec_store_minimal_tuple);
     seams::exec_store_buffer_heap_tuple::set(seam_exec_store_buffer_heap_tuple);
     seams::exec_store_heap_tuple::set(seam_exec_store_heap_tuple);
+    seams::exec_force_store_heap_tuple_payload::set(seam_exec_force_store_heap_tuple_payload);
     seams::exec_store_pinned_buffer_heap_tuple::set(seam_exec_store_pinned_buffer_heap_tuple);
     seams::exec_clear_tuple_payload::set(seam_exec_clear_tuple_payload);
     seams::exec_store_minimal_tuple_payload::set(seam_exec_store_minimal_tuple_payload);

@@ -88,15 +88,49 @@ fn heapam_tuple_insert<'mcx>(
     options: i32,
     bistate: Option<&mut BulkInsertStateData>,
 ) -> PgResult<()> {
-    let (mut tuple, _should_free) = slot_seam::exec_fetch_slot_heap_tuple::call(mcx, slot, true)?;
+    let (mut tuple, should_free) = slot_seam::exec_fetch_slot_heap_tuple::call(mcx, slot, true)?;
 
     slot.base_mut().tts_tableOid = relation.rd_id;
     tuple.tuple.t_tableOid = relation.rd_id;
 
     heapam::insert::heap_insert(mcx, relation, &mut tuple, cid, options, bistate)?;
 
-    slot.base_mut().tts_tid = tuple.tuple.t_self;
+    let stored_self = tuple.tuple.t_self;
+
+    // In C, ExecFetchSlotHeapTuple with shouldFree==false returns a pointer to
+    // the slot's own materialized tuple (hslot->tuple), so heap_insert stamps
+    // xmin/cmin/infomask directly into the slot's storage — RETURNING then reads
+    // the real system columns back out of the slot. In the owned model
+    // get_heap_tuple hands back a clone, so the stamp must be written back into
+    // the slot. (shouldFree==true means the slot was virtual/minimal and C
+    // pfrees the copy without retaining it; leave the slot untouched so its
+    // getsysattr correctly errors, matching C.)
+    if !should_free {
+        store_stamped_tuple_back(mcx, slot, tuple)?;
+    }
+    // ItemPointerCopy(&tuple->t_self, &slot->tts_tid) — set after the write-back,
+    // which (for a buffer-heap slot) clears+re-stores and resets tts_tid.
+    slot.base_mut().tts_tid = stored_self;
     Ok(())
+}
+
+/// Re-store the heap-modify-stamped tuple into the result slot, mirroring C's
+/// in-place mutation of the slot's own `tuple` pointer when
+/// `ExecFetchSlotHeapTuple` returned `shouldFree==false` (a heap/buffer-heap
+/// slot whose `get_heap_tuple` aliases its storage). In the owned model
+/// `get_heap_tuple` hands back a clone, so heap_insert/heap_update stamped the
+/// clone; write it back so RETURNING reads the new row's system columns
+/// (xmin/cmin/...). `ExecForceStoreHeapTuple` performs the slot-format
+/// conversion (here always a heap/buffer-heap slot, where it preserves the
+/// stamped header verbatim). `shouldFree==true` slots (virtual/minimal) are a
+/// transient copy C pfrees without retaining, so they never reach here and
+/// their getsysattr correctly errors, matching C.
+fn store_stamped_tuple_back<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    tuple: FormedTuple<'mcx>,
+) -> PgResult<()> {
+    slot_seam::exec_force_store_heap_tuple_payload::call(mcx, tuple, slot, true)
 }
 
 /// `heapam_tuple_insert_speculative(relation, slot, cid, options, bistate,
@@ -115,7 +149,7 @@ fn heapam_tuple_insert_speculative<'mcx>(
     bistate: Option<&mut BulkInsertStateData>,
     spec_token: u32,
 ) -> PgResult<()> {
-    let (mut tuple, _should_free) = slot_seam::exec_fetch_slot_heap_tuple::call(mcx, slot, true)?;
+    let (mut tuple, should_free) = slot_seam::exec_fetch_slot_heap_tuple::call(mcx, slot, true)?;
 
     // options |= HEAP_INSERT_SPECULATIVE;
     let options = options | heapam::insert::HEAP_INSERT_SPECULATIVE;
@@ -134,7 +168,12 @@ fn heapam_tuple_insert_speculative<'mcx>(
 
     heapam::insert::heap_insert(mcx, relation, &mut tuple, cid, options, bistate)?;
 
-    slot.base_mut().tts_tid = tuple.tuple.t_self;
+    let stored_self = tuple.tuple.t_self;
+
+    if !should_free {
+        store_stamped_tuple_back(mcx, slot, tuple)?;
+    }
+    slot.base_mut().tts_tid = stored_self;
     Ok(())
 }
 
@@ -256,7 +295,7 @@ fn heapam_tuple_update<'mcx>(
     lockmode: &mut LockTupleMode,
     update_indexes: &mut TU_UpdateIndexes,
 ) -> PgResult<TM_Result> {
-    let (mut tuple, _should_free) = slot_seam::exec_fetch_slot_heap_tuple::call(mcx, slot, true)?;
+    let (mut tuple, should_free) = slot_seam::exec_fetch_slot_heap_tuple::call(mcx, slot, true)?;
 
     slot.base_mut().tts_tableOid = relation.rd_id;
     tuple.tuple.t_tableOid = relation.rd_id;
@@ -278,7 +317,7 @@ fn heapam_tuple_update<'mcx>(
     *lockmode = hu_lockmode;
     *update_indexes = hu_update_indexes;
 
-    slot.base_mut().tts_tid = tuple.tuple.t_self;
+    let stored_self = tuple.tuple.t_self;
 
     // Mirror C's output asserts on heap_update's *update_indexes.
     if result != TM_Result::TM_Ok {
@@ -292,6 +331,15 @@ fn heapam_tuple_update<'mcx>(
                 || *update_indexes == TU_UpdateIndexes::TU_None
         );
     }
+
+    // As in heapam_tuple_insert: write the heap_update-stamped tuple (new xmin/
+    // cmin/infomask) back into the result slot so RETURNING can read the new
+    // row's system columns. Only on a successful update did heap_update stamp
+    // `tuple`. Set tts_tid afterwards (the buffer-heap write-back clears it).
+    if result == TM_Result::TM_Ok && !should_free {
+        store_stamped_tuple_back(mcx, slot, tuple)?;
+    }
+    slot.base_mut().tts_tid = stored_self;
 
     Ok(result)
 }
