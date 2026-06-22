@@ -5903,10 +5903,12 @@ fn preprocess_grouping_sets<'mcx>(
 
                 // An unsortable set must be hashable; later code assumes this.
                 if bms::bms_overlap_list(unhashable_refs.as_deref(), gset) {
-                    return Err(PgError::error(
-                        "could not implement GROUP BY: some of the datatypes only \
-                         support hashing, while others only support sorting",
-                    ));
+                    return Err(PgError::error("could not implement GROUP BY")
+                        .with_sqlstate(types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .with_detail(
+                            "Some of the datatypes only support hashing, while others \
+                             only support sorting.",
+                        ));
                 }
             } else {
                 sortable_sets.push(gset.clone());
@@ -6551,9 +6553,12 @@ fn create_ordinary_grouping_paths<'mcx>(
 
     // Give a helpful error if we failed to find any implementation (C:4141).
     if root.rel(grouped_rel).pathlist.is_empty() {
-        return Err(PgError::error(
-            "could not implement GROUP BY",
-        ));
+        return Err(PgError::error("could not implement GROUP BY")
+            .with_sqlstate(types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(
+                "Some of the datatypes only support hashing, while others \
+                 only support sorting.",
+            ));
     }
     Ok(partially_grouped_rel)
 }

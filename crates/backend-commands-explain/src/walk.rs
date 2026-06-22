@@ -950,7 +950,7 @@ pub fn ExplainNode<'es, 'p>(
             let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
             let node = Node::mk_expr(mcx, anded)?;
 
-            let useprefix = es.rtable_names.len() > 1 || es.verbose;
+            let useprefix = es.rtable_size > 1 || es.verbose;
 
             let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
             let es_pstmt = es
@@ -989,7 +989,7 @@ pub fn ExplainNode<'es, 'p>(
             let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
             let node = Node::mk_expr(mcx, anded)?;
 
-            let useprefix = es.rtable_names.len() > 1 || es.verbose;
+            let useprefix = es.rtable_size > 1 || es.verbose;
             let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
             let es_pstmt = es
                 .pstmt
@@ -2775,7 +2775,7 @@ fn show_window_def<'es, 'p>(
     // original ancestor list (without the WindowAgg prepended).
     const FRAMEOPTION_NONDEFAULT: i32 = 0x00001;
     if wagg.frameOptions & FRAMEOPTION_NONDEFAULT != 0 {
-        let useprefix = es.rtable_names.len() > 1 || es.verbose;
+        let useprefix = es.rtable_size > 1 || es.verbose;
         // Clone pstmt and the WindowAgg plan node into the 'es formatting arena
         // so all deparse-seam arguments share one lifetime (the seam's `'p`
         // unifies to `'es`, matching the `deparse_expr_for_plan` callers).
@@ -2833,7 +2833,7 @@ fn show_window_keys<'es, 'p>(
     keycols: &PgVec<'p, AttrNumber>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
 ) -> PgResult<()> {
-    let useprefix = es.rtable_names.len() > 1 || es.verbose;
+    let useprefix = es.rtable_size > 1 || es.verbose;
 
     let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, context_plan.clone_in(mcx)?)?;
     let es_pstmt = es
