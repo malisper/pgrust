@@ -58,7 +58,7 @@ use backend_pl_plpgsql_exec::{FunctionCallArg, FunctionResult};
 // `_pg_init` / fmgr-side reads. Both stay in sync via the assign hooks.
 // ---------------------------------------------------------------------------
 
-use core::cell::{Cell, OnceCell};
+use core::cell::{Cell, OnceCell, RefCell};
 use types_datum::VARHDRSZ;
 
 thread_local! {
@@ -79,6 +79,15 @@ thread_local! {
     static PLPGSQL_EXTRA_WARNINGS: Cell<int32> = const { Cell::new(PLPGSQL_XCHECK_NONE) };
     /// `int plpgsql_extra_errors;` (default "none" => PLPGSQL_XCHECK_NONE)
     static PLPGSQL_EXTRA_ERRORS: Cell<int32> = const { Cell::new(PLPGSQL_XCHECK_NONE) };
+    /// `static char *plpgsql_extra_warnings_string = NULL;` — the GUC's string
+    /// storage (`config_string.variable`). The assign hook derives the bitmask
+    /// `plpgsql_extra_warnings` from it; this cell holds the textual value SHOW /
+    /// current_setting render. Boot value "none" is seeded at registration.
+    static PLPGSQL_EXTRA_WARNINGS_STRING: RefCell<Option<String>> =
+        const { RefCell::new(None) };
+    /// `static char *plpgsql_extra_errors_string = NULL;`.
+    static PLPGSQL_EXTRA_ERRORS_STRING: RefCell<Option<String>> =
+        const { RefCell::new(None) };
 }
 
 /// Read `plpgsql_variable_conflict`.
@@ -100,6 +109,69 @@ pub fn plpgsql_extra_warnings() -> int32 {
 /// Read `plpgsql_extra_errors`.
 pub fn plpgsql_extra_errors() -> int32 {
     PLPGSQL_EXTRA_ERRORS.with(Cell::get)
+}
+
+// ---------------------------------------------------------------------------
+// GUC storage accessors (`config_*.variable`): the get/set pairs the custom-GUC
+// machinery writes through when a `SET plpgsql.x` is applied. Each mirrors C's
+// address-shared `*conf->variable = newval`.
+// ---------------------------------------------------------------------------
+
+/// `&plpgsql_variable_conflict` get accessor (enum encoded as its i32 repr).
+fn get_variable_conflict() -> int32 {
+    PLPGSQL_VARIABLE_CONFLICT.with(Cell::get) as int32
+}
+/// `&plpgsql_variable_conflict` set accessor. In C there is a single
+/// `plpgsql_variable_conflict` global (pl_handler.c) that pl_comp.c reads; in the
+/// owned model the compiler holds its own per-backend copy, so the assign writes
+/// both the handler mirror and the compiler's authoritative cell.
+fn set_variable_conflict(v: int32) {
+    let opt = match v {
+        0 => PLpgSQL_resolve_option::PLPGSQL_RESOLVE_ERROR,
+        1 => PLpgSQL_resolve_option::PLPGSQL_RESOLVE_VARIABLE,
+        2 => PLpgSQL_resolve_option::PLPGSQL_RESOLVE_COLUMN,
+        // The enum GUC only ever produces a valid option index (the parser maps
+        // a name to the entry's `val`), so other values cannot arrive.
+        _ => PLpgSQL_resolve_option::PLPGSQL_RESOLVE_ERROR,
+    };
+    PLPGSQL_VARIABLE_CONFLICT.with(|c| c.set(opt));
+    backend_pl_plpgsql_comp::set_plpgsql_variable_conflict(opt);
+}
+
+/// `&plpgsql_print_strict_params` get/set.
+fn get_print_strict_params() -> bool {
+    PLPGSQL_PRINT_STRICT_PARAMS.with(Cell::get)
+}
+fn set_print_strict_params(v: bool) {
+    PLPGSQL_PRINT_STRICT_PARAMS.with(|c| c.set(v));
+    backend_pl_plpgsql_comp::set_plpgsql_print_strict_params(v);
+}
+
+/// `&plpgsql_check_asserts` get/set.
+fn get_check_asserts() -> bool {
+    PLPGSQL_CHECK_ASSERTS.with(Cell::get)
+}
+fn set_check_asserts(v: bool) {
+    // The exec-seam `plpgsql_check_asserts` is a function-pointer seam installed
+    // once at boot (`init_seams`) that reads this live cell, so updating the cell
+    // is enough — `exec_stmt_assert` sees the new value without re-installing.
+    PLPGSQL_CHECK_ASSERTS.with(|c| c.set(v));
+}
+
+/// `&plpgsql_extra_warnings_string` get/set (the string GUC's storage).
+fn get_extra_warnings_string() -> Option<String> {
+    PLPGSQL_EXTRA_WARNINGS_STRING.with(|c| c.borrow().clone())
+}
+fn set_extra_warnings_string(v: Option<String>) {
+    PLPGSQL_EXTRA_WARNINGS_STRING.with(|c| *c.borrow_mut() = v);
+}
+
+/// `&plpgsql_extra_errors_string` get/set.
+fn get_extra_errors_string() -> Option<String> {
+    PLPGSQL_EXTRA_ERRORS_STRING.with(|c| c.borrow().clone())
+}
+fn set_extra_errors_string(v: Option<String>) {
+    PLPGSQL_EXTRA_ERRORS_STRING.with(|c| *c.borrow_mut() = v);
 }
 
 // ---------------------------------------------------------------------------
@@ -155,15 +227,74 @@ pub fn plpgsql_extra_checks_check_hook(
 }
 
 /// `plpgsql_extra_warnings_assign_hook(const char *newvalue, void *extra)`
-/// (pl_handler.c) — store the checked bitmask into `plpgsql_extra_warnings`.
+/// (pl_handler.c) — store the checked bitmask into `plpgsql_extra_warnings`. The
+/// compiler reads its own per-backend copy of this global, so propagate there too.
 pub fn plpgsql_extra_warnings_assign_hook(extra: int32) {
     PLPGSQL_EXTRA_WARNINGS.with(|c| c.set(extra));
+    backend_pl_plpgsql_comp::set_plpgsql_extra_warnings(extra);
 }
 
 /// `plpgsql_extra_errors_assign_hook(const char *newvalue, void *extra)`
 /// (pl_handler.c) — store the checked bitmask into `plpgsql_extra_errors`.
 pub fn plpgsql_extra_errors_assign_hook(extra: int32) {
     PLPGSQL_EXTRA_ERRORS.with(|c| c.set(extra));
+    backend_pl_plpgsql_comp::set_plpgsql_extra_errors(extra);
+}
+
+// ---------------------------------------------------------------------------
+// GUC-shaped check / assign hooks (the `GucStringCheckFn` / `GucStringAssignFn`
+// the custom-GUC machinery calls). The shared check hook parses the list into
+// the `PLPGSQL_XCHECK_*` bitmask and stashes it as the `extra` payload (C's
+// `*extra = malloc(int)`); the per-variable assign hook reads the bitmask back.
+// ---------------------------------------------------------------------------
+
+/// The `extra` payload `plpgsql_extra_checks_check_hook` produces — the parsed
+/// `PLPGSQL_XCHECK_*` bitmask (C's `int *extra`).
+struct ExtraChecksBitmask(int32);
+
+/// `GucStringCheckFn` for `plpgsql.extra_warnings` / `plpgsql.extra_errors`:
+/// validate the comma-separated keyword list and produce the bitmask `extra`.
+fn extra_checks_guc_check_hook(
+    newval: &mut Option<String>,
+    extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    // A NULL value (the C `newval == NULL`) cannot occur for these GUCs (boot
+    // value "none"); treat it as "none".
+    let value = newval.as_deref().unwrap_or("none");
+    let scratch = mcx::MemoryContext::new("plpgsql_extra_checks_check_hook");
+    match plpgsql_extra_checks_check_hook(scratch.mcx(), value)? {
+        Ok(bitmask) => {
+            *extra = Some(Box::new(ExtraChecksBitmask(bitmask)));
+            Ok(true)
+        }
+        Err(detail) => {
+            // C: GUC_check_errdetail("%s", detail) + return false. Surface the
+            // detail through the check-error channel the GUC layer reads.
+            backend_utils_misc_guc::GUC_check_errdetail(detail);
+            Ok(false)
+        }
+    }
+}
+
+/// `GucStringAssignFn` for `plpgsql.extra_warnings`.
+fn extra_warnings_guc_assign_hook(
+    _newval: Option<&str>,
+    extra: Option<&backend_utils_misc_guc_tables::GucHookExtra>,
+) {
+    if let Some(b) = extra.and_then(|e| e.downcast_ref::<ExtraChecksBitmask>()) {
+        plpgsql_extra_warnings_assign_hook(b.0);
+    }
+}
+
+/// `GucStringAssignFn` for `plpgsql.extra_errors`.
+fn extra_errors_guc_assign_hook(
+    _newval: Option<&str>,
+    extra: Option<&backend_utils_misc_guc_tables::GucHookExtra>,
+) {
+    if let Some(b) = extra.and_then(|e| e.downcast_ref::<ExtraChecksBitmask>()) {
+        plpgsql_extra_errors_assign_hook(b.0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +304,22 @@ pub fn plpgsql_extra_errors_assign_hook(extra: int32) {
 thread_local! {
     /// `static bool inited = false;` inside `_PG_init`.
     static PG_INIT_INITED: Cell<bool> = const { Cell::new(false) };
+    /// Whether [`register_custom_gucs`] has run for this backend (the custom-GUC
+    /// slice of `_PG_init`, fired lazily on first plpgsql library use).
+    static CUSTOM_GUCS_REGISTERED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `_PG_init`'s custom-GUC registration, fired once per backend on first PL/pgSQL
+/// library use (the call handler / inline handler / validator entry points). C
+/// runs the whole `_PG_init` at library load; here only the GUC-registration
+/// slice is reached (the xact-callback / rendezvous slices remain loud seams).
+/// Idempotent.
+fn ensure_custom_gucs_registered() {
+    if CUSTOM_GUCS_REGISTERED.with(Cell::get) {
+        return;
+    }
+    register_custom_gucs();
+    CUSTOM_GUCS_REGISTERED.with(|c| c.set(true));
 }
 
 /// `_PG_init(void)` (pl_handler.c) — library load-time initialization.
@@ -194,18 +341,7 @@ pub fn _pg_init() {
 
     seam::pg_bindtextdomain();
 
-    // DefineCustomEnumVariable("plpgsql.variable_conflict", …, &plpgsql_variable_conflict, …)
-    seam::define_custom_enum_variable_variable_conflict();
-    // DefineCustomBoolVariable("plpgsql.print_strict_params", …)
-    seam::define_custom_bool_variable_print_strict_params();
-    // DefineCustomBoolVariable("plpgsql.check_asserts", …)
-    seam::define_custom_bool_variable_check_asserts();
-    // DefineCustomStringVariable("plpgsql.extra_warnings", …, check/assign hooks)
-    seam::define_custom_string_variable_extra_warnings();
-    // DefineCustomStringVariable("plpgsql.extra_errors", …, check/assign hooks)
-    seam::define_custom_string_variable_extra_errors();
-
-    seam::mark_guc_prefix_reserved("plpgsql");
+    register_custom_gucs();
 
     // RegisterXactCallback(plpgsql_xact_cb, NULL);
     seam::register_xact_callback();
@@ -216,6 +352,98 @@ pub fn _pg_init() {
     seam::find_rendezvous_variable_plpgsql_plugin();
 
     PG_INIT_INITED.with(|c| c.set(true));
+}
+
+/// `static const struct config_enum_entry variable_conflict_options[]`
+/// (pl_handler.c).
+static VARIABLE_CONFLICT_OPTIONS: &[types_guc::config_enum_entry] = &[
+    types_guc::config_enum_entry { name: "error", val: 0, hidden: false },
+    types_guc::config_enum_entry { name: "use_variable", val: 1, hidden: false },
+    types_guc::config_enum_entry { name: "use_column", val: 2, hidden: false },
+];
+
+/// The custom-GUC registration block of `_PG_init` (the five
+/// `DefineCustom*Variable` + `MarkGUCPrefixReserved`). Split out so seam
+/// installation can register the GUCs once the GUC store is up, without firing
+/// the still-loud xact-callback / rendezvous seams. Idempotent via
+/// [`PG_INIT_INITED`]-adjacent guard in the caller.
+pub fn register_custom_gucs() {
+    use backend_utils_misc_guc::custom;
+    use backend_utils_misc_guc_tables::GucVarAccessors;
+    use types_guc::{GUC_LIST_INPUT, PGC_SUSET, PGC_USERSET};
+
+    // DefineCustomEnumVariable("plpgsql.variable_conflict", …)
+    let _ = custom::define_custom_enum_variable(
+        "plpgsql.variable_conflict",
+        Some("Sets handling of conflicts between PL/pgSQL variable names and table column names."),
+        None,
+        GucVarAccessors { get: get_variable_conflict, set: set_variable_conflict },
+        PLpgSQL_resolve_option::PLPGSQL_RESOLVE_ERROR as int32,
+        VARIABLE_CONFLICT_OPTIONS,
+        PGC_SUSET,
+        0,
+        None,
+        None,
+        None,
+    );
+
+    // DefineCustomBoolVariable("plpgsql.print_strict_params", …)
+    let _ = custom::define_custom_bool_variable(
+        "plpgsql.print_strict_params",
+        Some("Print information about parameters in the DETAIL part of the error messages generated on INTO ... STRICT failures."),
+        None,
+        GucVarAccessors { get: get_print_strict_params, set: set_print_strict_params },
+        false,
+        PGC_USERSET,
+        0,
+        None,
+        None,
+        None,
+    );
+
+    // DefineCustomBoolVariable("plpgsql.check_asserts", …)
+    let _ = custom::define_custom_bool_variable(
+        "plpgsql.check_asserts",
+        Some("Perform checks given in ASSERT statements."),
+        None,
+        GucVarAccessors { get: get_check_asserts, set: set_check_asserts },
+        true,
+        PGC_USERSET,
+        0,
+        None,
+        None,
+        None,
+    );
+
+    // DefineCustomStringVariable("plpgsql.extra_warnings", …, check/assign hooks)
+    let _ = custom::define_custom_string_variable(
+        "plpgsql.extra_warnings",
+        Some("List of programming constructs that should produce a warning."),
+        None,
+        GucVarAccessors { get: get_extra_warnings_string, set: set_extra_warnings_string },
+        Some("none"),
+        PGC_USERSET,
+        GUC_LIST_INPUT,
+        Some(extra_checks_guc_check_hook),
+        Some(extra_warnings_guc_assign_hook),
+        None,
+    );
+
+    // DefineCustomStringVariable("plpgsql.extra_errors", …, check/assign hooks)
+    let _ = custom::define_custom_string_variable(
+        "plpgsql.extra_errors",
+        Some("List of programming constructs that should produce an error."),
+        None,
+        GucVarAccessors { get: get_extra_errors_string, set: set_extra_errors_string },
+        Some("none"),
+        PGC_USERSET,
+        GUC_LIST_INPUT,
+        Some(extra_checks_guc_check_hook),
+        Some(extra_errors_guc_assign_hook),
+        None,
+    );
+
+    custom::mark_guc_prefix_reserved("plpgsql");
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +479,8 @@ fn ref_payload_image(p: Option<&types_fmgr::boundary::RefPayload>) -> Option<std
 }
 
 pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // _PG_init's custom-GUC registration (fired on first library use).
+    ensure_custom_gucs_registered();
     // nonatomic = fcinfo->context is a CallContext with atomic == false.
     let nonatomic = seam::called_nonatomic(fcinfo);
 
@@ -385,6 +615,8 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<D
 /// SPI/executor substrate; the create/free of the function + exec dispatch is
 /// real. A pure-control-flow block runs end-to-end.
 pub fn plpgsql_inline_handler(codeblock: InlineCodeBlock) -> PgResult<()> {
+    // _PG_init's custom-GUC registration (fired on first library use).
+    ensure_custom_gucs_registered();
     // Connect to SPI manager.
     let opts = if codeblock.atomic { 0 } else { SPI_OPT_NONATOMIC };
     let _ = SPI_connect_ext(opts);
@@ -446,6 +678,8 @@ pub fn plpgsql_inline_handler(codeblock: InlineCodeBlock) -> PgResult<()> {
 /// land); the access early-out + the fake-fcinfo test-compile control flow is
 /// real.
 pub fn plpgsql_validator(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // _PG_init's custom-GUC registration (fired on first library use).
+    ensure_custom_gucs_registered();
     let funcoid = seam::getarg_oid(fcinfo, 0);
 
     if !seam::check_function_validator_access(seam::flinfo_fn_oid(fcinfo), funcoid)? {

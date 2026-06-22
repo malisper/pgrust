@@ -24,6 +24,18 @@ mod mem;
 pub mod rowtupdesc_table;
 mod seam;
 
+/// The custom-GUC assign-hook targets (`plpgsql_variable_conflict` /
+/// `plpgsql_print_strict_params` / `plpgsql_extra_warnings` /
+/// `plpgsql_extra_errors`): the compiler's per-backend copies of the
+/// `pl_handler.c` GUC globals it reads while assembling a function. The handler
+/// (the layer above) writes these through its GUC assign hooks. Exposed so the
+/// handler's `DefineCustom*Variable` assign hooks update the values the compiler
+/// actually reads.
+pub use seam::{
+    set_plpgsql_extra_errors, set_plpgsql_extra_warnings, set_plpgsql_print_strict_params,
+    set_plpgsql_variable_conflict,
+};
+
 use core::cell::RefCell;
 
 use types_core::Oid;

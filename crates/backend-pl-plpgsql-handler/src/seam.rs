@@ -32,57 +32,11 @@ const T_EVENT_TRIGGER_DATA: u32 = 443;
 /// control-flow effect.
 pub fn pg_bindtextdomain() {}
 
-/// `DefineCustomEnumVariable("plpgsql.variable_conflict", …)` — register the
-/// custom GUC. The custom-GUC registration substrate (`guc.c`
-/// `DefineCustom*Variable` + the `config_enum_entry` table) is not yet ported;
-/// the compile-time default (`PLPGSQL_RESOLVE_ERROR`) the compiler reads already
-/// matches, so the variable is correct without registration.
-pub fn define_custom_enum_variable_variable_conflict() {
-    panic!(
-        "seam not wired: DefineCustomEnumVariable(\"plpgsql.variable_conflict\") (pl_handler.c) — \
-         custom-GUC registration substrate (guc.c) not yet ported"
-    );
-}
-
-/// `DefineCustomBoolVariable("plpgsql.print_strict_params", …)`.
-pub fn define_custom_bool_variable_print_strict_params() {
-    panic!(
-        "seam not wired: DefineCustomBoolVariable(\"plpgsql.print_strict_params\") (pl_handler.c) — \
-         custom-GUC registration substrate (guc.c) not yet ported"
-    );
-}
-
-/// `DefineCustomBoolVariable("plpgsql.check_asserts", …)`.
-pub fn define_custom_bool_variable_check_asserts() {
-    panic!(
-        "seam not wired: DefineCustomBoolVariable(\"plpgsql.check_asserts\") (pl_handler.c) — \
-         custom-GUC registration substrate (guc.c) not yet ported"
-    );
-}
-
-/// `DefineCustomStringVariable("plpgsql.extra_warnings", …)`.
-pub fn define_custom_string_variable_extra_warnings() {
-    panic!(
-        "seam not wired: DefineCustomStringVariable(\"plpgsql.extra_warnings\") (pl_handler.c) — \
-         custom-GUC registration substrate (guc.c) not yet ported"
-    );
-}
-
-/// `DefineCustomStringVariable("plpgsql.extra_errors", …)`.
-pub fn define_custom_string_variable_extra_errors() {
-    panic!(
-        "seam not wired: DefineCustomStringVariable(\"plpgsql.extra_errors\") (pl_handler.c) — \
-         custom-GUC registration substrate (guc.c) not yet ported"
-    );
-}
-
-/// `MarkGUCPrefixReserved("plpgsql")` (guc.c).
-pub fn mark_guc_prefix_reserved(_prefix: &str) {
-    panic!(
-        "seam not wired: MarkGUCPrefixReserved(\"plpgsql\") (pl_handler.c) — \
-         GUC prefix-reservation substrate (guc.c) not yet ported"
-    );
-}
+// The custom-GUC registration (`DefineCustomEnumVariable` /
+// `DefineCustomBoolVariable` / `DefineCustomStringVariable` /
+// `MarkGUCPrefixReserved`) is now ported: `crate::register_custom_gucs` drives
+// `backend_utils_misc_guc::custom::*` directly with the handler's storage
+// accessors + the extra_warnings/extra_errors check/assign hooks.
 
 /// `RegisterXactCallback(plpgsql_xact_cb, NULL)` (xact.c). The callback
 /// `plpgsql_xact_cb` lives in `pl_exec.c` and is not yet ported; registering a
