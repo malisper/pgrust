@@ -1053,7 +1053,20 @@ fn iocoerce_core<'mcx>(
             // `Ok(None)`. On a soft error C sets `*op->resnull = true` and
             // `*op->resvalue = 0`; otherwise it writes the converted value
             // (resnull unchanged: null iff str was NULL — i.e. cur_isnull).
-            let mut escontext = types_error::SoftErrorContext::new(false);
+            // C: `fcinfo_in->context = (Node *) state->escontext`. The shared sink
+            // is the jsestate's `escontext` (carries `details_wanted` so a caught
+            // conversion error is SAVED with its message — ExecEvalJsonCoercionFinish
+            // re-raises it as the DETAIL of "could not coerce ON ERROR/EMPTY
+            // expression"). Borrow it out so it does not alias `state` during the
+            // call, then restore it (preserving any saved error). When there is no
+            // jsestate escontext on the ExprState, fall back to a private sink.
+            let escontext_id = state.escontext;
+            let mut escontext = match escontext_id {
+                Some(id) => core::mem::take(
+                    &mut state.json_states.states.as_mut().unwrap()[id.0 as usize].escontext,
+                ),
+                None => types_error::SoftErrorContext::new(false),
+            };
             let out = function_call_invoke_datum_soft::call(
                 mcx,
                 in_oid,
@@ -1063,6 +1076,9 @@ fn iocoerce_core<'mcx>(
                 None,
                 &mut escontext,
             )?;
+            if let Some(id) = escontext_id {
+                state.json_states.states.as_mut().unwrap()[id.0 as usize].escontext = escontext;
+            }
             match out {
                 None => {
                     // SOFT_ERROR_OCCURRED: *op->resnull = true; *op->resvalue = 0.

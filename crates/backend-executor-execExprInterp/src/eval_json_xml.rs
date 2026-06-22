@@ -1132,18 +1132,38 @@ pub fn ExecEvalJsonCoercion<'mcx>(
 
     if exists_coerce {
         if exists_cast_to_int {
-            // Check domain constraints if any (domain_check_safe). Not yet
-            // threaded; only reached for JSON_EXISTS RETURNING a domain over int
-            // with constraints.
+            // C: if (exists_check_domain && !domain_check_safe(*op->resvalue,
+            //        *op->resnull, targettype, &cache, mcxt, escontext)) {
+            //        *op->resnull = true; *op->resvalue = 0; }
+            //    else *op->resvalue = DirectFunctionCall1(bool_int4, *op->resvalue);
+            let (v, n) = read_cell(state, resv);
             if exists_check_domain {
-                panic!(
-                    "execExprInterp: EEOP_JSONEXPR_COERCION — the exists_check_domain branch \
-                     needs domain_check_safe (utils/adt/domains.c), not yet threaded into the \
-                     interpreter"
+                // domain_check_safe runs under the jsestate soft sink (so a CHECK
+                // violation steers ON ERROR instead of raising hard). `Ok(())`
+                // with `error_occurred` is C's `false` return.
+                let mut escontext = escontext_id.map(|id| {
+                    core::mem::take(
+                        &mut state.json_states.states.as_mut().unwrap()[id.0 as usize].escontext,
+                    )
+                });
+                let res = backend_utils_cache_typcache_seams::domain_check_input::call(
+                    &Datum::from_bool(if n { false } else { v.as_bool() }),
+                    n,
+                    types_core::primitive::Oid::from(targettype),
+                    escontext.as_mut(),
                 );
+                let soft_failed = escontext.as_ref().is_some_and(|c| c.error_occurred());
+                if let (Some(id), Some(ec)) = (escontext_id, escontext) {
+                    state.json_states.states.as_mut().unwrap()[id.0 as usize].escontext = ec;
+                }
+                res?;
+                if soft_failed {
+                    // *op->resnull = true; *op->resvalue = 0.
+                    write_cell(state, resv, Datum::null(), true);
+                    return Ok(());
+                }
             }
             // *op->resvalue = DirectFunctionCall1(bool_int4, *op->resvalue);
-            let (v, n) = read_cell(state, resv);
             let b = if n { false } else { v.as_bool() };
             write_cell(state, resv, Datum::from_i32(if b { 1 } else { 0 }), n);
             return Ok(());
