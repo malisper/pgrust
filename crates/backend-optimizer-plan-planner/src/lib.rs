@@ -8227,7 +8227,17 @@ fn apply_scanjoin_target_to_paths<'mcx>(
                 let mut new_exprs: Vec<types_pathnodes::NodeId> =
                     Vec::with_capacity(t.exprs.len());
                 for &expr_id in t.exprs.iter() {
-                    let expr = root.node(expr_id).clone();
+                    // Deep-copy via `clone_in` into the planner-run arena rather
+                    // than the derived `Expr::clone`: a scan/join target expr can
+                    // carry an owned-subtree child (`SubPlan`/`SubLink`/`Aggref`,
+                    // e.g. a correlated MULTIEXPR `SET (a,b)=(SELECT ...)` over a
+                    // partitioned UPDATE) whose derived `clone` panics
+                    // (`SubPlanExpr::clone: SubPlan carries context-allocated
+                    // children`). `clone_in` routes the `SubPlan` arm through
+                    // `SubPlan::clone_in`; the copy is interned back into `root`'s
+                    // node arena via `alloc_node`, so it must outlive the whole
+                    // run (the long-lived planner `run.mcx()`).
+                    let expr = root.node(expr_id).clone_in(run.mcx())?;
                     let adjusted = backend_optimizer_util_appendinfo::adjust_appendrel_attrs_run(
                         Some(run), root, expr, &appinfos,
                     )?;
