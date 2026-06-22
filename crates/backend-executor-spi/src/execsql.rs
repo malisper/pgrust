@@ -204,11 +204,25 @@ pub fn spi_execsql_dynamic(
     // `plpgsql_exec_error_callback` pending, which must add its own context
     // line. Clear the "attached once" latch so that outer frame re-attaches
     // (the inner frame already attached its line before unwinding to here).
-    let out = out.map_err(|mut e| {
-        e = e.add_context(format!("SQL statement \"{query}\""));
-        e.plpgsql_context_attached = false;
-        e
-    });
+    //
+    // EXCEPT for the FOR-IN-EXECUTE / RETURN QUERY EXECUTE cursor path
+    // (`collect_all`): C runs those through `SPI_cursor_parse_open`, which pops
+    // the `_SPI_error_callback` BEFORE the portal is executed (spi.c:1777-1778),
+    // so an *execution*-phase error (e.g. EXPLAIN's GENERIC_PLAN+ANALYZE check
+    // raised at PortalRun, not at parse) is NOT decorated with the "SQL
+    // statement" frame. The materialize-all emulation mirrors that: skip the
+    // execute-phase decoration on the cursor path. (A plain dynamic EXECUTE goes
+    // through `SPI_execute_extended` → `_SPI_execute_plan`, which keeps the
+    // callback active across execution, so it still gets decorated.)
+    let out = if collect_all {
+        out
+    } else {
+        out.map_err(|mut e| {
+            e = e.add_context(format!("SQL statement \"{query}\""));
+            e.plpgsql_context_attached = false;
+            e
+        })
+    };
     let result = out;
 
     let _ = plancache::DropCachedPlan(source);
