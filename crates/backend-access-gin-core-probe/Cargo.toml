@@ -29,6 +29,7 @@ backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-utils-adt-tsginidx = { path = "../backend-utils-adt-tsginidx" }
+backend-utils-adt-jsonb-gin-seams = { path = "../backend-utils-adt-jsonb-gin-seams" }
 backend-access-index-amvalidate-seams = { path = "../backend-access-index-amvalidate-seams" }
 backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }

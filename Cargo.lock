@@ -758,6 +758,7 @@ dependencies = [
  "backend-access-index-amvalidate-seams",
  "backend-nodes-core-seams",
  "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-jsonb-gin-seams",
  "backend-utils-adt-regproc-seams",
  "backend-utils-adt-tsginidx",
  "backend-utils-cache-lsyscache-seams",

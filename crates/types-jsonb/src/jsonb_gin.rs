@@ -61,6 +61,92 @@ pub enum JsonPathGinNode {
     EntryIndex(usize),
 }
 
+impl JsonPathGinNode {
+    /// Serialize the (already-emitted) node tree to a compact byte blob so it can
+    /// round-trip through the GIN scan-key `extra_data[0]` `Pointer` channel
+    /// (which the owned GIN model carries as opaque `Vec<u8>`). This is purely a
+    /// transport encoding for the in-memory C `Pointer` the C code stashes in
+    /// `(*extra_data)[0]`; it is not an on-disk format.
+    ///
+    /// Layout (all little-endian): tag byte, then
+    ///   * `0` `Logic`: `and` byte, `u32` arg count, each arg recursively.
+    ///   * `1` `EntryIndex`: `u32` index.
+    ///   * `2` `EntryDatum`: `u32` length + payload bytes (only appears before
+    ///     `emit_jsp_gin_entries`; encoded for completeness).
+    pub fn encode_extra_data(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.encode_into(&mut out);
+        out
+    }
+
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        match self {
+            JsonPathGinNode::Logic { and, args } => {
+                out.push(0);
+                out.push(*and as u8);
+                out.extend_from_slice(&(args.len() as u32).to_le_bytes());
+                for arg in args {
+                    arg.encode_into(out);
+                }
+            }
+            JsonPathGinNode::EntryIndex(idx) => {
+                out.push(1);
+                out.extend_from_slice(&(*idx as u32).to_le_bytes());
+            }
+            JsonPathGinNode::EntryDatum(bytes) => {
+                out.push(2);
+                out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                out.extend_from_slice(bytes);
+            }
+        }
+    }
+
+    /// Inverse of [`Self::encode_extra_data`]. Returns `None` on a malformed
+    /// blob (never expected — the encoder is the only writer).
+    pub fn decode_extra_data(bytes: &[u8]) -> Option<Self> {
+        let mut pos = 0usize;
+        Self::decode_from(bytes, &mut pos)
+    }
+
+    fn decode_from(bytes: &[u8], pos: &mut usize) -> Option<Self> {
+        let tag = *bytes.get(*pos)?;
+        *pos += 1;
+        match tag {
+            0 => {
+                let and = *bytes.get(*pos)? != 0;
+                *pos += 1;
+                let n = read_u32(bytes, pos)? as usize;
+                let mut args = Vec::with_capacity(n);
+                for _ in 0..n {
+                    args.push(Self::decode_from(bytes, pos)?);
+                }
+                Some(JsonPathGinNode::Logic { and, args })
+            }
+            1 => {
+                let idx = read_u32(bytes, pos)? as usize;
+                Some(JsonPathGinNode::EntryIndex(idx))
+            }
+            2 => {
+                let len = read_u32(bytes, pos)? as usize;
+                let end = pos.checked_add(len)?;
+                let payload = bytes.get(*pos..end)?.to_vec();
+                *pos = end;
+                Some(JsonPathGinNode::EntryDatum(payload))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[inline]
+fn read_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let end = pos.checked_add(4)?;
+    let slice = bytes.get(*pos..end)?;
+    let v = u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]);
+    *pos = end;
+    Some(v)
+}
+
 /// The output of `extract_jsp_query`: the assembled GIN entries plus the root
 /// expression node (C: the value stored in `(*extra_data)[0]`).
 #[derive(Clone, Debug)]

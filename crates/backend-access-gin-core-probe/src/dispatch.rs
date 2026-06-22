@@ -26,8 +26,9 @@
 //! [`crate::fmgr_builtins`]; their `fn_addr` is structurally never reached (the
 //! AM dispatches by `fn_oid`), mirroring the GiST opclass.
 //!
-//! tsvector_ops / jsonb_ops support procs (whose OIDs are not handled here)
-//! bottom out loudly — those opclass bodies are the genuine residual GIN port.
+//! The `anyarray_ops`, `tsvector_ops`, and `jsonb_ops` / `jsonb_path_ops`
+//! support procs are all wired here; any other opclass support-proc OID bottoms
+//! out loudly (a user-defined opclass would need a `Datum::Internal` fmgr arm).
 
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
@@ -92,6 +93,44 @@ pub const F_GIN_TSQUERY_CONSISTENT_6ARGS: u32 = 3088;
 pub const F_GIN_TSQUERY_CONSISTENT_OLDSIG: u32 = 3792;
 /// `gin_tsquery_triconsistent(...)` — ternary `triConsistent`.
 pub const F_GIN_TSQUERY_TRICONSISTENT: u32 = 3921;
+
+// pg_proc.dat OIDs of the `jsonb_ops` / `jsonb_path_ops` GIN support procedures
+// (`jsonb_gin.c`). These are the values `index_getprocinfo` records in the
+// resolved support-proc `FmgrInfo::fn_oid` for the jsonb opclasses. The compare
+// proc (3480, amprocnum 1) is dispatched through the by-OID fmgr path
+// (`gin_compare_entries` → `function_call2_coll_datum`), not here.
+/// `gin_extract_jsonb(jsonb, internal, internal)` — jsonb_ops `extractValue`.
+pub const F_GIN_EXTRACT_JSONB: u32 = 3482;
+/// `gin_extract_jsonb_query(...)` — jsonb_ops `extractQuery`.
+pub const F_GIN_EXTRACT_JSONB_QUERY: u32 = 3483;
+/// `gin_consistent_jsonb(...)` — jsonb_ops boolean `consistent`.
+pub const F_GIN_CONSISTENT_JSONB: u32 = 3484;
+/// `gin_triconsistent_jsonb(...)` — jsonb_ops ternary `triConsistent`.
+pub const F_GIN_TRICONSISTENT_JSONB: u32 = 3488;
+/// `gin_extract_jsonb_path(jsonb, internal, internal)` — jsonb_path_ops
+/// `extractValue`.
+pub const F_GIN_EXTRACT_JSONB_PATH: u32 = 3485;
+/// `gin_extract_jsonb_query_path(...)` — jsonb_path_ops `extractQuery`.
+pub const F_GIN_EXTRACT_JSONB_QUERY_PATH: u32 = 3486;
+/// `gin_consistent_jsonb_path(...)` — jsonb_path_ops boolean `consistent`.
+pub const F_GIN_CONSISTENT_JSONB_PATH: u32 = 3487;
+/// `gin_triconsistent_jsonb_path(...)` — jsonb_path_ops ternary `triConsistent`.
+pub const F_GIN_TRICONSISTENT_JSONB_PATH: u32 = 3489;
+
+// jsonb GIN strategy numbers (jsonb.h) — selecting the query argument variant.
+const JSONB_CONTAINS_STRATEGY: u16 = 7;
+const JSONB_EXISTS_STRATEGY: u16 = 9;
+const JSONB_EXISTS_ANY_STRATEGY: u16 = 10;
+const JSONB_EXISTS_ALL_STRATEGY: u16 = 11;
+const JSONB_JSONPATH_EXISTS_STRATEGY: u16 = 15;
+const JSONB_JSONPATH_PREDICATE_STRATEGY: u16 = 16;
+
+/// `VARHDRSZ` — the 4-byte varlena length header. The canonical by-ref `Datum`
+/// image of a jsonb / text / text[] value includes this header; the jsonb_gin
+/// value cores want the payload after it (the jsonb `JsonbContainer` root, the
+/// `text` key string), while the jsonpath cores want the *whole* varlena (their
+/// `jsonpath_is_lax` / `jspInit` read the header word at bytes 4..8).
+const VARHDRSZ: usize = 4;
 
 /// Encode `gin_extract_tsquery`'s `map_item_operand` (the `int *` map the C code
 /// stores in every `extra_data[]` slot) as a native-endian `i32` byte blob, the
@@ -185,8 +224,64 @@ fn dispatch_extract_value<'mcx>(
             }
             Ok(Some((elems, PgVec::new_in(mcx))))
         }
+        F_GIN_EXTRACT_JSONB => {
+            // gin_extract_jsonb(jsonb): one `text` GIN key per JSON key / scalar.
+            // The canonical by-ref image is the full jsonb varlena; the core
+            // wants the `JsonbContainer` root after the varlena header.
+            let jb = value.as_ref_bytes();
+            let keys = backend_utils_adt_jsonb_gin_seams::gin_extract_jsonb::call(
+                mcx,
+                &jb[VARHDRSZ..],
+            )?;
+            let elems = text_keys_to_datums(mcx, keys)?;
+            Ok(Some((elems, PgVec::new_in(mcx))))
+        }
+        F_GIN_EXTRACT_JSONB_PATH => {
+            // gin_extract_jsonb_path(jsonb): one bare `uint32` hash key per JSON
+            // value (the jsonb_path_ops opclass). The keys travel as their 4
+            // native-endian hash bytes (a by-value `uint32` GIN key).
+            let jb = value.as_ref_bytes();
+            let keys = backend_utils_adt_jsonb_gin_seams::gin_extract_jsonb_path::call(
+                &jb[VARHDRSZ..],
+            )?;
+            let elems = hash_keys_to_datums(mcx, keys)?;
+            Ok(Some((elems, PgVec::new_in(mcx))))
+        }
         other => Err(unported(other, "extractValue")),
     }
+}
+
+/// Wrap a vector of `jsonb_ops` GIN key payloads (the `make_text_key` varlenas)
+/// back into canonical by-ref `text` `Datum`s. The bytes are the on-disk GIN
+/// key image the access method indexes / compares (`gin_compare_jsonb`); the
+/// jsonb_ops opclass `opckeytype` is `text`, a by-ref type.
+fn text_keys_to_datums<'mcx>(
+    mcx: Mcx<'mcx>,
+    keys: Vec<Vec<u8>>,
+) -> PgResult<PgVec<'mcx, Datum<'mcx>>> {
+    let mut elems: PgVec<'mcx, Datum<'mcx>> = PgVec::new_in(mcx);
+    for k in keys {
+        elems.push(Datum::from_byref_bytes_in(mcx, &k)?);
+    }
+    Ok(elems)
+}
+
+/// Wrap a vector of `jsonb_path_ops` GIN key payloads (each the 4 native-endian
+/// bytes of a `uint32` value hash, as `uint32_get_datum` produced) into the
+/// by-value `int4` `Datum`s the `jsonb_path_ops` opclass uses (its `opckeytype`
+/// is `int4`, a pass-by-value type; the keys are ordered / compared with the
+/// default `btint4cmp`).
+fn hash_keys_to_datums<'mcx>(
+    mcx: Mcx<'mcx>,
+    keys: Vec<Vec<u8>>,
+) -> PgResult<PgVec<'mcx, Datum<'mcx>>> {
+    let mut elems: PgVec<'mcx, Datum<'mcx>> = PgVec::new_in(mcx);
+    for k in keys {
+        // C: `UInt32GetDatum(hash)` — a by-value 4-byte word.
+        let h = u32::from_ne_bytes([k[0], k[1], k[2], k[3]]);
+        elems.push(Datum::from_u32(h));
+    }
+    Ok(elems)
 }
 
 /// `gin_extract_query` dispatch (`extractQueryFn`, `FunctionCall7Coll`): route
@@ -288,8 +383,134 @@ fn dispatch_extract_query<'mcx>(
                 search_mode,
             })
         }
+        F_GIN_EXTRACT_JSONB_QUERY => dispatch_jsonb_extract_query(mcx, query, strategy, false),
+        F_GIN_EXTRACT_JSONB_QUERY_PATH => dispatch_jsonb_extract_query(mcx, query, strategy, true),
         other => Err(unported(other, "extractQuery")),
     }
+}
+
+/// Shared `extractQuery` dispatch for the `jsonb_ops` (`path_ops == false`) and
+/// `jsonb_path_ops` (`path_ops == true`) opclasses. Builds the strategy-tagged
+/// [`GinJsonbQuery`] from the (already-detoasted) query `Datum`, calls the
+/// matching value core through the seam, and marshals the returned entries +
+/// `*searchMode` + `(*extra_data)[0]` node back into [`GinExtractQueryResult`].
+fn dispatch_jsonb_extract_query<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: Datum<'mcx>,
+    strategy: u16,
+    path_ops: bool,
+) -> PgResult<GinExtractQueryResult<'mcx>> {
+    use types_jsonb::jsonb_gin::GinJsonbQuery;
+
+    // Call the matching value core through the seam, given a `GinJsonbQuery`.
+    let call = |mcx: Mcx<'mcx>, jq: GinJsonbQuery| -> PgResult<_> {
+        if path_ops {
+            backend_utils_adt_jsonb_gin_seams::gin_extract_jsonb_query_path::call(mcx, jq, strategy)
+        } else {
+            backend_utils_adt_jsonb_gin_seams::gin_extract_jsonb_query::call(mcx, jq, strategy)
+        }
+    };
+
+    // The canonical by-ref image of the query argument.
+    let qbytes = query.as_ref_bytes();
+
+    let ext = match strategy {
+        JSONB_CONTAINS_STRATEGY => {
+            // Query is a jsonb; the core wants the container root after VARHDRSZ.
+            call(mcx, GinJsonbQuery::Contains(&qbytes[VARHDRSZ..]))?
+        }
+        JSONB_EXISTS_STRATEGY => {
+            // Query is a `text` key; the core wants the raw string payload.
+            call(mcx, GinJsonbQuery::Exists(&qbytes[VARHDRSZ..]))?
+        }
+        JSONB_EXISTS_ANY_STRATEGY | JSONB_EXISTS_ALL_STRATEGY => {
+            // Query is a `text[]`; each element's text payload is a candidate key
+            // (SQL NULL elements become `None`, ignored by the core). The element
+            // Datums (by-ref `text`) own the payload bytes; build a borrowing view
+            // and call the core within this scope so the borrows stay valid.
+            let (elems, nulls) = deconstruct_query_or_value(mcx, query)?;
+            let payloads: Vec<Option<&[u8]>> = elems
+                .iter()
+                .zip(nulls.iter())
+                .map(|(d, &isnull)| {
+                    if isnull {
+                        None
+                    } else {
+                        // VARDATA_ANY of the text element (strip the varlena header).
+                        Some(&d.as_ref_bytes()[VARHDRSZ..])
+                    }
+                })
+                .collect();
+            call(mcx, GinJsonbQuery::ExistsArray(&payloads))?
+        }
+        JSONB_JSONPATH_EXISTS_STRATEGY | JSONB_JSONPATH_PREDICATE_STRATEGY => {
+            // Query is the on-disk jsonpath varlena; the core reads its header word
+            // (bytes 4..8), so it wants the WHOLE varlena image.
+            call(mcx, GinJsonbQuery::Jsonpath(qbytes))?
+        }
+        other => {
+            return Err(PgError::error(format!(
+                "unrecognized jsonb GIN strategy number: {other}"
+            )));
+        }
+    };
+
+    marshal_jsonb_query_extraction(mcx, ext, path_ops)
+}
+
+/// Marshal a [`GinQueryExtraction`] (the de-pointered `gin_extract_jsonb_query
+/// [_path]` outputs) into the GIN-core [`GinExtractQueryResult`]. The query keys
+/// are wrapped the same way as the value keys (by-ref `text` for `jsonb_ops`,
+/// by-value `int4` hashes for `jsonb_path_ops`). The jsonpath strategies carry a
+/// single opclass-private root node, which C stashes in `(*extra_data)[0]`; here
+/// it is serialized into the first key's `extra_data` slot (the GIN scan carries
+/// `extra_data[0]` through to the consistent procs). `nullFlags` /
+/// `partial_matches` are empty (the jsonb opclasses set neither).
+fn marshal_jsonb_query_extraction<'mcx>(
+    mcx: Mcx<'mcx>,
+    ext: types_jsonb::jsonb_gin::GinQueryExtraction,
+    path_ops: bool,
+) -> PgResult<GinExtractQueryResult<'mcx>> {
+    let nentries = ext.entries.len();
+
+    let query_values = if path_ops {
+        hash_keys_to_datums(mcx, ext.entries)?
+    } else {
+        text_keys_to_datums(mcx, ext.entries)?
+    };
+
+    // extra_data[]: one slot per query key (C `(*extra_data)` length == nentries).
+    // The jsonpath root node lives only in slot 0; all other slots are NULL. The
+    // node is serialized to bytes for the opaque `Pointer` channel.
+    let mut extra_data: PgVec<'mcx, Option<PgVec<'mcx, u8>>> = PgVec::new_in(mcx);
+    if let Some(node) = ext.node {
+        let blob = node.encode_extra_data();
+        for i in 0..nentries {
+            if i == 0 {
+                let mut slot: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+                for &b in &blob {
+                    slot.push(b);
+                }
+                extra_data.push(Some(slot));
+            } else {
+                extra_data.push(None);
+            }
+        }
+    }
+
+    let search_mode = if ext.search_mode_all {
+        GIN_SEARCH_MODE_ALL
+    } else {
+        GIN_SEARCH_MODE_DEFAULT
+    };
+
+    Ok(GinExtractQueryResult {
+        query_values,
+        null_flags: PgVec::new_in(mcx),
+        partial_matches: PgVec::new_in(mcx),
+        extra_data,
+        search_mode,
+    })
 }
 
 /// `gin_consistent_call_bool` dispatch (`consistentFn`, `FunctionCall8Coll`):
@@ -352,7 +573,60 @@ fn dispatch_consistent_bool(key: &mut GinScanKey) -> bool {
             key.recheckCurItem = recheck;
             res
         }
+        F_GIN_CONSISTENT_JSONB | F_GIN_CONSISTENT_JSONB_PATH => {
+            let path_ops = key.consistent_fmgr_oid == F_GIN_CONSISTENT_JSONB_PATH;
+            let nkeys = key.nuserentries as usize;
+            // check[i] = (entryRes[i] != GIN_FALSE) — the GIN bool check array.
+            let check: Vec<bool> = key.entryRes[..nkeys].iter().map(|&v| v != 0).collect();
+            // extra_data[0] is the serialized jsonpath root node (None for the
+            // containment / existence strategies, which carry no node).
+            let node = decode_jsonb_extra_node(key);
+            let (res, recheck) = match jsonb_consistent_bool(
+                path_ops,
+                &check,
+                key.strategy,
+                nkeys as i32,
+                node.as_ref(),
+            ) {
+                Ok(r) => r,
+                Err(e) => std::panic::panic_any(e),
+            };
+            key.recheckCurItem = recheck;
+            res
+        }
         other => std::panic::panic_any(unported(other, "consistent")),
+    }
+}
+
+/// Decode the `JsonPathGinNode` the jsonb `extractQuery` serialized into
+/// `extra_data[0]` (the jsonpath strategies only). Returns `None` when no node
+/// was stored.
+fn decode_jsonb_extra_node(
+    key: &GinScanKey,
+) -> Option<types_jsonb::jsonb_gin::JsonPathGinNode> {
+    key.extra_data
+        .first()
+        .and_then(|o| o.as_ref())
+        .and_then(|b| types_jsonb::jsonb_gin::JsonPathGinNode::decode_extra_data(b))
+}
+
+/// Route to the boolean `gin_consistent_jsonb` / `gin_consistent_jsonb_path`
+/// value core through the seam.
+fn jsonb_consistent_bool(
+    path_ops: bool,
+    check: &[bool],
+    strategy: u16,
+    nkeys: i32,
+    node: Option<&types_jsonb::jsonb_gin::JsonPathGinNode>,
+) -> PgResult<(bool, bool)> {
+    if path_ops {
+        backend_utils_adt_jsonb_gin_seams::gin_consistent_jsonb_path::call(
+            check, strategy, nkeys, node,
+        )
+    } else {
+        backend_utils_adt_jsonb_gin_seams::gin_consistent_jsonb::call(
+            check, strategy, nkeys, node,
+        )
     }
 }
 
@@ -402,6 +676,32 @@ fn dispatch_consistent_tri(key: &mut GinScanKey) -> GinTernaryValue {
                 Err(e) => std::panic::panic_any(e),
             }
         }
+        F_GIN_TRICONSISTENT_JSONB | F_GIN_TRICONSISTENT_JSONB_PATH => {
+            let path_ops = key.tri_consistent_fmgr_oid == F_GIN_TRICONSISTENT_JSONB_PATH;
+            let nkeys = key.nuserentries as usize;
+            // check carries the ternary GIN values directly.
+            let check: Vec<GinTernaryValue> = key.entryRes[..nkeys].to_vec();
+            let node = decode_jsonb_extra_node(key);
+            let res = if path_ops {
+                backend_utils_adt_jsonb_gin_seams::gin_triconsistent_jsonb_path::call(
+                    &check,
+                    key.strategy,
+                    nkeys as i32,
+                    node.as_ref(),
+                )
+            } else {
+                backend_utils_adt_jsonb_gin_seams::gin_triconsistent_jsonb::call(
+                    &check,
+                    key.strategy,
+                    nkeys as i32,
+                    node.as_ref(),
+                )
+            };
+            match res {
+                Ok(r) => r,
+                Err(e) => std::panic::panic_any(e),
+            }
+        }
         other => std::panic::panic_any(unported(other, "triConsistent")),
     }
 }
@@ -412,8 +712,9 @@ fn dispatch_consistent_tri(key: &mut GinScanKey) -> GinTernaryValue {
 fn unported(foid: u32, role: &str) -> PgError {
     PgError::error(format!(
         "GIN opclass {role} support function (OID {foid}) has no owned dispatch \
-         (only the anyarray_ops procedures are wired through the typed by-OID \
-         GIN dispatch; tsvector_ops / jsonb_ops opclass bodies remain to be ported)"
+         (anyarray_ops, tsvector_ops, and jsonb_ops / jsonb_path_ops procedures \
+         are wired through the typed by-OID GIN dispatch; this OID is not one of \
+         them — a user-defined opclass would need a Datum::Internal fmgr arm)"
     ))
 }
 
