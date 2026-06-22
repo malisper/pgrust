@@ -1108,6 +1108,29 @@ fn ExecMakeTableFunctionResult<'mcx>(
                                         .into_error())
                                 }
                             };
+                            // Cross-check the composite's ACTUAL rowtype against
+                            // the query's expectedDesc before deforming (C's
+                            // `tupledesc_match`, reached when a RECORD/composite
+                            // table function's result row does not match the
+                            // column-definition list — e.g. a SQL function with
+                            // OUT params whose body returns `(1,2)` or
+                            // `(1,2.1,3)`). Without this the deform reads a column
+                            // against the wrong target type (panic / wrong data)
+                            // instead of raising "function return row and
+                            // query-specified return row do not match".
+                            if let Some(header) = formed.tuple.t_data.as_ref() {
+                                let tup_type =
+                                    types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
+                                let tup_typmod =
+                                    types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
+                                if let Ok(actual_desc) =
+                                    backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+                                        per_query, tup_type, tup_typmod,
+                                    )
+                                {
+                                    tupledesc_match(per_query, expected_desc, &actual_desc)?;
+                                }
+                            }
                             let cols = backend_access_common_heaptuple::heap_deform_tuple(
                                 per_query,
                                 &formed.tuple,
