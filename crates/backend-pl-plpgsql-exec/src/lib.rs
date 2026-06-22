@@ -3229,7 +3229,7 @@ fn exec_stmt_assert(
 /// requests against the *live* session GUCs: `ERROR` if `extra_errors` carries
 /// the bit, else `WARNING` if `extra_warnings` carries it, else 0 (disabled).
 /// Mirrors C's `if (plpgsql_extra_errors & BIT) ... else if (plpgsql_extra_warnings & BIT) ...`.
-fn extra_check_level(xcheck_bit: int32) -> i32 {
+pub(crate) fn extra_check_level(xcheck_bit: int32) -> i32 {
     if (exec_seams::plpgsql_extra_errors::call() & xcheck_bit) != 0 {
         types_error::ERROR.0
     } else if (exec_seams::plpgsql_extra_warnings::call() & xcheck_bit) != 0 {
@@ -3243,7 +3243,7 @@ fn extra_check_level(xcheck_bit: int32) -> i32 {
 /// `exec_move_row` "number of source and target fields … does not match"
 /// ereport). A WARNING-level report is emitted in place (and execution
 /// continues); an ERROR-level report is returned to propagate.
-fn emit_strict_multiassignment(level: i32) -> types_error::PgResult<()> {
+pub(crate) fn emit_strict_multiassignment(level: i32) -> types_error::PgResult<()> {
     let active = if level == types_error::ERROR.0 {
         "extra_errors"
     } else {

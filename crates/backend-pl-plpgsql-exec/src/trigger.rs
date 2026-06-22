@@ -362,20 +362,67 @@ pub fn exec_move_row_into_record_impl(
             er::make_expanded_record_from_tupdesc(mcx, td_ref)?
         };
 
-        // Set the field values (a by-reference column becomes a ByRef Datum from
-        // its verbatim image; the bare word is a by-value scalar).
-        let mut values: Vec<RichDatum<'static>> = Vec::with_capacity(columns.len());
-        let mut nulls: Vec<bool> = Vec::with_capacity(columns.len());
-        for c in columns {
-            nulls.push(c.isnull);
-            if c.isnull {
+        // Map the source result columns onto the record's tuple descriptor by
+        // position (C's exec_move_row_from_fields): one source column per
+        // non-dropped target attribute, in order, padding with NULL when the
+        // source is exhausted and ignoring surplus source columns. The
+        // `strict_multi_assignment` extra-check fires (WARNING/ERROR) whenever the
+        // non-dropped target field count differs from the source column count —
+        // a `SELECT 1,2,3 INTO t` (t has 2 live columns) or `SELECT 1 INTO t`.
+        // The RECORDOID ad-hoc tupdesc was built from the columns themselves, so
+        // its natts == columns.len() and no padding/check ever triggers there.
+        let target_natts = erh
+            .er_tupdesc
+            .as_ref()
+            .map(|td| td.natts as usize)
+            .unwrap_or(columns.len());
+        let strict_multiassignment_level =
+            crate::extra_check_level(types_plpgsql::PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT);
+
+        let mut values: Vec<RichDatum<'static>> = Vec::with_capacity(target_natts);
+        let mut nulls: Vec<bool> = Vec::with_capacity(target_natts);
+        let mut anum = 0usize;
+        for fnum in 0..target_natts {
+            let dropped = erh
+                .er_tupdesc
+                .as_ref()
+                .map(|td| td.attr(fnum).attisdropped)
+                .unwrap_or(false);
+            if dropped {
+                // A dropped target column consumes no source value; it is set
+                // NULL (C: value = (Datum) 0, isnull = true) and excluded from the
+                // source/target count comparison.
                 values.push(RichDatum::null());
-            } else if let Some(image) = &c.byref {
-                let slice = mcx::slice_in(mcx, image)?;
-                values.push(RichDatum::ByRef(slice));
-            } else {
-                values.push(RichDatum::from_usize(c.value));
+                nulls.push(true);
+                continue;
             }
+            match columns.get(anum) {
+                Some(c) => {
+                    anum += 1;
+                    nulls.push(c.isnull);
+                    if c.isnull {
+                        values.push(RichDatum::null());
+                    } else if let Some(image) = &c.byref {
+                        let slice = mcx::slice_in(mcx, image)?;
+                        values.push(RichDatum::ByRef(slice));
+                    } else {
+                        values.push(RichDatum::from_usize(c.value));
+                    }
+                }
+                None => {
+                    // No source for this target field: NULL, and fire the strict
+                    // check (more target fields than source columns).
+                    if strict_multiassignment_level != 0 {
+                        crate::emit_strict_multiassignment(strict_multiassignment_level)?;
+                    }
+                    values.push(RichDatum::null());
+                    nulls.push(true);
+                }
+            }
+        }
+        // More source columns than (non-dropped) target fields — fire the check.
+        if strict_multiassignment_level != 0 && anum < columns.len() {
+            crate::emit_strict_multiassignment(strict_multiassignment_level)?;
         }
         er::expanded_record_set_fields(mcx, &mut erh, &values, &nulls, true)?;
         erh
