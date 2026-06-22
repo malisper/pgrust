@@ -508,7 +508,7 @@ fn conv_createfunctionstmt<'mcx>(
         parameters: node_list(mcx, s.parameters)?,
         returnType: child_node_opt(mcx, s.returnType)?,
         options: node_list(mcx, s.options)?,
-        sql_body: node_opt(mcx, s.sql_body)?,
+        sql_body: sql_body_opt(mcx, s.sql_body)?,
     })
 }
 

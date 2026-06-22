@@ -195,6 +195,41 @@ fn define_args_list<'mcx>(
     Ok(out)
 }
 
+/// `CreateFunctionStmt.sql_body` (`*mut Node`) → `Option<NodePtr>`, preserving the
+/// grammar's `BEGIN ATOMIC` compound-statement convention. The `routine_body`
+/// production stores a compound statement as `(Node *) list_make1($3)` — a
+/// single-item `List` whose member is itself the `List` of body statements — so
+/// that parse analysis can tell an empty body (`BEGIN ATOMIC END`,
+/// `list_make1(NIL)`) apart from no body at all (NULL). For an empty body the
+/// inner `List` is `NIL` (a NULL list cell), which the strict [`node_list`] used
+/// by [`arm_t_list`] would reject as a corrupt tree. Here we convert the outer
+/// `List` ourselves, encoding the NULL inner cell as an empty `Node::List` —
+/// exactly what `interpret_sql_body` reads back as `linitial_node(List, ...)`
+/// yielding `NIL` (zero body statements). A non-`List` `sql_body` (the `RETURN`
+/// form, a single `ReturnStmt`) is passed through unchanged via [`node_opt`].
+fn sql_body_opt<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Option<NodePtr<'mcx>>> {
+    if n.is_null() {
+        return Ok(None);
+    }
+    // Only the BEGIN ATOMIC form is a List; the RETURN form is a bare statement.
+    let tag = unsafe { (*n).type_ };
+    if tag != tags::T_List {
+        return node_opt(mcx, n);
+    }
+    let list: &RawList = unsafe { &*n.cast::<RawList>() };
+    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    for cell in list.cells() {
+        let np: *mut RawNode = cell.ptr();
+        match node_opt(mcx, np)? {
+            Some(p) => out.push(p),
+            // NULL inner cell == empty BEGIN ATOMIC body (`list_make1(NIL)`):
+            // encode as an empty `Node::List`.
+            None => out.push(mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx))?)?),
+        }
+    }
+    Ok(Some(mcx::alloc_in(mcx, Node::mk_list(mcx, out)?)?))
+}
+
 /// `*mut List` of `Oid` (int cells) → `PgVec<Oid>`.
 fn oid_list<'mcx>(mcx: Mcx<'mcx>, l: *mut RawList) -> PgResult<PgVec<'mcx, u32>> {
     if l.is_null() {
