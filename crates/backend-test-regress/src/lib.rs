@@ -1397,22 +1397,172 @@ fn fc_wait_pid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
  * HeapTupleHeader *without* flattening the indirect pointers (so the
  * indirect-toast machinery can be exercised downstream).
  *
- * UNPORTED — genuinely blocked, not a stub: building a `VARATT_INDIRECT`
- * datum requires the indirect-TOAST-pointer substrate (`varatt_indirect` /
- * `SET_VARTAG_EXTERNAL(VARTAG_INDIRECT)` / `INDIRECT_POINTER_SIZE`) plus a
- * `TopTransactionContext`-lived datum copy and the deliberate non-flattening
- * return convention.  None of `INDIRECT_POINTER_SIZE`, the indirect-pointer
- * builder, or a by-Oid `TopTransactionContext` handle are ported (confirmed by
- * substrate audit).  The symbol still *resolves* (so `CREATE FUNCTION
- * make_tuple_indirect(record)` validates as in real PG); calling it raises a
- * precise feature error until the indirect-TOAST substrate lands.
+ * Port note — the indirect-TOAST-pointer substrate exists in this codebase but
+ * is keyed differently from C.  C's `varatt_indirect.pointer` is a raw
+ * `struct varlena *` into `TopTransactionContext`, embedded in the returned
+ * tuple's bytes and followed verbatim by the detoast `indirect_pointer`
+ * dereference.  Here a composite Datum crosses the fmgr boundary as a
+ * *serialized byte image* (`RefPayload::Composite`), so an embedded process
+ * address would not survive the copy.  Instead the target bytes are stashed in
+ * the per-backend `INDIRECT_TARGETS` registry (the `TopTransactionContext`
+ * stand-in — see `backend-access-common-toast-internals-seams`) and a stable
+ * `u64` *token* is embedded in the `varatt_indirect` payload slot; the
+ * `indirect_pointer` seam (installed by `backend-access-common-toast-internals`)
+ * resolves the token back to those bytes.  Everything else mirrors regress.c
+ * line-for-line: deform the record, rewrite each not-null toastable varlena
+ * into a `VARTAG_INDIRECT` external datum (fully detoasting an on-disk-external
+ * value first, so the target "still lives later"), re-form, and return the
+ * `HeapTupleHeader` image *without* flattening the indirect pointers.
  * ========================================================================= */
 
-fn fc_make_tuple_indirect(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    raise(PgError::error(
-        "make_tuple_indirect is not supported: indirect-TOAST pointer substrate \
-         (VARATT_INDIRECT / INDIRECT_POINTER_SIZE / TopTransactionContext) is not yet ported",
-    ));
+/// `VARTAG_INDIRECT` (varatt.h).
+const VARTAG_INDIRECT: u8 = 1;
+/// `VARHDRSZ_EXTERNAL` (varatt.h): 1-byte length tag (`0x01`) + 1-byte vartag.
+const VARHDRSZ_EXTERNAL: usize = 2;
+/// `TYPSTORAGE_PLAIN` (pg_type.h): the `attstorage` value for a non-toastable
+/// fixed-storage column.
+const TYPSTORAGE_PLAIN: i8 = b'p' as i8;
+
+/// `VARATT_IS_1B_E(PTR)` / `VARATT_IS_EXTERNAL(PTR)` (varatt.h, little-endian):
+/// a `0x01` length byte marks an external (TOAST-pointer) varlena.
+#[inline]
+fn varatt_is_external(b: &[u8]) -> bool {
+    !b.is_empty() && b[0] == 0x01
+}
+
+/// `VARATT_IS_EXTERNAL_INDIRECT(PTR)`: external form, `va_tag == VARTAG_INDIRECT`.
+#[inline]
+fn varatt_is_external_indirect(b: &[u8]) -> bool {
+    varatt_is_external(b) && b.len() >= 2 && b[1] == VARTAG_INDIRECT
+}
+
+/// `VARATT_IS_EXTERNAL_ONDISK(PTR)`: external form, `va_tag == VARTAG_ONDISK` (18).
+#[inline]
+fn varatt_is_external_ondisk(b: &[u8]) -> bool {
+    varatt_is_external(b) && b.len() >= 2 && b[1] == 18
+}
+
+fn fc_make_tuple_indirect(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match make_tuple_indirect_impl(fcinfo) {
+        Ok(d) => d,
+        Err(err) => raise(err),
+    }
+}
+
+fn make_tuple_indirect_impl(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> Result<Datum, PgError> {
+    use backend_access_common_heaptuple::{heap_deform_tuple, heap_form_tuple, Datum as HtDatum};
+
+    // HeapTupleHeader rec = PG_GETARG_HEAPTUPLEHEADER(0);
+    //
+    // The composite record arrives either on the dedicated `Composite` lane (a
+    // SQL-level `make_tuple_indirect(tab)` call) or on the generic `Varlena`
+    // lane (a plpgsql `NEW := make_tuple_indirect(NEW)` trigger assignment,
+    // which lowers the RECORD variable to its flat HeapTupleHeader varlena
+    // image) — both are the same physical block C's `DatumGetHeapTupleHeader`
+    // reads, so accept either via `as_any_varlena`.
+    let image = match fcinfo.ref_arg(0).and_then(|p| p.as_byref_image()) {
+        Some(b) => b.to_vec(),
+        None => {
+            return Err(PgError::error(
+                "make_tuple_indirect: composite arg missing from by-ref lane",
+            ))
+        }
+    };
+
+    let m = MemoryContext::new("make_tuple_indirect");
+    let mcx = m.mcx();
+
+    // Build the temporary HeapTuple control structure from the Datum image.
+    let formed = types_tuple::FormedTuple::from_datum_image(mcx, &image)?;
+    let header = formed.tuple.t_data.as_ref().ok_or_else(|| {
+        PgError::error("make_tuple_indirect: record has no header")
+    })?;
+
+    // tupType = HeapTupleHeaderGetTypeId(rec); tupTypmod = HeapTupleHeaderGetTypMod(rec);
+    let tup_type = types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
+    let tup_typmod = types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
+
+    // tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod); ncolumns = tupdesc->natts;
+    let tupdesc = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+        mcx, tup_type, tup_typmod,
+    )?;
+    let ncolumns = tupdesc.natts as usize;
+
+    // heap_deform_tuple(&tuple, tupdesc, values, nulls);
+    let cols = heap_deform_tuple(mcx, &formed.tuple, &tupdesc, &formed.data)?;
+    let mut values: Vec<HtDatum> = Vec::with_capacity(ncolumns);
+    let mut nulls: Vec<bool> = Vec::with_capacity(ncolumns);
+    for (val, isnull) in cols.iter() {
+        values.push(val.clone_in(mcx)?);
+        nulls.push(*isnull);
+    }
+    while values.len() < ncolumns {
+        values.push(HtDatum::null());
+        nulls.push(true);
+    }
+
+    // for (i = 0; i < ncolumns; i++) — rewrite each toastable varlena to indirect.
+    for i in 0..ncolumns {
+        let atti = &tupdesc.attrs[i];
+
+        // only work on existing, not-null varlenas
+        if atti.attisdropped
+            || nulls[i]
+            || atti.attlen != -1
+            || atti.attstorage == TYPSTORAGE_PLAIN
+        {
+            continue;
+        }
+
+        // attr = (struct varlena *) DatumGetPointer(values[i]);
+        let attr = values[i].as_ref_bytes().to_vec();
+
+        // don't recursively indirect
+        if varatt_is_external_indirect(&attr) {
+            continue;
+        }
+
+        // copy datum, so it still lives later
+        let target: Vec<u8> = if varatt_is_external_ondisk(&attr) {
+            // attr = detoast_external_attr(attr);
+            backend_access_common_detoast::detoast_external_attr(mcx, &attr)?.to_vec()
+        } else {
+            // palloc0(VARSIZE_ANY(oldattr)); memcpy(attr, oldattr, VARSIZE_ANY(oldattr));
+            let sz = backend_access_common_heaptuple::varsize_any(&attr);
+            attr[..sz.min(attr.len())].to_vec()
+        };
+
+        // build indirection Datum:
+        //   new_attr = palloc0(INDIRECT_POINTER_SIZE);
+        //   redirect_pointer.pointer = attr;
+        //   SET_VARTAG_EXTERNAL(new_attr, VARTAG_INDIRECT);
+        //   memcpy(VARDATA_EXTERNAL(new_attr), &redirect_pointer, sizeof(redirect_pointer));
+        //
+        // The `varatt_indirect.pointer` raw address becomes a stable registry
+        // token (the `TopTransactionContext`-lived copy stand-in).
+        let token = backend_access_common_toast_internals_seams::register_indirect_target(&target);
+        let mut new_attr = Vec::with_capacity(VARHDRSZ_EXTERNAL + 8);
+        new_attr.push(0x01u8); // SET_VARTAG_EXTERNAL length byte
+        new_attr.push(VARTAG_INDIRECT); // va_tag
+        new_attr.extend_from_slice(&token.to_ne_bytes()); // varatt_indirect payload
+
+        // values[i] = PointerGetDatum(new_attr);
+        values[i] = HtDatum::from_byref_bytes_in(mcx, &new_attr)?;
+    }
+
+    // newtup = heap_form_tuple(tupdesc, values, nulls);
+    let newtup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)
+        .map_err(|e| PgError::error(format!("make_tuple_indirect: heap_form_tuple: {e:?}")))?;
+
+    // We intentionally return the HeapTupleHeader image as-is (no flattening),
+    // so the indirect toast pointers survive in the returned composite for the
+    // downstream indirect-toast machinery to exercise.
+    let out_image = newtup.to_datum_image();
+    fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Composite(out_image));
+    fcinfo.isnull = false;
+    Ok(Datum::from_usize(0))
 }
 
 /* ===========================================================================

@@ -36,3 +36,7 @@ backend-commands-trigger = { path = "../backend-commands-trigger" }
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 libc = "0.2"
 port-pgsleep = { path = "../port-pgsleep" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-detoast = { path = "../backend-access-common-detoast" }
+backend-access-common-toast-internals-seams = { path = "../backend-access-common-toast-internals-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }

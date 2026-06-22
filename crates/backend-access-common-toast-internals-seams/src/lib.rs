@@ -231,3 +231,52 @@ impl Drop for ToastIndexesGuard<'_> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Indirect-TOAST-pointer target registry (varatt_indirect.pointer stand-in)
+// ---------------------------------------------------------------------------
+//
+// C's `VARTAG_INDIRECT` external datum carries a raw in-memory `struct varlena
+// *` (`varatt_indirect.pointer`) at the referent target, which lives in
+// `TopTransactionContext`; the producer (`make_tuple_indirect`) builds it and
+// the detoast `indirect_pointer` dereference follows the bare pointer. In this
+// port a composite Datum crosses the fmgr boundary as a *serialized byte image*
+// (`RefPayload::Composite`), so a raw process address embedded in those bytes
+// is meaningless once the image is copied/reconstructed.
+//
+// This registry is the faithful stand-in: the producer stores the target
+// varlena's verbatim bytes here and embeds a stable `u64` *token* (not an
+// address) into the indirect datum's `varatt_indirect`-payload slot; the
+// `indirect_pointer` dereference resolves the token back to those bytes. The
+// registry is `thread_local` because, exactly like `TopTransactionContext`, it
+// is per-backend; entries live for the backend's lifetime (a regression-test
+// fixture produces a bounded handful), matching the "still lives later" intent
+// of the C copy into `TopTransactionContext`.
+
+use core::cell::RefCell;
+
+thread_local! {
+    /// Token -> target varlena bytes. The token is the 1-based vector index.
+    static INDIRECT_TARGETS: RefCell<std::vec::Vec<std::vec::Vec<u8>>> =
+        const { RefCell::new(std::vec::Vec::new()) };
+}
+
+/// Store a target varlena image and return its stable token (`>= 1`, so `0`
+/// stays an obvious "unset" sentinel). C: copy the datum into
+/// `TopTransactionContext` and stash its address in `varatt_indirect.pointer`.
+pub fn register_indirect_target(bytes: &[u8]) -> u64 {
+    INDIRECT_TARGETS.with(|t| {
+        let mut t = t.borrow_mut();
+        t.push(bytes.to_vec());
+        t.len() as u64 // 1-based token
+    })
+}
+
+/// Resolve an indirect-pointer token back to its target varlena bytes. C:
+/// follow `varatt_indirect.pointer`. Returns `None` for an unknown token.
+pub fn resolve_indirect_target(token: u64) -> Option<std::vec::Vec<u8>> {
+    if token == 0 {
+        return None;
+    }
+    INDIRECT_TARGETS.with(|t| t.borrow().get((token - 1) as usize).cloned())
+}

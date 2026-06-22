@@ -815,6 +815,34 @@ pub use backend_access_common_toast_internals_seams::ToastIndexesGuard;
 /// The detoast-fetch seams (`toast_fetch_datum` / `toast_fetch_datum_slice` /
 /// `indirect_pointer`) and `toast_delete_external` stay panic-stubbed pending
 /// their keystones.
+/// `VARATT_EXTERNAL_GET_POINTER(redirect, attr); redirect.pointer`
+/// (access/common/detoast.c) — dereference a `VARATT_IS_EXTERNAL_INDIRECT`
+/// datum to the in-memory varlena it points at.
+///
+/// In C the indirect datum's payload is a raw `struct varlena *`
+/// (`varatt_indirect.pointer`) into `TopTransactionContext`; this port can't
+/// embed a live address in the serialized composite image, so the producer
+/// (`make_tuple_indirect`) stashes the target bytes in the per-backend
+/// `INDIRECT_TARGETS` registry and embeds a stable `u64` token in the
+/// payload slot instead. Here we read that token back and resolve it to the
+/// registered target bytes, copied into `mcx` (C's verbatim follow of the
+/// pointer). The token is stored native-endian, matching how C `memcpy`s the
+/// 8-byte pointer word into the payload.
+fn indirect_pointer<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let payload = attr
+        .get(VARHDRSZ_EXTERNAL..VARHDRSZ_EXTERNAL + 8)
+        .ok_or_else(|| PgError::error("truncated indirect TOAST pointer"))?;
+    let token = u64::from_ne_bytes([
+        payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+        payload[7],
+    ]);
+    let bytes = backend_access_common_toast_internals_seams::resolve_indirect_target(token)
+        .ok_or_else(|| {
+            PgError::error("indirect TOAST pointer references an unregistered target")
+        })?;
+    mcx::slice_in(mcx, &bytes)
+}
+
 pub fn init_seams() {
     use backend_access_common_toast_internals_seams as ti;
     ti::toast_open_indexes::set(toast_open_indexes);
@@ -823,6 +851,7 @@ pub fn init_seams() {
     ti::toast_save_datum::set(toast_save_datum);
     ti::toast_delete_datum::set(toast_delete_datum);
     ti::toast_fetch_datum::set(toast_fetch_datum);
+    ti::indirect_pointer::set(indirect_pointer);
     ti::get_toast_snapshot::set(get_toast_snapshot);
     backend_access_common_toastdesc_seams::toast_get_valid_index::set(toast_get_valid_index);
 }

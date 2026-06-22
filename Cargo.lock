@@ -18913,6 +18913,9 @@ dependencies = [
 name = "backend-test-regress"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast",
+ "backend-access-common-heaptuple",
+ "backend-access-common-toast-internals-seams",
  "backend-access-transam-parallel-rt-seams",
  "backend-catalog-catalog",
  "backend-commands-trigger",
@@ -18921,6 +18924,7 @@ dependencies = [
  "backend-parser-coerce-seams",
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-geo-ops",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-error-elog-seams",
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-fmgr-funcapi-seams",
