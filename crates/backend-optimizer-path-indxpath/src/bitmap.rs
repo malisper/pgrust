@@ -466,12 +466,14 @@ pub fn make_bitmap_paths_for_or_group<'mcx>(
         return Ok(jointlist);
     }
 
-    // Also try matching all containing clauses one-by-one. Each arm node is
-    // wrapped in a fresh RestrictInfo so build_paths_for_OR can match it.
+    // Also try matching all containing clauses one-by-one. C does
+    // `orargs = list_make1(lfirst(lc))`, where each arm is already a
+    // `RestrictInfo*`; mirror that by resolving the arm's existing RestrictInfo
+    // handle (only wrapping a bare clause node in a fresh simple RestrictInfo
+    // when the arm is not already a RestrictInfo).
     let mut split_ok = true;
     for arg in &args {
-        let arg_id = root.alloc_node(arg.clone());
-        let arg_ri = restrictinfo::make_simple_restrictinfo::call(mcx, root, arg_id);
+        let arg_ri = orarg_to_rinfo(mcx, root, arg)?;
         let orargs = [arg_ri];
         let indlist = build_paths_for_OR(mcx, root, run, rel, &orargs, other_clauses)?;
         if indlist.is_empty() {
