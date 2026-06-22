@@ -1175,8 +1175,20 @@ fn run_body<'mcx>(
 
         // prepare_next_query: analyze (raw body only) + check_sql_fn_statement +
         // (last only) check_sql_stmt_retval + AcquireRewriteLocks + rewrite.
-        let rewritten =
+        // For the last statement, check_sql_fn_retval also reports the authoritative
+        // `returnsTuple` (C's `func->returnsTuple = check_sql_stmt_retval(...)`).
+        let (rewritten, stmt_returns_tuple) =
             prepare_body_statement(mcx, body, retval_check, qi, is_last, fname)?;
+
+        // The result query's receiver is whole-row (composite) only if the
+        // authoritative check_sql_fn_retval said so. When it took a single
+        // composite column AS the result (returns_tuple=false), use the scalar
+        // receiver instead so the column is returned directly, not re-wrapped
+        // (bug #5777). Non-result statements keep the up-front choice (unused).
+        let effective_return_rowtype = match stmt_returns_tuple {
+            Some(false) => None,
+            Some(true) | None => return_rowtype,
+        };
 
         // The rewrite of one body statement may yield several queries (rules);
         // the last canSetTag one delivers the result when this is the last body
@@ -1210,7 +1222,7 @@ fn run_body<'mcx>(
                 source_text,
                 params.clone(),
                 is_result,
-                return_rowtype,
+                effective_return_rowtype,
             )
             .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
             if is_result {
@@ -1236,7 +1248,7 @@ fn prepare_body_statement<'mcx>(
     qi: usize,
     is_last: bool,
     fname: &str,
-) -> PgResult<mcx::PgVec<'mcx, Query<'mcx>>> {
+) -> PgResult<(mcx::PgVec<'mcx, Query<'mcx>>, Option<bool>)> {
     // Obtain the analyzed Query for body statement `qi`.
     let mut analyzed: Query<'mcx> = match body {
         BodyQueries::Analyzed(queries) => queries[qi].clone_in(mcx)?,
@@ -1263,17 +1275,29 @@ fn prepare_body_statement<'mcx>(
     // prepare_next_query(islast); deferring it here (rather than up front) means
     // a body whose final statement depends on earlier DDL is validated against
     // the schema that exists once those statements have run.
+    let mut returns_tuple: Option<bool> = None;
     if is_last {
         let mut one = [analyzed];
-        backend_parser_analyze::check_sql_fn_retval(
-            mcx,
-            &mut one[..],
-            retval_check.rettype,
-            retval_check.rettupdesc.as_deref(),
-            retval_check.prokind,
-            false,
-        )
-        .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
+        // C: `func->returnsTuple = check_sql_stmt_retval(...)`. The return value
+        // is whether the WHOLE tuple is the result. When the body's final
+        // statement has a single column that itself coerces to the
+        // (composite/RECORD) declared return type, check_sql_fn_retval takes that
+        // column AS the result and reports is_tuple_result=false — the function
+        // then acts as a scalar returning that one (rowtype-valued) column and
+        // must NOT re-wrap it in another composite (bug #5777:
+        // `(out int, out numeric) AS $$ select (1,2.1) $$`). We thread this back
+        // to the runner so it picks the scalar (not composite) result receiver.
+        returns_tuple = Some(
+            backend_parser_analyze::check_sql_fn_retval(
+                mcx,
+                &mut one[..],
+                retval_check.rettype,
+                retval_check.rettupdesc.as_deref(),
+                retval_check.prokind,
+                false,
+            )
+            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?,
+        );
         let [coerced] = one;
         analyzed = coerced;
     }
@@ -1285,8 +1309,9 @@ fn prepare_body_statement<'mcx>(
     let locked =
         rewrite_seams::acquire_rewrite_locks::call(mcx, analyzed, true, false)
             .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
-    rewrite_seams::query_rewrite_canonical::call(mcx, locked)
-        .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))
+    let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)
+        .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
+    Ok((rewritten, returns_tuple))
 }
 
 /// Format the `sql_exec_error_callback` context line (functions.c:1949): the
@@ -1493,8 +1518,10 @@ fn run_body_setof<'mcx>(
     for qi in 0..num {
         let is_last = qi + 1 == num;
 
-        // prepare_next_query for this body statement (see run_body).
-        let rewritten =
+        // prepare_next_query for this body statement (see run_body). The SETOF
+        // path delivers whole rows through the materialize sink, so the scalar
+        // returnsTuple flag is irrelevant here.
+        let (rewritten, _returns_tuple) =
             prepare_body_statement(mcx, body, retval_check, qi, is_last, fname)?;
 
         let last_setstag = rewritten.iter().rposition(|rq| rq.canSetTag);
