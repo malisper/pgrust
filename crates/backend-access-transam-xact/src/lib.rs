@@ -587,9 +587,33 @@ fn assign_transaction_id_at(idx: usize) -> PgResult<()> {
         predicate_seams::register_predicate_locking_xid::call(full.xid())?;
     }
 
-    // Acquire lock on the transaction XID. (C swaps CurrentResourceOwner to
-    // the xact's own owner around this; owners dissolve here.)
-    lmgr_seams::xact_lock_table_insert::call(full.xid())?;
+    // Acquire lock on the transaction XID. (We assume this cannot block.) We
+    // have to ensure that the lock is assigned to the transaction's own
+    // ResourceOwner.
+    //
+    //   currentOwner = CurrentResourceOwner;
+    //   CurrentResourceOwner = s->curTransactionOwner;
+    //   XactLockTableInsert(xid);
+    //   CurrentResourceOwner = currentOwner;
+    //
+    // Without this swap the XID lock would be attached to whatever
+    // CurrentResourceOwner happens to be (e.g. a portal/snapshot owner) rather
+    // than transaction `idx`'s own `curTransactionOwner`. That mis-ownership
+    // lets the lock be released/reassigned by the wrong owner on (sub)abort,
+    // and then double-released by the subxact's own `XactLockTableDelete` at
+    // commit — surfacing as a spurious "you don't own a lock of type
+    // ExclusiveLock" WARNING.
+    //
+    // When a deep subxact recursively assigns XIDs to still-XID-less ancestors
+    // (above), each ancestor's lock must go to *that* ancestor's owner, not the
+    // deepest subxact's. The owner tree mirrors the transaction stack, so
+    // transaction `idx`'s owner is the `(deepest_idx - idx)`-th parent of the
+    // live `CurTransactionResourceOwner`.
+    let levels_up = xs(|s| (s.transaction_stack.len() - 1 - idx) as u32);
+    let saved_owner = backend_utils_resowner_resowner_seams::set_current_to_cur_transaction_ancestor::call(levels_up);
+    let insert_result = lmgr_seams::xact_lock_table_insert::call(full.xid());
+    backend_utils_resowner_resowner_seams::set_CurrentResourceOwner::call(saved_owner);
+    insert_result?;
 
     // Every PGPROC_MAX_CACHED_SUBXIDS assigned xids within a top-level
     // transaction, issue a WAL record for the assignment (hot-standby

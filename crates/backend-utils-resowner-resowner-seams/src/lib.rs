@@ -166,6 +166,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CurrentResourceOwner = s->curTransactionOwner` for an *ancestor*
+    /// transaction `s` that is `levels_up` nesting levels above the live
+    /// `CurTransactionResourceOwner` (the deepest subtransaction). Returns the
+    /// previous `CurrentResourceOwner` so the caller can restore it.
+    ///
+    /// `AssignTransactionId` (xact.c) must attach each (sub)transaction's XID
+    /// lock to *that* transaction's own resource owner. When a deep
+    /// subtransaction first needs an XID, C walks up and recursively assigns
+    /// XIDs to every still-XID-less ancestor, each under that ancestor's own
+    /// `s->curTransactionOwner`. Since this port stores only the global
+    /// `CurTransactionResourceOwner` (the owner tree mirrors the transaction
+    /// stack), the ancestor owner is the `levels_up`-th parent of the live
+    /// `CurTransactionResourceOwner`. `levels_up == 0` is the deepest owner.
+    pub fn set_current_to_cur_transaction_ancestor(levels_up: u32) -> ResourceOwnerHandle
+);
+
+seam_core::seam!(
     /// `CurrentResourceOwner = s->parent->curTransactionOwner;
     /// CurTransactionResourceOwner = s->parent->curTransactionOwner;
     /// ResourceOwnerDelete(s->curTransactionOwner); s->curTransactionOwner = NULL`

@@ -247,6 +247,35 @@ pub fn install() {
         SetCurrentResourceOwner(crate::CurTransactionResourceOwner());
     });
 
+    // `CurrentResourceOwner = s->curTransactionOwner` for the `levels_up`-th
+    // ancestor of the live CurTransactionResourceOwner (the owner tree mirrors
+    // the transaction stack). Returns the previous CurrentResourceOwner.
+    rr::set_current_to_cur_transaction_ancestor::set(|levels_up| {
+        let prev = flat(CurrentResourceOwner());
+        // If there is no cur-transaction owner, leave CurrentResourceOwner
+        // untouched: downstream pin/lock paths require it to be non-NULL, and a
+        // missing transaction owner means there is nothing C would have swapped
+        // to either.
+        if let Some(base) = crate::CurTransactionResourceOwner() {
+            let mut owner = base;
+            for _ in 0..levels_up {
+                match ResourceOwnerGetParent(owner) {
+                    // Walking up should land on a valid ancestor (the owner tree
+                    // mirrors the transaction stack). If it would overshoot the
+                    // top owner, keep the deepest cur-transaction owner rather
+                    // than installing a NULL CurrentResourceOwner.
+                    Some(p) => owner = p,
+                    None => {
+                        owner = base;
+                        break;
+                    }
+                }
+            }
+            SetCurrentResourceOwner(Some(owner));
+        }
+        prev
+    });
+
     // `CurrentResourceOwner = CurTransactionResourceOwner = s->parent->
     // curTransactionOwner; ResourceOwnerDelete(s->curTransactionOwner)` — restore
     // the parent owner and free the subxact owner. The parent is the subxact
