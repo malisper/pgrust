@@ -4532,15 +4532,88 @@ fn get_name_for_var_field<'mcx>(
     };
 
     // Try to find the relevant RTE in this rtable. In a plan tree it's likely
-    // OUTER_VAR/INNER_VAR/INDEX_VAR — those need #159.
+    // OUTER_VAR or INNER_VAR, in which case we must dig down into the subplans,
+    // or INDEX_VAR, which is resolved similarly (#159 plan-tree).
     let in_range = {
         let dpns = &context.namespaces[dpns_idx];
         varno >= 1 && varno <= dpns.rtable.len() as i32
     };
     if !in_range {
-        return Err(deferred(
-            "get_name_for_var_field special varno (OUTER_VAR/INNER_VAR/INDEX_VAR; #159 plan-tree)",
-        ));
+        // OUTER_VAR: dig into the outer subplan's targetlist (ruleutils.c 8116).
+        if varno == OUTER_VAR && !context.namespaces[dpns_idx].outer_tlist.is_empty() {
+            let tle_expr = {
+                let dpns = &context.namespaces[dpns_idx];
+                get_tle_expr_by_resno(mcx, &dpns.outer_tlist, varattno)?
+            };
+            let tle_expr = tle_expr.ok_or_else(|| {
+                elog_error(format!("bogus varattno for OUTER_VAR var: {varattno}"))
+            })?;
+            let outer_plan = context.namespaces[dpns_idx]
+                .outer_plan
+                .as_ref()
+                .map(|p| (**p).clone_in(mcx))
+                .transpose()?;
+            let save = {
+                let dpns = &mut context.namespaces[dpns_idx];
+                match outer_plan {
+                    Some(op) => Some(crate::push_child_plan(mcx, dpns, &op)?),
+                    None => None,
+                }
+            };
+            let tle_expr_expr = tle_expr.as_expr().ok_or_else(|| {
+                elog_error("OUTER_VAR tlist entry is not an expression".to_string())
+            })?;
+            let result = get_name_for_var_field(&tle_expr_expr, fieldno, levelsup, context);
+            if let Some(save) = save {
+                crate::pop_child_plan(&mut context.namespaces[dpns_idx], save);
+            }
+            return result;
+        }
+        // INNER_VAR: dig into the inner subplan's targetlist (ruleutils.c 8135).
+        if varno == INNER_VAR && !context.namespaces[dpns_idx].inner_tlist.is_empty() {
+            let tle_expr = {
+                let dpns = &context.namespaces[dpns_idx];
+                get_tle_expr_by_resno(mcx, &dpns.inner_tlist, varattno)?
+            };
+            let tle_expr = tle_expr.ok_or_else(|| {
+                elog_error(format!("bogus varattno for INNER_VAR var: {varattno}"))
+            })?;
+            let inner_plan = context.namespaces[dpns_idx]
+                .inner_plan
+                .as_ref()
+                .map(|p| (**p).clone_in(mcx))
+                .transpose()?;
+            let save = {
+                let dpns = &mut context.namespaces[dpns_idx];
+                match inner_plan {
+                    Some(ip) => Some(crate::push_child_plan(mcx, dpns, &ip)?),
+                    None => None,
+                }
+            };
+            let tle_expr_expr = tle_expr.as_expr().ok_or_else(|| {
+                elog_error("INNER_VAR tlist entry is not an expression".to_string())
+            })?;
+            let result = get_name_for_var_field(&tle_expr_expr, fieldno, levelsup, context);
+            if let Some(save) = save {
+                crate::pop_child_plan(&mut context.namespaces[dpns_idx], save);
+            }
+            return result;
+        }
+        // INDEX_VAR: resolve against index_tlist (no child-plan push) (8154).
+        if varno == INDEX_VAR && !context.namespaces[dpns_idx].index_tlist.is_empty() {
+            let tle_expr = {
+                let dpns = &context.namespaces[dpns_idx];
+                get_tle_expr_by_resno(mcx, &dpns.index_tlist, varattno)?
+            };
+            let tle_expr = tle_expr.ok_or_else(|| {
+                elog_error(format!("bogus varattno for INDEX_VAR var: {varattno}"))
+            })?;
+            let tle_expr_expr = tle_expr.as_expr().ok_or_else(|| {
+                elog_error("INDEX_VAR tlist entry is not an expression".to_string())
+            })?;
+            return get_name_for_var_field(&tle_expr_expr, fieldno, levelsup, context);
+        }
+        return Err(elog_error(format!("bogus varno: {varno}")));
     }
 
     let attnum = varattno;
@@ -4605,10 +4678,46 @@ fn get_name_for_var_field<'mcx>(
                 }
                 drill_expr = expr;
             } else {
-                // Plan-tree SubqueryScan / childless-Result path (#159).
-                return Err(deferred(
-                    "get_name_for_var_field RTE_SUBQUERY plan-tree (SubqueryScan inner_plan; #159)",
-                ));
+                // We're deparsing a Plan tree so we don't have complete RTE
+                // entries (rte->subquery is NULL). The only place we'd normally
+                // see a Var directly referencing a SUBQUERY RTE is in a
+                // SubqueryScan plan node; look into the child plan's tlist. If
+                // the subquery was proven empty and optimized away we'd find
+                // such a Var in a childless Result node, with nothing to tell us
+                // what it originally referenced — fall back on "fN"
+                // (ruleutils.c 8249-8290; #159 plan-tree).
+                let has_inner_plan = context.namespaces[dpns_idx].inner_plan.is_some();
+                if !has_inner_plan {
+                    // Assert(dpns->plan && IsA(dpns->plan, Result)).
+                    return PgString::from_str_in(&format!("f{fieldno}"), mcx);
+                }
+                let tle_expr = {
+                    let dpns = &context.namespaces[dpns_idx];
+                    get_tle_expr_by_resno(mcx, &dpns.inner_tlist, attnum)?
+                };
+                let tle_expr = tle_expr.ok_or_else(|| {
+                    elog_error(format!("bogus varattno for subquery var: {attnum}"))
+                })?;
+                let inner_plan = context.namespaces[dpns_idx]
+                    .inner_plan
+                    .as_ref()
+                    .map(|p| (**p).clone_in(mcx))
+                    .transpose()?;
+                let save = {
+                    let dpns = &mut context.namespaces[dpns_idx];
+                    match inner_plan {
+                        Some(ip) => Some(crate::push_child_plan(mcx, dpns, &ip)?),
+                        None => None,
+                    }
+                };
+                let tle_expr_expr = tle_expr.as_expr().ok_or_else(|| {
+                    elog_error("subquery tlist entry is not an expression".to_string())
+                })?;
+                let result = get_name_for_var_field(&tle_expr_expr, fieldno, levelsup, context);
+                if let Some(save) = save {
+                    crate::pop_child_plan(&mut context.namespaces[dpns_idx], save);
+                }
+                return result;
             }
         }
         RTE_JOIN => {
@@ -4724,10 +4833,45 @@ fn get_name_for_var_field<'mcx>(
                     drill_expr = expr;
                 }
                 None => {
-                    // Plan-tree CteScan / WorkTableScan path (#159).
-                    return Err(deferred(
-                        "get_name_for_var_field RTE_CTE plan-tree (CteScan inner_plan; #159)",
-                    ));
+                    // We're deparsing a Plan tree so we don't have a CTE list.
+                    // The only places we'd normally see a Var directly
+                    // referencing a CTE RTE are in CteScan or WorkTableScan plan
+                    // nodes; set_deparse_plan arranged for dpns->inner_plan to be
+                    // the plan node that emits the CTE/RecursiveUnion result, so
+                    // we look at its tlist instead. If the CTE was proven empty,
+                    // fall back to "fN" (ruleutils.c 8382-8418; #159 plan-tree).
+                    let has_inner_plan = context.namespaces[dpns_idx].inner_plan.is_some();
+                    if !has_inner_plan {
+                        // Assert(dpns->plan && IsA(dpns->plan, Result)).
+                        return PgString::from_str_in(&format!("f{fieldno}"), mcx);
+                    }
+                    let tle_expr = {
+                        let dpns = &context.namespaces[dpns_idx];
+                        get_tle_expr_by_resno(mcx, &dpns.inner_tlist, attnum)?
+                    };
+                    let tle_expr = tle_expr.ok_or_else(|| {
+                        elog_error(format!("bogus varattno for subquery var: {attnum}"))
+                    })?;
+                    let inner_plan = context.namespaces[dpns_idx]
+                        .inner_plan
+                        .as_ref()
+                        .map(|p| (**p).clone_in(mcx))
+                        .transpose()?;
+                    let save = {
+                        let dpns = &mut context.namespaces[dpns_idx];
+                        match inner_plan {
+                            Some(ip) => Some(crate::push_child_plan(mcx, dpns, &ip)?),
+                            None => None,
+                        }
+                    };
+                    let tle_expr_expr = tle_expr.as_expr().ok_or_else(|| {
+                        elog_error("CTE tlist entry is not an expression".to_string())
+                    })?;
+                    let result = get_name_for_var_field(&tle_expr_expr, fieldno, levelsup, context);
+                    if let Some(save) = save {
+                        crate::pop_child_plan(&mut context.namespaces[dpns_idx], save);
+                    }
+                    return result;
                 }
             }
         }
