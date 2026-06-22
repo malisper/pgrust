@@ -764,10 +764,13 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::extend_buffered_rel_locked::set(extend_buffered_rel_locked);
     backend_storage_buffer_bufmgr_seams::extend_buffered_rel_to_fsm::set(extend_buffered_rel_to_fsm);
     backend_storage_buffer_bufmgr_seams::extend_buffered_rel_to_vm::set(extend_buffered_rel_to_vm);
-    // F2b: the relation-extension I/O accounting (stats-only; no-op installs,
-    // same posture as F1's `count_buffer_dirtied`, until pgstat ports).
+    // F2b: the relation-extension I/O accounting. `count_buffer_write` is still a
+    // no-op (instrumentation-only pgBufferUsage). `count_io_op_extend` /
+    // `count_io_op_read` / `count_io_op_hit` / `count_io_op_evict` are now
+    // installed for real by their pgstat-io owner (`pgstat_count_io_op` against
+    // IOOBJECT_RELATION); the per-relation `count_buffer_read` / `count_buffer_hit`
+    // tallies are installed by their pgstat-relation owner.
     backend_storage_buffer_bufmgr_seams::count_buffer_write::set(|| {});
-    backend_storage_buffer_bufmgr_seams::count_io_op_extend::set(|_cnt, _bytes| {});
     // F3: the read-path entry points (the synchronous single-block core; the
     // explicit StartReadBuffers/WaitReadBuffers pipeline is a public API on
     // BufferManager + rides the panic-until-owner aio-handle seams).

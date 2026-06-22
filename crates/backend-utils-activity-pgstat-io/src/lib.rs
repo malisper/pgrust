@@ -682,4 +682,54 @@ pub fn init_seams() {
         pgstat_io_flush_cb(nowait).unwrap_or(true)
     });
     backend_utils_activity_stat_seams::pgstat_flush_io::set(pgstat_io_flush_cb);
+
+    // bufmgr.c relation-IO accounting seams. bufmgr collapses the
+    // `pgstat_prepare_io_time(track_io_timing)` start-timestamp dance to a
+    // post-operation accounting call (the timing component is internal to this
+    // subsystem); we account count+bytes against IOOBJECT_RELATION with a zeroed
+    // start (no timing component), behaviour-neutral for the count-based stats.
+    //
+    // IOOP_EXTEND (bufmgr.c:2846 ExtendBufferedRelShared) — record `cnt` extend
+    // ops totalling `bytes`. (Previously installed as a no-op by bufmgr.)
+    backend_storage_buffer_bufmgr_seams::count_io_op_extend::set(|cnt, bytes| {
+        pgstat_count_io_op(
+            IOObject::IOOBJECT_RELATION,
+            IOContext::IOCONTEXT_NORMAL,
+            IOOp::IOOP_EXTEND,
+            cnt as u32,
+            bytes,
+        );
+    });
+    // IOOP_READ (bufmgr.c:1957 WaitReadBuffers) — record `cnt` reads totalling
+    // `bytes` against the relation object in the given IO context.
+    backend_storage_buffer_bufmgr_seams::count_io_op_read::set(|io_context, cnt, bytes| {
+        pgstat_count_io_op(
+            IOObject::IOOBJECT_RELATION,
+            io_context,
+            IOOp::IOOP_READ,
+            cnt as u32,
+            bytes,
+        );
+    });
+    // IOOP_HIT (bufmgr.c:1172 ReadBuffer_common / :1898 WaitReadBuffers) —
+    // record `cnt` buffer-cache hits (bytes always 0 for hits).
+    backend_storage_buffer_bufmgr_seams::count_io_op_hit::set(|io_context, cnt| {
+        pgstat_count_io_op(
+            IOObject::IOOBJECT_RELATION,
+            io_context,
+            IOOp::IOOP_HIT,
+            cnt as u32,
+            0,
+        );
+    });
+    // IOOP_EVICT (bufmgr.c:2470 BufferAlloc) — record `cnt` buffer evictions.
+    backend_storage_buffer_bufmgr_seams::count_io_op_evict::set(|io_context, cnt| {
+        pgstat_count_io_op(
+            IOObject::IOOBJECT_RELATION,
+            io_context,
+            IOOp::IOOP_EVICT,
+            cnt as u32,
+            0,
+        );
+    });
 }

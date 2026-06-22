@@ -618,6 +618,26 @@ pub fn pgstat_count_index_tuples(
     })
 }
 
+/// Port of `pgstat_count_buffer_read(rel)`: increment `counts.blocks_fetched`.
+pub fn pgstat_count_buffer_read(
+    relid: Oid,
+    relisshared: bool,
+    pgstat_enabled: bool,
+) -> PgResult<()> {
+    count_field(relid, relisshared, pgstat_enabled, |c| {
+        c.blocks_fetched += 1
+    })
+}
+
+/// Port of `pgstat_count_buffer_hit(rel)`: increment `counts.blocks_hit`.
+pub fn pgstat_count_buffer_hit(
+    relid: Oid,
+    relisshared: bool,
+    pgstat_enabled: bool,
+) -> PgResult<()> {
+    count_field(relid, relisshared, pgstat_enabled, |c| c.blocks_hit += 1)
+}
+
 /// Shared body for the nontransactional `counts` macros.
 fn count_field(
     relid: Oid,
@@ -1353,6 +1373,17 @@ pub fn init_seams() {
             pgstat_copy_relation_stats(dst_relid, dst_relisshared, src_relid, src_relisshared)
         },
     );
+
+    // --- bufmgr.c per-relation buffer-access tallies
+    //     (backend-storage-buffer-bufmgr-seams), fired from ReadBuffer_common /
+    //     WaitReadBuffers. Same `.expect`-wrapping posture as the count seams. ---
+    backend_storage_buffer_bufmgr_seams::count_buffer_read::set(|relid, relisshared, en| {
+        pgstat_count_buffer_read(relid, relisshared, en)
+            .expect("pgstat_count_buffer_read failed");
+    });
+    backend_storage_buffer_bufmgr_seams::count_buffer_hit::set(|relid, relisshared, en| {
+        pgstat_count_buffer_hit(relid, relisshared, en).expect("pgstat_count_buffer_hit failed");
+    });
 
     // `pgstat_count_truncate(rel)` (tablecmds ExecuteTruncateGuts). The tablecmds
     // caller crosses by `&Relation`; project (relid, relisshared, pgstat_enabled)

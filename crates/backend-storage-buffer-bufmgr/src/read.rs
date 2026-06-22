@@ -48,7 +48,7 @@ use types_core::primitive::{
 use types_error::{PgError, PgResult};
 use types_rel::Relation;
 use types_storage::buf::{
-    buftag, PgAioWaitRef, BM_TAG_VALID, BM_VALID, BUFFER_LOCK_EXCLUSIVE,
+    buftag, IOContext, PgAioWaitRef, BM_TAG_VALID, BM_VALID, BUFFER_LOCK_EXCLUSIVE,
 };
 use types_storage::storage::{LWLockMode, ReadBufferMode};
 use types_storage::{PrefetchBufferResult, RelFileLocator, RelFileLocatorBackend};
@@ -638,6 +638,26 @@ impl BufferManager {
         let (buffer, found) =
             self.PinBufferForBlock(rlocator, persistence, fork_num, block_num, has_strategy)?;
 
+        // `IOContextForStrategy(strategy)` collapsed: with no buffer-access
+        // strategy the context is IOCONTEXT_NORMAL (the only case threaded here;
+        // the BULKREAD/BULKWRITE/VACUUM ring kinds are not yet carried, so a
+        // present strategy also maps to NORMAL — a known residual).
+        let io_context = IOContext::IOCONTEXT_NORMAL;
+
+        // ReadBuffer_common per-relation + IO-object accounting (bufmgr.c:1160).
+        // The "read" counter is bumped on every relcache-relation block request
+        // (hit or miss); "hit" + IOOP_HIT only on a cache hit. The byte-tracked
+        // IOOP_READ is accounted at the smgrreadv below (miss path only).
+        if let Some(rel) = rel {
+            sb::count_buffer_read::call(rel.rd_id, rel.rd_rel.relisshared, rel.pgstat_enabled);
+            if found {
+                sb::count_buffer_hit::call(rel.rd_id, rel.rd_rel.relisshared, rel.pgstat_enabled);
+            }
+        }
+        if found {
+            sb::count_io_op_hit::call(io_context, 1);
+        }
+
         if found {
             // Already valid and pinned; nothing to read.
             return Ok(buffer);
@@ -670,6 +690,16 @@ impl BufferManager {
             let mut bufs: [&mut [u8]; 1] = [dst];
             smgr::smgrreadv(rlocator, fork_num, block_num, &mut bufs, 1)
         })?;
+
+        // WaitReadBuffers IOOP_READ accounting (bufmgr.c:1957): one read op of
+        // BLCKSZ bytes against the relation object. (The `pgBufferUsage` read
+        // counter / per-relation tally for the miss are instrumentation-only here;
+        // the per-relation `count_buffer_read` already fired above on the request.)
+        sb::count_io_op_read::call(
+            io_context,
+            1,
+            types_core::primitive::BLCKSZ as u64,
+        );
 
         // Verify the just-read page before marking it valid: the synchronous form
         // of buffer_readv_complete_one (bufmgr.c:7088 / the RBM PageIsVerified

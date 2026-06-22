@@ -778,6 +778,51 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_count_io_op_time(IOOBJECT_RELATION, io_context, IOOP_READ,
+    /// io_start, cnt, bytes)` (bufmgr.c:1957) — record `cnt` read operations
+    /// against the relation object totalling `bytes` bytes (plus elapsed time
+    /// when `track_io_timing` is on). Fired from `WaitReadBuffers` after the
+    /// synchronous `smgrreadv` of a buffer miss. Owned by pgstat; infallible,
+    /// stats-only.
+    pub fn count_io_op_read(io_context: types_storage::buf::IOContext, cnt: u64, bytes: u64)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_io_op(IOOBJECT_RELATION, io_context, IOOP_HIT, 1, 0)`
+    /// (bufmgr.c:1172 / :1898) — record `cnt` buffer-cache hits against the
+    /// relation object. Fired from `ReadBuffer_common` / `WaitReadBuffers` when
+    /// the requested block was already resident. Owned by pgstat; infallible,
+    /// stats-only.
+    pub fn count_io_op_hit(io_context: types_storage::buf::IOContext, cnt: u64)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_io_op(IOOBJECT_RELATION, io_context, IOOP_EVICT, 1, 0)`
+    /// (bufmgr.c:2470) — record `cnt` buffer evictions against the relation
+    /// object. Fired from `BufferAlloc` when a dirty/valid victim buffer is
+    /// recycled to make room for a new block. Owned by pgstat; infallible,
+    /// stats-only.
+    pub fn count_io_op_evict(io_context: types_storage::buf::IOContext, cnt: u64)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_buffer_read(rel)` (bufmgr.c:1166) — bump the per-relation
+    /// `pgstat_info->counts.blocks_fetched` for a block request on a relcache
+    /// relation (counted on both hits and misses, but only when a relcache entry
+    /// is present). `relid`/`relisshared`/`pgstat_enabled` carry the
+    /// `RelationData` identity + the `pgstat_should_count_relation` gate the macro
+    /// needs. Owned by pgstat; infallible.
+    pub fn count_buffer_read(relid: u32, relisshared: bool, pgstat_enabled: bool)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_buffer_hit(rel)` (bufmgr.c:1168) — bump the per-relation
+    /// `pgstat_info->counts.blocks_hit` when a block request on a relcache
+    /// relation was served from the buffer cache. Owned by pgstat; infallible.
+    pub fn count_buffer_hit(relid: u32, relisshared: bool, pgstat_enabled: bool)
+);
+
+seam_core::seam!(
     /// `ResourceOwnerRememberBufferIO(CurrentResourceOwner, buffer)` (bufmgr.c) —
     /// record one in-progress buffer I/O on the current resource owner so a
     /// transaction/portal abort can clean up a buffer left mid-I/O. The buffer-IO
