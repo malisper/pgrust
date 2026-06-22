@@ -2125,7 +2125,18 @@ fn match_saop_to_partition_key<'mcx>(
             if arrexpr.multidims {
                 return Ok(PartClauseMatchStatus::Unsupported);
             }
-            arrexpr.elements.clone()
+            // Deep-copy each element into `mcx` via `Expr::clone_in` rather than a
+            // plain `Vec<Expr>::clone()`: an element may be a `SubLink` (e.g.
+            // `b IN ((select 1),(select 2))`), whose embedded owned `subselect`
+            // `Query` forbids a shallow `.clone()` (it panics) and must round-trip
+            // through `clone_in` (`copyObject` shape). C aliases the list pointer
+            // (`elem_exprs = arrexpr->elements`); here the owned-node model needs a
+            // real deep copy so the cloned exprs live in `mcx`.
+            arrexpr
+                .elements
+                .iter()
+                .map(|e| e.clone_in(context.mcx))
+                .collect::<PgResult<Vec<Expr<'mcx>>>>()?
         }
         _ => {
             // Give up on any other clause types.

@@ -802,7 +802,13 @@ fn transformAExprIn<'mcx>(
     for r in rexpr_list.into_iter() {
         let rexpr = transformExprRecurse(pstate, Some(mcx::PgBox::into_inner(r)))?
             .ok_or_else(|| PgError::error("transformAExprIn: IN item is NULL"))?;
-        rexprs.push(rexpr.clone());
+        // C appends the same `rexpr` pointer to both `rexprs` and one of
+        // `rvars`/`rnonvars` (aliased list cells). In the owned-node model we
+        // need a real second copy; the IN item can be a `SubLink` (e.g.
+        // `b IN ((select 1),(select 2))`), whose embedded owned `subselect`
+        // `Query` forbids a shallow derived `.clone()` (it panics) and must
+        // round-trip through `clone_in` (`copyObject` shape).
+        rexprs.push(rexpr.clone_in(aexpr_clone_ctx(pstate))?.erase_lifetime());
         // contain_vars_of_level((Node *) rexpr, 0).
         if contain_vars_of_level(&{ let m = aexpr_clone_ctx(pstate); Node::mk_expr(m, rexpr.clone_in(m)?)? }, 0) {
             rvars.push(rexpr);
@@ -822,9 +828,13 @@ fn transformAExprIn<'mcx>(
         // in the list, so it is preferred when there is doubt.
         let mut allexprs: Vec<Expr> = Vec::with_capacity(rnonvars.len() + 1);
         if let Some(le) = &lexpr_t {
-            allexprs.push(le.clone());
+            allexprs.push(le.clone_in(aexpr_clone_ctx(pstate))?.erase_lifetime());
         }
-        allexprs.extend(rnonvars.iter().cloned());
+        // Deep-copy each non-Var into the parse arena: an element may be a
+        // `SubLink` whose derived `.clone()` panics (embedded owned `Query`).
+        for rnv in rnonvars.iter() {
+            allexprs.push(rnv.clone_in(aexpr_clone_ctx(pstate))?.erase_lifetime());
+        }
 
         let mut scalar_type = coerce::select_common_type::call(pstate, &allexprs, None)?;
 
@@ -846,7 +856,10 @@ fn transformAExprIn<'mcx>(
             // Coerce all the RHS non-Var inputs to the common type and build
             // an ArrayExpr for them.
             let mut aexprs: Vec<Expr> = Vec::with_capacity(rnonvars.len());
-            for rexpr in rnonvars.iter().cloned() {
+            // Consume `rnonvars` by value (it is not used again on this path):
+            // `coerce_to_common_type` takes ownership, and a plain `.cloned()`
+            // would panic on a `SubLink` element (embedded owned `Query`).
+            for rexpr in core::mem::take(&mut rnonvars).into_iter() {
                 let rexpr = coerce::coerce_to_common_type::call(pstate, rexpr, scalar_type, "IN")?;
                 aexprs.push(rexpr);
             }
