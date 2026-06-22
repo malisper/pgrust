@@ -1014,6 +1014,29 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     let dbname = dbname.expect("PostgresMain requires a non-NULL dbname");
     let username = username.expect("PostgresMain requires a non-NULL username");
 
+    // Re-anchor the stack-depth reference point at the backend's command-loop
+    // frame.
+    //
+    // C records the stack base once, in `main()` (main.c:120), and relies on the
+    // postmaster->backend hand-off being a shallow, fixed-depth delta: the
+    // postmaster sits in `ServerLoop` (a near-`main()`-depth frame) when it forks,
+    // so the inherited base is essentially at the backend's own command-loop
+    // frame, leaving the full `max_stack_depth` (default 100kB) of headroom for
+    // query execution. pgrust's fork path is much deeper than C's: by the time a
+    // forked backend reaches query execution, it is already >100kB above the base
+    // recorded in `main()`, so `check_stack_depth()` rejects even a trivial
+    // top-level `SELECT 1` whenever `max_stack_depth` is set to its 100kB floor
+    // (the jsonb recursion test does exactly this, then `RESET`s — the RESET and
+    // every following statement spuriously failed "stack depth limit exceeded").
+    //
+    // Re-establishing the base here, at the start of the backend's
+    // `PostgresMain`, restores the C invariant that the base ~= the command-loop
+    // frame, so the configured headroom applies to query frames as C intends.
+    // This is benign in single-user mode (the prior base, set in `main()`, is
+    // simply replaced by an equivalent-or-deeper one) and does not change the
+    // genuine deep-recursion behaviour the test exercises.
+    backend_tcop_postgres_seams::set_stack_base::call();
+
     // --- Per-backend signal-handler setup (postgres.c:4213-4252) ---
     //
     // The postmaster blocked all signals before forking, so the handlers are
