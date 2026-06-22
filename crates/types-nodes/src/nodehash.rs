@@ -670,6 +670,54 @@ pub struct HashState<'mcx> {
     pub parallel_state: Option<DsaPointer>,
 }
 
+impl<'mcx> HashState<'mcx> {
+    /// The `HashInstrumentation` collection that `show_hash_info`
+    /// (commands/explain.c:3375) merges before emitting the
+    /// `Buckets: ... Batches: ... Memory Usage: ...` line. Returns `None` when
+    /// the node never collected stats (`node->hinstrument == NULL` and
+    /// `node->shared_info == NULL`).
+    ///
+    /// Mirrors `show_hash_info`'s merge exactly: start from this process's
+    /// `hinstrument` (`memcpy(&hinstrument, hashstate->hinstrument, ...)`), then
+    /// fold each worker's slot in `shared_info->hinstrument[i]` via element-wise
+    /// `Max` (the parallel-aware case). At EXPLAIN time, in the leader, both the
+    /// local `hinstrument` and the merged `shared_info` are the backend-local
+    /// (`Local`) arms (`ExecShutdownHash` palloc0's the local slot and
+    /// `ExecHashRetrieveInstrumentation` snapshots the DSM array into a
+    /// backend-local copy before detach), so this read needs no DSM mapping.
+    pub fn collect_hash_instrumentation(&self) -> Option<HashInstrumentation> {
+        if self.hinstrument.is_none() && self.shared_info.is_none() {
+            return None;
+        }
+
+        // HashInstrumentation hinstrument = {0};
+        // if (hashstate->hinstrument)
+        //     memcpy(&hinstrument, hashstate->hinstrument, sizeof(...));
+        let mut hinstrument = match &self.hinstrument {
+            Some(HashInstrumentSlot::Local(b)) => **b,
+            // The DSM arm only exists inside a parallel worker; the leader
+            // (the EXPLAIN reader) always holds the `Local` arm here.
+            _ => HashInstrumentation::default(),
+        };
+
+        // if (hashstate->shared_info)
+        //     for (i = 0; i < num_workers; ++i)
+        //         hinstrument.X = Max(hinstrument.X, worker_hi->X);
+        if let Some(SharedHashInfo::Local { hinstrument: workers, .. }) = &self.shared_info {
+            for w in workers.iter() {
+                hinstrument.nbuckets = hinstrument.nbuckets.max(w.nbuckets);
+                hinstrument.nbuckets_original =
+                    hinstrument.nbuckets_original.max(w.nbuckets_original);
+                hinstrument.nbatch = hinstrument.nbatch.max(w.nbatch);
+                hinstrument.nbatch_original = hinstrument.nbatch_original.max(w.nbatch_original);
+                hinstrument.space_peak = hinstrument.space_peak.max(w.space_peak);
+            }
+        }
+
+        Some(hinstrument)
+    }
+}
+
 /// `HashJoinState` (`nodes/execnodes.h`) — the HashJoin executor node. Defined
 /// here (rather than in a future `nodeHashjoin` types module) because
 /// `nodeHash.c`'s probe routines (`ExecScanHashBucket`, …) operate on it.

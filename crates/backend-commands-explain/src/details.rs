@@ -21,6 +21,7 @@ use types_core::instrument::{Instrumentation, WalUsage};
 use types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 
+use types_nodes::nodehash::HashState;
 use types_nodes::nodeincrementalsort::{IncrementalSortGroupInfo, IncrementalSortStateData};
 use types_nodes::nodesort::{SortStateData, TuplesortMethod, TuplesortSpaceType};
 
@@ -155,6 +156,68 @@ pub fn show_memory_counters(
         fmt::ExplainPropertyInteger("Memory Used", Some("kB"), mem_used_kb, es)?;
         fmt::ExplainPropertyInteger("Memory Allocated", Some("kB"), mem_allocated_kb, es)?;
     }
+    Ok(())
+}
+
+/// `show_hash_info(hashstate, es)` (commands/explain.c:3375) — under EXPLAIN
+/// ANALYZE, emit the Hash node's bucket/batch/peak-memory instrumentation (the
+/// "Buckets: N (originally M)  Batches: N (originally M)  Memory Usage: NkB"
+/// line in TEXT format, or the discrete `Hash Buckets`/`Original Hash
+/// Buckets`/`Hash Batches`/`Original Hash Batches`/`Peak Memory Usage`
+/// properties otherwise).
+pub fn show_hash_info(
+    hashstate: &HashState<'_>,
+    es: &mut ExplainState<'_>,
+) -> PgResult<()> {
+    // HashInstrumentation hinstrument = {0};
+    // ... collect local + merge worker maxima ... (collect_hash_instrumentation)
+    let hinstrument = match hashstate.collect_hash_instrumentation() {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+
+    // if (hinstrument.nbatch > 0)
+    if hinstrument.nbatch > 0 {
+        // uint64 spacePeakKb = BYTES_TO_KILOBYTES(hinstrument.space_peak);
+        let space_peak_kb = bytes_to_kilobytes(hinstrument.space_peak as i64) as u64;
+
+        if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT {
+            fmt::ExplainPropertyInteger("Hash Buckets", None, hinstrument.nbuckets as i64, es)?;
+            fmt::ExplainPropertyInteger(
+                "Original Hash Buckets",
+                None,
+                hinstrument.nbuckets_original as i64,
+                es,
+            )?;
+            fmt::ExplainPropertyInteger("Hash Batches", None, hinstrument.nbatch as i64, es)?;
+            fmt::ExplainPropertyInteger(
+                "Original Hash Batches",
+                None,
+                hinstrument.nbatch_original as i64,
+                es,
+            )?;
+            fmt::ExplainPropertyUInteger("Peak Memory Usage", Some("kB"), space_peak_kb, es)?;
+        } else if hinstrument.nbatch_original != hinstrument.nbatch
+            || hinstrument.nbuckets_original != hinstrument.nbuckets
+        {
+            fmt::ExplainIndentText(es)?;
+            es.str.try_push_str(&format!(
+                "Buckets: {} (originally {})  Batches: {} (originally {})  Memory Usage: {}kB\n",
+                hinstrument.nbuckets,
+                hinstrument.nbuckets_original,
+                hinstrument.nbatch,
+                hinstrument.nbatch_original,
+                space_peak_kb
+            ))?;
+        } else {
+            fmt::ExplainIndentText(es)?;
+            es.str.try_push_str(&format!(
+                "Buckets: {}  Batches: {}  Memory Usage: {}kB\n",
+                hinstrument.nbuckets, hinstrument.nbatch, space_peak_kb
+            ))?;
+        }
+    }
+
     Ok(())
 }
 

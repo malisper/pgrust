@@ -1578,6 +1578,14 @@ pub fn ExplainNode<'es, 'p>(
             // Resolution / Conflict Arbiter Indexes / Conflict Filter).
             show_modifytable_info(es, mcx, planstate, plan_node, ancestors)?;
         }
+        ntag::T_Hash => {
+            // explain.c:2246: show_hash_info(castNode(HashState, planstate), es)
+            // — the ANALYZE-time "Buckets: N  Batches: N  Memory Usage: NkB"
+            // instrumentation line (bucket/batch originals + peak memory).
+            if let PlanStateNode::Hash(hashstate) = planstate {
+                crate::details::show_hash_info(hashstate, es)?;
+            }
+        }
         _ => {}
     }
 

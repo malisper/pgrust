@@ -1651,6 +1651,21 @@ fn outer_chgparam_is_null(node: &HashJoinState) -> bool {
 /// goes away.
 pub fn ExecShutdownHashJoin<'mcx>(node: &mut HashJoinState<'mcx>) -> PgResult<()> {
     if node.hj_HashTable.is_some() {
+        // Fold the FINAL hash table's dimensions into the inner Hash node's
+        // `hinstrument` before the table is detached/destroyed. In C the inner
+        // Hash node's `node->hashtable` aliases `hj_HashTable`, so its own
+        // `ExecShutdownHash` (nodeHash.c:2831) reads it directly. pgrust's owned
+        // model keeps the single table on the join node (`hj_HashTable`) — the
+        // inner HashState's `hashtable` is `None` by shutdown — so the equivalent
+        // accumulation (`ExecHashAccumInstrumentation(hashNode->hinstrument,
+        // hashtable)`) is performed here, where the table is still reachable. The
+        // walker has already run the inner Hash node's `ExecShutdownHash` (which,
+        // under EXPLAIN ANALYZE, allocated the `hinstrument` slot); this only adds
+        // the final-table maxima into it. The adapter no-ops when the inner Hash
+        // node is not instrumenting.
+        if inner_hash_state(node).ps.instrument.is_some() {
+            nodeHash::exec_hash_accum_instrumentation::call(node)?;
+        }
         // Detach from shared state before DSM memory goes away, so we don't hold
         // pointers into DSM memory by the time ExecEndHashJoin runs.
         nodeHash::exec_hash_table_detach_batch::call(node)?;
