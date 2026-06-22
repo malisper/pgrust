@@ -48,15 +48,26 @@ fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
 }
 
 /// `VARDATA_ANY` of a header-ful `bpchar`/`varchar` arg: the payload bytes after
-/// the (4-byte uncompressed) varlena length header, exactly the carrier the
-/// value cores consume.
+/// the varlena length header. Header-form-agnostic — a small stored value
+/// arrives with a 1-byte ("short") header (`SHORT_VARLENA_PACKING`), and
+/// stripping a fixed `VARHDRSZ` off it would drop three payload bytes from the
+/// front. Mirrors C `VARDATA_ANY`: skip ONE byte for a short (low-bit-set,
+/// non-external) header, else the 4-byte header. (No-op today while packing is
+/// off — every stored value is 4-byte — and correct once it is on.)
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    let image = arg_bytes(fcinfo, i);
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
+    vardata_any(arg_bytes(fcinfo, i))
+}
+
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header (skip 1 byte).
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        // 4-byte uncompressed header (skip VARHDRSZ).
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
     }
 }
 

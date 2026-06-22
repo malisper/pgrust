@@ -58,11 +58,19 @@ const VARHDRSZ: usize = 4;
 /// (4-byte uncompressed) length header.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    let image = arg_varlena(fcinfo, i);
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
+    vardata_any(arg_varlena(fcinfo, i))
+}
+
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image:
+/// skip ONE header byte for a short (1-byte) header, else `VARHDRSZ`. A small
+/// stored value arrives short-headed once `SHORT_VARLENA_PACKING` is on; a fixed
+/// `VARHDRSZ` strip would drop three payload bytes. No-op while packing is off.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
     }
 }
 

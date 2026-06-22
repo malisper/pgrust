@@ -17,13 +17,16 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 /// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
 const VARHDRSZ: usize = 4;
 
-/// `VARDATA_ANY` of a header-ful varlena image: payload after the 4-byte header.
+/// `VARDATA_ANY` of an inline (non-compressed, non-external) varlena image: skip
+/// ONE header byte for a short (1-byte) header, else `VARHDRSZ`. A small stored
+/// value arrives short-headed once `SHORT_VARLENA_PACKING` is on; a fixed
+/// `VARHDRSZ` strip would drop three payload bytes. No-op while packing is off.
 #[inline]
 fn vardata_any(image: &[u8]) -> &[u8] {
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
     }
 }
 

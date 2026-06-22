@@ -54,6 +54,19 @@ fn arg_isnull(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
 /// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
 const VARHDRSZ: usize = 4;
 
+/// `VARDATA_ANY` of an inline (non-compressed, non-external) varlena image: skip
+/// ONE header byte for a short (1-byte) header, else `VARHDRSZ`. A small stored
+/// value arrives short-headed once `SHORT_VARLENA_PACKING` is on; a fixed
+/// `VARHDRSZ` strip would drop three payload bytes. No-op while packing is off.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
+    }
+}
+
 /// `PG_GETARG_TEXT_PP(i)` — the detoasted `text` payload (`VARDATA_ANY`). Under
 /// the header-ful-everywhere convention the by-ref lane carries the full
 /// varlena image (4-byte length word + payload); this skips the header.
@@ -63,11 +76,7 @@ fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("string_agg fn: by-ref `text` arg missing from by-ref lane");
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
-    }
+    vardata_any(image)
 }
 
 /// Take the `internal` transition state out of `args[0]`. `None` is C's
@@ -198,11 +207,7 @@ fn arg_bytea<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("bytea_string_agg fn: by-ref `bytea` arg missing from by-ref lane");
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
-    }
+    vardata_any(image)
 }
 
 /// `PG_RETURN_BYTEA_P(image)` — a by-ref `bytea` result. Same varlena framing as

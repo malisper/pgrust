@@ -378,15 +378,20 @@ fn arg_name_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] 
     &image[..len]
 }
 
-/// `VARDATA_ANY` of a header-ful text/bytea varlena argument: skip the 4-byte
-/// length header so the core hashes `VARSIZE_ANY_EXHDR` payload bytes.
+/// `VARDATA_ANY` of a text/bytea varlena argument so the core hashes
+/// `VARSIZE_ANY_EXHDR` payload bytes. Header-form-agnostic: a small stored value
+/// (a hashed column from a hash-join / hash-agg key) arrives with a 1-byte
+/// ("short") header once `SHORT_VARLENA_PACKING` is on, and stripping a fixed
+/// 4-byte header off it would hash the wrong bytes — different hashes for equal
+/// values. Skip ONE byte for a short header, else the 4-byte header. No-op while
+/// packing is off.
 #[inline]
 fn arg_varlena_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     let image = arg_bytes(fcinfo, i);
-    if image.len() >= 4 {
-        &image[4..]
-    } else {
-        &[]
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= 4 => &image[4..],
+        _ => &[],
     }
 }
 

@@ -65,11 +65,13 @@ const VARHDRSZ: usize = 4;
 /// second arg is a plain `text` lexeme.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    // VARDATA_ANY: a small stored value arrives short-headed once
+    // SHORT_VARLENA_PACKING is on; skip ONE byte for a short header, else VARHDRSZ.
     let image = arg_tsvector(fcinfo, i);
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
     }
 }
 
