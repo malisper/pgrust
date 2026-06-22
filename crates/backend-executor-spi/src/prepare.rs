@@ -294,7 +294,7 @@ pub fn spi_execute_snapshot<'mcx>(
     snapshot: Option<types_snapshot::SnapshotData>,
     crosscheck: Option<types_snapshot::SnapshotData>,
     _read_only: bool,
-    _fire_triggers: bool,
+    fire_triggers: bool,
     tcount: i64,
 ) -> PgResult<SpiExecResult> {
     let (sources, argtypes) =
@@ -314,7 +314,7 @@ pub fn spi_execute_snapshot<'mcx>(
 
     for &source in sources.iter() {
         let (res, processed, result) = execute_one_source(
-            mcx, source, &param_li, &snapshot, &crosscheck, _read_only, tcount,
+            mcx, source, &param_li, &snapshot, &crosscheck, _read_only, fire_triggers, tcount,
         )?;
         my_res = res;
         my_processed = processed;
@@ -347,6 +347,7 @@ fn execute_one_source<'mcx>(
     snapshot: &Option<types_snapshot::SnapshotData>,
     crosscheck: &Option<types_snapshot::SnapshotData>,
     read_only: bool,
+    fire_triggers: bool,
     tcount: i64,
 ) -> PgResult<(i32, u64, Option<SpiResult>)> {
     // _SPI_execute_plan: when no caller snapshot is given, RI's read-only check
@@ -363,7 +364,16 @@ fn execute_one_source<'mcx>(
         }
     };
 
-    let out = run_cached(mcx, source, param_li, crosscheck, read_only, pushed, tcount);
+    let out = run_cached(
+        mcx,
+        source,
+        param_li,
+        crosscheck,
+        read_only,
+        pushed,
+        fire_triggers,
+        tcount,
+    );
 
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
@@ -378,6 +388,7 @@ fn run_cached<'mcx>(
     crosscheck: &Option<types_snapshot::SnapshotData>,
     read_only: bool,
     pushed_active_snap: bool,
+    fire_triggers: bool,
     tcount: i64,
 ) -> PgResult<(i32, u64, Option<SpiResult>)> {
     let cplan = plancache::GetCachedPlan(source, param_li.clone(), ResourceOwner::NULL, None)?;
@@ -397,7 +408,8 @@ fn run_cached<'mcx>(
             xact::command_counter_increment::call()?;
             snapmgr::update_active_snapshot_command_id::call()?;
         }
-        let (code, n, result) = run_one_stmt(stmt, param_li, crosscheck, tcount)?;
+        let (code, n, result) =
+            run_one_stmt(stmt, param_li, crosscheck, fire_triggers, tcount)?;
         res = code;
         processed = n;
         if result.is_some() {
@@ -417,6 +429,7 @@ fn run_one_stmt<'mcx>(
     stmt: &PlannedStmt<'mcx>,
     param_li: &ParamListInfo,
     crosscheck: &Option<types_snapshot::SnapshotData>,
+    fire_triggers: bool,
     tcount: i64,
 ) -> PgResult<(i32, u64, Option<SpiResult>)> {
     let operation = stmt.commandType;
@@ -480,8 +493,19 @@ fn run_one_stmt<'mcx>(
         0, // instrument_options
     )?;
 
-    // _SPI_pquery: fire_triggers => eflags = 0.
-    execmain::ExecutorStart(&mut qdesc, 0)?;
+    // _SPI_pquery: select execution options. fire_triggers => eflags = 0
+    // (run-to-completion); otherwise EXEC_FLAG_SKIP_TRIGGERS so the RI/FK
+    // cascade sub-statement does NOT open its own after-trigger query level —
+    // its queued AFTER events land at the outer query level and are picked up
+    // by the AfterTriggerEndQuery re-drive loop (and share its transition
+    // tuplestore). (executor.h: EXEC_FLAG_SKIP_TRIGGERS = 0x0020.)
+    const EXEC_FLAG_SKIP_TRIGGERS: i32 = 0x0020;
+    let eflags = if fire_triggers {
+        0
+    } else {
+        EXEC_FLAG_SKIP_TRIGGERS
+    };
+    execmain::ExecutorStart(&mut qdesc, eflags)?;
     let count: u64 = if tcount <= 0 { u64::MAX } else { tcount as u64 };
     execmain::ExecutorRun(&mut qdesc, types_scan::sdir::ForwardScanDirection, count)?;
     let processed = qdesc.es_processed();
