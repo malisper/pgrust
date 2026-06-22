@@ -152,7 +152,7 @@ pub fn tts_virtual_clear(slot: &mut VirtualTupleTableSlot) {
     // slot->tts_flags |= TTS_FLAG_EMPTY;
     slot.base.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
+    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
 }
 
 /// `tts_virtual_getsomeattrs` (execTuples.c):
@@ -582,7 +582,7 @@ pub fn tts_heap_clear(slot: &mut HeapTupleTableSlot) {
     // slot->tts_flags |= TTS_FLAG_EMPTY;
     slot.base.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
+    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
     // hslot->off = 0;
     slot.off = 0;
     // hslot->tuple = NULL;
@@ -895,7 +895,7 @@ pub fn tts_minimal_clear(slot: &mut MinimalTupleTableSlot) {
     // slot->tts_flags |= TTS_FLAG_EMPTY;
     slot.base.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
+    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
     // mslot->off = 0;
     slot.off = 0;
     // mslot->mintuple = NULL;
@@ -1347,7 +1347,7 @@ pub fn tts_buffer_heap_clear(slot: &mut BufferHeapTupleTableSlot) {
     // slot->tts_flags |= TTS_FLAG_EMPTY;
     slot.base.base.tts_flags |= types_nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.base.tts_tid = types_tuple::heaptuple::ItemPointerData::default();
+    slot.base.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
     // bslot->base.tuple = NULL;
     slot.base.tuple = None;
     // bslot->base.off = 0;

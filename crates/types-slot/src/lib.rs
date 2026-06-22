@@ -305,7 +305,7 @@ pub struct TupleTableSlotOps {
 /// `ItemPointerSetInvalid(&slot->tts_tid)` — block = `InvalidBlockNumber`,
 /// offset = `InvalidOffsetNumber`.
 pub fn item_pointer_invalid() -> ItemPointerData {
-    ItemPointerData::default()
+    ItemPointerData::invalid()
 }
 
 /// SCAFFOLD anchor so an otherwise data-only module exposes a fallible builder
