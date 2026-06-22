@@ -189,8 +189,46 @@ pub fn jsonpath_in<'mcx>(
 
 /// C: `jsonpath_out(PG_FUNCTION_ARGS)` — render an on-disk jsonpath to text.
 pub fn jsonpath_out<'mcx>(mcx: Mcx<'mcx>, input: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let estimated_len = varsize(input);
-    jsonPathToCstring(mcx, input, estimated_len)
+    // `jsonpath_out` expects the FULL on-disk image (`[VARHDRSZ][header][nodes]`),
+    // reading the version/flags word at `input[4..8]`. The two JSON_TABLE
+    // path-`Const` shapes in this tree differ: the row-pattern path Const
+    // (makeJsonTablePathScan) stores a single-header image, while a column
+    // path-spec Const const-folded through the text->jsonpath cast (fmgr
+    // `jsonpath_in` re-framed by `ret_varlena`) carries an extra leading VARHDRSZ
+    // word (`[VARHDRSZ-outer][VARHDRSZ-inner][header][nodes]`). Detect the latter
+    // by checking whether the word at `[4..8]` is a valid jsonpath header
+    // (version, optionally `| LAX`); if not, the real image starts one VARHDRSZ
+    // word in. This keeps deparse correct for both Const shapes without
+    // perturbing the executor, which consumes each shape through its own path.
+    let normalized = normalize_jsonpath_for_out(input);
+    let estimated_len = varsize(normalized);
+    jsonPathToCstring(mcx, normalized, estimated_len)
+}
+
+/// See [`jsonpath_out`]: strip a spurious leading VARHDRSZ word from a
+/// double-wrapped jsonpath varlena so the header read at `[4..8]` lands on the
+/// version/flags word. Returns `input` unchanged when it is already a
+/// well-formed single-header image.
+fn normalize_jsonpath_for_out(input: &[u8]) -> &[u8] {
+    const VARHDRSZ: usize = 4;
+    if input.len() >= 8 {
+        let hdr = u32::from_ne_bytes([input[4], input[5], input[6], input[7]]);
+        if hdr & !JSONPATH_LAX == JSONPATH_VERSION {
+            return input;
+        }
+        // Header at [4..8] is not a valid jsonpath version: this is the
+        // double-wrapped column path-spec Const. The genuine image begins after
+        // the outer VARHDRSZ word.
+        if input.len() >= VARHDRSZ + 8 {
+            let inner = &input[VARHDRSZ..];
+            let inner_hdr =
+                u32::from_ne_bytes([inner[4], inner[5], inner[6], inner[7]]);
+            if inner_hdr & !JSONPATH_LAX == JSONPATH_VERSION {
+                return inner;
+            }
+        }
+    }
+    input
 }
 
 /// Core of C: `jsonpath_recv(PG_FUNCTION_ARGS)`.

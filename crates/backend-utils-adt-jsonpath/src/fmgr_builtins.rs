@@ -45,6 +45,18 @@ fn arg_jsonpath_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &
     &image[VARHDRSZ..]
 }
 
+/// The FULL `jsonpath` varlena image (`[VARHDRSZ][version word][nodes]`) — the
+/// form `jsonpath_out`/`jspInit`/`jsonpath_header` consume (C reads
+/// `JsonPath *->header` at offset `VARHDRSZ`, then `->data` at
+/// `JSONPATH_HDRSZ`). Unlike [`arg_jsonpath_payload`], the leading length word
+/// is kept so the header read lands on the version word, not the first node.
+fn arg_jsonpath_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("jsonpath fn: by-ref `jsonpath` arg missing from by-ref lane")
+}
+
 /// Set a by-reference varlena (`_in`) result on the by-ref lane: the cores
 /// return the bare payload, so frame it as a full 4-byte-header varlena image
 /// (`SET_VARSIZE(image, VARHDRSZ + len)`, native-order `(total) << 2`).
@@ -103,7 +115,13 @@ fn fc_jsonpath_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResul
 /// `jsonpath_out(jsonpath) -> cstring` (oid 4003): render the on-disk image to
 /// text.
 fn fc_jsonpath_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let jp = arg_jsonpath_payload(fcinfo, 0);
+    // `jsonpath_out` reads `jsonpath_header(input)` at `input[4..8]` and
+    // `jsonpath_data(input)` at `input[8..]` — i.e. it consumes the FULL varlena
+    // image (`[VARHDRSZ][version][nodes]`), exactly as C's `PG_GETARG_JSONPATH_P`
+    // hands `jsonpath_out` the whole datum. Passing the VARHDRSZ-stripped payload
+    // made `jspInit` read the first node word as the version (`bad jsonpath
+    // header`); pass the full image instead.
+    let jp = arg_jsonpath_image(fcinfo, 0);
     let m = scratch_mcx();
     let bytes = crate::jsonpath_out(m.mcx(), jp)?;
     Ok(ret_cstring(fcinfo, String::from_utf8_lossy(bytes.as_slice()).into_owned()))
