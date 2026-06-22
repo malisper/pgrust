@@ -81,12 +81,38 @@ fn stat_identity(libname: &str) -> PgResult<FileIdentity> {
 /// build. Libraries whose bodies are ported into the in-process registry are
 /// intercepted by `dfmgr` before reaching here, so a call that arrives means a
 /// genuine OS extension `.so` was requested.
-fn no_c_abi(what: &str, libname: &str) -> ! {
+///
+/// Unlike real PostgreSQL — which `dlopen`s the file and reports the OS
+/// loader's `dlerror()` text — this backend exposes no C ABI to load a real
+/// extension `.so`. We therefore mirror C's faithful failure mode of an
+/// unloadable library: a graceful
+/// ```c
+/// ereport(ERROR,
+///         (errcode_for_file_access(),
+///          errmsg("could not load library \"%s\": %s", libname, load_error)));
+/// ```
+/// so the session/transaction aborts cleanly and the backend stays alive,
+/// instead of panicking and poisoning the cluster (TD-DFMGR-DYNLOADER).
+fn no_c_abi_error(libname: &str) -> types_error::PgError {
+    ereport(ERROR)
+        .errcode_for_file_access()
+        .errmsg(format!(
+            "could not load library \"{libname}\": loading C-ABI extension \
+             libraries is not supported by this server"
+        ))
+        .into_error()
+}
+
+/// Post-open seams (`call_pg_init`, `close_library`, `function_exists`,
+/// `fetch_finfo_record`, `plugin_init`, `invoke_output_plugin_callback`) only
+/// run against a handle returned by `open_library`. Because `open_library`
+/// always fails gracefully in this build (no real `dlopen`), none of them is
+/// ever reached on the load path; reaching one is a genuine logic error.
+fn no_c_abi_unreachable(what: &str, libname: &str) -> ! {
     panic!(
         "port-dynloader: {what} of OS extension library \"{libname}\" is \
          unreachable in the idiomatic-Rust backend (no C ABI to dlopen/dlsym); \
-         libraries whose C bodies are ported are served by dfmgr's in-process \
-         ported-library registry before reaching the OS loader \
+         open_library always fails gracefully before any post-open seam runs \
          (TD-DFMGR-DYNLOADER)"
     );
 }
@@ -96,31 +122,38 @@ fn no_c_abi(what: &str, libname: &str) -> ! {
 pub fn init_seams() {
     port_dynloader_seams::stat_identity::set(stat_identity);
 
+    // The OS-loader edge: no real `dlopen` is possible (no C ABI), so this
+    // seam fails GRACEFULLY with C's faithful "could not load library" ERROR
+    // rather than panicking. The session/transaction aborts cleanly and the
+    // backend stays alive, exactly like real PG hitting an unloadable library.
     port_dynloader_seams::open_library::set(|libname: &str| -> PgResult<LibraryOpen> {
-        no_c_abi("open_library (dlopen)", libname)
+        Err(no_c_abi_error(libname))
     });
+
+    // Post-open seams are unreachable because `open_library` always errors
+    // first; reaching one is a logic error, so they keep the loud panic.
     port_dynloader_seams::call_pg_init::set(|_handle: LibraryHandle| -> PgResult<()> {
-        no_c_abi("call_pg_init (_PG_init)", "<loaded handle>")
+        no_c_abi_unreachable("call_pg_init (_PG_init)", "<loaded handle>")
     });
     port_dynloader_seams::close_library::set(|_handle: LibraryHandle| {
-        no_c_abi("close_library (dlclose)", "<loaded handle>")
+        no_c_abi_unreachable("close_library (dlclose)", "<loaded handle>")
     });
     port_dynloader_seams::function_exists::set(
         |_handle: LibraryHandle, funcname: &str| -> bool {
-            no_c_abi("function_exists (dlsym)", funcname)
+            no_c_abi_unreachable("function_exists (dlsym)", funcname)
         },
     );
     port_dynloader_seams::fetch_finfo_record::set(
         |_handle: LibraryHandle, prosrc: &str| -> PgResult<LoadedExternalFunc> {
-            no_c_abi("fetch_finfo_record (Pg_finfo_record)", prosrc)
+            no_c_abi_unreachable("fetch_finfo_record (Pg_finfo_record)", prosrc)
         },
     );
     port_dynloader_seams::plugin_init::set(|_handle: LibraryHandle| -> PgResult<u32> {
-        no_c_abi("plugin_init (_PG_output_plugin_init)", "<loaded handle>")
+        no_c_abi_unreachable("plugin_init (_PG_output_plugin_init)", "<loaded handle>")
     });
     port_dynloader_seams::invoke_output_plugin_callback::set(
         |_inv: CallbackInvocation| -> PgResult<bool> {
-            no_c_abi("invoke_output_plugin_callback", "<loaded handle>")
+            no_c_abi_unreachable("invoke_output_plugin_callback", "<loaded handle>")
         },
     );
 }
