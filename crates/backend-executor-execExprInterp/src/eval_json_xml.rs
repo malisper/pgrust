@@ -1233,12 +1233,15 @@ pub fn ExecEvalJsonCoercionFinish<'mcx>(
             return Err(coercion_error("ON EMPTY", clause, &detail));
         }
 
-        // Reset for next use: resvalue NULL, error TRUE, escontext cleared.
+        // Reset for next use: resvalue NULL, error TRUE. C (execExprInterp.c:5230)
+        // resets `escontext.error_occurred = false; escontext.details_wanted =
+        // true` — it does NOT zero the whole struct, so the subsequent ON ERROR /
+        // ON EMPTY behavior coercion captures its error message (DETAIL).
         let error_cell = state.json_states.states.as_ref().unwrap()[jsestate_id.0 as usize].error_cell;
         write_cell(state, resv, Datum::null(), true);
         write_cell(state, error_cell, Datum::from_bool(true), false);
         let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
-        js.escontext = types_error::SoftErrorContext::default();
+        js.escontext = types_error::SoftErrorContext::new(true);
     }
     Ok(())
 }
