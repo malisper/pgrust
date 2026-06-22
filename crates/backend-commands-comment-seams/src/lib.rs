@@ -54,3 +54,18 @@ seam!(
     /// on `Err`.
     pub fn DeleteComments(oid: Oid, classoid: Oid, subid: i32) -> PgResult<()>
 );
+
+seam!(
+    /// Move the whole-object (`objsubid = 0`) `pg_description` comment from one
+    /// relation OID to another, in place. catalog/index.c's
+    /// `index_concurrently_swap` "Move comment if any" block (lines 1726-1770):
+    /// scan `pg_description` for `{old_index_id, RelationRelationId, 0}` and, if
+    /// found, rewrite the `objoid` column to `new_index_id` and
+    /// `CatalogTupleUpdate`. Owned by comment.c (the only unit that reads/writes
+    /// `pg_description`). Can `ereport(ERROR)`, carried on `Err`.
+    pub fn move_relation_comment<'mcx>(
+        mcx: Mcx<'mcx>,
+        old_index_id: Oid,
+        new_index_id: Oid,
+    ) -> PgResult<()>
+);

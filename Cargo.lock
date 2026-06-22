@@ -4811,6 +4811,7 @@ dependencies = [
  "backend-catalog-pg-depend-seams",
  "backend-catalog-pg-inherits-seams",
  "backend-catalog-storage-seams",
+ "backend-commands-comment-seams",
  "backend-commands-event-trigger-seams",
  "backend-commands-matview-deps-seams",
  "backend-commands-tablecmds-seams",

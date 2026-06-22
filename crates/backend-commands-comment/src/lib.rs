@@ -45,8 +45,8 @@ use backend_utils_error::ereport;
 use backend_utils_init_miscinit_seams::get_user_id;
 use mcx::Mcx;
 use types_catalog::catalog::{
-    DESCRIPTION_OBJ_INDEX_ID, DESCRIPTION_RELATION_ID, SHARED_DESCRIPTION_OBJ_INDEX_ID,
-    SHARED_DESCRIPTION_RELATION_ID,
+    DESCRIPTION_OBJ_INDEX_ID, DESCRIPTION_RELATION_ID, RELATION_RELATION_ID,
+    SHARED_DESCRIPTION_OBJ_INDEX_ID, SHARED_DESCRIPTION_RELATION_ID,
 };
 use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::{Oid, OidIsValid};
@@ -348,6 +348,45 @@ pub fn CreateComments<'mcx>(
     table_close(description, NoLock)
 }
 
+/// `index_concurrently_swap`'s "Move comment if any" block (catalog/index.c:
+/// 1726-1770). Rewrite the whole-object (`objsubid = 0`) `pg_description` row of
+/// `old_index_id` to point at `new_index_id`, in place.
+pub fn move_relation_comment<'mcx>(
+    mcx: Mcx<'mcx>,
+    old_index_id: Oid,
+    new_index_id: Oid,
+) -> PgResult<()> {
+    let mut values: [Datum<'mcx>; NATTS_PG_DESCRIPTION] = core::array::from_fn(|_| Datum::null());
+    let nulls = [false; NATTS_PG_DESCRIPTION];
+    let mut replaces = [false; NATTS_PG_DESCRIPTION];
+
+    values[ANUM_PG_DESCRIPTION_OBJOID - 1] = Datum::from_oid(new_index_id);
+    replaces[ANUM_PG_DESCRIPTION_OBJOID - 1] = true;
+
+    let skey = [
+        oid_key(ANUM_PG_DESCRIPTION_OBJOID as i16, old_index_id)?,
+        oid_key(ANUM_PG_DESCRIPTION_CLASSOID as i16, RELATION_RELATION_ID)?,
+        int4_key(ANUM_PG_DESCRIPTION_OBJSUBID as i16, 0)?,
+    ];
+
+    let description = table_open(mcx, DESCRIPTION_RELATION_ID, RowExclusiveLock)?;
+
+    let mut scan =
+        genam::systable_beginscan::call(&description, DESCRIPTION_OBJ_INDEX_ID, true, None, &skey)?;
+
+    // while ((tuple = systable_getnext(sd)) != NULL) { ...; break; }
+    if let Some(oldtuple) = genam::systable_getnext::call(mcx, scan.desc_mut())? {
+        let mut newtuple =
+            heap_modify_tuple(mcx, &oldtuple, &description.rd_att, &values, &nulls, &replaces)?;
+        CatalogTupleUpdate(mcx, &description, oldtuple.tuple.t_self, &mut newtuple)?;
+        // Assume there can be only one match.
+    }
+
+    scan.end()?;
+
+    table_close(description, NoLock)
+}
+
 /// `CreateSharedComments` — create/replace/delete a `pg_shdescription` comment.
 ///
 /// comment.c:237-316. Same shape as [`CreateComments`] with two scan keys and
@@ -625,6 +664,7 @@ fn comment_object_slow_seam<'mcx>(
 /// (`comment_object` / `comment_object_slow`).
 pub fn init_seams() {
     backend_commands_comment_seams::DeleteComments::set(DeleteComments);
+    backend_commands_comment_seams::move_relation_comment::set(move_relation_comment);
 
     // utility.c dispatches COMMENT through tcop-utility-out-seams: the fast
     // path (no event-trigger support) calls `comment_object`; the slow path

@@ -2425,10 +2425,9 @@ pub fn index_concurrently_create_copy<'mcx>(
 /// the old index over to the new index, marking the old index invalid and the
 /// new one valid.
 ///
-/// One faithful contained gap: the `pg_description` comment move (catalog/
-/// index.c:1726-1770) is omitted — it has no catalog-write seam owner in this
-/// tree and is only reached when the reindexed index itself carries a `COMMENT`
-/// (no such case appears in the REINDEX CONCURRENTLY regression corpus). The
+/// The `pg_description` comment move (catalog/index.c:1726-1770) is delegated to
+/// comment.c's `move_relation_comment` seam (the unit that owns
+/// `pg_description`). The
 /// `relispartition` / `indisexclusion` swaps are likewise carried only through
 /// the partition-inheritance leg and the exclusion rejection in
 /// [`index_concurrently_create_copy`] respectively (the form-update seams do not
@@ -2529,9 +2528,9 @@ pub fn index_concurrently_swap<'mcx>(
     )?;
 
     /*
-     * NOTE: the pg_description comment move (catalog/index.c:1726-1770) is a
-     * documented contained gap (see the function doc comment).
+     * Move comment if any (catalog/index.c:1726-1770).
      */
+    backend_commands_comment_seams::move_relation_comment::call(mcx, old_index_id, new_index_id)?;
 
     /*
      * Swap inheritance relationship with parent index.
