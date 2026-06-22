@@ -612,20 +612,45 @@ pub fn ExecAggInitGroup<'mcx>(
 
 /// `ExecAggPlainTransByVal(aggstate, pertrans, pergroup, aggcontext, setno)`
 /// (execExprInterp.c:5836) — by-value transition: invoke the transfn with the
+/// Resolve the i32 `curaggcontext` the way C's `ExecAggPlainTrans*` would: the
+/// compiled op's `aggcontext` is the per-aggregate memory context — the single
+/// `hashcontext` for hashed transitions (mapped to the
+/// [`CURAGGCONTEXT_HASH`](crate::node_lifecycle::CURAGGCONTEXT_HASH) sentinel),
+/// or the per-grouping-set `aggcontexts[setno]` for sorted/plain transitions
+/// (mapped to `setno`). A missing `aggcontext` (none passed) falls back to
+/// `setno` (the historical behavior for the non-hash path).
+fn curaggcontext_for(
+    aggstate: &AggStateData<'_>,
+    aggcontext: Option<types_nodes::execnodes::EcxtId>,
+    setno: i32,
+) -> i32 {
+    match aggcontext {
+        Some(ctx) if Some(ctx) == aggstate.hashcontext => {
+            crate::node_lifecycle::CURAGGCONTEXT_HASH
+        }
+        _ => setno,
+    }
+}
+
 /// current transValue + inputs and store the new value back. No by-ref copy.
 pub fn ExecAggPlainTransByVal<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     transno: usize,
     setoff: usize,
     setno: i32,
-    _aggcontext: Option<types_nodes::execnodes::EcxtId>,
+    aggcontext: Option<types_nodes::execnodes::EcxtId>,
     input_args: Vec<AggDatum<'mcx>>,
     input_args_null: &[bool],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // cf. select_current_set(): aggstate->curaggcontext = aggcontext (= setno for
-    // the non-hash path); aggstate->current_set = setno; curpertrans = pertrans.
-    aggstate.curaggcontext = setno;
+    // cf. select_current_set(): aggstate->curaggcontext = aggcontext;
+    // aggstate->current_set = setno; curpertrans = pertrans. The compiled op's
+    // `aggcontext` is the hashcontext for hashed transitions (resolve to the
+    // CURAGGCONTEXT_HASH sentinel) and the per-set aggcontext (= setno) for
+    // sorted/plain transitions — exactly what `select_current_set(setno,
+    // is_hash)` would set. The owned model carries curaggcontext as an i32, so
+    // map the EcxtId back to the sentinel/index here.
+    aggstate.curaggcontext = curaggcontext_for(aggstate, aggcontext, setno);
     aggstate.current_set = setno;
     aggstate.curpertrans = transno as i32;
 
@@ -668,7 +693,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
     input_args_null: &[bool],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    aggstate.curaggcontext = setno;
+    aggstate.curaggcontext = curaggcontext_for(aggstate, aggcontext, setno);
     aggstate.current_set = setno;
     aggstate.curpertrans = transno as i32;
 

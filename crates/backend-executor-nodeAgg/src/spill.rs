@@ -443,25 +443,146 @@ pub fn hashagg_spill_init<'mcx>(
 /// on-disk size.
 pub fn hashagg_spill_tuple<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
     spill: &mut HashAggSpill<'mcx>,
     inputslot: SlotId,
     hash: u32,
 ) -> PgResult<usize> {
-    // The C body fetches a MinimalTuple from the (possibly projected) input
-    // slot via slot_getsomeattrs / ExecStoreVirtualTuple /
-    // ExecFetchSlotMinimalTuple, all owned by the not-yet-ported
-    // executor/execTuples unit (and the trimmed TupleTableSlot here carries no
-    // payload yet). It also reads `colnos_needed` via bms_is_member (owned by
-    // nodes/bitmapset.c) and rehashes via hash_bytes_uint32 (owned by
-    // access/hash/hashfn.c). None of those owners are ported, so this path
-    // must fail loudly rather than spill a fabricated tuple.
-    let _ = (aggstate, spill, inputslot, hash);
-    panic!(
-        "seam not installed: executor/execTuples (ExecFetchSlotMinimalTuple, \
-         slot_getsomeattrs, ExecStoreVirtualTuple), nodes/bitmapset \
-         (bms_is_member), access/hash/hashfn (hash_bytes_uint32) — needed by \
-         hashagg_spill_tuple; ports land with the slot payload model"
-    )
+    use backend_executor_execTuples_seams as exectuples;
+
+    debug_assert!(spill.partitions.is_some());
+
+    let mcx = estate.es_query_cxt;
+
+    // Determine which slot holds the to-be-spilled tuple. When not all columns
+    // are needed, project the needed columns into hash_spill_wslot (a virtual
+    // slot); otherwise spill the input slot directly.
+    let spillslot: SlotId = if !aggstate.all_cols_needed {
+        let wslot = aggstate
+            .hash_spill_wslot
+            .expect("hashagg_spill_tuple: hash_spill_wslot");
+
+        // slot_getsomeattrs(inputslot, aggstate->max_colno_needed);
+        // Deform up to max_colno_needed, then read the per-column (value,isnull)
+        // array out of the input slot.
+        let incols =
+            exectuples::slot_getallattrs_by_id::call(estate, inputslot)?;
+
+        // ExecClearTuple(spillslot); for each attr: copy the value when its
+        // (1-based) column is a member of colnos_needed, else NULL it.
+        let natts =
+            exectuples::slot_natts::call(estate, wslot) as usize;
+        let max_colno_needed = aggstate.max_colno_needed;
+
+        let mut values: alloc::vec::Vec<
+            types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+        > = alloc::vec::Vec::with_capacity(natts);
+        let mut isnull: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(natts);
+
+        for i in 0..natts {
+            // bms_is_member(i + 1, aggstate->colnos_needed)
+            let needed = (i as i32) < max_colno_needed
+                && backend_nodes_core_seams::bms_is_member::call(
+                    i as i32 + 1,
+                    aggstate.colnos_needed.as_deref(),
+                );
+            if needed {
+                // spillslot->tts_values[i] = inputslot->tts_values[i];
+                let (v, n) = match incols.get(i) {
+                    Some((v, n)) => (v.clone_in(mcx)?, *n),
+                    None => (
+                        types_tuple::backend_access_common_heaptuple::Datum::null(),
+                        true,
+                    ),
+                };
+                values.push(v);
+                isnull.push(n);
+            } else {
+                // spillslot->tts_isnull[i] = true;
+                values.push(types_tuple::backend_access_common_heaptuple::Datum::null());
+                isnull.push(true);
+            }
+        }
+
+        // memcpy the value/isnull arrays into the virtual slot and
+        // ExecStoreVirtualTuple(spillslot).
+        exectuples::store_virtual_values::call(estate, wslot, &values, &isnull)?;
+        wslot
+    } else {
+        inputslot
+    };
+
+    // tuple = ExecFetchSlotMinimalTuple(spillslot, &shouldFree);
+    let (mtup, _should_free) =
+        exectuples::exec_fetch_slot_minimal_tuple::call(mcx, estate, spillslot)?;
+
+    let partition: usize = if spill.shift < 32 {
+        ((hash & spill.mask) >> spill.shift) as usize
+    } else {
+        0
+    };
+
+    // spill->ntuples[partition]++;
+    {
+        let ntuples = spill
+            .ntuples
+            .as_mut()
+            .expect("hashagg_spill_tuple: ntuples");
+        ntuples[partition] += 1;
+    }
+
+    // addHyperLogLog(&spill->hll_card[partition], hash_bytes_uint32(hash));
+    {
+        let hll_card = spill
+            .hll_card
+            .as_mut()
+            .expect("hashagg_spill_tuple: hll_card");
+        hll::addHyperLogLog(
+            &mut hll_card[partition],
+            common_hashfn::hash_bytes_uint32(hash),
+        );
+    }
+
+    // tape = spill->partitions[partition];
+    let tape = spill
+        .partitions
+        .as_ref()
+        .and_then(|p| p[partition])
+        .expect("hashagg_spill_tuple: partition tape");
+
+    // Serialize the minimal tuple into its flat C image (the t_len-first blob,
+    // identical to what hashagg_batch_read reads back).
+    let blob = backend_access_common_heaptuple::flat::minimal_tuple_to_flat(mcx, &mtup)
+        .map_err(flat_err)?;
+
+    let tapeset = aggstate
+        .hash_tapeset
+        .as_mut()
+        .expect("hashagg_spill_tuple: hash_tapeset");
+
+    let mut total_written = 0usize;
+
+    // LogicalTapeWrite(tape, &hash, sizeof(uint32));
+    tape_seams::logical_tape_write::call(tapeset, tape, &hash.to_ne_bytes())?;
+    total_written += core::mem::size_of::<u32>();
+
+    // LogicalTapeWrite(tape, tuple, tuple->t_len);
+    tape_seams::logical_tape_write::call(tapeset, tape, &blob)?;
+    total_written += blob.len();
+
+    Ok(total_written)
+}
+
+/// Map a `minimal_tuple_to_flat` structural error into a `PgError`.
+pub(crate) fn flat_err(
+    e: backend_access_common_heaptuple::flat::MinimalTupleFlatError,
+) -> types_error::PgError {
+    match e {
+        backend_access_common_heaptuple::flat::MinimalTupleFlatError::Pg(err) => err,
+        other => types_error::PgError::error(format!(
+            "hashagg spill: malformed minimal tuple: {other:?}"
+        )),
+    }
 }
 
 /// `hashagg_spill_finish(aggstate, spill, setno)` — close a spill's output

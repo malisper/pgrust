@@ -702,15 +702,144 @@ pub fn lookup_hash_entries<'mcx>(
                 aggstate.hash_cur_entry_index[setno as usize] = Some(index);
             }
         } else {
-            // Spill mode: LookupTupleHashEntryHash with create == false (the C
-            // passes p_isnew == NULL); a miss spills the tuple via
-            // hashagg_spill_tuple. The spill path operates on slot value images
-            // that execTuples owns. Loud panic until that surface lands.
-            let _ = setno;
-            panic!(
-                "backend-executor-execGrouping: no-create LookupTupleHashEntry \
-                 (spill mode) not yet declared (lookup_hash_entries)"
-            );
+            // Spill mode: C calls LookupTupleHashEntry(hashtable, hashslot,
+            // NULL, &hash) — p_isnew == NULL means no new entry is created on a
+            // miss. The internally-computed hash is returned and used to route a
+            // missing tuple to its spill partition. Here we compute the hash
+            // explicitly (tuple_hash_table_hash, exactly what
+            // LookupTupleHashEntry does internally) then probe with
+            // create == false; a hit caches the per-group pointer, a miss spills.
+            let hash = {
+                let hashtable = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+                    .hashtable
+                    .as_mut()
+                    .expect("perhash->hashtable");
+                backend_executor_execGrouping_seams::tuple_hash_table_hash::call(
+                    &mut **hashtable,
+                    hashslot,
+                    estate,
+                )?
+            };
+
+            let aggstate_numtrans_gt0 = aggstate.numtrans != 0;
+            let next_index = aggstate.perhash.as_ref().expect("perhash")[setno as usize]
+                .pergroup_sidetable
+                .len();
+            let mut captured_index: Option<usize> = None;
+            let (found, _isnew) = {
+                let hashtable = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+                    .hashtable
+                    .as_mut()
+                    .expect("perhash->hashtable");
+                backend_executor_execGrouping_seams::lookup_tuple_hash_entry_hash::call(
+                    &mut **hashtable,
+                    hashslot,
+                    hash,
+                    false, // create == false (p_isnew == NULL)
+                    estate,
+                    &mut |opt| {
+                        if let Some((_entry, additional)) = opt {
+                            if aggstate_numtrans_gt0 {
+                                match pergroup_index_read(additional) {
+                                    Some(idx) => captured_index = Some(idx),
+                                    None => {
+                                        pergroup_index_write(additional, next_index);
+                                        captured_index = Some(next_index);
+                                    }
+                                }
+                            }
+                        }
+                    },
+                )?
+            };
+
+            if found {
+                // entry != NULL: isnew is always false here (create == false),
+                // so no initialize_hash_entry. pergroup[setno] =
+                // TupleHashEntryGetAdditional(entry).
+                if aggstate.numtrans == 0 {
+                    if let Some(hp) = aggstate.hash_pergroup.as_mut() {
+                        hp[setno as usize] = Some(mcx::PgVec::new_in(estate.es_query_cxt));
+                    }
+                } else {
+                    let index = captured_index
+                        .expect("lookup_hash_entries: callback set the side-table id");
+                    let setoff = hash_setoff_base + setno as usize;
+                    let pg = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+                        .pergroup_sidetable[index]
+                        .take()
+                        .expect("lookup_hash_entries: side-table slot for entry");
+                    if let Some(all) = aggstate.all_pergroups.as_mut() {
+                        all[setoff] = Some(pg);
+                    }
+                    aggstate.hash_cur_entry_index[setno as usize] = Some(index);
+                }
+            } else {
+                // entry == NULL: no room for a new group, spill the tuple.
+                //   HashAggSpill *spill = &aggstate->hash_spills[setno];
+                //   if (spill->partitions == NULL)
+                //       hashagg_spill_init(spill, hash_tapeset, 0,
+                //                          perhash->aggnode->numGroups,
+                //                          hashentrysize);
+                //   hashagg_spill_tuple(aggstate, spill, slot, hash);
+                //   pergroup[setno] = NULL;
+                let needs_init = aggstate
+                    .hash_spills
+                    .as_ref()
+                    .map(|s| s[setno as usize].partitions.is_none())
+                    .unwrap_or(true);
+
+                if needs_init {
+                    let num_groups = aggstate
+                        .perhash
+                        .as_ref()
+                        .and_then(|p| p.get(setno as usize))
+                        .and_then(|ph| ph.aggnode.as_ref())
+                        .map(|n| n.num_groups)
+                        .unwrap_or(0) as f64;
+                    let hashentrysize = aggstate.hashentrysize;
+                    let mcx = estate.es_query_cxt;
+                    // Borrow the tapeset and the target spill disjointly.
+                    let mut spills = aggstate
+                        .hash_spills
+                        .take()
+                        .expect("lookup_hash_entries: hash_spills present in spill mode");
+                    let tapeset = aggstate
+                        .hash_tapeset
+                        .as_mut()
+                        .expect("lookup_hash_entries: hash_tapeset present in spill mode");
+                    crate::spill::hashagg_spill_init(
+                        &mut spills[setno as usize],
+                        tapeset,
+                        0,
+                        num_groups,
+                        hashentrysize,
+                        mcx,
+                    )?;
+                    aggstate.hash_spills = Some(spills);
+                }
+
+                // hashagg_spill_tuple borrows aggstate (tapeset) + a single
+                // spill mutably; take the spills vec out for the call.
+                let mut spills = aggstate
+                    .hash_spills
+                    .take()
+                    .expect("lookup_hash_entries: hash_spills present in spill mode");
+                let res = crate::spill::hashagg_spill_tuple(
+                    aggstate,
+                    estate,
+                    &mut spills[setno as usize],
+                    outerslot,
+                    hash,
+                );
+                aggstate.hash_spills = Some(spills);
+                res?;
+
+                // pergroup[setno] = NULL;
+                if let Some(hp) = aggstate.hash_pergroup.as_mut() {
+                    hp[setno as usize] = None;
+                }
+            }
         }
     }
 
@@ -799,7 +928,7 @@ pub fn agg_refill_hash_table<'mcx>(
     }
 
     // batch = llast(hash_batches); hash_batches = list_delete_last(hash_batches);
-    let batch = {
+    let mut batch = {
         let batches = aggstate.hash_batches.as_mut().expect("hash_batches");
         let b = batches.pop().expect("non-empty");
         *b // HashAggBatch is Copy
@@ -857,19 +986,202 @@ pub fn agg_refill_hash_table<'mcx>(
     let mcx = estate.es_query_cxt;
     hashagg_recompile_expressions(aggstate, true, true, estate, mcx)?;
 
-    // The per-tuple refill loop reads spilled MinimalTuples
-    // (hashagg_batch_read), stores them with ExecStoreMinimalTuple, prepares
-    // the hash slot, looks them up by precomputed hash, and either advances the
-    // aggregates or re-spills; then closes the input tape, runs
-    // hashagg_spill_finish / hash_agg_update_metrics, clears hash_spill_mode,
-    // and resets the iterator. ExecStoreMinimalTuple is owned by the unported
-    // execTuples unit (no seam; slot value arrays absent from the shared
-    // vocabulary). Loud panic until that surface lands.
     let _ = (mem_limit, ngroups_limit);
-    panic!(
-        "backend-executor-execTuples: ExecStoreMinimalTuple for spilled batch not yet \
-         ported (agg_refill_hash_table)"
-    );
+
+    let setno = batch.setno;
+    let hash_setoff_base = hash_setoff_base(aggstate);
+
+    // A local HashAggSpill for any re-spilling this batch triggers; created
+    // lazily on first miss (C: spill_initialized).
+    let mut spill: Option<crate::aggstate::HashAggSpill<'mcx>> = None;
+
+    let spillslot = aggstate
+        .hash_spill_rslot
+        .expect("agg_refill_hash_table: hash_spill_rslot");
+
+    let tmpcontext = aggstate.tmpcontext.expect("tmpcontext");
+
+    loop {
+        // CHECK_FOR_INTERRUPTS();
+        backend_tcop_postgres_seams::check_for_interrupts::call()?;
+
+        // tuple = hashagg_batch_read(batch, &hash);  if (tuple == NULL) break;
+        let read = {
+            let tapeset = aggstate
+                .hash_tapeset
+                .as_mut()
+                .expect("agg_refill_hash_table: hash_tapeset");
+            crate::spill::hashagg_batch_read(tapeset, &mut batch, mcx)?
+        };
+        let (blob, hash) = match read {
+            Some(t) => t,
+            None => break,
+        };
+
+        // ExecStoreMinimalTuple(tuple, spillslot, true);
+        let mtup = backend_access_common_heaptuple::flat::minimal_tuple_from_flat(mcx, &blob)
+            .map_err(crate::spill::flat_err)?;
+        backend_executor_execTuples_seams::exec_store_minimal_tuple::call(
+            estate, mtup, spillslot, true,
+        )?;
+
+        // aggstate->tmpcontext->ecxt_outertuple = spillslot;
+        estate.ecxt_mut(tmpcontext).ecxt_outertuple = Some(spillslot);
+
+        // prepare_hash_slot(perhash, outerslot, hashslot);
+        let hashslot = aggstate.perhash.as_ref().expect("perhash")[setno as usize]
+            .hashslot
+            .expect("perhash->hashslot");
+        prepare_hash_slot(aggstate, setno, spillslot, hashslot, estate)?;
+
+        // p_isnew = aggstate->hash_spill_mode ? NULL : &isnew;
+        let want_new = !aggstate.hash_spill_mode;
+
+        // entry = LookupTupleHashEntryHash(hashtable, hashslot, p_isnew, hash);
+        aggstate.hash_cur_entry_index[setno as usize] = None;
+        let next_index = aggstate.perhash.as_ref().expect("perhash")[setno as usize]
+            .pergroup_sidetable
+            .len();
+        let aggstate_numtrans_gt0 = aggstate.numtrans != 0;
+        let mut captured_index: Option<usize> = None;
+        // entry = LookupTupleHashEntryHash(hashtable, hashslot, p_isnew, hash);
+        // Always use the precomputed tape `hash` (C's LookupTupleHashEntryHash):
+        // the spill partitioning routed equal keys to the same partition by that
+        // exact hash, so the refill MUST insert/probe by it (recomputing the hash
+        // would risk a different value and split a group). `create == want_new`
+        // (p_isnew == NULL in spill mode); the seam returns (found, isnew).
+        let (found, isnew) = {
+            let hashtable = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+                .hashtable
+                .as_mut()
+                .expect("perhash->hashtable");
+            backend_executor_execGrouping_seams::lookup_tuple_hash_entry_hash::call(
+                &mut **hashtable,
+                hashslot,
+                hash,
+                want_new,
+                estate,
+                &mut |opt| {
+                    if let Some((_entry, additional)) = opt {
+                        if aggstate_numtrans_gt0 {
+                            match pergroup_index_read(additional) {
+                                Some(idx) => captured_index = Some(idx),
+                                None => {
+                                    pergroup_index_write(additional, next_index);
+                                    captured_index = Some(next_index);
+                                }
+                            }
+                        }
+                    }
+                },
+            )?
+        };
+
+        if found {
+            // if (isnew) initialize_hash_entry(...);
+            // aggstate->hash_pergroup[setno] = TupleHashEntryGetAdditional(entry);
+            // advance_aggregates(aggstate);
+            if aggstate.numtrans == 0 {
+                if isnew {
+                    aggstate.hash_ngroups_current += 1;
+                    crate::spill::hash_agg_check_limits(aggstate, estate, mcx)?;
+                }
+                if let Some(hp) = aggstate.hash_pergroup.as_mut() {
+                    hp[setno as usize] = Some(mcx::PgVec::new_in(mcx));
+                }
+            } else {
+                let index = captured_index
+                    .expect("agg_refill_hash_table: callback set the side-table id");
+                if isnew {
+                    initialize_hash_entry(aggstate, setno, index, estate)?;
+                }
+                let setoff = hash_setoff_base + setno as usize;
+                let pg = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+                    .pergroup_sidetable[index]
+                    .take()
+                    .expect("agg_refill_hash_table: side-table slot for entry");
+                if let Some(all) = aggstate.all_pergroups.as_mut() {
+                    all[setoff] = Some(pg);
+                }
+                aggstate.hash_cur_entry_index[setno as usize] = Some(index);
+            }
+
+            crate::transition::advance_aggregates(aggstate, estate)?;
+            store_hash_pergroups_back(aggstate);
+        } else {
+            // no memory for a new group, spill
+            if spill.is_none() {
+                // hashagg_spill_init(&spill, tapeset, batch->used_bits,
+                //                    batch->input_card, aggstate->hashentrysize);
+                let mut s = crate::aggstate::HashAggSpill::default();
+                let hashentrysize = aggstate.hashentrysize;
+                let used_bits = batch.used_bits;
+                let input_card = batch.input_card;
+                let tapeset = aggstate
+                    .hash_tapeset
+                    .as_mut()
+                    .expect("agg_refill_hash_table: hash_tapeset");
+                crate::spill::hashagg_spill_init(
+                    &mut s, tapeset, used_bits, input_card, hashentrysize, mcx,
+                )?;
+                spill = Some(s);
+            }
+
+            let s = spill.as_mut().expect("spill just initialized");
+            crate::spill::hashagg_spill_tuple(aggstate, estate, s, spillslot, hash)?;
+
+            if let Some(hp) = aggstate.hash_pergroup.as_mut() {
+                hp[setno as usize] = None;
+            }
+        }
+
+        // ResetExprContext(aggstate->tmpcontext);
+        reset_tmpcontext(aggstate, estate)?;
+    }
+
+    // LogicalTapeClose(batch->input_tape);
+    if let Some(tape) = batch.input_tape {
+        let tapeset = aggstate
+            .hash_tapeset
+            .as_mut()
+            .expect("agg_refill_hash_table: hash_tapeset for close");
+        backend_utils_sort_storage_seams::logical_tape_close::call(tapeset, tape);
+    }
+
+    // change back to phase 0
+    aggstate.current_phase = 0;
+    aggstate.phase = aggstate.current_phase;
+
+    if let Some(mut s) = spill {
+        // hashagg_spill_finish(aggstate, &spill, batch->setno);
+        let np = s.npartitions;
+        crate::spill::hashagg_spill_finish(aggstate, &mut s, setno, mcx)?;
+        // hash_agg_update_metrics(aggstate, true, spill.npartitions);
+        crate::spill::hash_agg_update_metrics(aggstate, estate, true, np)?;
+    } else {
+        // hash_agg_update_metrics(aggstate, true, 0);
+        crate::spill::hash_agg_update_metrics(aggstate, estate, true, 0)?;
+    }
+
+    aggstate.hash_spill_mode = false;
+
+    // prepare to walk the first hash table
+    // select_current_set(aggstate, batch->setno, true);
+    crate::node_lifecycle::select_current_set(aggstate, setno, true);
+
+    // ResetTupleHashIterator(perhash[batch->setno].hashtable, &perhash[...].hashiter);
+    let iter = {
+        let table = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+            .hashtable
+            .as_mut()
+            .expect("perhash->hashtable");
+        backend_executor_execGrouping_seams::init_tuple_hash_iterator::call(&mut **table)
+    };
+    aggstate.perhash.as_mut().expect("perhash")[setno as usize].hashiter = iter;
+
+    // pfree(batch); — `batch` is a Copy struct on the stack; nothing to free.
+
+    Ok(true)
 }
 
 /// `agg_retrieve_hash_table(aggstate)` — the hashed-grouping driver: emit

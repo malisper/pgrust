@@ -10284,6 +10284,7 @@ dependencies = [
 name = "backend-executor-nodeAgg"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-transam-parallel",
  "backend-catalog-aclchk-seams",
  "backend-catalog-objectaccess-seams",
@@ -10312,6 +10313,7 @@ dependencies = [
  "backend-utils-init-small-seams",
  "backend-utils-sort-storage-seams",
  "backend-utils-sort-tuplesort-seams",
+ "common-hashfn",
  "mcx",
  "seam-core",
  "types-acl",

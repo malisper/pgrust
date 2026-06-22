@@ -37,6 +37,8 @@ types-catalog = { path = "../types-catalog" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
 backend-lib-hyperloglog = { path = "../backend-lib-hyperloglog" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+common-hashfn = { path = "../common-hashfn" }
 backend-executor-nodeHash-seams = { path = "../backend-executor-nodeHash-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }

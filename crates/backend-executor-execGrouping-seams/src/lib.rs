@@ -116,9 +116,11 @@ seam_core::seam!(
     /// `LookupTupleHashEntryHash(hashtable, slot, isnew, hash)`
     /// (execGrouping.c): like [`lookup_tuple_hash_entry`] but with a
     /// caller-supplied precomputed `hash`. When `create` is false (the C passes
-    /// `isnew == NULL`), no new entry is made and a miss yields `false` with
-    /// the callback invoked `None`; otherwise an entry is found/created,
-    /// delivered to `f`, and `isnew` is returned.
+    /// `isnew == NULL`), no new entry is made and a miss yields `(false, false)`
+    /// with the callback invoked `None`; otherwise an entry is found/created and
+    /// delivered to `f`. Returns `(found, isnew)`: `found` is whether an entry
+    /// was delivered (found-or-created), `isnew` is `true` only for a
+    /// freshly-created entry (always `false` for the no-create path).
     pub fn lookup_tuple_hash_entry_hash<'mcx>(
         hashtable: &mut TupleHashTable<'mcx>,
         slot: SlotId,
@@ -126,7 +128,7 @@ seam_core::seam!(
         create: bool,
         estate: &mut EStateData<'mcx>,
         f: &mut dyn FnMut(Option<(&mut TupleHashEntryData<'mcx>, &mut [u8])>),
-    ) -> PgResult<bool>
+    ) -> PgResult<(bool, bool)>
 );
 
 seam_core::seam!(

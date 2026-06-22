@@ -557,15 +557,19 @@ pub fn lookup_tuple_hash_entry_hash<'mcx>(
     create: bool,
     estate: &mut EStateData<'mcx>,
     f: &mut dyn FnMut(Option<(&mut TupleHashEntryData<'mcx>, &mut [u8])>),
-) -> PgResult<bool> {
+) -> PgResult<(bool, bool)> {
     ensure_materialized(hashtable, estate)?;
     set_input_slot(hashtable, slot);
 
     let mut isnew = false;
     if create {
-        lookup_internal(hashtable, Some(&mut isnew), hash, slot, estate, &mut |e, a| {
+        let delivered = lookup_internal(hashtable, Some(&mut isnew), hash, slot, estate, &mut |e, a| {
             f(Some((e, a)));
         })?;
+        if !delivered {
+            f(None);
+        }
+        Ok((delivered, isnew))
     } else {
         let hit = lookup_internal(hashtable, None, hash, slot, estate, &mut |e, a| {
             f(Some((e, a)));
@@ -573,8 +577,8 @@ pub fn lookup_tuple_hash_entry_hash<'mcx>(
         if !hit {
             f(None);
         }
+        Ok((hit, false))
     }
-    Ok(isnew)
 }
 
 /// `FindTupleHashEntry(hashtable, slot, eqcomp, hashexpr)` (execGrouping.c) —
