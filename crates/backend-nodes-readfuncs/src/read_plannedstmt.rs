@@ -16,6 +16,7 @@
 //! mirroring the C dummy whose corresponding fields are read into a `PlannedStmt`
 //! that the worker likewise never inspects.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
@@ -23,13 +24,17 @@ use types_error::PgResult;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::{CmdType, Node};
 use types_nodes::parsenodes::{RTEPermissionInfo, RangeTblEntry};
+use types_nodes::partprune_carrier::{
+    PartitionPruneCombineOp, PartitionPruneInfo, PartitionPruneStep, PartitionPruneStepCombine,
+    PartitionPruneStepOp, PartitionedRelPruneInfo, RawBms,
+};
 
 use backend_nodes_core::read;
 
 use crate::{
-    elog_error, next_token, read_bitmapset_opt_field, read_bool_field, read_enum_field,
-    read_int64_field, read_int_field, read_location_field, read_node_field, read_node_list_field,
-    tok_str,
+    elog_error, next_token, read_bitmapset_field, read_bitmapset_opt_field, read_bool_field,
+    read_enum_field, read_int64_field, read_int_field, read_location_field, read_node_field,
+    read_node_list_field, tok_str,
 };
 
 /// `string_to_planned_stmt(text)` — the seam body. Install-time entry: point the
@@ -107,18 +112,10 @@ fn read_planned_stmt_body<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PlannedStmt<'mcx>> {
     // :planTree (Plan node)
     let plan_tree: Option<PgBox<'mcx, Node<'mcx>>> = read_node_field(mcx)?;
 
-    // :partPruneInfos — the writer emits `<>` (NIL) for the worker-shipping
-    // cases; the carrier types it opaque with no reader, so consume the `<>`
-    // token (skip label, read value) and keep the empty list.
-    {
-        let _label = next_token()?;
-        let v = next_token()?;
-        if !v.bytes.is_empty() {
-            return Err(elog_error(
-                "PlannedStmt partPruneInfos round-trip expects NIL (<>) from the worker dummy",
-            ));
-        }
-    }
+    // :partPruneInfos — `<>` (NIL) for non-partitioned plans, else a `(...)`
+    // list of `PARTITIONPRUNEINFO` carriers the worker reconstructs so a parallel
+    // Append/MergeAppend can index `es_part_prune_infos` by `part_prune_index`.
+    let part_prune_infos = read_part_prune_infos(mcx)?;
 
     // :rtable (List of RANGETBLENTRY)
     let rtable = read_rte_pgvec_opt(mcx)?;
@@ -195,7 +192,7 @@ fn read_planned_stmt_body<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PlannedStmt<'mcx>> {
         transientPlan: transient_plan,
         dependsOnRole: depends_on_role,
         invalItems: None,
-        partPruneInfos: Vec::new(),
+        partPruneInfos: part_prune_infos,
         appendRelations: Vec::new(),
     })
 }
@@ -347,4 +344,277 @@ fn read_oid_list_pgvec_opt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgVec<'mcx, 
             Ok(Some(out))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// PartitionPruneInfo carrier readers — mirror the generated
+// `_readPartitionPruneInfo` family (readfuncs.funcs.c:5088). The serializer in
+// outfuncs::serialize_plan writes each as a framed `{PARTITIONPRUNEINFO ...}`
+// node body; these hand-parse them back into the plan-data carrier (Exprs read
+// through the registered `node_read` Expr path).
+// ---------------------------------------------------------------------------
+
+/// `:partPruneInfos` — a `List *` of `PartitionPruneInfo`. `<>`/NIL is empty.
+fn read_part_prune_infos<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Vec<PartitionPruneInfo<'mcx>>> {
+    let _label = next_token()?; // skip :partPruneInfos
+    let open = next_token()?;
+    if open.bytes.is_empty() {
+        return Ok(Vec::new()); // `<>` — C NIL
+    }
+    if open.bytes != b"(" {
+        return Err(elog_error("expected '(' for partPruneInfos list"));
+    }
+    let mut out = Vec::new();
+    loop {
+        let t = next_token()?;
+        if t.bytes == b")" {
+            break;
+        }
+        if t.bytes != b"{" {
+            return Err(elog_error("expected '{' for PartitionPruneInfo node"));
+        }
+        out.push(read_partition_prune_info_body(mcx)?);
+    }
+    Ok(out)
+}
+
+/// Read a `RawBms` from the current cursor (the `(b m1 m2 ...)` form). `None`
+/// for the empty/NULL set.
+fn read_raw_bms_field() -> PgResult<RawBms> {
+    let er = read_bitmapset_field()?;
+    if er.words.iter().all(|w| *w == 0) {
+        Ok(None)
+    } else {
+        Ok(Some(er.words))
+    }
+}
+
+/// Expect the next token to equal `lit` (a structural/type token).
+fn expect_token(lit: &[u8]) -> PgResult<()> {
+    let t = next_token()?;
+    if t.bytes != lit {
+        return Err(elog_error(alloc::format!(
+            "expected token {:?} in PartitionPruneInfo, got {:?}",
+            String::from_utf8_lossy(lit),
+            tok_str(&t)
+        )));
+    }
+    Ok(())
+}
+
+/// `_readPartitionPruneInfo` — the `{` is already consumed by the caller.
+fn read_partition_prune_info_body<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<PartitionPruneInfo<'mcx>> {
+    expect_token(b"PARTITIONPRUNEINFO")?;
+    // READ_BITMAPSET_FIELD(relids);
+    let relids = read_raw_bms_field()?;
+    // READ_NODE_FIELD(prune_infos);  — List of List of PartitionedRelPruneInfo.
+    let prune_infos = read_prune_infos_field(mcx)?;
+    // READ_BITMAPSET_FIELD(other_subplans);
+    let other_subplans = read_raw_bms_field()?;
+    expect_token(b"}")?;
+    Ok(PartitionPruneInfo {
+        relids,
+        prune_infos,
+        other_subplans,
+    })
+}
+
+/// `:prune_infos` — `List *` of `List *` of `PartitionedRelPruneInfo`.
+fn read_prune_infos_field<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Vec<Vec<PartitionedRelPruneInfo<'mcx>>>> {
+    let _label = next_token()?; // skip :prune_infos
+    let open = next_token()?;
+    if open.bytes.is_empty() {
+        return Ok(Vec::new()); // `<>`
+    }
+    if open.bytes != b"(" {
+        return Err(elog_error("expected '(' for prune_infos list"));
+    }
+    let mut outer = Vec::new();
+    loop {
+        let t = next_token()?;
+        if t.bytes == b")" {
+            break;
+        }
+        // Inner `List *` of PartitionedRelPruneInfo: t is its opening `(`.
+        if t.bytes != b"(" {
+            return Err(elog_error("expected '(' for inner prune_infos list"));
+        }
+        let mut inner = Vec::new();
+        loop {
+            let it = next_token()?;
+            if it.bytes == b")" {
+                break;
+            }
+            if it.bytes != b"{" {
+                return Err(elog_error(
+                    "expected '{' for PartitionedRelPruneInfo node",
+                ));
+            }
+            inner.push(read_partitioned_rel_prune_info_body(mcx)?);
+        }
+        outer.push(inner);
+    }
+    Ok(outer)
+}
+
+/// `_readPartitionedRelPruneInfo` — the `{` is already consumed.
+fn read_partitioned_rel_prune_info_body<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<PartitionedRelPruneInfo<'mcx>> {
+    expect_token(b"PARTITIONEDRELPRUNEINFO")?;
+    // READ_UINT_FIELD(rtindex);
+    let rtindex = crate::read_uint_field()?;
+    // READ_BITMAPSET_FIELD(present_parts);
+    let present_parts = read_raw_bms_field()?;
+    // READ_INT_FIELD(nparts);
+    let nparts = read_int_field()?;
+    // READ_INT_ARRAY(subplan_map, nparts);
+    let subplan_map = read_i32_array_field()?;
+    // READ_INT_ARRAY(subpart_map, nparts);
+    let subpart_map = read_i32_array_field()?;
+    // READ_INT_ARRAY(leafpart_rti_map, nparts);
+    let leafpart_rti_map = read_i32_array_field()?;
+    // READ_OID_ARRAY(relid_map, nparts);
+    let relid_map = read_oid_array_field()?;
+    // READ_NODE_FIELD(initial_pruning_steps);
+    let initial_pruning_steps = read_prune_steps_field(mcx)?;
+    // READ_NODE_FIELD(exec_pruning_steps);
+    let exec_pruning_steps = read_prune_steps_field(mcx)?;
+    // READ_BITMAPSET_FIELD(execparamids);
+    let execparamids = read_raw_bms_field()?;
+    expect_token(b"}")?;
+    Ok(PartitionedRelPruneInfo {
+        rtindex,
+        present_parts,
+        nparts,
+        subplan_map,
+        subpart_map,
+        leafpart_rti_map,
+        relid_map,
+        initial_pruning_steps,
+        exec_pruning_steps,
+        execparamids,
+    })
+}
+
+/// `:fld (i ...)` / `<>` → `Vec<i32>` (the `WRITE_INT_ARRAY` round-trip).
+fn read_i32_array_field() -> PgResult<Vec<i32>> {
+    Ok(read_scalar_list_opt(b'i')?
+        .map(|v| v.into_iter().map(|x| x as i32).collect())
+        .unwrap_or_default())
+}
+
+/// `:fld (o ...)` / `<>` → `Vec<Oid>` (the `WRITE_OID_ARRAY` round-trip).
+fn read_oid_array_field() -> PgResult<Vec<u32>> {
+    Ok(read_scalar_list_opt(b'o')?
+        .map(|v| v.into_iter().map(|x| x as u32).collect())
+        .unwrap_or_default())
+}
+
+/// `:fld` — `List *` of `PartitionPruneStep` (Op/Combine). `<>`/NIL is empty.
+fn read_prune_steps_field<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Vec<PartitionPruneStep<'mcx>>> {
+    let _label = next_token()?; // skip :fldname
+    let open = next_token()?;
+    if open.bytes.is_empty() {
+        return Ok(Vec::new()); // `<>`
+    }
+    if open.bytes != b"(" {
+        return Err(elog_error("expected '(' for pruning_steps list"));
+    }
+    let mut out = Vec::new();
+    loop {
+        let t = next_token()?;
+        if t.bytes == b")" {
+            break;
+        }
+        if t.bytes != b"{" {
+            return Err(elog_error("expected '{' for PartitionPruneStep node"));
+        }
+        out.push(read_partition_prune_step_body(mcx)?);
+    }
+    Ok(out)
+}
+
+/// `_readPartitionPruneStepOp` / `_readPartitionPruneStepCombine` — the `{` is
+/// already consumed; dispatch on the type token.
+fn read_partition_prune_step_body<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<PartitionPruneStep<'mcx>> {
+    let tag = next_token()?;
+    if tag.bytes == b"PARTITIONPRUNESTEPOP" {
+        // READ_INT_FIELD(step.step_id);
+        let step_id = read_int_field()?;
+        // READ_INT_FIELD(opstrategy);
+        let opstrategy = read_int_field()?;
+        // READ_NODE_FIELD(exprs);  — List of Expr.
+        let exprs = read_expr_list_field(mcx)?;
+        // READ_NODE_FIELD(cmpfns);  — OidList.
+        let cmpfns = read_oid_array_field()?;
+        // READ_BITMAPSET_FIELD(nullkeys);
+        let nullkeys = read_raw_bms_field()?;
+        expect_token(b"}")?;
+        Ok(PartitionPruneStep::Op(PartitionPruneStepOp {
+            step_id,
+            opstrategy,
+            exprs,
+            cmpfns,
+            nullkeys,
+        }))
+    } else if tag.bytes == b"PARTITIONPRUNESTEPCOMBINE" {
+        // READ_INT_FIELD(step.step_id);
+        let step_id = read_int_field()?;
+        // READ_ENUM_FIELD(combineOp, PartitionPruneCombineOp);
+        let combine_op = match read_enum_field()? {
+            0 => PartitionPruneCombineOp::Union,
+            1 => PartitionPruneCombineOp::Intersect,
+            other => {
+                return Err(elog_error(alloc::format!(
+                    "unrecognized PartitionPruneCombineOp {other}"
+                )))
+            }
+        };
+        // READ_NODE_FIELD(source_stepids);  — IntList.
+        let source_stepids = read_i32_array_field()?;
+        expect_token(b"}")?;
+        Ok(PartitionPruneStep::Combine(PartitionPruneStepCombine {
+            step_id,
+            combine_op,
+            source_stepids,
+        }))
+    } else {
+        Err(elog_error(alloc::format!(
+            "unrecognized PartitionPruneStep type {:?}",
+            tok_str(&tag)
+        )))
+    }
+}
+
+/// `:exprs (...)` — `List *` of `Expr`, read through the registered node path
+/// and unwrapped from the `Node::Expr` cast. `<>`/NIL is empty.
+fn read_expr_list_field<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<Vec<types_nodes::primnodes::Expr<'mcx>>> {
+    let items = read_node_list_field(mcx)?;
+    let mut out = Vec::with_capacity(items.len());
+    for it in items {
+        let n = PgBox::into_inner(it);
+        let tag = n.node_tag();
+        match n.into_expr() {
+            Some(e) => out.push(e),
+            None => {
+                return Err(elog_error(alloc::format!(
+                    "expected Expr in pruning-step exprs, got {tag:?}"
+                )))
+            }
+        }
+    }
+    Ok(out)
 }
