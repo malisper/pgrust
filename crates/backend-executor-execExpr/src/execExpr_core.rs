@@ -2866,6 +2866,14 @@ pub fn exec_build_update_projection_impl<'mcx>(
     let state = &mut proj_info.pi_state;
     // if (evalTargetList) state->expr = (Expr *) targetList; else state->expr = NULL;
     state.ext_params = 0;
+    // Stamp the non-owning EState back-link (C reaches the EState through
+    // `state->parent->state`; a parent IS present at this entry,
+    // `ExecBuildUpdateProjection(..., &mtstate->ps)`). A MULTIEXPR SubPlan in
+    // the UPDATE SET tlist (e.g. ON CONFLICT DO UPDATE SET (b,a) = (SELECT ...))
+    // is hoisted to a setup step and compiled here; its SubPlan-init needs
+    // es_subplanstates synchronously, so without this it would hit the
+    // "SubPlan found with no parent plan" guard.
+    state.es_link = Some(EStateLink::from_ref(estate));
     // state->resultslot = slot; — the UPDATE projection's output slot.
     state.resultslot = slot;
     ensure_result_arena(mcx, state)?;
