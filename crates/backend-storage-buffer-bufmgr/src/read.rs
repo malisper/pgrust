@@ -212,10 +212,12 @@ struct ReadBuffersOperation {
     /// (actual blocks read + status), valid once an IO has been issued+completed.
     io_result: i32,
     io_status: u32,
-    /// `IOContextForStrategy(strategy)` collapsed to a `has_strategy` bool (the
-    /// ring kind is not threaded through this core; a present strategy maps to
-    /// IOCONTEXT_NORMAL, the same collapse as F2 `get_victim_buffer`).
-    has_strategy: bool,
+    /// `IOContextForStrategy(operation->strategy)` (bufmgr.c:1641/1792) — the
+    /// pg_stat_io context this read is accounted under. `IOCONTEXT_NORMAL` for the
+    /// default (no strategy ring), or the strategy ring's context
+    /// (BULKREAD/BULKWRITE/VACUUM) threaded from the caller. The ring object
+    /// itself is still collapsed, but its KIND now reaches the IO-stats.
+    io_context: IOContext,
 }
 
 /// A cleared / invalid AIO wait reference (`pgaio_wref_clear`):
@@ -241,7 +243,13 @@ impl BufferManager {
     /// [`Self::ReadBufferExtended`] reading the main fork with `RBM_NORMAL` and
     /// the default (no) strategy.
     pub fn ReadBuffer(&self, rel: &Relation, block_num: BlockNumber) -> PgResult<Buffer> {
-        self.ReadBufferExtended(rel, MAIN_FORKNUM, block_num, ReadBufferMode::Normal, false)
+        self.ReadBufferExtended(
+            rel,
+            MAIN_FORKNUM,
+            block_num,
+            ReadBufferMode::Normal,
+            IOContext::IOCONTEXT_NORMAL,
+        )
     }
 
     /// `ReadBufferExtended(reln, forkNum, blockNum, mode, strategy)`
@@ -253,7 +261,7 @@ impl BufferManager {
         fork_num: ForkNumber,
         block_num: BlockNumber,
         mode: ReadBufferMode,
-        has_strategy: bool,
+        io_context: IOContext,
     ) -> PgResult<Buffer> {
         // Reject attempts to read non-local temporary relations directly. We
         // would be likely to get wrong data since we have no visibility into the
@@ -280,7 +288,7 @@ impl BufferManager {
             fork_num,
             block_num,
             mode,
-            has_strategy,
+            io_context,
             Some(rel),
         )
     }
@@ -295,7 +303,7 @@ impl BufferManager {
         forknum: ForkNumber,
         blocknum: BlockNumber,
         mode: ReadBufferMode,
-        has_strategy: bool,
+        io_context: IOContext,
     ) -> PgResult<Buffer> {
         let smgr_persistence = if permanent {
             RELPERSISTENCE_PERMANENT
@@ -312,7 +320,7 @@ impl BufferManager {
             forknum,
             blocknum,
             mode,
-            has_strategy,
+            io_context,
             None,
         )
     }
@@ -549,7 +557,7 @@ impl BufferManager {
         persistence: u8,
         fork_num: ForkNumber,
         block_num: BlockNumber,
-        has_strategy: bool,
+        io_context: IOContext,
     ) -> PgResult<(Buffer, bool)> {
         debug_assert_ne!(block_num, P_NEW);
 
@@ -567,13 +575,10 @@ impl BufferManager {
             return sb::local_buffer_alloc::call(rlocator, fork_num, block_num);
         }
 
-        // BufferAlloc finds or allocates the buffer in the shared pool. The
-        // per-relation pgstat read/hit tallies + IOOP_HIT count ride the (still
-        // unported) pgstat subsystem; deferred (instrumentation only), the same
-        // systemic deferral as F2.
+        // BufferAlloc finds or allocates the buffer in the shared pool, counting
+        // IOOP_EVICT/REUSE in `io_context` for any victim eviction.
         let (buf_id, found) =
-            self.buffer_alloc(rlocator, persistence, fork_num, block_num, has_strategy)?;
-        let _ = has_strategy;
+            self.buffer_alloc(rlocator, persistence, fork_num, block_num, io_context)?;
         Ok((buf_id_to_buffer(buf_id as i32), found))
     }
 
@@ -597,7 +602,7 @@ impl BufferManager {
         fork_num: ForkNumber,
         block_num: BlockNumber,
         mode: ReadBufferMode,
-        has_strategy: bool,
+        io_context: IOContext,
         rel: Option<&Relation>,
     ) -> PgResult<Buffer> {
         // Backward compatibility path: most code should use ExtendBufferedRel()
@@ -612,7 +617,7 @@ impl BufferManager {
             if mode == ReadBufferMode::ZeroAndLock || mode == ReadBufferMode::ZeroAndCleanupLock {
                 flags |= EB_LOCK_FIRST;
             }
-            return self.ExtendBufferedRel(rel, fork_num, has_strategy, flags);
+            return self.ExtendBufferedRel(rel, fork_num, io_context, flags);
         }
 
         let rlocator = rlocator.ok_or_else(|| {
@@ -622,7 +627,7 @@ impl BufferManager {
         // RBM_ZERO_AND_{LOCK,CLEANUP_LOCK}: pin, then zero+lock (bufmgr.c:1226).
         if mode == ReadBufferMode::ZeroAndCleanupLock || mode == ReadBufferMode::ZeroAndLock {
             let (buffer, found) =
-                self.PinBufferForBlock(rlocator, persistence, fork_num, block_num, has_strategy)?;
+                self.PinBufferForBlock(rlocator, persistence, fork_num, block_num, io_context)?;
             self.ZeroAndLockBuffer(buffer, mode, found)?;
             return Ok(buffer);
         }
@@ -636,13 +641,12 @@ impl BufferManager {
         }
 
         let (buffer, found) =
-            self.PinBufferForBlock(rlocator, persistence, fork_num, block_num, has_strategy)?;
+            self.PinBufferForBlock(rlocator, persistence, fork_num, block_num, io_context)?;
 
-        // `IOContextForStrategy(strategy)` collapsed: with no buffer-access
-        // strategy the context is IOCONTEXT_NORMAL (the only case threaded here;
-        // the BULKREAD/BULKWRITE/VACUUM ring kinds are not yet carried, so a
-        // present strategy also maps to NORMAL — a known residual).
-        let io_context = IOContext::IOCONTEXT_NORMAL;
+        // `io_context = IOContextForStrategy(strategy)` for a relation read
+        // (bufmgr.c:1647) — threaded from the caller's strategy ring kind (or
+        // IOCONTEXT_NORMAL when no strategy). For a temp relation the read-miss
+        // path below re-accounts under IOOBJECT_TEMP_RELATION/NORMAL instead.
 
         // ReadBuffer_common per-relation + IO-object accounting (bufmgr.c:1160).
         // The "read" counter is bumped on every relcache-relation block request
@@ -850,7 +854,7 @@ impl BufferManager {
         block_num: BlockNumber,
         nblocks: &mut i32,
         flags: u32,
-        has_strategy: bool,
+        io_context: IOContext,
     ) -> PgResult<(ReadOp, bool)> {
         let bmr = BmrRead::new(rel)?;
         let mut operation = ReadBuffersOperation {
@@ -864,7 +868,7 @@ impl BufferManager {
             io_wref: wref_invalid(),
             io_result: 0,
             io_status: PGAIO_RS_UNKNOWN,
-            has_strategy,
+            io_context,
         };
         let did_start_io = self.start_read_buffers_impl(
             &mut operation,
@@ -886,7 +890,7 @@ impl BufferManager {
         buffer: &mut Buffer,
         blocknum: BlockNumber,
         flags: u32,
-        has_strategy: bool,
+        io_context: IOContext,
     ) -> PgResult<(ReadOp, bool)> {
         let bmr = BmrRead::new(rel)?;
         let mut operation = ReadBuffersOperation {
@@ -900,7 +904,7 @@ impl BufferManager {
             io_wref: wref_invalid(),
             io_result: 0,
             io_status: PGAIO_RS_UNKNOWN,
-            has_strategy,
+            io_context,
         };
         let mut nblocks = 1;
         let mut slice = [INVALID_BUFFER];
@@ -942,7 +946,7 @@ impl BufferManager {
         let rlocator = operation.rlocator;
         let fork_num = operation.forknum;
         let persistence = operation.persistence;
-        let has_strategy = operation.has_strategy;
+        let io_context = operation.io_context;
 
         let mut i = 0;
         while i < actual_nblocks {
@@ -975,7 +979,7 @@ impl BufferManager {
                     persistence,
                     fork_num,
                     block_num.wrapping_add(i as u32),
-                    has_strategy,
+                    io_context,
                 )?;
                 buffers[i as usize] = buf;
                 found = f;
@@ -1356,9 +1360,10 @@ impl BufferManager {
         let zero_page = [0u8; BLCKSZ as usize];
         smgr::smgrextend(dst_key, fork_num, nblocks - 1, &zero_page, true)?;
 
-        // This is a bulk operation, so use buffer access strategies. In this
-        // model the strategy ring is collapsed to a `has_strategy` bool, so both
-        // the bulk-read (source) and bulk-write (destination) sides pass `true`.
+        // This is a bulk operation, so use buffer access strategies: the source
+        // reads use a BAS_BULKREAD ring (IOCONTEXT_BULKREAD), the destination
+        // writes a BAS_BULKWRITE ring (IOCONTEXT_BULKWRITE). The ring objects are
+        // collapsed in this core, but their context KINDs reach pg_stat_io.
         // Iterate over each block of the source relation file.
         for blkno in 0..nblocks {
             // CHECK_FOR_INTERRUPTS().
@@ -1371,7 +1376,7 @@ impl BufferManager {
                 fork_num,
                 blkno,
                 ReadBufferMode::Normal,
-                true,
+                IOContext::IOCONTEXT_BULKREAD,
             )?;
             self.LockBuffer(src_buf, BUFFER_LOCK_SHARE)?;
 
@@ -1383,7 +1388,7 @@ impl BufferManager {
                 fork_num,
                 blkno,
                 ReadBufferMode::ZeroAndLock,
-                true,
+                IOContext::IOCONTEXT_BULKWRITE,
             )?;
 
             // START_CRIT_SECTION().

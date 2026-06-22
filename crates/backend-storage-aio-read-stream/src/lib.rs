@@ -184,7 +184,9 @@ pub struct ReadStream<'mcx> {
     /// call (bufmgr's StartReadBuffers takes them per-call).
     rel: &'mcx Relation<'mcx>,
     forknum: ForkNumber,
-    has_strategy: bool,
+    /// `IOContextForStrategy(stream->ios[].op.strategy)` — the pg_stat_io context
+    /// this stream's reads are accounted under (IOCONTEXT_NORMAL when no ring).
+    io_context: types_storage::buf::IOContext,
 }
 
 impl<'mcx> ReadStream<'mcx> {
@@ -327,7 +329,7 @@ impl<'mcx> ReadStream<'mcx> {
                 self.pending_read_blocknum,
                 &mut nblocks_io,
                 flags,
-                self.has_strategy,
+                self.io_context,
             )?
         };
         nblocks = nblocks_io;
@@ -519,7 +521,7 @@ impl<'mcx> ReadStream<'mcx> {
                     &mut slot,
                     next_blocknum,
                     flags,
-                    self.has_strategy,
+                    self.io_context,
                 )?;
                 self.buffers[obi as usize] = slot;
 
@@ -671,11 +673,13 @@ impl<'mcx> ReadStream<'mcx> {
     /// that would be used. Transitional support for callers that do I/O
     /// themselves.
     pub fn read_stream_next_block(&mut self) -> (BlockNumber, bool) {
-        // *strategy = stream->ios[0].op.strategy; here the strategy is the
-        // stream-wide has_strategy flag (the op carries it from begin time).
-        let strategy = self.has_strategy;
+        // *strategy = stream->ios[0].op.strategy; the op carries the stream-wide
+        // strategy from begin time. The transitional caller only needs whether a
+        // ring is in use (io_context != NORMAL).
+        let has_strategy =
+            self.io_context != types_storage::buf::IOContext::IOCONTEXT_NORMAL;
         let blocknum = self.read_stream_get_block(None);
-        (blocknum, strategy)
+        (blocknum, has_strategy)
     }
 
     /// `read_stream_reset(stream)` (read_stream.c:1043) — release queued buffers
@@ -747,8 +751,20 @@ fn read_stream_begin_impl<'mcx>(
 ) -> PgResult<Box<ReadStream<'mcx>>> {
     let _ = persistence;
 
-    // Whether a (non-NULL) buffer-access strategy ring was supplied.
-    let has_strategy = strategy.is_some();
+    // IOContextForStrategy(strategy) — the pg_stat_io context for this stream's
+    // reads (IOCONTEXT_NORMAL when no ring).
+    let io_context = {
+        use types_storage::buf::{BufferAccessStrategyType as Bas, IOContext};
+        match &strategy {
+            None => IOContext::IOCONTEXT_NORMAL,
+            Some(s) => match s.borrow().btype {
+                Bas::BasNormal => IOContext::IOCONTEXT_NORMAL,
+                Bas::BasBulkread => IOContext::IOCONTEXT_BULKREAD,
+                Bas::BasBulkwrite => IOContext::IOCONTEXT_BULKWRITE,
+                Bas::BasVacuum => IOContext::IOCONTEXT_VACUUM,
+            },
+        }
+    };
 
     // Decide how many I/Os we will allow to run at the same time.
     let tablespace_id = spc_oid;
@@ -874,7 +890,7 @@ fn read_stream_begin_impl<'mcx>(
         buffers: vec![InvalidBuffer; buffers_len],
         rel,
         forknum,
-        has_strategy,
+        io_context,
     };
 
     Ok(Box::new(stream))

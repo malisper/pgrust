@@ -29,9 +29,9 @@ use backend_storage_buffer_support::ClockSweep;
 use types_core::primitive::{BlockNumber, Buffer, ForkNumber};
 use types_error::{PgError, PgResult};
 use types_storage::buf::{
-    buftag, PgAioWaitRef, BM_CHECKPOINT_NEEDED, BM_DIRTY, BM_IO_ERROR, BM_IO_IN_PROGRESS,
-    BM_JUST_DIRTIED, BM_PERMANENT, BM_PIN_COUNT_WAITER, BM_TAG_VALID, BM_VALID, BUF_FLAG_MASK,
-    BUF_REFCOUNT_ONE, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE,
+    buftag, IOContext, PgAioWaitRef, BM_CHECKPOINT_NEEDED, BM_DIRTY, BM_IO_ERROR,
+    BM_IO_IN_PROGRESS, BM_JUST_DIRTIED, BM_PERMANENT, BM_PIN_COUNT_WAITER, BM_TAG_VALID,
+    BM_VALID, BUF_FLAG_MASK, BUF_REFCOUNT_ONE, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE,
 };
 use types_storage::storage::LWLockMode;
 use types_storage::RelFileLocatorBackend;
@@ -115,11 +115,18 @@ impl BufferManager {
     /// it with `None` (the default no-ring strategy) and document the collapse,
     /// same posture as the F1 freelist note. The dirty-victim WAL-veto
     /// (`StrategyRejectBuffer`) is unreachable while the ring is collapsed.
-    fn strategy_get_buffer(&self, _has_strategy: bool) -> PgResult<(usize, u32)> {
+    fn strategy_get_buffer(&self, io_context: IOContext) -> PgResult<(usize, u32, bool)> {
+        // The ring object itself is still collapsed (a real cross-call ring is a
+        // separate keystone): we pass `None` to the clock sweep, so `from_ring`
+        // is always false and every claimed valid victim is counted as an
+        // IOOP_EVICT (never IOOP_REUSE) in `io_context`. stats.sql's vacuum check
+        // sums reuses+evictions, so the eviction count alone satisfies it; the
+        // reuse-vs-evict split needs the threaded ring.
+        let _ = io_context;
         let sweep = ClockSweep::new(self.strategy_control());
         let mut from_ring = false;
         let victim = sweep.get_buffer(None, &mut from_ring)?;
-        Ok((victim.buf_id as usize, victim.buf_state))
+        Ok((victim.buf_id as usize, victim.buf_state, from_ring))
     }
 
     /// `StrategyFreeBuffer(buf)` (freelist.c:363) — put a buffer back on the
@@ -135,7 +142,7 @@ impl BufferManager {
     /// `GetVictimBuffer(strategy, io_context)` (bufmgr.c:2345) — select a clean,
     /// unpinned victim buffer, flushing it first if dirty, then pin it. On return
     /// the buffer is pinned (refcount 1), not in the lookup hash, and tag-cleared.
-    pub(crate) fn get_victim_buffer(&self, has_strategy: bool) -> PgResult<usize> {
+    pub(crate) fn get_victim_buffer(&self, io_context: IOContext) -> PgResult<usize> {
         // Ensure, while holding a spinlock, that there's room to remember the
         // pin we are about to take (bufmgr.c:2357-2358). The victim pin in
         // PinBuffer_Locked below remembers a buffer in CurrentResourceOwner, and
@@ -145,7 +152,7 @@ impl BufferManager {
         self.private_refcount().ReservePrivateRefCountEntry();
         sb::resowner_enlarge::call()?;
 
-        let (buf_id, buf_state) = self.strategy_get_buffer(has_strategy)?;
+        let (buf_id, buf_state, from_ring) = self.strategy_get_buffer(io_context)?;
         debug_assert_eq!(buf_state_get_refcount(buf_state), 0);
 
         // Pin it while we still hold the header lock.
@@ -155,14 +162,15 @@ impl BufferManager {
         // DEFERRED (bufmgr.c:2425-2441 — StrategyRejectBuffer/WAL veto): a ring
         // strategy may refuse a dirty victim whose LSN still needs a WAL flush,
         // looping to pick a fresh buffer outside the ring. UNREACHABLE here: the
-        // ring is collapsed to `has_strategy: bool` (no `from_ring` tracking), so
+        // ring is collapsed (no `from_ring` ring membership), so
         // `StrategyRejectBuffer` would always return false and the unconditional
         // flush already matches C for every supported path. The veto becomes
         // meaningful only once a real ring is threaded through victim selection.
         //
         // If the buffer was dirty, write it out (FlushBuffer under a SHARE content
-        // lock; the physical write engine is the F5 flush owner via the
-        // `flush_one_buffer` seam — panic-until-owner).
+        // lock). The write is accounted against the strategy `io_context` (the
+        // ring's eviction write-back), matching C's `FlushBuffer(buf, NULL,
+        // IOOBJECT_RELATION, io_context)` at bufmgr.c:2466.
         if buf_state & BM_DIRTY != 0 {
             let lock = self.content_lock(buf_id);
             lwlock::LWLockAcquire(
@@ -170,9 +178,20 @@ impl BufferManager {
                 LWLockMode::LW_SHARED,
                 backend_storage_lmgr_proc_seams::my_proc_number::call(),
             )?;
-            let flush = sb::flush_one_buffer::call(buf_id_to_buffer(buf_id as i32));
+            let flush = self.flush_buffer(buf_id, io_context);
             lwlock::LWLockRelease(lock)?;
             flush?;
+        }
+
+        // When a BufferAccessStrategy is in use, a valid buffer evicted from
+        // shared buffers is counted as IOOP_REUSE (if it was already a ring
+        // buffer) or IOOP_EVICT, in the strategy `io_context` (bufmgr.c:2454).
+        if buf_state & BM_VALID != 0 {
+            if from_ring {
+                sb::count_io_op_reuse::call(io_context, 1);
+            } else {
+                sb::count_io_op_evict::call(io_context, 1);
+            }
         }
 
         // Now it is safe to release the victim's old mapping + invalidate it.
@@ -187,7 +206,7 @@ impl BufferManager {
                 // Someone re-dirtied/re-pinned it; retry from scratch.
                 // UnpinBuffer(buf_hdr) (bufmgr.c:2481).
                 self.unpin_buffer(buf_id);
-                return self.get_victim_buffer(has_strategy);
+                return self.get_victim_buffer(io_context);
             }
         }
         Ok(buf_id)
@@ -303,8 +322,13 @@ impl BufferManager {
         relpersistence: u8,
         forknum: ForkNumber,
         blocknum: BlockNumber,
-        has_strategy: bool,
+        io_context: IOContext,
     ) -> PgResult<(usize, bool)> {
+        // `strategy != NULL` ⟺ io_context is a strategy ring context (the
+        // pin/usagecount logic in PinBuffer needs that bool; IOCONTEXT_NORMAL is
+        // the no-strategy case).
+        let has_strategy = io_context != IOContext::IOCONTEXT_NORMAL;
+
         // Make sure we will have room to remember the buffer pin (bufmgr.c:2014).
         sb::resowner_enlarge::call()?;
         self.private_refcount().ReservePrivateRefCountEntry();
@@ -325,7 +349,7 @@ impl BufferManager {
         guard.release()?;
 
         // Acquire a victim buffer.
-        let victim = self.get_victim_buffer(has_strategy)?;
+        let victim = self.get_victim_buffer(io_context)?;
 
         // Try to insert under the new tag.
         let guard = self.map_acquire(new_part, LWLockMode::LW_EXCLUSIVE)?;

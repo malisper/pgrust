@@ -239,6 +239,26 @@ const EB_CREATE_FORK_IF_NEEDED: u32 = 1 << 2;
 /// `EB_CLEAR_SIZE_CACHE` (bufmgr.h) — invalidate the smgr size cache.
 const EB_CLEAR_SIZE_CACHE: u32 = 1 << 4;
 
+/// `IOContextForStrategy(strategy)` (freelist.c) — map a `BufferAccessStrategy`
+/// to the pg_stat_io context its reads/writes/extends are accounted under. A
+/// NULL (`None`) strategy is `IOCONTEXT_NORMAL`; the ring kinds map to their
+/// BULKREAD / BULKWRITE / VACUUM contexts. The ring object itself stays
+/// collapsed in the buffer manager core, but its KIND is threaded to the stats.
+fn io_context_for_strategy(
+    strategy: &types_storage::buf::BufferAccessStrategy,
+) -> types_storage::buf::IOContext {
+    use types_storage::buf::{BufferAccessStrategyType as Bas, IOContext};
+    match strategy {
+        None => IOContext::IOCONTEXT_NORMAL,
+        Some(s) => match s.borrow().btype {
+            Bas::BasNormal => IOContext::IOCONTEXT_NORMAL,
+            Bas::BasBulkread => IOContext::IOCONTEXT_BULKREAD,
+            Bas::BasBulkwrite => IOContext::IOCONTEXT_BULKWRITE,
+            Bas::BasVacuum => IOContext::IOCONTEXT_VACUUM,
+        },
+    }
+}
+
 /// `ExtendBufferedRel(BMR_REL(rel), forkNum, NULL, EB_LOCK_FIRST |
 /// EB_SKIP_EXTENSION_LOCK)` installed seam (bufmgr.c) — extend the relation fork
 /// by one block, returning the new write-locked, pinned buffer (the
@@ -250,7 +270,7 @@ fn extend_buffered_rel(
     BufferManager::global_expect().ExtendBufferedRel(
         rel,
         fork_num,
-        false,
+        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
         EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK,
     )
 }
@@ -264,7 +284,12 @@ fn extend_buffered_rel_locked(
     rel: &types_rel::Relation,
     fork_num: types_core::primitive::ForkNumber,
 ) -> types_error::PgResult<Buffer> {
-    BufferManager::global_expect().ExtendBufferedRel(rel, fork_num, false, EB_LOCK_FIRST)
+    BufferManager::global_expect().ExtendBufferedRel(
+        rel,
+        fork_num,
+        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+        EB_LOCK_FIRST,
+    )
 }
 
 /// `ExtendBufferedRelBy(BMR_REL(rel), MAIN_FORKNUM, strategy, EB_LOCK_FIRST,
@@ -274,7 +299,7 @@ fn extend_buffered_rel_locked(
 /// sized accordingly.
 fn extend_buffered_rel_by_main(
     rel: &types_rel::Relation,
-    has_strategy: bool,
+    io_context: types_storage::buf::IOContext,
     extend_by: u32,
 ) -> types_error::PgResult<types_storage::buf::ExtendedRelation> {
     // MAX_BUFFERS_TO_EXTEND_BY (hio.c) — the caller's hard cap on extend_by.
@@ -284,7 +309,7 @@ fn extend_buffered_rel_by_main(
     let first_block = BufferManager::global_expect().ExtendBufferedRelBy(
         rel,
         types_core::primitive::ForkNumber::MAIN_FORKNUM,
-        has_strategy,
+        io_context,
         EB_LOCK_FIRST,
         extend_by,
         &mut buffers[..extend_by as usize],
@@ -308,7 +333,7 @@ fn extend_buffered_rel_to_fsm(
     BufferManager::global_expect().ExtendBufferedRelTo(
         rel,
         types_core::primitive::ForkNumber::FSM_FORKNUM,
-        false,
+        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
         EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE,
         fsm_nblocks,
         types_storage::storage::ReadBufferMode::ZeroOnError,
@@ -326,7 +351,7 @@ fn extend_buffered_rel_to_vm(
     BufferManager::global_expect().ExtendBufferedRelTo(
         rel,
         types_core::primitive::ForkNumber::VISIBILITYMAP_FORKNUM,
-        false,
+        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
         EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE,
         vm_nblocks,
         types_storage::storage::ReadBufferMode::ZeroOnError,
@@ -380,7 +405,7 @@ fn read_buffer_extended<'mcx>(
         types_core::primitive::ForkNumber::MAIN_FORKNUM,
         blkno,
         types_storage::storage::ReadBufferMode::Normal,
-        true,
+        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
     )
 }
 
@@ -393,12 +418,11 @@ fn read_buffer_without_relcache(
     forknum: types_core::primitive::ForkNumber,
     blocknum: types_core::primitive::BlockNumber,
     mode: types_storage::storage::ReadBufferMode,
-    has_strategy: bool,
+    io_context: types_storage::buf::IOContext,
     permanent: bool,
 ) -> types_error::PgResult<Buffer> {
-    let _ = has_strategy;
     BufferManager::global_expect().ReadBufferWithoutRelcache(
-        rlocator, permanent, forknum, blocknum, mode, has_strategy,
+        rlocator, permanent, forknum, blocknum, mode, io_context,
     )
 }
 
@@ -422,14 +446,14 @@ fn read_buffer_extended_mode<'mcx>(
     rel: &types_rel::Relation<'mcx>,
     blkno: types_core::primitive::BlockNumber,
     mode: types_storage::storage::ReadBufferMode,
-    has_strategy: bool,
+    io_context: types_storage::buf::IOContext,
 ) -> types_error::PgResult<Buffer> {
     BufferManager::global_expect().ReadBufferExtended(
         rel,
         types_core::primitive::ForkNumber::MAIN_FORKNUM,
         blkno,
         mode,
-        has_strategy,
+        io_context,
     )
 }
 
@@ -445,7 +469,7 @@ fn read_buffer_extended_fork<'mcx>(
         forknum,
         blkno,
         types_storage::storage::ReadBufferMode::Normal,
-        false,
+        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
     )
 }
 
@@ -462,7 +486,7 @@ fn read_buffer_zero_and_lock<'mcx>(
         fork_num,
         blkno,
         types_storage::storage::ReadBufferMode::ZeroAndLock,
-        false,
+        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
     )
 }
 
@@ -475,13 +499,13 @@ fn read_buffer_with_strategy<'mcx>(
     blkno: types_core::primitive::BlockNumber,
     strategy: types_storage::buf::BufferAccessStrategy,
 ) -> types_error::PgResult<Buffer> {
-    let has_strategy = strategy.is_some();
+    let io_context = io_context_for_strategy(&strategy);
     BufferManager::global_expect().ReadBufferExtended(
         rel,
         types_core::primitive::ForkNumber::MAIN_FORKNUM,
         blkno,
         types_storage::storage::ReadBufferMode::Normal,
-        has_strategy,
+        io_context,
     )
 }
 
@@ -496,7 +520,7 @@ fn read_buffer_extended_fsm<'mcx>(
         types_core::primitive::ForkNumber::FSM_FORKNUM,
         blkno,
         types_storage::storage::ReadBufferMode::ZeroOnError,
-        false,
+        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
     )
 }
 
@@ -511,7 +535,7 @@ fn read_buffer_extended_vm<'mcx>(
         types_core::primitive::ForkNumber::VISIBILITYMAP_FORKNUM,
         blkno,
         types_storage::storage::ReadBufferMode::ZeroOnError,
-        false,
+        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
     )
 }
 
@@ -548,7 +572,7 @@ fn xlog_read_buffer_extended(
     }
     // The relation is always treated as permanent for the redo read (recovery
     // replays WAL-logged changes); ReadBufferWithoutRelcache reads it in.
-    bm.ReadBufferWithoutRelcache(rlocator, true, forknum, blkno, mode, false)
+    bm.ReadBufferWithoutRelcache(rlocator, true, forknum, blkno, mode, types_storage::buf::IOContext::IOCONTEXT_NORMAL)
 }
 
 // --- F5: flush / drop seams (bufmgr.c) ------------------------------------
@@ -952,12 +976,13 @@ fn vac_read_buffer_extended<'mcx>(
 ) -> types_error::PgResult<Buffer> {
     let forknum = types_core::primitive::ForkNumber::from_i32(fork)
         .expect("vacuumlazy read_buffer_extended: invalid fork number");
+    let io_context = io_context_for_strategy(&strategy);
     BufferManager::global_expect().ReadBufferExtended(
         rel,
         forknum,
         blkno,
         types_storage::storage::ReadBufferMode::Normal,
-        strategy.is_some(),
+        io_context,
     )
 }
 

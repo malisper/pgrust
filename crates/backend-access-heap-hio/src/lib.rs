@@ -84,6 +84,25 @@ fn rel_handle(relation: &RelationData<'_>) -> Oid {
     relation.rd_id
 }
 
+/// `IOContextForStrategy(bistate->strategy)` — the pg_stat_io context a
+/// bulk-insert's reads/extends are accounted under. The CTAS / COPY-IN path uses
+/// a BAS_BULKWRITE strategy → IOCONTEXT_BULKWRITE; a NULL strategy is
+/// IOCONTEXT_NORMAL.
+fn io_context_for_strategy(
+    strategy: &types_storage::buf::BufferAccessStrategy,
+) -> types_storage::buf::IOContext {
+    use types_storage::buf::{BufferAccessStrategyType as Bas, IOContext};
+    match strategy {
+        None => IOContext::IOCONTEXT_NORMAL,
+        Some(s) => match s.borrow().btype {
+            Bas::BasNormal => IOContext::IOCONTEXT_NORMAL,
+            Bas::BasBulkread => IOContext::IOCONTEXT_BULKREAD,
+            Bas::BasBulkwrite => IOContext::IOCONTEXT_BULKWRITE,
+            Bas::BasVacuum => IOContext::IOCONTEXT_VACUUM,
+        },
+    }
+}
+
 /// `BufferIsValid(buffer)` — a buffer number is valid when nonzero
 /// (`InvalidBuffer == 0`).
 #[inline]
@@ -187,7 +206,12 @@ fn ReadBufferBI(
     // If not bulk-insert, exactly like ReadBuffer.
     let bistate = match bistate {
         None => {
-            return hio_seam::read_buffer_extended::call(rel, target_block, mode, false);
+            return hio_seam::read_buffer_extended::call(
+                rel,
+                target_block,
+                mode,
+                types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+            );
         }
         Some(bistate) => bistate,
     };
@@ -208,8 +232,8 @@ fn ReadBufferBI(
     }
 
     // Perform a read using the buffer strategy.
-    let has_strategy = bistate.strategy.is_some();
-    let buffer = hio_seam::read_buffer_extended::call(rel, target_block, mode, has_strategy)?;
+    let io_context = io_context_for_strategy(&bistate.strategy);
+    let buffer = hio_seam::read_buffer_extended::call(rel, target_block, mode, io_context)?;
 
     // Save the selected block as target for future inserts.
     hio_seam::incr_buffer_ref_count::call(buffer)?;
@@ -396,8 +420,11 @@ fn RelationAddBlocks(
 
     // Extend the relation.  We ask for the first returned page to be locked, so
     // that we are sure that nobody has inserted into the page concurrently.
-    let has_strategy = bistate.as_ref().map(|b| b.strategy.is_some()).unwrap_or(false);
-    let extended = hio_seam::extend_buffered_rel_by::call(rel, has_strategy, extend_by_pages)?;
+    let io_context = bistate
+        .as_ref()
+        .map(|b| io_context_for_strategy(&b.strategy))
+        .unwrap_or(types_storage::buf::IOContext::IOCONTEXT_NORMAL);
+    let extended = hio_seam::extend_buffered_rel_by::call(rel, io_context, extend_by_pages)?;
     let first_block = extended.first_block;
     let extend_by_pages = extended.extended_by;
     let victim_buffers = extended.victim_buffers;

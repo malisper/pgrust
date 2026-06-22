@@ -47,8 +47,8 @@ use types_core::primitive::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber}
 use types_error::{PgError, PgResult};
 use types_rel::Relation;
 use types_storage::buf::{
-    buftag, MAX_BLOCK_NUMBER, BM_DIRTY, BM_JUST_DIRTIED, BM_PERMANENT, BM_TAG_VALID, BM_VALID,
-    BUF_USAGECOUNT_ONE,
+    buftag, IOContext, MAX_BLOCK_NUMBER, BM_DIRTY, BM_JUST_DIRTIED, BM_PERMANENT, BM_TAG_VALID,
+    BM_VALID, BUF_USAGECOUNT_ONE,
 };
 use types_storage::storage::{LWLockMode, NUM_AUXILIARY_PROCS, ReadBufferMode};
 use types_storage::RelFileLocatorBackend;
@@ -235,14 +235,14 @@ impl BufferManager {
         &self,
         rel: &Relation,
         fork: ForkNumber,
-        has_strategy: bool,
+        io_context: IOContext,
         flags: u32,
     ) -> PgResult<Buffer> {
         let mut buf: Buffer = INVALID_BUFFER;
         let mut extend_by: u32 = 1;
         // ExtendBufferedRelBy(bmr, forkNum, strategy, flags, 1, &buf, &extend_by);
         let buffers = core::slice::from_mut(&mut buf);
-        self.ExtendBufferedRelBy(rel, fork, has_strategy, flags, 1, buffers, &mut extend_by)?;
+        self.ExtendBufferedRelBy(rel, fork, io_context, flags, 1, buffers, &mut extend_by)?;
         Ok(buf)
     }
 
@@ -256,7 +256,7 @@ impl BufferManager {
         &self,
         rel: &Relation,
         fork: ForkNumber,
-        has_strategy: bool,
+        io_context: IOContext,
         flags: u32,
         extend_by: u32,
         buffers: &mut [Buffer],
@@ -268,7 +268,7 @@ impl BufferManager {
         self.ExtendBufferedRelCommon(
             &bmr,
             fork,
-            has_strategy,
+            io_context,
             flags,
             extend_by,
             InvalidBlockNumber,
@@ -286,7 +286,7 @@ impl BufferManager {
         &self,
         rel: &Relation,
         fork: ForkNumber,
-        has_strategy: bool,
+        io_context: IOContext,
         mut flags: u32,
         extend_to: BlockNumber,
         mode: ReadBufferMode,
@@ -357,7 +357,7 @@ impl BufferManager {
             let first_block = self.ExtendBufferedRelCommon(
                 &bmr,
                 fork,
-                has_strategy,
+                io_context,
                 flags,
                 num_pages,
                 extend_to,
@@ -391,7 +391,7 @@ impl BufferManager {
                 fork,
                 extend_to - 1,
                 mode,
-                has_strategy,
+                io_context,
                 Some(bmr.rel),
             )?;
         }
@@ -411,7 +411,7 @@ impl BufferManager {
         &self,
         bmr: &BmrRel,
         fork: ForkNumber,
-        has_strategy: bool,
+        io_context: IOContext,
         flags: u32,
         extend_by: u32,
         extend_upto: BlockNumber,
@@ -440,7 +440,7 @@ impl BufferManager {
             self.ExtendBufferedRelShared(
                 bmr,
                 fork,
-                has_strategy,
+                io_context,
                 flags,
                 extend_by,
                 extend_upto,
@@ -468,7 +468,7 @@ impl BufferManager {
         &self,
         bmr: &BmrRel,
         fork: ForkNumber,
-        has_strategy: bool,
+        io_context: IOContext,
         flags: u32,
         mut extend_by: u32,
         extend_upto: BlockNumber,
@@ -491,7 +491,7 @@ impl BufferManager {
         // These pages are pinned by us and not valid. While we hold the pin they
         // can't be acquired as victim buffers by another backend.
         for i in 0..extend_by {
-            let buf_id = self.get_victim_buffer(has_strategy)?;
+            let buf_id = self.get_victim_buffer(io_context)?;
             buffers[i as usize] = buf_id_to_buffer(buf_id as i32);
 
             // new buffers are zero-filled: MemSet(buf_block, 0, BLCKSZ).
@@ -598,8 +598,10 @@ impl BufferManager {
                 let existing_buf_id = existing_id as usize;
 
                 // Pin the existing buffer before releasing the partition lock,
-                // preventing it from being evicted.
-                let valid = self.pin_buffer(existing_buf_id, has_strategy);
+                // preventing it from being evicted. (`strategy != NULL` ⟺ a
+                // non-NORMAL io_context.)
+                let valid = self
+                    .pin_buffer(existing_buf_id, io_context != IOContext::IOCONTEXT_NORMAL);
 
                 guard.release()?;
 
@@ -690,8 +692,12 @@ impl BufferManager {
         }
 
         // pgstat_count_io_op_time(IOOBJECT_RELATION, io_context, IOOP_EXTEND,
-        //                         io_start, 1, extend_by * BLCKSZ).
-        sb::count_io_op_extend::call(1, extend_by as u64 * types_core::primitive::BLCKSZ as u64);
+        //                         io_start, 1, extend_by * BLCKSZ) (bufmgr.c:2846).
+        sb::count_io_op_extend::call(
+            io_context,
+            1,
+            extend_by as u64 * types_core::primitive::BLCKSZ as u64,
+        );
 
         // Set BM_VALID, terminate IO, and wake up any waiters.
         for i in 0..extend_by {

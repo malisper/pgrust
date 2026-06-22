@@ -399,7 +399,7 @@ fn read_buffer_extended(
     rel: Oid,
     target_block: types_core::primitive::BlockNumber,
     mode: i32,
-    has_strategy: bool,
+    io_context: types_storage::buf::IOContext,
 ) -> PgResult<types_storage::storage::Buffer> {
     let mode = match mode {
         0 => types_storage::storage::ReadBufferMode::Normal,
@@ -418,7 +418,7 @@ fn read_buffer_extended(
         &rel,
         target_block,
         mode,
-        has_strategy,
+        io_context,
     )
 }
 
@@ -426,14 +426,14 @@ fn read_buffer_extended(
 /// (bufmgr.c), OID-keyed.
 fn extend_buffered_rel_by(
     rel: Oid,
-    has_strategy: bool,
+    io_context: types_storage::buf::IOContext,
     extend_by: u32,
 ) -> PgResult<types_storage::buf::ExtendedRelation> {
     let relcx = mcx::MemoryContext::new("extend_buffered_rel_by");
     let rel = project_open(&relcx, rel)?;
     backend_storage_buffer_bufmgr_seams::extend_buffered_rel_by_main::call(
         &rel,
-        has_strategy,
+        io_context,
         extend_by,
     )
 }

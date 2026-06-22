@@ -401,7 +401,8 @@ pub(crate) fn scan_source_database_pg_class<'mcx>(
             types_core::primitive::ForkNumber::MAIN_FORKNUM,
             blkno,
             types_storage::storage::ReadBufferMode::Normal,
-            true,
+            // CreateAndCopyRelationData reads the source with a BAS_BULKREAD ring.
+            types_storage::buf::IOContext::IOCONTEXT_BULKREAD,
             true,
         )?;
 

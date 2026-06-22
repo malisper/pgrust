@@ -161,7 +161,7 @@ seam_core::seam!(
         rel: &types_rel::Relation<'mcx>,
         blkno: types_core::primitive::BlockNumber,
         mode: types_storage::storage::ReadBufferMode,
-        has_strategy: bool,
+        io_context: types_storage::buf::IOContext,
     ) -> types_error::PgResult<types_storage::storage::Buffer>
 );
 
@@ -222,7 +222,7 @@ seam_core::seam!(
         forknum: types_core::primitive::ForkNumber,
         blocknum: types_core::primitive::BlockNumber,
         mode: types_storage::storage::ReadBufferMode,
-        has_strategy: bool,
+        io_context: types_storage::buf::IOContext,
         permanent: bool,
     ) -> types_error::PgResult<types_storage::storage::Buffer>
 );
@@ -509,7 +509,7 @@ seam_core::seam!(
     /// extension `ereport(ERROR)`s.
     pub fn extend_buffered_rel_by_main<'mcx>(
         rel: &types_rel::Relation<'mcx>,
-        has_strategy: bool,
+        io_context: types_storage::buf::IOContext,
         extend_by: u32,
     ) -> types_error::PgResult<types_storage::buf::ExtendedRelation>
 );
@@ -773,8 +773,10 @@ seam_core::seam!(
     /// elapsed time when `track_io_timing` is on. The `pgstat_prepare_io_time` /
     /// `track_io_timing` start-timestamp dance is internal to the statistics
     /// subsystem; this seam collapses it to the post-operation accounting call,
-    /// behaviour-neutral (stats only). Owned by pgstat when it ports; infallible.
-    pub fn count_io_op_extend(cnt: u64, bytes: u64)
+    /// behaviour-neutral (stats only). `io_context` is the strategy ring's
+    /// context (IOCONTEXT_BULKWRITE for a CTAS / COPY-IN extend) or
+    /// IOCONTEXT_NORMAL. Owned by pgstat when it ports; infallible.
+    pub fn count_io_op_extend(io_context: types_storage::buf::IOContext, cnt: u64, bytes: u64)
 );
 
 seam_core::seam!(

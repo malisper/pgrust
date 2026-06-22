@@ -88,7 +88,7 @@ seam_core::seam!(
         rel: Oid,
         target_block: BlockNumber,
         mode: i32,
-        has_strategy: bool,
+        io_context: types_storage::buf::IOContext,
     ) -> PgResult<Buffer>
 );
 
@@ -107,7 +107,7 @@ seam_core::seam!(
     /// returned page is exclusive-locked (`EB_LOCK_FIRST`).
     pub fn extend_buffered_rel_by(
         rel: Oid,
-        has_strategy: bool,
+        io_context: types_storage::buf::IOContext,
         extend_by: u32,
     ) -> PgResult<ExtendedRelation>
 );

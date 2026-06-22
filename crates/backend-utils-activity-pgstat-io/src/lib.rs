@@ -691,10 +691,10 @@ pub fn init_seams() {
     //
     // IOOP_EXTEND (bufmgr.c:2846 ExtendBufferedRelShared) — record `cnt` extend
     // ops totalling `bytes`. (Previously installed as a no-op by bufmgr.)
-    backend_storage_buffer_bufmgr_seams::count_io_op_extend::set(|cnt, bytes| {
+    backend_storage_buffer_bufmgr_seams::count_io_op_extend::set(|io_context, cnt, bytes| {
         pgstat_count_io_op(
             IOObject::IOOBJECT_RELATION,
-            IOContext::IOCONTEXT_NORMAL,
+            io_context,
             IOOp::IOOP_EXTEND,
             cnt as u32,
             bytes,
