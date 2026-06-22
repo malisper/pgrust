@@ -96,12 +96,18 @@ fn nlockents() -> PgResult<i64> {
 /// model these are this backend's `thread_local`s; we simply (re)initialize
 /// them empty (matching `ShmemInitHash` for a fresh segment + `SpinLockInit`).
 pub fn LockManagerShmemInit() -> PgResult<()> {
-    // The C computes init/max table sizes for ShmemInitHash; the HashMap model
-    // grows on demand, so we only ensure the structures exist and are empty.
-    state::with_shared(|s| {
-        s.locks.clear();
-        s.proclocks.clear();
-    });
+    use backend_storage_ipc_shmem_seams::shmem_init_struct;
+
+    // The C `ShmemInitHash` table sizes: `max_table_size` LOCK entries, 2x that
+    // PROCLOCK entries (lock.c `InitLocks`). Our flat arena pre-sizes the LOCK /
+    // PROCLOCK pools to exactly those caps in genuine cross-process shmem.
+    let n_locks = nlockents()? as usize;
+    let n_proclocks = n_locks.saturating_mul(2);
+
+    let bytes = state::arena_bytes(n_locks, n_proclocks);
+    let (base, found) = shmem_init_struct::call("Lock Table Arena", bytes)?;
+    state::shmem_init(base, found, n_locks, n_proclocks);
+
     state::FP_STRONG.with(|c| *c.borrow_mut() = state::FastPathStrongRelationLockData::default());
     Ok(())
 }
@@ -137,6 +143,14 @@ pub fn LockManagerShmemSize() -> PgResult<Size> {
 
     // 10% safety margin.
     size = add_size::call(size, size / 10)?;
+
+    // Our flat `ShmemInitStruct` arena (the genuine cross-process backing store
+    // for the LOCK/PROCLOCK tables) must also fit; reserve at least its byte
+    // size so ipci's accumulator covers the real allocation.
+    let n_locks = max_table_size as usize;
+    let n_proclocks = n_locks.saturating_mul(2);
+    let arena = state::arena_bytes(n_locks, n_proclocks);
+    size = add_size::call(size, arena)?;
     Ok(size)
 }
 

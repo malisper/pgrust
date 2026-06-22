@@ -66,6 +66,7 @@ use backend_storage_lmgr_proc as proc_owner;
 use backend_storage_lmgr_proc_seams as proc;
 use backend_utils_resowner_seams as resowner;
 
+
 /// Source file for the `ErrorLocation` of lock.c's ereports.
 const SRC: &str = "src/backend/storage/lmgr/lock.c";
 
@@ -255,15 +256,11 @@ pub fn LockHasWaiters(locktag: &LOCKTAG, lockmode: LOCKMODE, _session_lock: bool
 
     let result = state::with_shared(|s| {
         let myproc = proc::my_proc_number::call();
-        let hold_mask = s
-            .proclocks
-            .get(&(*locktag, myproc))
-            .map(|p| p.hold_mask)
-            .unwrap_or(0);
+        let hold_mask = s.proclock_hold_mask(locktag, myproc);
         if (hold_mask & LOCKBIT_ON(lockmode)) == 0 {
             return Err(());
         }
-        let wait_mask = s.locks.get(locktag).map(|e| e.lock.waitMask).unwrap_or(0);
+        let wait_mask = s.lock_wait_mask(locktag);
         Ok((tables::conflict_tab_for(lockmethodid as u16, lockmode) & wait_mask) != 0)
     });
 
@@ -294,8 +291,7 @@ pub fn LockWaiterCount(locktag: &LOCKTAG) -> PgResult<i32> {
         lock_partition_lock_offset(hashcode),
         LWLockMode::LW_EXCLUSIVE,
     )?;
-    let waiters =
-        state::with_shared(|s| s.locks.get(locktag).map(|e| e.lock.nRequested).unwrap_or(0));
+    let waiters = state::with_shared(|s| s.lock_n_requested(locktag));
     guard.release()?;
     Ok(waiters)
 }
@@ -331,39 +327,33 @@ fn setup_lock_in_table(
 
     let result = state::with_shared(|s| {
         // Find or create the LOCK.
-        let lock_found = s.locks.contains_key(locktag);
-        if !lock_found {
-            let mut entry = Box::new(state::LockEntry::default());
-            entry.lock.tag = *locktag;
-            s.locks.insert(*locktag, entry);
-        }
+        s.lock_get_or_create(locktag);
 
         // Find or create the PROCLOCK.
-        let pkey = (*locktag, proc_no);
-        let proclock_found = s.proclocks.contains_key(&pkey);
+        let proclock_found = s.proclock_exists(locktag, proc_no);
         if !proclock_found {
-            s.proclocks.insert(
-                pkey,
+            // proclock_insert chains the holder into lock->procLocks.
+            s.proclock_insert(
+                locktag,
+                proc_no,
                 state::ProcLock {
                     group_leader: leader,
                     hold_mask: 0,
                     release_mask: 0,
                 },
             );
-            // dlist_push_tail(&lock->procLocks, ...): record holder order.
-            let entry = s.locks.get_mut(locktag).expect("lock just created");
-            entry.holders.push(proc_no);
         } else {
             // C: Assert((proclock->holdMask & ~lock->grantMask) == 0).
         }
 
         // Increment request counts immediately (granted or waiting).
-        let entry = s.locks.get_mut(locktag).expect("lock present");
-        entry.lock.nRequested += 1;
-        entry.lock.requested[lockmode as usize] += 1;
+        s.lock_with_mut(locktag, |b| {
+            b.set_n_requested(b.n_requested() + 1);
+            b.set_requested_at(lockmode as usize, b.requested_at(lockmode as usize) + 1);
+        });
 
         // We shouldn't already hold the desired lock.
-        let hold_mask = s.proclocks.get(&pkey).map(|p| p.hold_mask).unwrap_or(0);
+        let hold_mask = s.proclock_hold_mask(locktag, proc_no);
         if (hold_mask & LOCKBIT_ON(lockmode)) != 0 {
             return Err((locktag.locktag_field1, locktag.locktag_field2, locktag.locktag_field3));
         }
@@ -393,12 +383,10 @@ fn lock_check_conflicts(lockmethodid: u8, lockmode: LOCKMODE, locktag: &LOCKTAG,
     let conflict_mask = tables::conflict_tab_for(lockmethodid as u16, lockmode);
 
     state::with_shared(|s| {
-        let entry = match s.locks.get(locktag) {
-            Some(e) => e,
+        let (grant_mask, granted) = match s.lock_with(locktag, |b| (b.grant_mask(), b.granted())) {
+            Some(v) => v,
             None => return false,
         };
-        let grant_mask = entry.lock.grantMask;
-        let granted = entry.lock.granted;
 
         // Global conflict check.
         if (conflict_mask & grant_mask) == 0 {
@@ -406,7 +394,7 @@ fn lock_check_conflicts(lockmethodid: u8, lockmode: LOCKMODE, locktag: &LOCKTAG,
         }
 
         // Subtract out locks I hold myself.
-        let my_pl = s.proclocks.get(&(*locktag, proc_no)).copied().unwrap_or_default();
+        let my_pl = s.proclock_get(locktag, proc_no).unwrap_or_default();
         let my_locks = my_pl.hold_mask;
         let mut conflicts_remaining = [0i32; types_storage::lock::MAX_LOCKMODES];
         let mut total_conflicts_remaining = 0i32;
@@ -443,12 +431,12 @@ fn lock_check_conflicts(lockmethodid: u8, lockmode: LOCKMODE, locktag: &LOCKTAG,
         }
 
         // Subtract out locks held in conflicting modes by members of our group.
-        for &other in entry.holders.iter() {
+        for other in s.holders(locktag) {
             if other == proc_no {
                 continue;
             }
-            let other_pl = match s.proclocks.get(&(*locktag, other)) {
-                Some(p) => *p,
+            let other_pl = match s.proclock_get(locktag, other) {
+                Some(p) => p,
                 None => continue,
             };
             if other_pl.group_leader == my_pl.group_leader
@@ -478,17 +466,17 @@ fn lock_check_conflicts(lockmethodid: u8, lockmode: LOCKMODE, locktag: &LOCKTAG,
 /// `GrantLock(lock, proclock, lockmode)` (lock.c).
 fn grant_lock(locktag: &LOCKTAG, proc_no: ProcNumber, lockmode: LOCKMODE) {
     state::with_shared(|s| {
-        if let Some(entry) = s.locks.get_mut(locktag) {
-            entry.lock.nGranted += 1;
-            entry.lock.granted[lockmode as usize] += 1;
-            entry.lock.grantMask |= LOCKBIT_ON(lockmode);
-            if entry.lock.granted[lockmode as usize] == entry.lock.requested[lockmode as usize] {
-                entry.lock.waitMask &= LOCKBIT_OFF(lockmode);
+        s.lock_with_mut(locktag, |b| {
+            b.set_n_granted(b.n_granted() + 1);
+            b.set_granted_at(lockmode as usize, b.granted_at(lockmode as usize) + 1);
+            b.set_grant_mask(b.grant_mask() | LOCKBIT_ON(lockmode));
+            if b.granted_at(lockmode as usize) == b.requested_at(lockmode as usize) {
+                b.set_wait_mask(b.wait_mask() & LOCKBIT_OFF(lockmode));
             }
-        }
-        if let Some(pl) = s.proclocks.get_mut(&(*locktag, proc_no)) {
+        });
+        s.proclock_update(locktag, proc_no, |pl| {
             pl.hold_mask |= LOCKBIT_ON(lockmode);
-        }
+        });
     });
 }
 
@@ -496,22 +484,21 @@ fn grant_lock(locktag: &LOCKTAG, proc_no: ProcNumber, lockmode: LOCKMODE) {
 /// whether `ProcLockWakeup` is needed.
 fn un_grant_lock(locktag: &LOCKTAG, lockmode: LOCKMODE, proc_no: ProcNumber, lockmethodid: u8) -> bool {
     state::with_shared(|s| {
-        let mut wakeup_needed = false;
-        if let Some(entry) = s.locks.get_mut(locktag) {
-            entry.lock.nRequested -= 1;
-            entry.lock.requested[lockmode as usize] -= 1;
-            entry.lock.nGranted -= 1;
-            entry.lock.granted[lockmode as usize] -= 1;
-            if entry.lock.granted[lockmode as usize] == 0 {
-                entry.lock.grantMask &= LOCKBIT_OFF(lockmode);
-            }
-            if (tables::conflict_tab_for(lockmethodid as u16, lockmode) & entry.lock.waitMask) != 0 {
-                wakeup_needed = true;
-            }
-        }
-        if let Some(pl) = s.proclocks.get_mut(&(*locktag, proc_no)) {
+        let wakeup_needed = s
+            .lock_with_mut(locktag, |b| {
+                b.set_n_requested(b.n_requested() - 1);
+                b.set_requested_at(lockmode as usize, b.requested_at(lockmode as usize) - 1);
+                b.set_n_granted(b.n_granted() - 1);
+                b.set_granted_at(lockmode as usize, b.granted_at(lockmode as usize) - 1);
+                if b.granted_at(lockmode as usize) == 0 {
+                    b.set_grant_mask(b.grant_mask() & LOCKBIT_OFF(lockmode));
+                }
+                (tables::conflict_tab_for(lockmethodid as u16, lockmode) & b.wait_mask()) != 0
+            })
+            .unwrap_or(false);
+        s.proclock_update(locktag, proc_no, |pl| {
             pl.hold_mask &= LOCKBIT_OFF(lockmode);
-        }
+        });
         wakeup_needed
     })
 }
@@ -521,14 +508,12 @@ fn un_grant_lock(locktag: &LOCKTAG, lockmode: LOCKMODE, proc_no: ProcNumber, loc
 fn clean_up_lock(locktag: &LOCKTAG, proc_no: ProcNumber, lockmethodid: u8, wakeup_needed: bool) {
     // If this was my last hold, delete my proclock entry.
     let (hold_mask, n_requested) = state::with_shared(|s| {
-        let hold = s.proclocks.get(&(*locktag, proc_no)).map(|p| p.hold_mask).unwrap_or(0);
+        let hold = s.proclock_hold_mask(locktag, proc_no);
         if hold == 0 {
-            s.proclocks.remove(&(*locktag, proc_no));
-            if let Some(entry) = s.locks.get_mut(locktag) {
-                entry.holders.retain(|&h| h != proc_no);
-            }
+            // proclock_remove unchains it from lock->procLocks.
+            s.proclock_remove(locktag, proc_no);
         }
-        let nreq = s.locks.get(locktag).map(|e| e.lock.nRequested).unwrap_or(0);
+        let nreq = s.lock_n_requested(locktag);
         (hold, nreq)
     });
     let _ = hold_mask;
@@ -536,7 +521,7 @@ fn clean_up_lock(locktag: &LOCKTAG, proc_no: ProcNumber, lockmethodid: u8, wakeu
     if n_requested == 0 {
         // Garbage-collect the lock object.
         state::with_shared(|s| {
-            s.locks.remove(locktag);
+            s.lock_remove(locktag);
         });
     } else if wakeup_needed {
         proc_lock_wakeup(locktag, lockmethodid);
@@ -728,14 +713,16 @@ pub fn RemoveFromWaitQueue(proc_no: ProcNumber, _hashcode: u32) {
 
     // Remove proc from lock's wait queue.
     state::with_shared(|s| {
-        if let Some(entry) = s.locks.get_mut(&wait_tag) {
-            entry.wait_queue.retain(|&p| p != proc_no);
+        if s.lock_exists(&wait_tag) {
+            s.waitq_remove(&wait_tag, proc_no);
             // Undo the waiting process's request-count increments.
-            entry.lock.nRequested -= 1;
-            entry.lock.requested[lockmode as usize] -= 1;
-            if entry.lock.granted[lockmode as usize] == entry.lock.requested[lockmode as usize] {
-                entry.lock.waitMask &= LOCKBIT_OFF(lockmode);
-            }
+            s.lock_with_mut(&wait_tag, |b| {
+                b.set_n_requested(b.n_requested() - 1);
+                b.set_requested_at(lockmode as usize, b.requested_at(lockmode as usize) - 1);
+                if b.granted_at(lockmode as usize) == b.requested_at(lockmode as usize) {
+                    b.set_wait_mask(b.wait_mask() & LOCKBIT_OFF(lockmode));
+                }
+            });
         }
     });
 
@@ -882,7 +869,7 @@ pub fn LockAcquireExtended(
     });
 
     // Conflict with waiters' requests, else with already-held locks.
-    let wait_mask = state::with_shared(|s| s.locks.get(locktag).map(|e| e.lock.waitMask).unwrap_or(0));
+    let wait_mask = state::with_shared(|s| s.lock_wait_mask(locktag));
     let found_conflict = if (tables::conflict_tab_for(lockmethodid as u16, lockmode) & wait_mask) != 0 {
         true
     } else {
@@ -906,20 +893,18 @@ pub fn LockAcquireExtended(
         // Deadlock detected while joining, or dontWait and would block.
         AbortStrongLockAcquire();
 
-        let hold_mask = state::with_shared(|s| s.proclocks.get(&(*locktag, proc_no)).map(|p| p.hold_mask).unwrap_or(0));
+        let hold_mask = state::with_shared(|s| s.proclock_hold_mask(locktag, proc_no));
         if hold_mask == 0 {
             state::with_shared(|s| {
-                s.proclocks.remove(&(*locktag, proc_no));
-                if let Some(entry) = s.locks.get_mut(locktag) {
-                    entry.holders.retain(|&h| h != proc_no);
-                }
+                // proclock_remove unchains it from lock->procLocks.
+                s.proclock_remove(locktag, proc_no);
             });
         }
         state::with_shared(|s| {
-            if let Some(entry) = s.locks.get_mut(locktag) {
-                entry.lock.nRequested -= 1;
-                entry.lock.requested[lockmode as usize] -= 1;
-            }
+            s.lock_with_mut(locktag, |b| {
+                b.set_n_requested(b.n_requested() - 1);
+                b.set_requested_at(lockmode as usize, b.requested_at(lockmode as usize) - 1);
+            });
         });
         partition_guard.release()?;
         if state::with_local(|m| m.get(&localtag).map(|l| l.nLocks).unwrap_or(0)) == 0 {
@@ -1071,7 +1056,7 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, session_lock: bool) ->
     )?;
 
     let myproc = proc::my_proc_number::call();
-    let hold_mask = state::with_shared(|s| s.proclocks.get(&(*locktag, myproc)).map(|p| p.hold_mask).unwrap_or(0));
+    let hold_mask = state::with_shared(|s| s.proclock_hold_mask(locktag, myproc));
     if (hold_mask & LOCKBIT_ON(lockmode)) == 0 {
         partition_guard.release()?;
         warning(format!(
@@ -1180,9 +1165,9 @@ pub fn LockReleaseAll(lockmethodid: u8, all_locks: bool) -> PgResult<()> {
         // Mark the proclock to show we need to release this lockmode.
         let myproc = proc::my_proc_number::call();
         state::with_shared(|s| {
-            if let Some(pl) = s.proclocks.get_mut(&(localtag.lock, myproc)) {
+            s.proclock_update(&localtag.lock, myproc, |pl| {
                 pl.release_mask |= LOCKBIT_ON(localtag.mode);
-            }
+            });
         });
 
         remove_local_lock(&localtag);
@@ -1193,14 +1178,12 @@ pub fn LockReleaseAll(lockmethodid: u8, all_locks: bool) -> PgResult<()> {
     for partition in 0..NUM_LOCK_PARTITIONS {
         // Collect this backend's proclock tags in this partition.
         let proclock_tags: Vec<LOCKTAG> = state::with_shared(|s| {
-            s.proclocks
-                .keys()
-                .filter(|(_tag, pno)| *pno == myproc)
-                .filter(|(tag, _)| {
-                    lock_hash_partition(LockTagHashCode(tag)) == partition
-                })
-                .map(|(tag, _)| *tag)
-                .collect()
+            s.proclock_keys_filtered(|tag, pno| {
+                pno == myproc && lock_hash_partition(LockTagHashCode(tag)) == partition
+            })
+            .into_iter()
+            .map(|(tag, _)| tag)
+            .collect()
         });
         if proclock_tags.is_empty() {
             continue;
@@ -1218,8 +1201,7 @@ pub fn LockReleaseAll(lockmethodid: u8, all_locks: bool) -> PgResult<()> {
             }
 
             let (hold_mask, mut release_mask) = state::with_shared(|s| {
-                s.proclocks
-                    .get(&(tag, myproc))
+                s.proclock_get(&tag, myproc)
                     .map(|p| (p.hold_mask, p.release_mask))
                     .unwrap_or((0, 0))
             });
@@ -1228,9 +1210,9 @@ pub fn LockReleaseAll(lockmethodid: u8, all_locks: bool) -> PgResult<()> {
             if all_locks {
                 release_mask = hold_mask;
                 state::with_shared(|s| {
-                    if let Some(pl) = s.proclocks.get_mut(&(tag, myproc)) {
+                    s.proclock_update(&tag, myproc, |pl| {
                         pl.release_mask = hold_mask;
-                    }
+                    });
                 });
             }
 
@@ -1249,9 +1231,9 @@ pub fn LockReleaseAll(lockmethodid: u8, all_locks: bool) -> PgResult<()> {
             }
 
             state::with_shared(|s| {
-                if let Some(pl) = s.proclocks.get_mut(&(tag, myproc)) {
+                s.proclock_update(&tag, myproc, |pl| {
                     pl.release_mask = 0;
-                }
+                });
             });
 
             clean_up_lock(&tag, myproc, lockmethodid, wakeup_needed);
@@ -1458,7 +1440,8 @@ pub fn LockRefindAndRelease(
         LWLockMode::LW_EXCLUSIVE,
     )?;
 
-    let exists = state::with_shared(|s| s.locks.contains_key(locktag) && s.proclocks.contains_key(&(*locktag, proc_no)));
+    let exists =
+        state::with_shared(|s| s.lock_exists(locktag) && s.proclock_exists(locktag, proc_no));
     if !exists {
         partition_guard.release()?;
         return Err(pg_error(
@@ -1467,7 +1450,7 @@ pub fn LockRefindAndRelease(
         ));
     }
 
-    let hold_mask = state::with_shared(|s| s.proclocks.get(&(*locktag, proc_no)).map(|p| p.hold_mask).unwrap_or(0));
+    let hold_mask = state::with_shared(|s| s.proclock_hold_mask(locktag, proc_no));
     if (hold_mask & LOCKBIT_ON(lockmode)) == 0 {
         partition_guard.release()?;
         warning(format!(
@@ -1509,18 +1492,17 @@ pub(crate) fn seam_lock_check_conflicts(
 }
 
 pub(crate) fn seam_proclock_hold_mask(locktag: LOCKTAG, holder: ProcNumber) -> LOCKMASK {
-    state::with_shared(|s| s.proclocks.get(&(locktag, holder)).map(|p| p.hold_mask).unwrap_or(0))
+    state::with_shared(|s| s.proclock_hold_mask(&locktag, holder))
 }
 
 pub(crate) fn seam_lock_group_held_locks(locktag: LOCKTAG, leader: ProcNumber) -> LOCKMASK {
     state::with_shared(|s| {
-        let entry = match s.locks.get(&locktag) {
-            Some(e) => e,
-            None => return 0,
-        };
+        if !s.lock_exists(&locktag) {
+            return 0;
+        }
         let mut mask = 0;
-        for &h in entry.holders.iter() {
-            if let Some(pl) = s.proclocks.get(&(locktag, h)) {
+        for h in s.holders(&locktag) {
+            if let Some(pl) = s.proclock_get(&locktag, h) {
                 if pl.group_leader == leader {
                     mask |= pl.hold_mask;
                 }
@@ -1531,7 +1513,7 @@ pub(crate) fn seam_lock_group_held_locks(locktag: LOCKTAG, leader: ProcNumber) -
 }
 
 pub(crate) fn seam_lock_wait_queue_is_empty(locktag: LOCKTAG) -> bool {
-    state::with_shared(|s| s.locks.get(&locktag).map(|e| e.wait_queue.is_empty()).unwrap_or(true))
+    state::with_shared(|s| s.waitq_is_empty(&locktag))
 }
 
 pub(crate) fn seam_lock_wait_queue_insert_before(
@@ -1540,33 +1522,21 @@ pub(crate) fn seam_lock_wait_queue_insert_before(
     myproc: ProcNumber,
 ) {
     state::with_shared(|s| {
-        if let Some(entry) = s.locks.get_mut(&locktag) {
-            // Remove any stale entry first (dclist single-membership).
-            entry.wait_queue.retain(|&p| p != myproc);
-            let pos = entry
-                .wait_queue
-                .iter()
-                .position(|&p| p == insert_before)
-                .unwrap_or(entry.wait_queue.len());
-            entry.wait_queue.insert(pos, myproc);
-        }
+        s.waitq_insert_before(&locktag, insert_before, myproc);
     });
 }
 
 pub(crate) fn seam_lock_wait_queue_push_tail(locktag: LOCKTAG, myproc: ProcNumber) {
     state::with_shared(|s| {
-        if let Some(entry) = s.locks.get_mut(&locktag) {
-            entry.wait_queue.retain(|&p| p != myproc);
-            entry.wait_queue.push(myproc);
-        }
+        s.waitq_push_tail(&locktag, myproc);
     });
 }
 
 pub(crate) fn seam_lock_set_wait_mask_bit(locktag: LOCKTAG, lockmode: LOCKMODE) {
     state::with_shared(|s| {
-        if let Some(entry) = s.locks.get_mut(&locktag) {
-            entry.lock.waitMask |= LOCKBIT_ON(lockmode);
-        }
+        s.lock_with_mut(&locktag, |b| {
+            b.set_wait_mask(b.wait_mask() | LOCKBIT_ON(lockmode));
+        });
     });
 }
 
@@ -1575,14 +1545,12 @@ pub(crate) fn seam_lock_wait_queue_delete(proc_no: ProcNumber) {
     // lock the proc is waiting on (its waitLock tag) and remove it.
     let wait_tag = proc::proc_wait_lock_tag::call(proc_no);
     state::with_shared(|s| {
-        if let Some(entry) = s.locks.get_mut(&wait_tag) {
-            entry.wait_queue.retain(|&p| p != proc_no);
-        }
+        s.waitq_remove(&wait_tag, proc_no);
     });
 }
 
 pub(crate) fn seam_lock_wait_queue_waiters_snapshot(locktag: LOCKTAG) -> Vec<ProcNumber> {
-    state::with_shared(|s| s.locks.get(&locktag).map(|e| e.wait_queue.clone()).unwrap_or_default())
+    state::with_shared(|s| s.waiters(&locktag))
 }
 
 /// `GetLockHoldersAndWaiters` inner walk (proc.c log path), seam form (by
@@ -1598,14 +1566,13 @@ fn get_lock_holders_and_waiters(
     locktag: &LOCKTAG,
 ) -> backend_storage_lmgr_lock_seams::LockHoldersAndWaiters {
     state::with_shared(|s| {
-        let entry = match s.locks.get(locktag) {
-            Some(e) => e,
-            None => return backend_storage_lmgr_lock_seams::LockHoldersAndWaiters::default(),
-        };
-        let waiters: Vec<ProcNumber> = entry.wait_queue.clone();
+        if !s.lock_exists(locktag) {
+            return backend_storage_lmgr_lock_seams::LockHoldersAndWaiters::default();
+        }
+        let waiters: Vec<ProcNumber> = s.waiters(locktag);
         let mut holders_pids: Vec<i32> = Vec::new();
         let mut holders_num = 0;
-        for &h in entry.holders.iter() {
+        for h in s.holders(locktag) {
             // A holder is a PROCLOCK not on the wait queue.
             if !waiters.contains(&h) {
                 holders_pids.push(proc::proc_pid::call(h));
@@ -1659,19 +1626,19 @@ fn make_lock_method(lockmethodid: u8) -> types_storage::lock::LockMethod {
 /// table). The wait-mask/grant state is copied so any read inside proc.c sees a
 /// consistent picture.
 fn take_lock_snapshot(locktag: &LOCKTAG) -> LOCK {
-    state::with_shared(|s| match s.locks.get(locktag) {
-        Some(entry) => LOCK {
-            tag: entry.lock.tag,
-            grantMask: entry.lock.grantMask,
-            waitMask: entry.lock.waitMask,
+    state::with_shared(|s| {
+        s.lock_with(locktag, |b| LOCK {
+            tag: b.tag(),
+            grantMask: b.grant_mask(),
+            waitMask: b.wait_mask(),
             procLocks: Default::default(),
             waitProcs: Default::default(),
-            requested: entry.lock.requested,
-            nRequested: entry.lock.nRequested,
-            granted: entry.lock.granted,
-            nGranted: entry.lock.nGranted,
-        },
-        None => LOCK { tag: *locktag, ..LOCK::default() },
+            requested: b.requested(),
+            nRequested: b.n_requested(),
+            granted: b.granted(),
+            nGranted: b.n_granted(),
+        })
+        .unwrap_or(LOCK { tag: *locktag, ..LOCK::default() })
     })
 }
 
@@ -1780,11 +1747,11 @@ pub fn GetRunningTransactionLocks<'mcx>(
     // non-exclusive lock types.)
     let mut access_exclusive_locks = mcx::PgVec::new_in(mcx);
     let collected: Vec<(LOCKTAG, ProcNumber)> = state::with_shared(|s| {
-        s.proclocks
-            .iter()
-            .filter(|(_, pl)| pl.hold_mask & LOCKBIT_ON(AccessExclusiveLock) != 0)
-            .filter(|((tag, _), _)| tag.locktag_type == LOCKTAG_RELATION)
-            .map(|((tag, pno), _)| (*tag, *pno))
+        s.proclock_scan()
+            .into_iter()
+            .filter(|(_, _, pl)| pl.hold_mask & LOCKBIT_ON(AccessExclusiveLock) != 0)
+            .filter(|(tag, _, _)| tag.locktag_type == LOCKTAG_RELATION)
+            .map(|(tag, pno, _)| (tag, pno))
             .collect()
     });
     for (tag, pno) in collected {
@@ -1975,7 +1942,7 @@ pub fn VirtualXactLock(
     // `transfer`: convert the target proc's fast-path VXID lock into a regular
     // primary lock-table entry, run under the target's fpInfoLock by proc.c.
     let target = vxid.procNumber;
-    let mut transfer = |target: ProcNumber, tag: &LOCKTAG| -> PgResult<()> {
+    let transfer = |target: ProcNumber, tag: &LOCKTAG| -> PgResult<()> {
         let hashcode = LockTagHashCode(tag);
         let partition_guard = lwlock::lwlock_acquire_main::call(
             lock_partition_lock_offset(hashcode),

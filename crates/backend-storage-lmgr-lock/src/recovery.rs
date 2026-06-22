@@ -240,9 +240,9 @@ pub(crate) fn PostPrepare_Locks(xid: types_core::primitive::TransactionId) -> Pg
         }
         // Mark the proclock to show we need to release this lockmode.
         state::with_shared(|s| {
-            if let Some(pl) = s.proclocks.get_mut(&(locktag, myproc)) {
+            s.proclock_update(&locktag, myproc, |pl| {
                 pl.release_mask |= LOCKBIT_ON(mode);
-            }
+            });
         });
         crate::locking::remove_local_lock_for(&locktag, mode);
     }
@@ -252,14 +252,13 @@ pub(crate) fn PostPrepare_Locks(xid: types_core::primitive::TransactionId) -> Pg
     for partition in 0..NUM_LOCK_PARTITIONS as i32 {
         // Collect this partition's proclocks held by myproc.
         let in_partition: Vec<LOCKTAG> = state::with_shared(|s| {
-            s.proclocks
-                .keys()
-                .filter(|(tag, holder)| {
-                    *holder == myproc
-                        && lock_hash_partition(LockTagHashCode(tag)) == partition
-                })
-                .map(|(tag, _)| *tag)
-                .collect()
+            s.proclock_keys_filtered(|tag, holder| {
+                holder == myproc
+                    && lock_hash_partition(LockTagHashCode(tag)) == partition
+            })
+            .into_iter()
+            .map(|(tag, _)| tag)
+            .collect()
         });
         if in_partition.is_empty() {
             continue;
@@ -276,8 +275,7 @@ pub(crate) fn PostPrepare_Locks(xid: types_core::primitive::TransactionId) -> Pg
                 continue;
             }
             let (release_mask, hold_mask, group_leader) = state::with_shared(|s| {
-                s.proclocks
-                    .get(&(tag, myproc))
+                s.proclock_get(&tag, myproc)
                     .map(|p| (p.release_mask, p.hold_mask, p.group_leader))
                     .unwrap_or((0, 0, myproc))
             });
@@ -300,18 +298,10 @@ pub(crate) fn PostPrepare_Locks(xid: types_core::primitive::TransactionId) -> Pg
             // and update the LOCK's holder list.
             let _ = _guard;
             state::with_shared(|s| {
-                if let Some(mut pl) = s.proclocks.remove(&(tag, myproc)) {
+                s.proclock_rekey_holder(&tag, myproc, newproc, |pl| {
                     pl.group_leader = newproc;
                     pl.release_mask = 0;
-                    s.proclocks.insert((tag, newproc), pl);
-                    if let Some(entry) = s.locks.get_mut(&tag) {
-                        for h in entry.holders.iter_mut() {
-                            if *h == myproc {
-                                *h = newproc;
-                            }
-                        }
-                    }
-                }
+                });
             });
         }
     }
@@ -480,19 +470,15 @@ pub(crate) fn GetLockConflicts<'mcx>(
     )?;
 
     // Examine each existing holder (or awaiter) of the lock.
-    let holders: Vec<ProcNumber> = state::with_shared(|s| match s.locks.get(locktag) {
-        Some(entry) => entry
-            .holders
-            .iter()
-            .copied()
+    let holders: Vec<ProcNumber> = state::with_shared(|s| {
+        s.holders(locktag)
+            .into_iter()
             .filter(|h| {
-                s.proclocks
-                    .get(&(*locktag, *h))
+                s.proclock_get(locktag, *h)
                     .map(|pl| (conflict_mask & pl.hold_mask) != 0)
                     .unwrap_or(false)
             })
-            .collect(),
-        None => Vec::new(),
+            .collect()
     });
 
     for holder in holders {
@@ -539,9 +525,9 @@ pub(crate) fn GetLockStatusData<'mcx>(
 
     // Scan the PROCLOCK table. Each (LOCKTAG, holder) pair is one instance.
     let entries: Vec<(LOCKTAG, ProcNumber, LOCKMASK, ProcNumber)> = state::with_shared(|s| {
-        s.proclocks
-            .iter()
-            .map(|((tag, holder), pl)| (*tag, *holder, pl.hold_mask, pl.group_leader))
+        s.proclock_scan()
+            .into_iter()
+            .map(|(tag, holder, pl)| (tag, holder, pl.hold_mask, pl.group_leader))
             .collect()
     });
 
@@ -595,13 +581,13 @@ pub(crate) fn GetLockStatusData<'mcx>(
 /// code, keyed `(LOCKTAG, holder)`.
 pub(crate) fn proc_locks_hold_masks(holder: ProcNumber, partition: usize) -> Vec<LOCKMASK> {
     state::with_shared(|s| {
-        s.proclocks
-            .iter()
-            .filter(|((tag, h), _)| {
+        s.proclock_scan()
+            .into_iter()
+            .filter(|(tag, h, _)| {
                 *h == holder
                     && lock_hash_partition(LockTagHashCode(tag)) as usize == partition
             })
-            .map(|(_, pl)| pl.hold_mask)
+            .map(|(_, _, pl)| pl.hold_mask)
             .collect()
     })
 }
