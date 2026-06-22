@@ -133,15 +133,43 @@ pub fn spi_eval_expr(
     //     the inner expression (not the outer `select fn(...)` call);
     //   * otherwise a mode-dependent context line is attached.
     // The "attached once" latch is cleared so an outer PL/pgSQL frame re-attaches
-    // its own `plpgsql_exec_error_callback` line. (Mirrors execsql.rs exactly.)
-    let spi_error_decorate = |mut e: types_error::PgError| -> types_error::PgError {
+    // its own `plpgsql_exec_error_callback` line.
+    //
+    // `add_query_context`: the `else` branch (the mode-dependent
+    // `PL/pgSQL expression/assignment/SQL statement "<query>"` context line) is
+    // only emitted when the SPI error callback is genuinely on the stack at the
+    // failing point. In C, `exec_eval_expr` evaluates a *simple* expression that
+    // references a PL/pgSQL datum (e.g. `10 / v`, `v := p1 - 1`) directly via
+    // `exec_eval_simple_expr` → `ExecEvalExpr`, with NO SPI callback installed —
+    // so a *runtime* error there carries only the outer
+    // `plpgsql_exec_error_callback` function-line context, not the
+    // expression/assignment line.
+    //
+    // The two phases differ in this owned SPI surface, which has no simple-expr
+    // fast path and routes every expression through `run_eval`:
+    //   * PREPARE phase: a parse/analysis error always runs under C's SPI
+    //     prepare callback, so it gets the query context (`= true`).
+    //   * RUN phase: pass `add_query_context` = "the expression references no
+    //     PL/pgSQL datum". A datum-free constant expression (e.g. `1/0`) is
+    //     const-folded by C's `eval_const_expressions` and therefore *errors at
+    //     plan time* under the SPI prepare callback — so it does carry the
+    //     `PL/pgSQL expression "1/0"` context. pgrust evaluates it at run time
+    //     instead, so re-attach the same context here. A datum-referencing
+    //     expression cannot be folded; C reaches it via the simple-expr runtime
+    //     fast path with NO callback, so no context line is added.
+    // The syntax-position promotion (the `if` branch) still fires on both
+    // phases.
+    let spi_error_decorate = |mut e: types_error::PgError,
+                              add_query_context: bool|
+     -> types_error::PgError {
         if e.cursor_position().unwrap_or(0) > 0 {
             let pos = e.cursor_position().unwrap();
             e = e
                 .with_cursor_position(0)
                 .with_internal_position(pos)
                 .with_internal_query(query.to_string());
-        } else {
+            e.plpgsql_context_attached = false;
+        } else if add_query_context {
             let line = match parsemode {
                 RawParseMode::RAW_PARSE_PLPGSQL_EXPR => {
                     format!("PL/pgSQL expression \"{query}\"")
@@ -154,26 +182,8 @@ pub fn spi_eval_expr(
                 _ => format!("SQL statement \"{query}\""),
             };
             e = e.add_context(line);
+            e.plpgsql_context_attached = false;
         }
-        e.plpgsql_context_attached = false;
-        e
-    };
-
-    // Execution-phase decoration for a PL/pgSQL *expression* (`RETURN <expr>`,
-    // `IF <cond>`, an assignment RHS): C evaluates a *simple* expression through
-    // `exec_eval_simple_expr`, which bypasses SPI and runs the cached `ExprState`
-    // directly — so NO `_SPI_error_callback` is on the error_context_stack when a
-    // runtime error (e.g. `division by zero` in `1/x`) is raised, and the
-    // "PL/pgSQL expression \"…\"" context line is therefore NOT attached. (The
-    // outer frame's own `plpgsql_exec_error_callback` still fires, which the
-    // latch reset below re-enables.) The full `spi_error_decorate` line is added
-    // only for parse/analysis-time errors (the prepare phase below), matching C's
-    // simple-expr path where prepare still goes through SPI but execution does
-    // not. A genuinely non-simple expression would run via SPI's `exec_run_select`
-    // and keep the callback; pgrust's expression path corresponds to the simple
-    // case (a scalar one-row SELECT), so we drop the execute-phase context line.
-    let spi_error_no_context = |mut e: types_error::PgError| -> types_error::PgError {
-        e.plpgsql_context_attached = false;
         e
     };
 
@@ -181,7 +191,7 @@ pub fn spi_eval_expr(
     // rewrite + complete the cached plan. This records the referenced datum
     // numbers into `parse_state.paramnos`.
     let (source, argtypes) = prepare_expr_plan(mcx, interned, parsemode, parse_state.clone())
-        .map_err(&spi_error_decorate)?;
+        .map_err(|e| spi_error_decorate(e, true))?;
 
     // setup_param_list: build the value ParamListInfo from the referenced estate
     // datums. The referenced dnos drive which datums to bind; the param id is
@@ -202,7 +212,10 @@ pub fn spi_eval_expr(
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
     }
-    let (processed, raw) = out.map_err(&spi_error_no_context)?;
+    // A constant (datum-free) expression is const-folded — and thus its runtime
+    // error is reported with the SPI context — in C; mirror that here.
+    let run_phase_context = parse_state.referenced_dnos().is_empty();
+    let (processed, raw) = out.map_err(|e| spi_error_decorate(e, run_phase_context))?;
 
     let _ = plancache::DropCachedPlan(source);
 
