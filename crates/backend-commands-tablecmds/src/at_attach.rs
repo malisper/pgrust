@@ -183,7 +183,7 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
             .into_error());
     }
     if attachrel.rd_rel.relkind == RELKIND_RELATION
-        && backend_catalog_pg_inherits::has_subclass(attachrel.rd_id)?
+        && backend_catalog_pg_inherits::has_subclass_scan(attachrel.rd_id)?
     {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)

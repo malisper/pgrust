@@ -463,6 +463,26 @@ pub fn has_subclass(relationId: Oid) -> PgResult<bool> {
     Ok(result)
 }
 
+/// Accurate "does this relation have at least one direct child?" by scanning
+/// pg_inherits on `inhparent` (the exact check ATExecAttachPartition performs at
+/// tablecmds.c:20322, where the lossy `relhassubclass` flag must NOT be used —
+/// it stays set after the last child is dropped, so `has_subclass` would wrongly
+/// report a parent). Mirrors the `inhparent`-keyed systable scan of pg_inherits.
+pub fn has_subclass_scan(relationId: Oid) -> PgResult<bool> {
+    let ctx = MemoryContext::new("pg_inherits has_subclass_scan");
+    let catalog = open_inherits(ctx.mcx(), AccessShareLock)?;
+    let key = oid_key(Anum_pg_inherits_inhparent, relationId)?;
+
+    let mut result = false;
+    systable_scan_foreach(&catalog, InheritsParentIndexId, key, |_row| {
+        result = true;
+        Ok(false) /* the C reads only the first tuple */
+    })?;
+
+    catalog.close(AccessShareLock)?;
+    Ok(result)
+}
+
 /*
  * has_superclass - does this relation inherit from another?
  *
