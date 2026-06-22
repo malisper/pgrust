@@ -37,7 +37,7 @@ use backend_utils_adt_tsgistidx as tsgist;
 use backend_utils_adt_tsquery_core::gist as tsqgist;
 use types_tsearch::tsearch::TSQuerySign;
 use types_tsearch::tsgistidx::SignTsVector;
-use types_network::{inet_struct, GistInetKey};
+use types_network::GistInetKey;
 use dispatch::{GistConsistentResult, GistDistanceResult, StrategyNumber};
 use mcx::{Mcx, PgBox};
 use types_core::geo::{Point, CIRCLE, BOX};
@@ -1669,7 +1669,10 @@ fn dispatch_consistent<'mcx>(
         F_GIST_CIRCLE_CONSISTENT => gist_circle_consistent(entry, query, strategy),
         F_INET_GIST_CONSISTENT => {
             let key = GistInetKey::from_datum_bytes(entry.key.as_ref_bytes());
-            let q = inet_struct::from_datum_bytes(query.as_ref_bytes());
+            // The query is a real `inet`/`cidr` SQL varlena (`PG_GETARG_INET_PP`),
+            // so it must be detoasted and decoded at `VARDATA_ANY` rather than read
+            // as the header-less `GistInetKey`/`inet` byte image the index key uses.
+            let q = backend_utils_adt_network_seams::inet::datum_get_inet_pp::call(_mcx, query)?;
             let (matched, recheck) = inet_gist::inet_gist_consistent::call(key, q, strategy, is_leaf)?;
             Ok(GistConsistentResult { matched, recheck })
         }
@@ -1770,8 +1773,13 @@ fn dispatch_compress<'mcx>(
             // converted; inner entries pass through unchanged.
             if entry.leafkey {
                 let in_ = match &entry.key {
-                    // DatumGetPointer(entry->key) != NULL
-                    Datum::ByRef(_) => Some(inet_struct::from_datum_bytes(entry.key.as_ref_bytes())),
+                    // DatumGetPointer(entry->key) != NULL. The leaf key is the
+                    // original `inet`/`cidr` column varlena (`PG_GETARG_INET_PP`),
+                    // so detoast and decode at `VARDATA_ANY` rather than reading the
+                    // header-less `GistInetKey` byte image.
+                    Datum::ByRef(_) => {
+                        Some(backend_utils_adt_network_seams::inet::datum_get_inet_pp::call(mcx, &entry.key)?)
+                    }
                     // DatumGetPointer(entry->key) == NULL
                     Datum::ByVal(_) => None,
                     Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {

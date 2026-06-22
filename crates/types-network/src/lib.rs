@@ -151,24 +151,38 @@ pub struct GistInetKey {
 
 impl GistInetKey {
     /// Encode the key into the bytes carried by a by-reference `Datum`
-    /// (`InetKeyPGetDatum`): family, minbits, commonbits, then 16 address bytes.
-    pub fn to_datum_bytes(&self) -> [u8; 19] {
-        let mut out = [0u8; 19];
-        out[0] = self.family;
-        out[1] = self.minbits;
-        out[2] = self.commonbits;
-        out[3..19].copy_from_slice(&self.ipaddr);
+    /// (`InetKeyPGetDatum`).
+    ///
+    /// The C `GistInetKey` is a varlena whose struct layout is
+    /// `{ char vl_len_[4]; uint8 family; uint8 minbits; uint8 commonbits;
+    /// uint8 ipaddr[16]; }` — i.e. the payload fields begin at byte offset 4,
+    /// *after* the 4-byte length word, and `gk_ip_family`/`gk_ip_addr` read the
+    /// struct at those fixed offsets (they never use `VARDATA_ANY`). So this
+    /// emits a full 4-byte-header varlena image (`SET_VARSIZE`) holding the whole
+    /// 16-byte address; `index_form_tuple` copies the varlena verbatim onto the
+    /// page, and `from_datum_bytes` reads the fields back at the same offsets.
+    pub fn to_datum_bytes(&self) -> [u8; 23] {
+        let mut out = [0u8; 23];
+        // SET_VARSIZE(out, 23): the 4-byte length word (low two bits are the
+        // uncompressed/long-header flags = 0). 23 << 2 = 92 fits in byte 0.
+        let varsize: u32 = 23;
+        out[..4].copy_from_slice(&(varsize << 2).to_le_bytes());
+        out[4] = self.family;
+        out[5] = self.minbits;
+        out[6] = self.commonbits;
+        out[7..23].copy_from_slice(&self.ipaddr);
         out
     }
 
-    /// Decode a key from by-reference `Datum` bytes (`DatumGetInetKeyP`).
+    /// Decode a key from by-reference `Datum` bytes (`DatumGetInetKeyP`). The
+    /// fields sit at fixed struct offsets after the 4-byte varlena length word.
     pub fn from_datum_bytes(b: &[u8]) -> GistInetKey {
         let mut ipaddr = [0u8; 16];
-        ipaddr.copy_from_slice(&b[3..19]);
+        ipaddr.copy_from_slice(&b[7..23]);
         GistInetKey {
-            family: b[0],
-            minbits: b[1],
-            commonbits: b[2],
+            family: b[4],
+            minbits: b[5],
+            commonbits: b[6],
             ipaddr,
         }
     }

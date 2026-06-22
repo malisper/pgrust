@@ -1288,6 +1288,7 @@ dependencies = [
  "backend-access-gist-proc-seams",
  "backend-utils-adt-geo-ops-seams",
  "backend-utils-adt-network-gist-seams",
+ "backend-utils-adt-network-seams",
  "backend-utils-adt-rangetypes-gist",
  "backend-utils-adt-ts-small",
  "backend-utils-adt-tsgistidx",

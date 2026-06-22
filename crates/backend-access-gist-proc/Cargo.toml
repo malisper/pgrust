@@ -23,6 +23,7 @@ backend-access-gist-dispatch-seams = { path = "../backend-access-gist-dispatch-s
 backend-access-gist-proc-seams = { path = "../backend-access-gist-proc-seams" }
 backend-utils-adt-geo-ops-seams = { path = "../backend-utils-adt-geo-ops-seams" }
 backend-utils-adt-network-gist-seams = { path = "../backend-utils-adt-network-gist-seams" }
+backend-utils-adt-network-seams = { path = "../backend-utils-adt-network-seams" }
 types-network = { path = "../types-network" }
 backend-utils-adt-rangetypes-gist = { path = "../backend-utils-adt-rangetypes-gist" }
 types-rangetypes = { path = "../types-rangetypes" }
