@@ -22,6 +22,7 @@
 use mcx::Mcx;
 use types_error::{PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED};
 use types_ri_triggers::TriggerDataRef;
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
 use types_tuple::heap::SizeofHeapTupleHeader;
 use types_tuple::heaptuple::{
     HeapTupleData, HeapTupleHeaderData, HeapTupleHeaderGetNatts, HEAP_XACT_MASK,
@@ -116,8 +117,19 @@ pub fn suppress_redundant_updates_trigger<'mcx>(
     // get tuple data, set default result
     // rettuple = newtuple = trigdata->tg_newtuple;
     // oldtuple = trigdata->tg_trigtuple;
-    let newtuple = trigger::tg_newtuple::call(mcx, trigdata)?;
-    let oldtuple = trigger::tg_trigtuple::call(mcx, trigdata)?;
+    //
+    // C compares the two HeapTuples byte-for-byte over their full on-disk image
+    // (a single contiguous palloc block: fixed header, NULL bitmap, padding, and
+    // the user-data area).  In this tree's owned tuple representation those parts
+    // are split — the header (`HeapTupleData`) carries only the fixed fields and
+    // the NULL bitmap (`t_bits`), while the user-data area lives separately in the
+    // `FormedTuple::data` vector.  So the comparison is driven off the fully-formed
+    // OLD/NEW `FormedTuple`s (header + user data) fetched off the trigger slot
+    // side-channel, reconstructing the C `memcmp` tail (`bitmap || padding || data`).
+    let newslot = trigger::tg_newslot::call(trigdata);
+    let oldslot = trigger::tg_trigslot::call(trigdata);
+    let newtuple = trigger::tg_slot_formed_tuple::call(mcx, newslot)?;
+    let oldtuple = trigger::tg_slot_formed_tuple::call(mcx, oldslot)?;
 
     decide(newtuple, oldtuple)
 }
@@ -140,15 +152,17 @@ pub fn suppress_redundant_updates_trigger<'mcx>(
 /// violation rather than a recoverable user error, so it surfaces as an `ERROR`
 /// instead of silently pretending the tuples differ.
 fn decide<'mcx>(
-    newtuple: Option<HeapTupleData<'mcx>>,
-    oldtuple: Option<HeapTupleData<'mcx>>,
+    newtuple: Option<FormedTuple<'mcx>>,
+    oldtuple: Option<FormedTuple<'mcx>>,
 ) -> PgResult<Option<HeapTupleData<'mcx>>> {
     let newtuple = newtuple.ok_or_else(missing_tuple)?;
     let oldtuple = oldtuple.ok_or_else(missing_tuple)?;
 
     // newheader = newtuple->t_data;  oldheader = oldtuple->t_data;
-    let newheader: &HeapTupleHeaderData = newtuple.t_data.as_deref().ok_or_else(missing_tuple)?;
-    let oldheader: &HeapTupleHeaderData = oldtuple.t_data.as_deref().ok_or_else(missing_tuple)?;
+    let newheader: &HeapTupleHeaderData =
+        newtuple.tuple.t_data.as_deref().ok_or_else(missing_tuple)?;
+    let oldheader: &HeapTupleHeaderData =
+        oldtuple.tuple.t_data.as_deref().ok_or_else(missing_tuple)?;
 
     // if the tuple payload is the same ... then suppress the update.
     if tuples_identical(&newtuple, &oldtuple, newheader, oldheader) {
@@ -157,7 +171,7 @@ fn decide<'mcx>(
     }
 
     // rettuple = newtuple (the surviving NEW tuple).
-    Ok(Some(newtuple))
+    Ok(Some(mcx::box_into_inner_leak(newtuple.tuple)))
 }
 
 /// Internal error for a trigger-manager contract violation (a tuple/header the
@@ -174,13 +188,13 @@ fn missing_tuple() -> PgError {
 /// `&&`) and the trailing payload comparison over everything past
 /// `SizeofHeapTupleHeader`.
 fn tuples_identical(
-    newtuple: &HeapTupleData,
-    oldtuple: &HeapTupleData,
+    newtuple: &FormedTuple,
+    oldtuple: &FormedTuple,
     newheader: &HeapTupleHeaderData,
     oldheader: &HeapTupleHeaderData,
 ) -> bool {
     // newtuple->t_len == oldtuple->t_len
-    newtuple.t_len == oldtuple.t_len
+    newtuple.tuple.t_len == oldtuple.tuple.t_len
         // newheader->t_hoff == oldheader->t_hoff
         && newheader.t_hoff == oldheader.t_hoff
         // HeapTupleHeaderGetNatts(newheader) == HeapTupleHeaderGetNatts(oldheader)
@@ -190,7 +204,7 @@ fn tuples_identical(
         // memcmp(((char *) newheader) + SizeofHeapTupleHeader,
         //        ((char *) oldheader) + SizeofHeapTupleHeader,
         //        newtuple->t_len - SizeofHeapTupleHeader) == 0
-        && payload_eq(newtuple, newheader, oldheader)
+        && payload_eq(newtuple, oldtuple, newheader, oldheader)
 }
 
 /// `memcmp((char*)newheader + SizeofHeapTupleHeader,
@@ -214,23 +228,40 @@ fn tuples_identical(
 /// (a malformed/partial owned tuple, which C — reading a contiguous block —
 /// never produces) we report "not equal" rather than reading past the end.
 fn payload_eq(
-    newtuple: &HeapTupleData,
+    newtuple: &FormedTuple,
+    oldtuple: &FormedTuple,
     newheader: &HeapTupleHeaderData,
     oldheader: &HeapTupleHeaderData,
 ) -> bool {
     // newtuple->t_len - SizeofHeapTupleHeader (the C memcmp length, from newtuple).
     // saturating_sub mirrors that a header-sized-or-smaller tuple compares zero
     // payload bytes without panicking on the subtraction.
-    let len = (newtuple.t_len as usize).saturating_sub(SizeofHeapTupleHeader);
+    let len = (newtuple.tuple.t_len as usize).saturating_sub(SizeofHeapTupleHeader);
 
-    // The compared region begins at offset SizeofHeapTupleHeader of each header,
-    // which is precisely the start of the `t_bits` flexible-array tail.
-    let new_tail: &[u8] = &newheader.t_bits;
-    let old_tail: &[u8] = &oldheader.t_bits;
+    // Reconstruct the contiguous C tail (everything from offset
+    // SizeofHeapTupleHeader to t_len) for each tuple: the NULL bitmap (`t_bits`),
+    // then zero padding up to `t_hoff`, then the user-data area (`data`).
+    let new_tail = reconstruct_tail(newtuple, newheader);
+    let old_tail = reconstruct_tail(oldtuple, oldheader);
 
     // C reads `len` bytes past each header. Require both tails to actually hold
     // those bytes (true for any well-formed tuple), then compare exactly `len`.
     new_tail.len() >= len && old_tail.len() >= len && new_tail[..len] == old_tail[..len]
+}
+
+/// Build the contiguous byte tail C `memcmp`s — everything past the fixed header
+/// (`SizeofHeapTupleHeader == 23`) up to `t_len`: the NULL bitmap (`t_bits`),
+/// zero padding up to `t_hoff`, then the user-data area (`FormedTuple::data`).
+fn reconstruct_tail(tuple: &FormedTuple, header: &HeapTupleHeaderData) -> Vec<u8> {
+    let t_hoff = header.t_hoff as usize;
+    // The tail begins at offset SizeofHeapTupleHeader; the header section of the
+    // tail (bitmap + padding) is `t_hoff - SizeofHeapTupleHeader` bytes.
+    let header_tail_len = t_hoff.saturating_sub(SizeofHeapTupleHeader);
+    let mut tail = vec![0u8; header_tail_len];
+    let copy = core::cmp::min(header.t_bits.len(), header_tail_len);
+    tail[..copy].copy_from_slice(&header.t_bits[..copy]);
+    tail.extend_from_slice(&tuple.data);
+    tail
 }
 
 #[cfg(test)]
@@ -263,28 +294,43 @@ mod tests {
         }
     }
 
-    fn make_tuple<'mcx>(mcx: Mcx<'mcx>, header: HeapTupleHeaderData<'mcx>) -> HeapTupleData<'mcx> {
-        let t_len = (SizeofHeapTupleHeader + header.t_bits.len()) as u32;
-        make_tuple_with_len(mcx, t_len, header)
-    }
-
-    fn make_tuple_with_len<'mcx>(
+    /// Build a `FormedTuple` for the comparison core: `header` carries the fixed
+    /// header + NULL bitmap (`t_bits`, the bytes up to `t_hoff`); `data` is the
+    /// separately-stored user-data area. `t_len = t_hoff + data.len()`, matching
+    /// the on-disk contract.
+    fn make_formed<'mcx>(
         mcx: Mcx<'mcx>,
-        t_len: u32,
         header: HeapTupleHeaderData<'mcx>,
-    ) -> HeapTupleData<'mcx> {
-        HeapTupleData {
+        data: &[u8],
+    ) -> FormedTuple<'mcx> {
+        let t_len = header.t_hoff as u32 + data.len() as u32;
+        let tuple = HeapTupleData {
             t_len,
             t_self: ItemPointerData::default(),
             t_tableOid: 0,
             t_data: Some(PgBox::new_in(header, mcx)),
+        };
+        FormedTuple {
+            tuple: PgBox::new_in(tuple, mcx),
+            data: slice_in(mcx, data).unwrap(),
         }
+    }
+
+    /// Convenience: build a `FormedTuple` with no separate user-data area (the
+    /// whole tail being the NULL bitmap, `t_len = SizeofHeapTupleHeader + bitmap`).
+    fn make_tuple<'mcx>(mcx: Mcx<'mcx>, header: HeapTupleHeaderData<'mcx>) -> FormedTuple<'mcx> {
+        // t_hoff = SizeofHeapTupleHeader + bitmap len so t_len = t_hoff with no data.
+        let header = HeapTupleHeaderData {
+            t_hoff: (SizeofHeapTupleHeader + header.t_bits.len()) as u8,
+            ..header
+        };
+        make_formed(mcx, header, &[])
     }
 
     /// Drive the owned post-validation core directly.
     fn decide_pair<'mcx>(
-        newt: HeapTupleData<'mcx>,
-        oldt: HeapTupleData<'mcx>,
+        newt: FormedTuple<'mcx>,
+        oldt: FormedTuple<'mcx>,
     ) -> PgResult<Option<HeapTupleData<'mcx>>> {
         decide(Some(newt), Some(oldt))
     }
@@ -326,21 +372,26 @@ mod tests {
     fn differing_len_keeps_update() {
         let ctx = MemoryContext::new("trig-len");
         let mcx = ctx.mcx();
-        let newt = make_tuple(mcx, make_header(mcx, 24, 2, 0, &[0b0000_0011]));
-        let oldt = make_tuple_with_len(mcx, 48, make_header(mcx, 24, 2, 0, &[0b0000_0011]));
+        // Same header but the NEW user-data area is shorter than the OLD one.
+        let newt = make_formed(mcx, make_header(mcx, 24, 2, 0, &[0b0000_0011]), &[0x01]);
+        let oldt = make_formed(
+            mcx,
+            make_header(mcx, 24, 2, 0, &[0b0000_0011]),
+            &[0x01, 0x02, 0x03],
+        );
         let kept = decide_pair(newt, oldt).unwrap().expect("kept");
-        assert_eq!(kept.t_len, SizeofHeapTupleHeader as u32 + 1);
+        assert_eq!(kept.t_len, 24 + 1);
     }
 
     #[test]
     fn differing_payload_past_bitmap_keeps_update() {
         let ctx = MemoryContext::new("trig-payload");
         let mcx = ctx.mcx();
-        // Same NULL bitmap, attribute byte differs further along the tail.
-        let new_tail = [0b0000_0001u8, 0xde, 0xad, 0xbe, 0xef, 0x00];
-        let old_tail = [0b0000_0001u8, 0xde, 0xad, 0xbe, 0xef, 0x01];
-        let newt = make_tuple(mcx, make_header(mcx, 24, 1, HEAP_HASNULL_TEST, &new_tail));
-        let oldt = make_tuple(mcx, make_header(mcx, 24, 1, HEAP_HASNULL_TEST, &old_tail));
+        // Same NULL bitmap, attribute byte differs in the user-data area.
+        let new_data = [0xde, 0xad, 0xbe, 0xef, 0x00];
+        let old_data = [0xde, 0xad, 0xbe, 0xef, 0x01];
+        let newt = make_formed(mcx, make_header(mcx, 24, 1, HEAP_HASNULL_TEST, &[0b1]), &new_data);
+        let oldt = make_formed(mcx, make_header(mcx, 24, 1, HEAP_HASNULL_TEST, &[0b1]), &old_data);
         assert!(decide_pair(newt, oldt).unwrap().is_some());
     }
 
@@ -349,16 +400,16 @@ mod tests {
         let ctx = MemoryContext::new("trig-fields");
         let mcx = ctx.mcx();
         // natts diff
-        let n = make_tuple(mcx, make_header(mcx, 24, 2, 0, &[]));
-        let o = make_tuple(mcx, make_header(mcx, 24, 3, 0, &[]));
+        let n = make_formed(mcx, make_header(mcx, 24, 2, 0, &[0b1]), &[]);
+        let o = make_formed(mcx, make_header(mcx, 24, 3, 0, &[0b1]), &[]);
         assert!(decide_pair(n, o).unwrap().is_some());
-        // hoff diff
-        let n = make_tuple(mcx, make_header(mcx, 24, 2, 0, &[0b11]));
-        let o = make_tuple(mcx, make_header(mcx, 32, 2, 0, &[0b11]));
+        // hoff diff (different t_hoff -> different t_len, both with no user data)
+        let n = make_formed(mcx, make_header(mcx, 24, 2, 0, &[0b11]), &[]);
+        let o = make_formed(mcx, make_header(mcx, 32, 2, 0, &[0b11]), &[]);
         assert!(decide_pair(n, o).unwrap().is_some());
         // non-xact infomask diff (HEAP_HASVARWIDTH 0x0002, outside HEAP_XACT_MASK)
-        let n = make_tuple(mcx, make_header(mcx, 24, 2, 0x0002, &[]));
-        let o = make_tuple(mcx, make_header(mcx, 24, 2, 0x0000, &[]));
+        let n = make_formed(mcx, make_header(mcx, 24, 2, 0x0002, &[0b1]), &[]);
+        let o = make_formed(mcx, make_header(mcx, 24, 2, 0x0000, &[0b1]), &[]);
         assert!(decide_pair(n, o).unwrap().is_some());
     }
 
@@ -375,12 +426,18 @@ mod tests {
                 3 => TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE, // INSERT timing
                 _ => BEFORE_ROW_UPDATE,
             });
-            fn mk(mcx: Mcx<'_>, _td: TriggerDataRef) -> PgResult<Option<HeapTupleData<'_>>> {
-                let tail = [0b0000_0011u8, 0x00, 0x2a, 0x00];
-                Ok(Some(make_tuple(mcx, make_header(mcx, 24, 1, 0, &tail))))
+            // tg_newslot/tg_trigslot resolve to distinct slot markers; the formed
+            // tuple seam returns identical NEW/OLD tuples for both.
+            trigger::tg_newslot::set(|_td| types_ri_triggers::TupleTableSlotRef(1));
+            trigger::tg_trigslot::set(|_td| types_ri_triggers::TupleTableSlotRef(2));
+            fn mk_formed(
+                mcx: Mcx<'_>,
+                _slot: types_ri_triggers::TupleTableSlotRef,
+            ) -> PgResult<Option<FormedTuple<'_>>> {
+                let data = [0x2a, 0x00];
+                Ok(Some(make_formed(mcx, make_header(mcx, 24, 1, 0, &[0b1]), &data)))
             }
-            trigger::tg_newtuple::set(mk);
-            trigger::tg_trigtuple::set(mk);
+            trigger::tg_slot_formed_tuple::set(mk_formed);
         });
     }
 
