@@ -42,7 +42,20 @@ fn arg_jsonpath_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("jsonpath fn: by-ref `jsonpath` arg missing from by-ref lane");
-    &image[VARHDRSZ..]
+    vardata_any(image)
+}
+
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image:
+/// skip ONE header byte for a short (1-byte, low-bit-set) header, else `VARHDRSZ`.
+/// A small stored value arrives short-headed once `SHORT_VARLENA_PACKING` is on; a
+/// fixed 4-byte strip would drop three payload bytes. No-op while off.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
+    }
 }
 
 /// The FULL `jsonpath` varlena image (`[VARHDRSZ][version word][nodes]`) — the

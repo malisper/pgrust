@@ -57,11 +57,22 @@ fn arg_inet(fcinfo: &FunctionCallInfoBaseData, i: usize) -> inet_struct {
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("inet fn: by-ref `inet` arg missing from by-ref lane");
-    assert!(
-        image.len() >= VARHDRSZ + 18,
-        "inet fn: by-ref image too short"
-    );
-    inet_struct::from_datum_bytes(&image[VARHDRSZ..])
+    let body = vardata_any(image);
+    assert!(body.len() >= 18, "inet fn: by-ref image too short");
+    inet_struct::from_datum_bytes(body)
+}
+
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image:
+/// skip ONE header byte for a short (1-byte, low-bit-set) header, else `VARHDRSZ`
+/// (4). A small stored value arrives short-headed once `SHORT_VARLENA_PACKING` is
+/// on; a fixed 4-byte strip would drop three payload bytes. No-op while off.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
+    }
 }
 
 /// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.

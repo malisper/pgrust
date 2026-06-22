@@ -72,9 +72,21 @@ fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
 /// image, so skip the 4-byte length word to reach `VARDATA_ANY`.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
-    let image = arg_varlena(fcinfo, i);
-    let payload = if image.len() >= 4 { &image[4..] } else { &image[..] };
+    let payload = vardata_any(arg_varlena(fcinfo, i));
     core::str::from_utf8(payload).expect("datetime fn: invalid UTF-8 text arg")
+}
+
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image:
+/// skip ONE header byte for a short (1-byte, low-bit-set) header, else `VARHDRSZ`
+/// (4). A small stored value arrives short-headed once `SHORT_VARLENA_PACKING` is
+/// on; a fixed 4-byte strip would drop three payload bytes. No-op while off.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= 4 => &image[4..],
+        _ => &[],
+    }
 }
 
 #[inline]
