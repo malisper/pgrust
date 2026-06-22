@@ -1591,11 +1591,35 @@ pub fn make_scalar_list1(name: &str, scalar_dno: i32, lineno: i32, _location: i3
     plpgsql_adddatum(PLpgSQL_datum::Row(mem::boxed(row)))
 }
 
-/// `plpgsql_check_shadowvar` — emit the shadowed-variables warning if `name`
-/// shadows an outer variable (warning only; no-op when the check is off).
-pub fn plpgsql_check_shadowvar(_name: &str, _location: i32) {
-    // The extra_warnings=shadowed_variables emission is purely diagnostic; it
-    // is a no-op when the GUC bit is unset (the default for the compile path).
+/// `plpgsql_check_shadowvar` — decide whether `name` shadows an outer variable.
+///
+/// Mirrors the `decl_varname` action in `pl_gram.y`: only when the current
+/// compile's `extra_warnings` / `extra_errors` carry `PLPGSQL_XCHECK_SHADOWVAR`
+/// do we look the name up in the *enclosing* scope (`local_scope = false`); if
+/// found, the `extra_errors` bit promotes the WARNING to an ERROR.  The grammar
+/// performs the positioned `ereport` from the returned action.
+pub fn plpgsql_check_shadowvar(name: &str) -> comp_seams::ShadowVarAction {
+    let extra_warnings = curr_compile_field(|f| f.extra_warnings);
+    let extra_errors = curr_compile_field(|f| f.extra_errors);
+
+    if (extra_warnings & PLPGSQL_XCHECK_SHADOWVAR) == 0
+        && (extra_errors & PLPGSQL_XCHECK_SHADOWVAR) == 0
+    {
+        return comp_seams::ShadowVarAction::None;
+    }
+
+    let shadowed = funcs::plpgsql_ns_top()
+        .map(|top| funcs::plpgsql_ns_lookup(&top, false, name, None, None, None).is_some())
+        .unwrap_or(false);
+    if !shadowed {
+        return comp_seams::ShadowVarAction::None;
+    }
+
+    if (extra_errors & PLPGSQL_XCHECK_SHADOWVAR) != 0 {
+        comp_seams::ShadowVarAction::Error
+    } else {
+        comp_seams::ShadowVarAction::Warning
+    }
 }
 
 // ===========================================================================

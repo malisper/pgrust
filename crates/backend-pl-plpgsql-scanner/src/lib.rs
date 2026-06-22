@@ -904,7 +904,28 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
     }
 
     fn syntax_error(&self, msg: &str, location: i32) -> PgError {
-        let mut err = PgError::error(msg.to_string()).with_sqlstate(ERRCODE_SYNTAX_ERROR);
+        self.positioned_error(
+            types_error::ERROR,
+            ERRCODE_SYNTAX_ERROR,
+            msg,
+            location,
+        )
+    }
+
+    /// Build a `PgError` at `level` with `sqlstate`/`msg`, attaching the scanner
+    /// error position (`internalerrposition`) and the function body
+    /// (`internalerrquery`) when `location` is known, exactly as
+    /// `plpgsql_scanner_errposition` does in C's `parser_errposition`.  Used for
+    /// the direct-`ereport` grammar sites (e.g. the `decl_varname`
+    /// shadowed-variables WARNING/ERROR) so they render with `LINE n: ... ^`.
+    pub fn positioned_error(
+        &self,
+        level: types_error::ErrorLevel,
+        sqlstate: types_error::SqlState,
+        msg: &str,
+        location: i32,
+    ) -> PgError {
+        let mut err = PgError::new(level, msg.to_string()).with_sqlstate(sqlstate);
         if location >= 0 {
             let pos = self.plpgsql_scanner_errposition(location);
             err = err
@@ -912,6 +933,13 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
                 .with_internal_query(self.scanorig.clone());
         }
         err
+    }
+
+    /// The original PL/pgSQL function source (`scanorig` / the C `prosrc`),
+    /// needed by `function_parse_error_transpose` to relocate a body-relative
+    /// error position into the original CREATE FUNCTION / DO query text.
+    pub fn scanorig(&self) -> &str {
+        &self.scanorig
     }
 
     /// `plpgsql_location_to_lineno(location, yyscanner)` — map a byte offset in

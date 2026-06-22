@@ -23,8 +23,9 @@ use backend_pl_plpgsql_scanner::{
 use backend_parser_scan::tokens::{COLON_EQUALS, DOT_DOT, EQUALS_GREATER, ICONST, SCONST};
 use backend_utils_error::ereport;
 use types_error::{
-    PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_SYNTAX_ERROR, ERROR as ERROR_LEVEL,
+    PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_ALIAS,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_SYNTAX_ERROR,
+    ERROR as ERROR_LEVEL,
 };
 use types_parsenodes::RawParseMode;
 use types_plpgsql::*;
@@ -661,7 +662,15 @@ impl<'mcx> Parser<'mcx> {
         if funcs::plpgsql_ns_lookup_local(&name) {
             return Err(self.yyerror_at(loc, "duplicate declaration"));
         }
-        comp_seam::plpgsql_check_shadowvar::call(&name, loc);
+        match comp_seam::plpgsql_check_shadowvar::call(&name) {
+            comp_seam::ShadowVarAction::None => {}
+            comp_seam::ShadowVarAction::Warning => {
+                self.emit_shadowvar(&name, loc, false)?;
+            }
+            comp_seam::ShadowVarAction::Error => {
+                return Err(self.shadowvar_error(&name, loc));
+            }
+        }
 
         Ok(VarName { name, lineno })
     }
@@ -3760,6 +3769,50 @@ impl<'mcx> Parser<'mcx> {
     }
 
     // -- positioned ereport helper methods (routed through the scanner) ------
+
+    /// `ereport(WARNING, errcode(ERRCODE_DUPLICATE_ALIAS), errmsg("variable
+    /// \"%s\" shadows a previously defined variable", name),
+    /// parser_errposition(loc))` — the `extra_warnings=shadowed_variables`
+    /// WARNING (emitted immediately; `errfinish` reports it to the client and
+    /// returns).  `is_error=true` would promote to ERROR, but that path goes
+    /// through [`Parser::shadowvar_error`] instead so the error propagates.
+    fn emit_shadowvar(&self, name: &str, loc: i32, _is_error: bool) -> PgResult<()> {
+        let msg = format!("variable \"{name}\" shadows a previously defined variable");
+        let err = self.scanner.positioned_error(
+            types_error::WARNING,
+            ERRCODE_DUPLICATE_ALIAS,
+            &msg,
+            loc,
+        );
+        backend_utils_error::ThrowErrorData(self.transpose_compile_error(err))
+    }
+
+    /// The `extra_errors=shadowed_variables` ERROR variant of
+    /// [`Parser::emit_shadowvar`].
+    fn shadowvar_error(&self, name: &str, loc: i32) -> PgError {
+        let msg = format!("variable \"{name}\" shadows a previously defined variable");
+        let err = self.scanner.positioned_error(
+            types_error::ERROR,
+            ERRCODE_DUPLICATE_ALIAS,
+            &msg,
+            loc,
+        );
+        self.transpose_compile_error(err)
+    }
+
+    /// `function_parse_error_transpose(prosrc)` (the
+    /// `plpgsql_compile_error_callback` behavior): relocate a body-relative
+    /// cursor/internal position into the original CREATE FUNCTION / DO query
+    /// text.  In C this runs in the compile error-context callback so it fires
+    /// for *every* `ereport` raised during parsing — including the inline
+    /// shadowed-variables WARNING — but this codebase has retired
+    /// `error_context_stack`, so the direct-`ereport` grammar sites apply it
+    /// explicitly here, mirroring `parse_function_body`'s `map_err` for the
+    /// propagated-ERROR path.
+    fn transpose_compile_error(&self, err: PgError) -> PgError {
+        comp_seam::function_parse_error_transpose::call(self.scanner.scanorig(), err)
+            .unwrap_or_else(|fallback| fallback)
+    }
 
     /// `errmsg("variable \"%s\" does not exist", name), parser_errposition(loc)`.
     fn variable_does_not_exist(&self, name: &str, loc: i32) -> PgError {

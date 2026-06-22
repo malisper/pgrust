@@ -350,11 +350,25 @@ seam_core::seam!(
     pub fn plpgsql_add_initdatums_collect() -> Vec<i32>
 );
 
+/// Decision returned by [`plpgsql_check_shadowvar`]: whether `name` shadows an
+/// outer variable and, if so, whether the `plpgsql.extra_*` GUC bits request a
+/// WARNING or an ERROR.  The grammar (which owns the scanner position needed for
+/// `parser_errposition`) performs the actual `ereport`.
+pub enum ShadowVarAction {
+    /// No outer variable is shadowed, or the SHADOWVAR check is disabled.
+    None,
+    /// `extra_warnings & PLPGSQL_XCHECK_SHADOWVAR` (and not extra_errors) — warn.
+    Warning,
+    /// `extra_errors & PLPGSQL_XCHECK_SHADOWVAR` — raise an ERROR.
+    Error,
+}
+
 seam_core::seam!(
-    /// `plpgsql_check_shadowvar(name, location)` — emit the
-    /// `extra_warnings=shadowed_variables` warning if `name` shadows an outer
-    /// variable.
-    pub fn plpgsql_check_shadowvar(name: &str, location: i32)
+    /// `plpgsql_check_shadowvar(name)` — decide whether `name` shadows an outer
+    /// variable in the current compile namespace and, if so, whether the
+    /// `extra_warnings`/`extra_errors` SHADOWVAR bits request a WARNING or ERROR.
+    /// Mirrors the `decl_varname` action in `pl_gram.y`.
+    pub fn plpgsql_check_shadowvar(name: &str) -> ShadowVarAction
 );
 
 seam_core::seam!(
