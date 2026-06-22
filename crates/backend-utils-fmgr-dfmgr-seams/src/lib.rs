@@ -122,6 +122,13 @@ pub struct BuiltinLibraryEntry {
     pub name: &'static str,
     /// Resolve a symbol of this library to its ported function pair.
     pub lookup: fn(&str) -> Option<LoadedExternalFunc>,
+    /// The library's `_PG_init`-equivalent, run when the library is loaded
+    /// (`internal_load_library` → `call_pg_init` in dfmgr.c). `None` for
+    /// libraries with no load-time initialization. Must be idempotent: the
+    /// builtin-library `load_file` fast path may invoke it on every `LOAD` of
+    /// the module (the OS-loader dedup that gates the C `_PG_init` call does not
+    /// apply to in-process modules).
+    pub pg_init: Option<fn() -> types_error::PgResult<()>>,
 }
 
 static BUILTIN_LIBRARIES: std::sync::Mutex<Vec<BuiltinLibraryEntry>> =
@@ -159,4 +166,16 @@ pub fn registry_resolve(library: &str, function: &str) -> Option<LoadedExternalF
     let libs = BUILTIN_LIBRARIES.lock().unwrap();
     let entry = libs.iter().find(|e| e.name == library)?;
     (entry.lookup)(function)
+}
+
+/// The `_PG_init`-equivalent registered for `library`, if any. Backs the
+/// builtin-library `load_file` path's `call_pg_init` step (the loader runs a
+/// loaded module's `_PG_init` — `internal_load_library` in dfmgr.c).
+pub fn registry_pg_init(library: &str) -> Option<fn() -> types_error::PgResult<()>> {
+    BUILTIN_LIBRARIES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.name == library)
+        .and_then(|e| e.pg_init)
 }

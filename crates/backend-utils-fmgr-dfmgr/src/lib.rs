@@ -69,6 +69,12 @@ thread_local! {
     /// context memory.
     static FILE_LIST: RefCell<Vec<LoadedModule>> = const { RefCell::new(Vec::new()) };
 
+    /// Names of in-process ported ("builtin") libraries whose `_PG_init`-equivalent
+    /// has already run this backend. The OS-loader `FILE_LIST` dedup gates
+    /// `call_pg_init` for real `.so`s; builtin modules take the `install_load_file`
+    /// fast path before that dedup, so their one-time `_PG_init` is tracked here.
+    static BUILTIN_INITED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+
     /// `rendezvousHash` — `varName` → shared value token (`0` == NULL). C's
     /// value is a `void *`; idiomatically it is an integer token two
     /// cooperating libraries agree on. Process-lifetime: entries are never
@@ -888,8 +894,26 @@ fn install_invoke_output_plugin_callback(
 fn install_load_file(filename: &str, restricted: bool) -> PgResult<()> {
     // A library whose C body is ported into the Rust backend is already "loaded"
     // (its symbols live in-process); a bare load succeeds without the OS loader.
+    // The OS loader would still run the module's `_PG_init` on first load
+    // (`internal_load_library` → `call_pg_init`); mirror that for the in-process
+    // module the first time it is loaded this backend, so e.g. `LOAD 'plpgsql'`
+    // runs plpgsql's `_PG_init` (custom-GUC registration + `MarkGUCPrefixReserved`).
     if let Some(library) = simple_library_name(filename) {
         if backend_utils_fmgr_dfmgr_seams::builtin_library_present::call(library) {
+            if let Some(pg_init) = backend_utils_fmgr_dfmgr_seams::registry_pg_init(library) {
+                let already_inited = BUILTIN_INITED.with(|set| {
+                    let mut set = set.borrow_mut();
+                    if set.iter().any(|n| *n == library) {
+                        true
+                    } else {
+                        set.push(library.to_owned());
+                        false
+                    }
+                });
+                if !already_inited {
+                    pg_init()?;
+                }
+            }
             return Ok(());
         }
     }

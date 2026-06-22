@@ -1671,8 +1671,20 @@ pub fn init_seams() {
         backend_utils_fmgr_dfmgr_seams::BuiltinLibraryEntry {
             name: LIBRARY,
             lookup,
+            // `LOAD 'plpgsql'` runs plpgsql's `_PG_init` slice: the custom-GUC
+            // registration + `MarkGUCPrefixReserved("plpgsql")`. Idempotent.
+            pg_init: Some(builtin_pg_init),
         },
     );
+}
+
+/// `_PG_init`-equivalent run when `$libdir/plpgsql` is loaded via `LOAD`
+/// (dfmgr's builtin-library path). Runs the custom-GUC registration slice
+/// (`DefineCustom*Variable` + `MarkGUCPrefixReserved("plpgsql")`) once per
+/// backend, matching C's `_PG_init` reserving the `plpgsql` prefix at load time.
+fn builtin_pg_init() -> types_error::PgResult<()> {
+    ensure_custom_gucs_registered();
+    Ok(())
 }
 
 /// The array-iteration leg of `exec_stmt_foreach_a` (pl_exec.c). Given the

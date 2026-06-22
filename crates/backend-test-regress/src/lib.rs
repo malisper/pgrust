@@ -1696,6 +1696,7 @@ pub fn init_seams() {
         backend_utils_fmgr_dfmgr_seams::BuiltinLibraryEntry {
             name: LIBRARY,
             lookup,
+            pg_init: None,
         },
     );
 
