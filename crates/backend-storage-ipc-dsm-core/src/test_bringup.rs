@@ -166,6 +166,15 @@ fn install_substrate_once() {
         // tcop: reset debug_query_string (no statement string under test).
         backend_tcop_postgres_seams::reset_debug_query_string::set(|| {});
 
+        // globals.c: IsPostmasterEnvironment / IsUnderPostmaster. The test
+        // backend is a standalone (`--single`-equivalent) DSM owner: it is not
+        // the postmaster and not under a postmaster, so `shmem_exit` runs
+        // `dsm_backend_shutdown()` normally. Installing these keeps the atexit
+        // cleanup path (proc_exit -> shmem_exit) from hitting an uninstalled
+        // seam at process teardown.
+        backend_utils_init_small_seams::is_postmaster_environment::set(|| false);
+        backend_utils_init_small_seams::is_under_postmaster::set(|| false);
+
         // shmem.c: ShmemAlloc. `CreateLWLocks` now allocates the LWLock array
         // through `shmem_alloc::call` (the postmaster carves the lock array out
         // of the main shared segment). Under test there is no main segment, so
