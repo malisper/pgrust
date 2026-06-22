@@ -50,6 +50,9 @@ types-datetime = { path = "../types-datetime" }
 # value core (misc), the text<->cstring varlena marshalling, and heap tuple
 # form/deform for the composite result + the composite table-function store path.
 backend-utils-adt-misc = { path = "../backend-utils-adt-misc" }
+backend-utils-adt-mcxtfuncs = { path = "../backend-utils-adt-mcxtfuncs" }
+backend-utils-adt-mcxtfuncs-seams = { path = "../backend-utils-adt-mcxtfuncs-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 

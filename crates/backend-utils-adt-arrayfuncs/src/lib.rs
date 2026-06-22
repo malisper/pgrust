@@ -174,6 +174,7 @@ pub fn init_seams() {
         more::deconstruct_char_array::set(construct::deconstruct_char_array_elems);
         more::construct_text_array::set(construct::construct_text_array_bytes);
         more::construct_int2_array::set(construct::construct_int2_array_bytes);
+        more::construct_int4_array::set(construct::construct_int4_array_bytes);
     }
 
     // arraysubs.c — array subscripting exec callbacks.

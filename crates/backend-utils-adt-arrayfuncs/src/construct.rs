@@ -3532,6 +3532,37 @@ pub fn construct_int2_array_bytes(elems: &[i16]) -> PgResult<alloc::vec::Vec<u8>
     Ok(buf.as_slice().to_vec())
 }
 
+/// Seam `construct_int4_array` — `construct_array_builtin(datums, n, INT4OID)`
+/// (mcxtfuncs.c `int_list_to_array`). Build a 1-D, no-NULL `int4[]` byte image
+/// from the per-element `int32` values (the `path` of
+/// `pg_get_backend_memory_contexts`). Returns the owned array varlena image
+/// bytes (mirrors [`construct_int2_array_bytes`]).
+pub fn construct_int4_array_bytes(elems: &[i32]) -> PgResult<alloc::vec::Vec<u8>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+
+    let cx = mcx::MemoryContext::new("mcxtfuncs construct_int4_array");
+    let mcx = cx.mcx();
+
+    // INT4OID is 4-byte pass-by-value: each element's scalar word is the i32,
+    // matching `Int32GetDatum`.
+    let values: alloc::vec::Vec<TDatum> =
+        elems.iter().map(|&v| TDatum::ByVal((v as u32) as usize)).collect();
+    let nulls = alloc::vec![false; elems.len()];
+
+    let (elmlen, elmbyval, elmalign) = construct_builtin_meta(foundation::INT4OID)?;
+    let buf = construct_array_expr(
+        mcx,
+        &values,
+        &nulls,
+        foundation::INT4OID,
+        elmlen as i16,
+        elmbyval,
+        elmalign,
+        false,
+    )?;
+    Ok(buf.as_slice().to_vec())
+}
+
 /// Seam `deconstruct_text_array_with_dims` — `deconstruct_array_builtin(arr,
 /// TEXTOID, &elems, &nulls, &nelems)` (arrayfuncs.c) keeping the array's shape
 /// header. Detoast a `text[]` image, then return `(ARR_NDIM, ARR_DIMS,

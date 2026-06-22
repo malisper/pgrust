@@ -59,3 +59,10 @@ seam_core::seam!(
     /// `int2[]` datum.
     pub fn construct_int2_array(elems: &[i16]) -> PgResult<Vec<u8>>
 );
+
+seam_core::seam!(
+    /// `construct_array_builtin(datums, n, INT4OID)` (mcxtfuncs.c
+    /// `int_list_to_array`) — build an `int4[]` datum byte image from the
+    /// per-element `int32` values (the `pg_get_backend_memory_contexts` `path`).
+    pub fn construct_int4_array(elems: &[i32]) -> PgResult<Vec<u8>>
+);
