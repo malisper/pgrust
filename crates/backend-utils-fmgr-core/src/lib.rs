@@ -2849,6 +2849,32 @@ fn function_call3_seam(
     oid_function_call3_coll(ctx.mcx(), function_id, InvalidOid, arg1, arg2, arg3)
 }
 
+/// `FunctionCall3Coll(flinfo, InvalidOid, arg1, arg2, arg3)` over the canonical
+/// `Datum` lane (re-resolve by OID); see the seam doc. Carries by-reference
+/// argument AND result values across the fmgr by-reference side channel so a cast
+/// whose result is pass-by-reference (e.g. `int4 -> numeric`) yields a real value.
+fn function_call3_coll_datum_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    function_id: Oid,
+    arg1: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    arg2: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    arg3: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    let resolved = fmgr_info(mcx, function_id)?;
+    let (a1, r1) = datum_to_ref_arg(&arg1);
+    let (a2, r2) = datum_to_ref_arg(&arg2);
+    let (a3, r3) = datum_to_ref_arg(&arg3);
+    let (word, ref_result) = function_call_coll_ref_args_out(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        InvalidOid,
+        vec![a1, a2, a3],
+        vec![r1, r2, r3],
+    )?;
+    ref_out_to_datum(mcx, word, ref_result)
+}
+
 /// `OutputFunctionCall(flinfo, val)` seam: the resolved `FmgrInfo` carries only
 /// the lookup `fn_oid`, so re-resolve and invoke the type's text output function
 /// on the per-attribute value, returning the cstring's bytes (no terminating
@@ -4608,6 +4634,7 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::function_call1_coll_datum::set(function_call1_coll_datum_seam);
     backend_utils_fmgr_fmgr_seams::function_call2_coll_datum::set(function_call2_coll_datum_seam);
     backend_utils_fmgr_fmgr_seams::function_call3::set(function_call3_seam);
+    backend_utils_fmgr_fmgr_seams::function_call3_coll_datum::set(function_call3_coll_datum_seam);
     backend_utils_fmgr_fmgr_seams::output_function_call::set(output_function_call_seam);
     backend_utils_fmgr_fmgr_seams::send_function_call::set(send_function_call_seam);
     backend_utils_fmgr_fmgr_seams::oid_input_function_call::set(oid_input_function_call_seam);

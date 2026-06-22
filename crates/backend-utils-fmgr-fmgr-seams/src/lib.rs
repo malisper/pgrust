@@ -682,6 +682,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FunctionCall3Coll(flinfo, InvalidOid, arg1, arg2, arg3)` (fmgr.c) over the
+    /// canonical per-attribute [`Datum`] lane (re-resolve by OID). Identical in
+    /// dispatch to [`function_call3`] but carries by-reference (varlena) argument
+    /// AND result values across the fmgr by-reference side channel instead of only
+    /// the bare by-value word. Used by `ri_CompareWithCast` to apply a cast
+    /// function `(value, typmod=-1, implicit=false)` whose result type may be
+    /// pass-by-reference (e.g. `int4 -> numeric`): the cast output must be carried
+    /// as a real `numeric` value into the following equality operator, which the
+    /// bare-word lane cannot do. The C path asserts the result is non-null. Can
+    /// `ereport(ERROR)`.
+    pub fn function_call3_coll_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        arg1: Datum<'mcx>,
+        arg2: Datum<'mcx>,
+        arg3: Datum<'mcx>,
+    ) -> PgResult<Datum<'mcx>>
+);
+
+seam_core::seam!(
     /// `OidOutputFunctionCall(functionId, val)` (fmgr.c), raw-`Datum` form used
     /// by bootstrap's `InsertOneValue` DEBUG4 trace: one-shot lookup + call of
     /// a type's text output function on the canonical `Datum<'mcx>` it just

@@ -13,7 +13,6 @@ use mcx::Mcx;
 // still carry the bare-word shim (`types_datum::Datum`), so a by-value scalar
 // crosses that ABI edge via `byval_word()` / `Datum::ByVal`.
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_datum::Datum as DatumWord;
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_FOREIGN_KEY_VIOLATION,
@@ -545,16 +544,11 @@ pub fn ri_keys_equal(
             };
             let typeid = rel.att_type(attnums[i]);
             let collid = rel.att_collation(attnums[i]);
-            // The fmgr comparison edge takes bare-word `DatumWord`; the canonical
-            // values are non-null scalars here, so their by-value word crosses out.
-            if !ri_compare_with_cast(
-                mcx,
-                eq_opr,
-                typeid,
-                collid,
-                DatumWord::from_usize(newvalue.as_usize()),
-                DatumWord::from_usize(oldvalue.as_usize()),
-            )? {
+            // The comparison edge takes canonical `Datum`s so a by-reference key
+            // value (and the by-reference output of a coercion cast, e.g. the
+            // `int4 -> numeric` promotion for a `int` FK referencing a `numeric`
+            // PK) crosses through the fmgr by-reference side channel intact.
+            if !ri_compare_with_cast(mcx, eq_opr, typeid, collid, newvalue, oldvalue)? {
                 return Ok(false);
             }
         }
@@ -568,29 +562,34 @@ pub fn ri_keys_equal(
 /// it is ContainedBy, so the order of lhs vs rhs is significant.
 ///
 /// NB: we have already checked that neither value is null.
-fn ri_compare_with_cast(
-    mcx: Mcx<'_>,
+fn ri_compare_with_cast<'mcx>(
+    mcx: Mcx<'mcx>,
     eq_opr: Oid,
     typeid: Oid,
     collid: Oid,
-    mut lhs: DatumWord,
-    mut rhs: DatumWord,
+    mut lhs: Datum<'mcx>,
+    mut rhs: Datum<'mcx>,
 ) -> PgResult<bool> {
     let entry = ri_hash_compare_op(mcx, eq_opr, typeid)?;
 
-    // Do we need to cast the values?
+    // Do we need to cast the values? The cast result type may be
+    // pass-by-reference (e.g. `int4 -> numeric`), so this goes over the canonical
+    // `Datum` lane, which carries the by-reference value through the fmgr
+    // by-reference side channel.
     if entry.cast_func != InvalidOid {
-        lhs = backend_utils_fmgr_fmgr_seams::function_call3::call(
+        lhs = backend_utils_fmgr_fmgr_seams::function_call3_coll_datum::call(
+            mcx,
             entry.cast_func,
             lhs,
-            DatumWord::from_i32(-1),     // typmod
-            DatumWord::from_bool(false), // implicit coercion
+            Datum::from_i32(-1),     // typmod
+            Datum::from_bool(false), // implicit coercion
         )?;
-        rhs = backend_utils_fmgr_fmgr_seams::function_call3::call(
+        rhs = backend_utils_fmgr_fmgr_seams::function_call3_coll_datum::call(
+            mcx,
             entry.cast_func,
             rhs,
-            DatumWord::from_i32(-1),
-            DatumWord::from_bool(false),
+            Datum::from_i32(-1),
+            Datum::from_bool(false),
         )?;
     }
 
@@ -599,8 +598,13 @@ fn ri_compare_with_cast(
     // Note: the comparison here would in principle need the collation of the
     // *other* table; for simplicity we use our own collation, which is fine
     // because both collations are required to share a notion of equality.
-    let result =
-        backend_utils_fmgr_fmgr_seams::function_call2_coll::call(entry.eq_opr_func, collid, lhs, rhs)?;
+    let result = backend_utils_fmgr_fmgr_seams::function_call2_coll_datum::call(
+        mcx,
+        entry.eq_opr_func,
+        collid,
+        lhs,
+        rhs,
+    )?;
     Ok(result.as_bool())
 }
 

@@ -4840,8 +4840,25 @@ fn has_noncloned_pk_fkey_trigger_impl<'mcx>(
 ) -> PgResult<bool> {
     // ExecCrossPartitionUpdateForeignKey's inner walk over ri_TrigDesc->triggers
     // for a non-cloned RI_TRIGGER_PK AFTER ROW UPDATE trigger. Reachable only on
-    // a cross-partition FK update path (firing-front substrate).
-    front_half("ExecARUpdateTriggers (has-noncloned-PK-FK walk)", 3145)
+    // a cross-partition FK update path (firing-front substrate, not yet ported).
+    //
+    // This must travel as a recoverable `Err`, NOT the diverging `front_half`
+    // `panic!`: this site is reached from inside `ALTER TABLE ... ADD FOREIGN
+    // KEY`'s validation/cross-partition walk, where a `panic!` unwinds through a
+    // catalog-mutating, non-unwind-safe section and escalates to a backend kill
+    // (cf. the "crashes = port-introduced unwind/cleanup-path escalations" class).
+    // The sibling firing-front sites that already error gracefully only do so
+    // because their panic is caught on a plain DML path; relying on that here
+    // truncates the rest of the session. An `Err` carrying the same diagnostic
+    // text propagates without unwinding and is reported as a normal ERROR.
+    Err(PgError::error(
+        "backend-commands-trigger: ExecARUpdateTriggers (has-noncloned-PK-FK walk) \
+         (trigger.c:3145) needs the per-trigger WHEN-qual ExprState \
+         (ResultRelInfo.ri_TrigWhenExprs, trimmed), OLD/NEW slot materialization, and \
+         GetTupleForTrigger (table_tuple_lock / heap_fetch / EvalPlanQual) — \
+         firing-front substrate not yet ported"
+            .to_string(),
+    ))
 }
 
 // ===========================================================================
