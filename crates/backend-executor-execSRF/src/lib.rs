@@ -736,9 +736,43 @@ fn materialize_sink_into_rsinfo<'mcx>(
             continue;
         }
 
+        // C: `convert_tuples_by_position` — the producer (plpgsql RETURN NEXT of
+        // a record / fmgr_sql capture) emits exactly the record's LIVE columns,
+        // which has NO entry for a dropped attribute of the function's result
+        // rowtype. The result descriptor (`expectedDesc`), in contrast, retains
+        // the dropped-column slots. Map each source column onto the next NON-
+        // dropped destination attribute, emitting a NULL for every dropped slot
+        // (C does this once, in plpgsql's coerce_function_result_tuple via
+        // convert_tuples_by_position, before tuplestore_puttuple). When the
+        // descriptor has no dropped columns this is the identity 1:1 placement.
         let mut values: alloc::vec::Vec<CanonDatum> = alloc::vec::Vec::with_capacity(natts);
         let mut nulls: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(natts);
-        for col in row.into_iter() {
+        let row_len = row.len();
+        let dropped_count = if returns_tuple {
+            result_desc.attrs.iter().filter(|a| a.attisdropped).count()
+        } else {
+            0
+        };
+        // Only realign when the source row is short by exactly the dropped count
+        // (i.e. the producer omitted the dropped slots). Otherwise place 1:1.
+        let realign_dropped = dropped_count > 0 && row_len + dropped_count == natts;
+        let mut src = row.into_iter();
+        for dest_i in 0..natts {
+            if realign_dropped && result_desc.attrs[dest_i].attisdropped {
+                values.push(CanonDatum::default());
+                nulls.push(true);
+                continue;
+            }
+            let col = match src.next() {
+                Some(c) => c,
+                None => {
+                    // Pad a short row to the descriptor width with NULLs
+                    // (defensive; a well-formed producer fills every live slot).
+                    values.push(CanonDatum::default());
+                    nulls.push(true);
+                    continue;
+                }
+            };
             if col.isnull {
                 values.push(CanonDatum::default());
                 nulls.push(true);
@@ -765,12 +799,6 @@ fn materialize_sink_into_rsinfo<'mcx>(
             };
             values.push(v);
             nulls.push(false);
-        }
-        // Pad a short row to the descriptor width with NULLs (defensive; a
-        // well-formed producer emits `natts` columns per row).
-        while values.len() < natts {
-            values.push(CanonDatum::default());
-            nulls.push(true);
         }
         backend_utils_sort_storage_seams::tuplestore_putvalues::call(
             &mut rsinfo.setResult,
