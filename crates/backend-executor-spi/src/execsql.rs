@@ -314,6 +314,35 @@ fn spi_execsql_inner(
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
     }
+    // `_SPI_error_callback` (spi.c): SPI installs an error-context callback for
+    // the duration of `_SPI_execute_plan`. When an error escapes the embedded
+    // query, the callback emits a context line whose wording depends on the
+    // plan's raw parse mode (the `switch (carg->mode)`): a PL/pgSQL expression
+    // (`RAW_PARSE_PLPGSQL_EXPR`) reads `PL/pgSQL expression "%s"`, an assignment
+    // (`RAW_PARSE_PLPGSQL_ASSIGN{1,2,3}`) reads `PL/pgSQL assignment "%s"`, and a
+    // complete statement (the default, e.g. a PERFORM's `SELECT ...`) reads
+    // `SQL statement "%s"`. This is the attach-on-propagation analogue
+    // (docs/query-lifecycle-raii) applied at the same boundary C pushed/popped
+    // the callback, innermost so it precedes the caller's PL/pgSQL-function
+    // context line. Crossing this SPI boundary means any outer PL/pgSQL frame
+    // still has its own `plpgsql_exec_error_callback` pending, so clear the
+    // "attached once" latch to let that outer frame re-attach its own line.
+    let out = out.map_err(|mut e| {
+        let line = match parsemode {
+            RawParseMode::RAW_PARSE_PLPGSQL_EXPR => {
+                format!("PL/pgSQL expression \"{query}\"")
+            }
+            RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN1
+            | RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN2
+            | RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN3 => {
+                format!("PL/pgSQL assignment \"{query}\"")
+            }
+            _ => format!("SQL statement \"{query}\""),
+        };
+        e = e.add_context(line);
+        e.plpgsql_context_attached = false;
+        e
+    });
     let result = out;
 
     let _ = plancache::DropCachedPlan(source);

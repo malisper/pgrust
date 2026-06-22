@@ -1277,7 +1277,15 @@ pub fn perform_rewrite_query(expr: &mut PLpgSQL_expr) {
     const SELECT: &str = " SELECT";
     if let Some(pos) = ascii_ci_find(&expr.query, PERFORM) {
         let mut bytes = expr.query.clone().into_bytes();
+        // memcpy(new->expr->query, " SELECT", 7): overwrite the "PERFORM" keyword
+        // with a leading space + "SELECT" (same 7-byte length).
         bytes[pos..pos + PERFORM.len()].copy_from_slice(SELECT.as_bytes());
+        // memmove(new->expr->query, new->expr->query + 1, strlen(...)): left-justify
+        // to get rid of the leading space the substitution just introduced, so the
+        // stored query text reads "SELECT ..." (not " SELECT ..."). C does this from
+        // query[0] because read_sql_construct returns the construct starting exactly
+        // at "perform"; here that start is `pos`, so drop the space at `pos`.
+        bytes.remove(pos);
         expr.query = String::from_utf8(bytes).expect("ascii overwrite stays valid utf8");
     }
 }
