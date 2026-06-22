@@ -411,18 +411,19 @@ fn index_getattr<'mcx>(
 // --- Predicate locking / pgstat / instrument: behaviour-preserving no-ops ---
 //
 // The bt_first/bt_next seams do not carry the IndexScanDesc, so `xs_snapshot`,
-// the SSI isolation level, `rel->pgstat_info`, and `scan->instrument` are not
-// reachable from this layer (BTScanOpaqueData carries none of them, and this
-// crate does not depend on the predicate/pgstat seam crates).
+// the SSI isolation level, and `scan->instrument` are not reachable from this
+// layer (BTScanOpaqueData carries none of them). `pgstat_count_index_scan` is
+// the exception: it keys off the relation OID, so it routes through the pgstat
+// seam (see below).
 //
-// All three are behaviour-preserving when skipped on the common path, exactly
-// like page.rs's rd_amcache no-op:
+// The skipped ones are behaviour-preserving on the common path, exactly like
+// page.rs's rd_amcache no-op:
 //   * `PredicateLockPage` / `PredicateLockRelation` are internally no-ops unless
 //     SSI is active for the read; SSI is not plumbed to this layer, so this
 //     matches the (overwhelmingly common) non-serializable case. Serializable
 //     correctness for nbtree scans is a genuine SSI-plumbing gap, not a stub.
-//   * `pgstat_count_index_scan` is a macro that no-ops when
-//     `rel->pgstat_info == NULL`; there is no pgstat_info at this layer.
+//   (`pgstat_count_index_scan` is NOT skipped: it is routed through the pgstat
+//   seam below, matching the other index AMs — see its definition.)
 //   * `scan->instrument` is NULL-guarded in C; there is no instrument here.
 
 /// `PredicateLockRelation(rel, scan->xs_snapshot)` — see module note.
@@ -440,9 +441,18 @@ fn isolation_is_serializable() -> bool {
     false
 }
 
-/// `pgstat_count_index_scan(rel)` — see module note.
+/// `pgstat_count_index_scan(rel)` (pgstat.h macro): increment the relation's
+/// pending `numscans` counter via the pgstat seam. The macro is a no-op when
+/// `rel->pgstat_info == NULL` / `pgstat_should_count_relation` is false; the
+/// seam body reproduces that gate from `pgstat_enabled` + the OID key.
 #[inline]
-fn pgstat_count_index_scan<'mcx>(_rel: &Relation<'mcx>) {}
+fn pgstat_count_index_scan<'mcx>(rel: &Relation<'mcx>) {
+    backend_utils_activity_pgstat_seams::pgstat_count_index_scan::call(
+        rel.rd_id,
+        rel.rd_rel.relisshared,
+        rel.pgstat_enabled,
+    );
+}
 
 /// `CHECK_FOR_INTERRUPTS()` — query-cancel / die check. Modelled as a no-op at
 /// this layer (the interrupt machinery is process-global; the loops it guards

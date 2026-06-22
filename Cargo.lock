@@ -2293,6 +2293,7 @@ dependencies = [
  "backend-storage-page",
  "backend-storage-smgr-bulkwrite-seams",
  "backend-storage-smgr-seams",
+ "backend-utils-activity-pgstat-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-datum-seams",
  "backend-utils-adt-skipsupport-seams",
