@@ -1007,7 +1007,7 @@ fn run_body<'mcx>(
     let mut rewritten_queries: alloc::vec::Vec<Query<'mcx>> = alloc::vec::Vec::new();
     let mut last_setstag: Option<usize> = None;
 
-    for query in querytrees.iter() {
+    for (qi, query) in querytrees.iter().enumerate() {
         // C functions.c:931 (prepare_next_query, pre-analyzed prosqlbody branch):
         // AcquireRewriteLocks(parsetree, true, false) before pg_rewrite_query.
         // A prosqlbody (BEGIN ATOMIC) function stores pre-analyzed Query trees that
@@ -1015,9 +1015,17 @@ fn run_body<'mcx>(
         // without this the executor's ExecOpenScanRelation re-opens each scanned
         // relation with NoLock and the lock-held-by-me assertion fires. (Re-locking
         // an already-held AccessShareLock on the prosrc path is a no-op.)
-        let locked =
-            rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)?;
-        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)?;
+        //
+        // The rewriter is where an RLS-affected query raises "query would be
+        // affected by row-level security policy" (and similar revalidation
+        // errors). C keeps sql_exec_error_callback on the error_context_stack
+        // for the whole postquel run including this rewrite step, so the body
+        // statement's `SQL function "<fname>" statement <N>` context line must
+        // be attached to errors from rewrite as well, not just execution.
+        let locked = rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)
+            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
+        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)
+            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
         for rq in rewritten.iter() {
             if rq.canSetTag {
                 last_setstag = Some(rewritten_queries.len());
@@ -1227,7 +1235,7 @@ fn run_body_setof<'mcx>(
     let mut plans: alloc::vec::Vec<PlannedStmt<'mcx>> = alloc::vec::Vec::new();
     let mut last_setstag: Option<usize> = None;
 
-    for query in querytrees.iter() {
+    for (qi, query) in querytrees.iter().enumerate() {
         // C functions.c:931 (prepare_next_query, pre-analyzed prosqlbody branch):
         // AcquireRewriteLocks(parsetree, true, false) before pg_rewrite_query.
         // A prosqlbody (BEGIN ATOMIC) function stores pre-analyzed Query trees that
@@ -1235,9 +1243,14 @@ fn run_body_setof<'mcx>(
         // without this the executor's ExecOpenScanRelation re-opens each scanned
         // relation with NoLock and the lock-held-by-me assertion fires. (Re-locking
         // an already-held AccessShareLock on the prosrc path is a no-op.)
-        let locked =
-            rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)?;
-        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)?;
+        //
+        // RLS revalidation errors raised by the rewriter need the body
+        // statement's `SQL function "<fname>" statement <N>` context line too
+        // (C keeps sql_exec_error_callback installed across the rewrite step).
+        let locked = rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)
+            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
+        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)
+            .map_err(|e| e.add_context(sql_exec_context(fname, qi + 1)))?;
         for rq in rewritten.iter() {
             // Utility statements require no planning; C wraps them in a trivial
             // CMD_UTILITY PlannedStmt (copying canSetTag/utilityStmt/etc.) and
