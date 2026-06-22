@@ -2660,21 +2660,74 @@ pub fn set_deparse_context_plan<'mcx, 'p>(
     set_deparse_plan(mcx, &mut dpcontext[0], plan)?;
 
     // For ModifyTable, set aliases for OLD and NEW in RETURNING.
-    if let Some(m) = plan.as_modifytable() {
-        dpcontext[0].ret_old_alias = match m.returningOldAlias.as_ref() {
-            Some(b) => Some(pstrdup(
-                mcx,
-                core::str::from_utf8(b).unwrap_or(""),
-            )?),
-            None => None,
+    //
+    // In C, `es->deparse_cxt` is a single long-lived `deparse_namespace` reused
+    // across every node of the plan tree, and `set_deparse_context_plan` only
+    // *assigns* `ret_old_alias`/`ret_new_alias` inside the `IsA(plan,
+    // ModifyTable)` arm — it never clears them for a non-ModifyTable plan. So once
+    // the enclosing ModifyTable node set them, they persist in the shared context
+    // while EXPLAIN descends into nested nodes (e.g. a RETURNING-list SubPlan's
+    // Aggregate), letting `get_variable` still render `old.`/`new.` for the
+    // correlated OLD/NEW Vars in the subplan's targetlist.
+    //
+    // The owned model builds a *fresh* per-node namespace, so that persistence is
+    // lost: when `plan` is the subplan's Aggregate, no ModifyTable is in hand and
+    // the aliases would be NULL. Recover C's behavior by inheriting the aliases
+    // from the nearest enclosing ModifyTable in `ancestors` when `plan` itself is
+    // not one (EXPLAIN pushes each enclosing plan onto `ancestors` as it
+    // descends, so the RETURNING ModifyTable is present there for its subplans).
+    // Extract the OLD/NEW alias strings up front (so the immutable borrow of
+    // `dpcontext[0].ancestors` is released before we mutate `dpcontext[0]`).
+    // Extract the OLD/NEW RETURNING alias byte-strings (cloned into `'mcx`) from
+    // a ModifyTable: prefer `plan` itself, else the nearest enclosing ModifyTable
+    // in `ancestors`. Capturing the raw byte vectors first releases all borrows of
+    // `dpcontext` before we mutate it below.
+    let ret_alias_bytes: Option<(
+        Option<alloc::vec::Vec<u8>>,
+        Option<alloc::vec::Vec<u8>>,
+    )> = {
+        let pull = |old: Option<&[u8]>, new: Option<&[u8]>| {
+            (
+                old.map(|b| b.to_vec()),
+                new.map(|b| b.to_vec()),
+            )
         };
-        dpcontext[0].ret_new_alias = match m.returningNewAlias.as_ref() {
-            Some(b) => Some(pstrdup(
-                mcx,
-                core::str::from_utf8(b).unwrap_or(""),
-            )?),
-            None => None,
-        };
+        if let Some(m) = plan.as_modifytable() {
+            Some(pull(
+                m.returningOldAlias.as_deref(),
+                m.returningNewAlias.as_deref(),
+            ))
+        } else if let Some(m) = dpcontext[0]
+            .ancestors
+            .iter()
+            .find_map(|a| a.as_ref().as_modifytable())
+        {
+            Some(pull(
+                m.returningOldAlias.as_deref(),
+                m.returningNewAlias.as_deref(),
+            ))
+        } else {
+            None
+        }
+    };
+    let ret_aliases: Option<(Option<PgString<'mcx>>, Option<PgString<'mcx>>)> = match ret_alias_bytes
+    {
+        Some((old, new)) => {
+            let old = match old {
+                Some(b) => Some(pstrdup(mcx, core::str::from_utf8(&b).unwrap_or(""))?),
+                None => None,
+            };
+            let new = match new {
+                Some(b) => Some(pstrdup(mcx, core::str::from_utf8(&b).unwrap_or(""))?),
+                None => None,
+            };
+            Some((old, new))
+        }
+        None => None,
+    };
+    if let Some((old, new)) = ret_aliases {
+        dpcontext[0].ret_old_alias = old;
+        dpcontext[0].ret_new_alias = new;
     }
 
     Ok(dpcontext)
