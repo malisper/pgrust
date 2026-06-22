@@ -874,19 +874,34 @@ pub fn ExecEvalJsonExprPath<'mcx>(
         let typioparam =
             types_core::primitive::Oid::from(fcinfo.args[1].value.as_usize() as u32);
         let typmod = fcinfo.args[2].value.as_usize() as i32;
-        // C threads jsestate->escontext for soft IO-coercion errors; the owned
-        // hard-error input_function_call seam (escontext == NULL) is used here,
-        // so a malformed value raises hard rather than steering ON ERROR. This
-        // is the one IO-coercion narrowing (no soft InputFunctionCallSafe seam).
-        let coerced = backend_utils_fmgr_fmgr_seams::input_function_call::call(
-            mcx,
-            fn_oid,
-            Some(&vs),
-            typioparam,
-            typmod,
-            None,
-        )?;
-        write_cell(state, resv, coerced, false);
+        // C: `*op->resvalue = FunctionCallInvoke(fcinfo)` with
+        // `fcinfo->context = &jsestate->escontext`, then
+        // `if (SOFT_ERROR_OCCURRED(&jsestate->escontext)) error = true`. A
+        // malformed value (e.g. coercing "1.23" to integer) records a soft error
+        // and steers ON ERROR rather than raising hard — but only when ON ERROR
+        // is not ERROR. With ON ERROR = ERROR (`throw_error`) the failure must
+        // propagate hard, so no escontext is threaded.
+        if throw_error {
+            let coerced = backend_utils_fmgr_fmgr_seams::input_function_call::call(
+                mcx, fn_oid, Some(&vs), typioparam, typmod, None,
+            )?;
+            write_cell(state, resv, coerced, false);
+        } else {
+            let mut io_escontext = types_error::SoftErrorContext::new(false);
+            let coerced = backend_utils_fmgr_fmgr_seams::input_function_call::call(
+                mcx,
+                fn_oid,
+                Some(&vs),
+                typioparam,
+                typmod,
+                Some(&mut io_escontext),
+            )?;
+            if io_escontext.error_occurred() {
+                error = true;
+            } else {
+                write_cell(state, resv, coerced, false);
+            }
+        }
     }
 
     // Handle ON EMPTY.
@@ -952,25 +967,24 @@ fn build_path_vars<'mcx>(
         .collect();
     for (name, typid, typmod, cell) in specs {
         let (val, isnull) = read_cell(state, cell);
-        // JsonPathVariable.value is a bare-word types_datum::Datum. A by-value
-        // arg maps directly; a by-reference arg cannot be carried by the bare
-        // word — that is the genuine by-ref-Datum substrate gap (and the
-        // json_item_from_datum seam that would consume it is itself
-        // uninstalled), so it loud-panics here.
-        let word = match val {
-            Datum::ByVal(w) => w,
-            _ => panic!(
-                "execExprInterp: ExecEvalJsonExprPath PASSING variable {:?} has a by-reference \
-                 value; the bare-word JsonPathVariable.value carrier and the json_item_from_datum \
-                 detoast seam for varlena PASSING args are not yet landed",
-                String::from_utf8_lossy(&name)
+        // JsonPathVariable splits the bound value: a pass-by-value arg rides in
+        // `value` as a bare machine word; a pass-by-reference arg carries its
+        // full header-ful varlena image in `value_bytes` (the C `Datum` is a
+        // pointer into that image). `JsonItemFromDatum` reads whichever carrier
+        // the type uses.
+        let (word, value_bytes) = match val {
+            Datum::ByVal(w) => (types_datum::Datum::from_usize(w), None),
+            other => (
+                types_datum::Datum::null(),
+                Some(other.as_ref_bytes().to_vec()),
             ),
         };
         vars.push(JsonPathVariable {
             name,
             typid,
             typmod,
-            value: types_datum::Datum::from_usize(word),
+            value: word,
+            value_bytes,
             isnull,
         });
     }

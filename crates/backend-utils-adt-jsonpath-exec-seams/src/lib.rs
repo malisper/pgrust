@@ -31,8 +31,6 @@ use alloc::vec::Vec;
 
 use types_core::Oid;
 use types_datum::Datum;
-use types_error::PgResult;
-use types_jsonb::backend_utils_adt_jsonb_util::JsonbValue;
 
 // The `compareDatetime` cross-type comparison, the `parse_datetime` text
 // parser, and the `executeDateTimeMethod` cast switch are no longer seamed:
@@ -48,13 +46,14 @@ use types_jsonb::backend_utils_adt_jsonb_util::JsonbValue;
 // function directly (a leaf adt dep, no seam, mirroring `numeric_*`), so they
 // are not declared as seams here.
 
-seam_core::seam!(
-    /// C: `JsonItemFromDatum(Datum val, Oid typid, int32 typmod, JsonbValue *res)`
-    /// — coerce a SQL `Datum` of a `numeric`/int/float/text/varchar/jsonb/json
-    /// type into a `JsonbValue`. (The `BOOLOID`, datetime, and `default`-error
-    /// arms are handled in-crate.)
-    pub fn json_item_from_datum(val: Datum, typid: Oid, typmod: i32) -> PgResult<JsonbValue>
-);
+// `JsonItemFromDatum` (coerce a PASSING variable's SQL value into a
+// `JsonbValue`) is no longer a seam: jsonpath_exec.c is a leaf adt unit, so the
+// numeric/int/float coercions (`backend-utils-adt-numeric`), the text/varchar
+// `VARDATA_ANY` arm, and the jsonb/json arms (`JsonbExtractScalar`/
+// `JsonbInitBinary`/`jsonb_in`) are all reached in-crate. The bound value's
+// by-reference varlena image is carried out-of-band on `JsonPathVariable` /
+// `JsonTableVariable` (`value_bytes`), so no `Datum`-pointer detoast seam is
+// needed.
 
 // `check_stack_depth()` (utils/misc/stack_depth.c) and `CHECK_FOR_INTERRUPTS()`
 // (miscadmin.h, serviced via tcop/postgres.c) are genuine cross-subsystem
@@ -116,12 +115,18 @@ pub enum JsonTablePlan {
 }
 
 /// A bound jsonpath PASSING variable surfaced by the JSON_TABLE provider.
+///
+/// As with `JsonPathVariable`, the bound value is split: a pass-by-value type
+/// rides in `value` as a bare machine word, and a pass-by-reference type
+/// (`numeric`/`text`/`varchar`/`jsonb`/`json`) carries its full header-ful
+/// varlena image in `value_bytes` (`None` for by-value types).
 #[derive(Clone, Debug)]
 pub struct JsonTableVariable {
     pub name: Vec<u8>,
     pub typid: Oid,
     pub typmod: i32,
     pub value: Datum,
+    pub value_bytes: core::option::Option<Vec<u8>>,
     pub isnull: bool,
 }
 

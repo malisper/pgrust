@@ -433,11 +433,13 @@ fn eval_passing_args<'mcx>(
         // var->name = pstrdup(name->sval).
         let name = passing_names[i].as_bytes().to_vec();
 
+        let (word, value_bytes) = tuple_datum_to_carrier(&value);
         args.push(jsonpath_exec::JsonTableVariable {
             name,
             typid,
             typmod,
-            value: tuple_datum_to_word(&value),
+            value: word,
+            value_bytes,
             isnull,
         });
     }
@@ -445,22 +447,17 @@ fn eval_passing_args<'mcx>(
     Ok(args)
 }
 
-/// Convert a `types_tuple::Datum` (the `ExecEvalExpr` result) into the bare-word
-/// `types_datum::Datum` the jsonpath `JsonPathVariable` carries.
-///
-/// A by-value scalar maps directly to its machine word. A by-reference PASSING
-/// value (text / jsonb / numeric …) cannot be carried by the bare word — that
-/// is the by-reference-`Datum` substrate gap also noted on the jsonpath_exec
-/// `json_item_from_datum` seam (which a by-ref PASSING var would dispatch into),
-/// so a real by-ref PASSING argument panics loudly until that lane lands.
-/// JSON_TABLE without PASSING (the common case) never reaches this arm.
-fn tuple_datum_to_word(d: &Datum<'_>) -> types_datum::Datum {
+/// Convert a `types_tuple::Datum` (the `ExecEvalExpr` result) into the carrier
+/// pair the jsonpath `JsonTableVariable` / `JsonPathVariable` uses: a bare
+/// machine word for pass-by-value types, or the full header-ful varlena image
+/// for pass-by-reference types (`text` / `jsonb` / `numeric` …), which
+/// `JsonItemFromDatum` reads via `value_bytes`.
+fn tuple_datum_to_carrier(
+    d: &Datum<'_>,
+) -> (types_datum::Datum, Option<alloc::vec::Vec<u8>>) {
     match d {
-        Datum::ByVal(w) => types_datum::Datum::from_usize(*w),
-        _ => panic!(
-            "JSON_TABLE PASSING: by-reference argument value — the by-reference-Datum \
-             substrate for varlena PASSING args is not yet landed"
-        ),
+        Datum::ByVal(w) => (types_datum::Datum::from_usize(*w), None),
+        _ => (types_datum::Datum::null(), Some(d.as_ref_bytes().to_vec())),
     }
 }
 

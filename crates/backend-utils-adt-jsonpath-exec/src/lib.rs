@@ -200,6 +200,14 @@ pub enum JsonPathVars {
 }
 
 /// C: `struct JsonPathVariable` (jsonpath.h) — a bound jsonpath variable.
+///
+/// In C the bound value is a single by-value-or-by-reference `Datum`. The safe
+/// port splits that word: a pass-by-value type (`bool`/int/float/datetime)
+/// rides in [`value`](Self::value) as a bare machine word, while a
+/// pass-by-reference type (`numeric`/`text`/`varchar`/`jsonb`/`json`) cannot
+/// survive as a bare word, so its full header-ful varlena image is carried
+/// out-of-band in [`value_bytes`](Self::value_bytes). `JsonItemFromDatum`
+/// dispatches on `typid` and reads whichever carrier the type uses.
 #[derive(Clone, Debug)]
 pub struct JsonPathVariable {
     /// Variable name (no leading `$`).
@@ -208,8 +216,12 @@ pub struct JsonPathVariable {
     pub typid: Oid,
     /// Typmod of `value`.
     pub typmod: i32,
-    /// The bound SQL value (as a `Datum`).
+    /// The bound SQL value as a bare machine word, for pass-by-value types.
     pub value: Datum,
+    /// The bound SQL value's full (header-ful) varlena image, for
+    /// pass-by-reference types (`numeric`/`text`/`varchar`/`jsonb`/`json`).
+    /// `None` for pass-by-value types.
+    pub value_bytes: Option<Vec<u8>>,
     /// Whether `value` is SQL NULL.
     pub isnull: bool,
 }
@@ -2279,7 +2291,7 @@ fn GetJsonPathVar(
         *base_object_id = 0;
         JsonbValue::null()
     } else {
-        JsonItemFromDatum(mcx, var.value, var.typid, var.typmod)?
+        JsonItemFromDatum(mcx, var)?
     };
 
     *base_object = result.clone();
@@ -2295,37 +2307,116 @@ fn CountJsonPathVars(vars: &JsonPathVars) -> PgResult<i32> {
     })
 }
 
-/// C: `JsonItemFromDatum` (jsonpath_exec.c:3047) — coerce a SQL `Datum` of a
-/// known type into a `JsonbValue`.
+/// C: `JsonItemFromDatum` (jsonpath_exec.c:3047) — coerce a bound PASSING
+/// variable's SQL value into a `JsonbValue`.
 ///
-/// The pure arms are in-crate: `BOOLOID`; the `DATE/TIME/TIMETZ/TIMESTAMP/
-/// TIMESTAMPTZ` field-assignment arm; and the `default` arm's "could not convert
-/// value of type %s to jsonpath" error (using the seamed `format_type_be`). The
-/// numeric/int/float/text/varchar/jsonb/json arms (varlena interpretation +
-/// fmgr coercions) stay behind the seam.
-fn JsonItemFromDatum(mcx: Mcx<'_>, val: Datum, typid: Oid, typmod: i32) -> PgResult<JsonbValue> {
+/// The bound value is split across the [`JsonPathVariable`] carriers: a
+/// pass-by-value type reads `var.value` (a bare machine word), a
+/// pass-by-reference type reads `var.value_bytes` (the full header-ful varlena
+/// image). All arms are now in-crate (jsonpath_exec.c is a leaf adt unit): the
+/// numeric/int/float coercions go through `backend-utils-adt-numeric`, the
+/// text/varchar arm strips the varlena header (`VARDATA_ANY`/
+/// `VARSIZE_ANY_EXHDR`), and the jsonb/json arms reuse the in-crate
+/// `JsonbExtractScalar`/`JsonbInitBinary`/`jsonb_in`.
+fn JsonItemFromDatum(mcx: Mcx<'_>, var: &JsonPathVariable) -> PgResult<JsonbValue> {
     use types_tuple::heaptuple::{
         BOOLOID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, JSONBOID, JSONOID,
         NUMERICOID, TEXTOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, VARCHAROID,
+    };
+
+    let typid = var.typid;
+    let typmod = var.typmod;
+
+    // `VARDATA_ANY`/`VARSIZE_ANY_EXHDR` of a header-ful (4-byte) varlena image.
+    let var_bytes = || -> PgResult<&[u8]> {
+        var.value_bytes.as_deref().ok_or_else(|| {
+            elog_error("JsonItemFromDatum: pass-by-reference variable has no varlena image")
+        })
     };
 
     match typid {
         BOOLOID => Ok(JsonbValue {
             typ: jbvType::jbvBool,
             // C: `res->val.boolean = DatumGetBool(val)`.
-            val: JsonbValueData::Bool(val.as_usize() != 0),
+            val: JsonbValueData::Bool(var.value.as_usize() != 0),
         }),
         DATEOID | TIMEOID | TIMETZOID | TIMESTAMPOID | TIMESTAMPTZOID => Ok(JsonbValue {
             typ: jbvType::jbvDatetime,
             val: JsonbValueData::Datetime(JsonbDatetime {
-                value: val.as_usize(),
+                value: var.value.as_usize(),
                 typid,
                 typmod,
                 tz: 0,
             }),
         }),
-        NUMERICOID | INT2OID | INT4OID | INT8OID | FLOAT4OID | FLOAT8OID | TEXTOID | VARCHAROID
-        | JSONBOID | JSONOID => seam::json_item_from_datum::call(val, typid, typmod),
+        NUMERICOID => Ok(JsonbValue {
+            // C: `JsonbValueInitNumericDatum(res, val)` — `val` is the numeric
+            // varlena; `value_bytes` is exactly that on-disk image.
+            typ: jbvType::jbvNumeric,
+            val: JsonbValueData::Numeric(var_bytes()?.to_vec()),
+        }),
+        INT2OID => Ok(JsonbValue {
+            // C: `DirectFunctionCall1(int2_numeric, val)`.
+            typ: jbvType::jbvNumeric,
+            val: JsonbValueData::Numeric(int64_to_numeric_bytes(mcx, var.value.as_i16() as i64)?),
+        }),
+        INT4OID => Ok(JsonbValue {
+            // C: `DirectFunctionCall1(int4_numeric, val)`.
+            typ: jbvType::jbvNumeric,
+            val: JsonbValueData::Numeric(int64_to_numeric_bytes(mcx, var.value.as_i32() as i64)?),
+        }),
+        INT8OID => Ok(JsonbValue {
+            // C: `DirectFunctionCall1(int8_numeric, val)`.
+            typ: jbvType::jbvNumeric,
+            val: JsonbValueData::Numeric(int64_to_numeric_bytes(mcx, var.value.as_i64())?),
+        }),
+        FLOAT4OID => Ok(JsonbValue {
+            // C: `DirectFunctionCall1(float4_numeric, val)`.
+            typ: jbvType::jbvNumeric,
+            val: JsonbValueData::Numeric(float8_to_numeric_bytes(mcx, var.value.as_f32() as f64)?),
+        }),
+        FLOAT8OID => Ok(JsonbValue {
+            // C: `DirectFunctionCall1(float8_numeric, val)`.
+            typ: jbvType::jbvNumeric,
+            val: JsonbValueData::Numeric(float8_to_numeric_bytes(mcx, var.value.as_f64())?),
+        }),
+        TEXTOID | VARCHAROID => {
+            // C: `res->val.string.val = VARDATA_ANY(val);`
+            //    `res->val.string.len = VARSIZE_ANY_EXHDR(val);`
+            let img = var_bytes()?;
+            let payload = &img[VARHDRSZ.min(img.len())..];
+            Ok(JsonbValue {
+                typ: jbvType::jbvString,
+                val: JsonbValueData::String(payload.to_vec()),
+            })
+        }
+        JSONBOID => {
+            // C: scalar -> `JsonbExtractScalar`, else `JsonbInitBinary`.
+            let jb = var_bytes()?;
+            let root = jsonb_root(jb);
+            let mut res = JsonbValue::null();
+            if json_container_is_scalar(container_header(root)) {
+                JsonbExtractScalar(root, &mut res)?;
+            } else {
+                JsonbInitBinary(&mut res, jb);
+            }
+            Ok(res)
+        }
+        JSONOID => {
+            // C: `jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, str))` then
+            // recurse as JSONBOID.
+            let img = var_bytes()?;
+            let txt = &img[VARHDRSZ.min(img.len())..];
+            let jb = jsonb_in_bytes(mcx, txt)?;
+            let root = jsonb_root(&jb);
+            let mut res = JsonbValue::null();
+            if json_container_is_scalar(container_header(root)) {
+                JsonbExtractScalar(root, &mut res)?;
+            } else {
+                JsonbInitBinary(&mut res, &jb);
+            }
+            Ok(res)
+        }
         _ => Err(ereport(ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(format!(
@@ -3841,6 +3932,14 @@ fn vars_from_opt_jsonb(vars: Option<&[u8]>) -> JsonPathVars {
 }
 
 // --- numeric helpers (on-disk bytes) ---------------------------------------
+
+/// C: `DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(str)))` ->
+/// on-disk jsonb varlena bytes. `txt` is the header-stripped `json` text body.
+fn jsonb_in_bytes(mcx: Mcx<'_>, txt: &[u8]) -> PgResult<Vec<u8>> {
+    Ok(backend_utils_adt_jsonb::jsonb_in(mcx, txt, None)?
+        .expect("jsonb_in without escontext never soft-fails")
+        .to_vec())
+}
 
 /// C: `int64_to_numeric(val)` -> on-disk varlena bytes.
 fn int64_to_numeric_bytes(mcx: Mcx<'_>, val: i64) -> PgResult<Vec<u8>> {

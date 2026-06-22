@@ -125,6 +125,7 @@ fn vars_from_table_vars(vars: Vec<JsonTableVariable>) -> JsonPathVars {
                 typid: v.typid,
                 typmod: v.typmod,
                 value: v.value,
+                value_bytes: v.value_bytes,
                 isnull: v.isnull,
             })
             .collect(),
