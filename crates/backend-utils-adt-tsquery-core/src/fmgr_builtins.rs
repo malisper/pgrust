@@ -264,6 +264,25 @@ fn builtin(
     )
 }
 
+/// The shared fmgr-frame entry point for every GiST `tsquery_ops` support proc.
+/// In the owned model these are invoked through the GiST core's typed by-OID
+/// dispatch (`backend-access-gist-proc`), reading `FmgrInfo::fn_oid` — never
+/// `fn_addr`. This frame entry therefore is never reached on any port path; the
+/// row exists so `fmgr_info` (via `index_getprocinfo` in `initGISTstate`) can
+/// resolve the `internal`-language prosrc name (without it `CREATE INDEX ...
+/// USING gist` errors `internal function "gtsquery_consistent" is not in
+/// internal lookup table`). It errors clearly if a future fmgr-frame call site
+/// is added.
+fn fc_gtsquery_support_via_dispatch(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let foid = fcinfo.flinfo.as_ref().map(|fi| fi.fn_oid).unwrap_or(0);
+    Err(types_error::PgError::error(format!(
+        "GIST tsquery_ops support function (OID {foid}) must be invoked through \
+         the GiST opclass dispatch, not the fmgr frame"
+    )))
+}
+
 /// Register every `tsquery` builtin whose value core is ported and whose
 /// arg/result types are expressible at the current fmgr boundary. OIDs/nargs
 /// from `pg_proc.dat`; every row is `proisstrict => 't'` and not retset.
@@ -293,5 +312,18 @@ pub fn register_tsquery_builtins() {
         // ---- set-containment (GIN-opclass `@>` / `<@`) ----
         builtin(3691, "tsq_mcontains", 2, fc_tsq_mcontains),
         builtin(3692, "tsq_mcontained", 2, fc_tsq_mcontained),
+        // ---- GiST `tsquery_ops` opclass support procedures ----
+        // (all `proisstrict => 't'` — the default — and not retset; OIDs/nargs
+        // from `pg_proc.dat`). The bodies live in `crate::gist` and are reached
+        // through the GiST core's typed by-OID dispatch
+        // (`backend-access-gist-proc`); the row's `func` adapter is the
+        // never-entered dispatch-frame stub.
+        builtin(3695, "gtsquery_compress", 1, fc_gtsquery_support_via_dispatch),
+        builtin(3697, "gtsquery_picksplit", 2, fc_gtsquery_support_via_dispatch),
+        builtin(3698, "gtsquery_union", 2, fc_gtsquery_support_via_dispatch),
+        builtin(3699, "gtsquery_same", 3, fc_gtsquery_support_via_dispatch),
+        builtin(3700, "gtsquery_penalty", 3, fc_gtsquery_support_via_dispatch),
+        builtin(3701, "gtsquery_consistent", 5, fc_gtsquery_support_via_dispatch),
+        builtin(3793, "gtsquery_consistent_oldsig", 5, fc_gtsquery_support_via_dispatch),
     ]);
 }

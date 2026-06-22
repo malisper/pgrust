@@ -76,6 +76,8 @@ mod unnest;
 mod control_srf;
 mod multirange_unnest;
 mod tsvector_unnest;
+mod ts_parse;
+mod ts_stat;
 mod pg_get_keywords;
 mod pg_tablespace_databases;
 mod pg_listening_channels;
@@ -185,6 +187,17 @@ pub fn init_seams() {
     // "char"[])` row per WordEntry (its decode core is
     // `backend-utils-adt-tsvector-core::op::tsvector_unnest`).
     tsvector_unnest::register_tsvector_unnest();
+    // `ts_token_type(*)` / `ts_parse(*)` (wparser.c) — the materialize-mode SRFs
+    // emitting one `(tokid, alias, description)` / `(tokid, token)` row per
+    // parser token-type descriptor / tokenized lexeme (cores
+    // `backend-tsearch-parse::tt_storage_list` / `::prs_tokenize`).
+    ts_parse::register_ts_parse();
+    // `ts_stat(query[, weights])` (tsvector_op.c) — the materialize-mode SRFs
+    // emitting one `(word text, ndoc int4, nentry int4)` row per stat-tree node
+    // (cores `backend-utils-adt-tsvector-core::op::ts_stat_sql` /
+    // `ts_setup_firstcall` / `ts_process_call`; the SPI cursor walk is the
+    // `exec_stat_query` seam installed by `backend-executor-spi`).
+    ts_stat::register_ts_stat();
     // `pg_get_keywords()` (OID 1686) — the materialize-mode SRF emitting one
     // `(word text, catcode "char", barelabel bool, catdesc text, baredesc text)`
     // row per grammar keyword (its render core is

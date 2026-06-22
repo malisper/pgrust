@@ -132,9 +132,13 @@ impl SignTsVector {
         };
         let total = 4 + I32 + payload_len;
         let mut out = Vec::with_capacity(total);
-        // SET_VARSIZE(res, total): 4-byte length header (native endian, as the
-        // unpacked 4-byte varlena form the fmgr by-ref lane round-trips).
-        out.extend_from_slice(&(total as i32).to_ne_bytes());
+        // SET_VARSIZE(res, total): a real 4-byte ("4B-U") varlena length header.
+        // The on-disk / fmgr varlena convention stores the total byte length in
+        // the high 30 bits (`len << 2`), with the low 2 bits the 4B-uncompressed
+        // tag (`00`); `VARSIZE_4B` reads it back as `word >> 2`. The GiST index
+        // storage (`index_form_tuple`) reads this header to size the key, so it
+        // must be the real shifted form, not the bare total.
+        out.extend_from_slice(&((total as i32) << 2).to_ne_bytes());
         out.extend_from_slice(&self.flag.to_ne_bytes());
         match &self.data {
             SignTsVectorData::Arr(a) => {
@@ -174,8 +178,9 @@ mod tests {
 
     fn roundtrip(v: &SignTsVector) {
         let img = v.to_image();
-        // The 4-byte header records the full image length (SET_VARSIZE).
-        let total = i32::from_ne_bytes([img[0], img[1], img[2], img[3]]) as usize;
+        // The 4-byte header records the full image length as a real 4B-U varlena
+        // header (`SET_VARSIZE` = `len << 2`); `VARSIZE_4B` reads it `word >> 2`.
+        let total = (i32::from_ne_bytes([img[0], img[1], img[2], img[3]]) >> 2) as usize;
         assert_eq!(total, img.len());
         // from_image consumes the body (header stripped), as the fmgr by-ref lane
         // hands it after VARDATA.

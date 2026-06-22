@@ -133,6 +133,8 @@ pub fn init_seams() {
     // --- ts_rewrite SPI cursor leg (real body: SPI_cursor_open over the
     //     prepared plan + the SPI_cursor_fetch loop into DestSPI) ---
     seams::tsquery_rewrite_run::set(exec::tsquery_rewrite_run_seam);
+    // --- ts_stat SPI cursor leg (ts_stat_sql): one-tsvector-column cursor walk ---
+    backend_utils_adt_tsvector_ext_seams::exec_stat_query::set(exec::exec_stat_query_seam);
 
     // matview.c's refresh_by_match_merge drives SPI through its own outward
     // frontier seam crate; spi.c owns the bodies. The execute/exec/getvalue/

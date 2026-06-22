@@ -53,6 +53,14 @@ backend-utils-adt-misc = { path = "../backend-utils-adt-misc" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 
+# ts_token_type(*) / ts_parse(*) (wparser.c) materialize-mode SRFs: the
+# data-producing cores (default-parser token-type list + tokenizer), the parser
+# cache entry (to verify the default-parser method OIDs), and the by-name parser
+# OID resolution.
+backend-tsearch-parse = { path = "../backend-tsearch-parse" }
+backend-utils-cache-ts-cache = { path = "../backend-utils-cache-ts-cache" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+
 # unnest(anyarray) (OID 2331) + generate_subscripts(anyarray, int4 [, bool])
 # (OIDs 1191/1192): the value-per-call SRF element-deconstruction / subscript
 # cores (array_unnest / generate_subscripts) and the ArrayElementDatum carrier.
