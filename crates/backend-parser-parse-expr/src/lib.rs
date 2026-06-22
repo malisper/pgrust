@@ -5309,8 +5309,8 @@ fn transformJsonSerializeExpr<'mcx>(
     build_json_constructor_expr(
         pstate,
         JsonConstructorType::JSCTOR_JSON_SERIALIZE,
-        Vec::new(),
-        Some(arg),
+        alloc::vec![arg],
+        None,
         returning,
         false,
         false,
@@ -5728,8 +5728,9 @@ fn transformJsonIsPredicate<'mcx>(
     pstate: &mut ParseState<'mcx>,
     pred: types_nodes::rawexprnodes::JsonIsPredicate<'mcx>,
 ) -> PgResult<Expr> {
-    // transformJsonParseArg: recurse + coerce the subject to text/json/jsonb.
-    let arg_node = boxed_node(
+    // transformJsonParseArg: recurse + coerce the subject to text/json/jsonb,
+    // applying the bytea -> text conversion for bytea input. Mirrors C exactly.
+    let raw = boxed_node(
         pred.expr
             .as_ref()
             .map(|p| p.clone_in(aexpr_clone_ctx(pstate)))
@@ -5737,37 +5738,11 @@ fn transformJsonIsPredicate<'mcx>(
             .map(|n| mcx::alloc_in(aexpr_clone_ctx(pstate), n))
             .transpose()?,
     );
-    let mut expr = transformExprRecurse(pstate, arg_node)?
-        .ok_or_else(|| PgError::error("IS JSON: NULL argument"))?;
+    let (expr, exprtype) = transform_json_parse_arg(pstate, raw, &pred.format)?;
 
-    let mut exprtype = expr_type(Some(&expr))?;
-
-    // Coerce UNKNOWN / string-category inputs to text (transformJsonParseArg).
-    if exprtype == UNKNOWNOID {
-        expr = coerce::coerce_to_specific_type::call(pstate, expr, TEXTOID, "IS JSON")?;
-        exprtype = TEXTOID;
-    } else if exprtype != JSONOID && exprtype != JSONBOID && exprtype != BYTEAOID {
-        let (typcategory, _typispreferred) =
-            lsyscache::get_type_category_preferred::call(exprtype)?;
-        if typcategory == TYPCATEGORY_STRING {
-            let coerced = coerce::coerce_to_target_type::call(
-                pstate,
-                expr.clone(),
-                exprtype,
-                TEXTOID,
-                -1,
-                CoercionContext::COERCION_IMPLICIT,
-                CoercionForm::COERCE_IMPLICIT_CAST,
-                -1,
-            )?;
-            if let Some(c) = coerced {
-                expr = c;
-                exprtype = TEXTOID;
-            }
-        }
-    }
-
-    if exprtype != TEXTOID && exprtype != JSONOID && exprtype != JSONBOID && exprtype != BYTEAOID {
+    // make resulting expression. Note: bytea is NOT allowed here because
+    // transform_json_parse_arg already converted it to text.
+    if exprtype != TEXTOID && exprtype != JSONOID && exprtype != JSONBOID {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_DATATYPE_MISMATCH)
             .errmsg(alloc::format!(

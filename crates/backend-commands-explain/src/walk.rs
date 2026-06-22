@@ -1029,6 +1029,39 @@ pub fn ExplainNode<'es, 'p>(
                 )?;
             }
         }
+        ntag::T_FunctionScan => {
+            // explain.c:2067-2087: verbose-only show_expression over the list of
+            // each RangeTblFunction's funcexpr, "Function Call"; then Filter.
+            if es.verbose {
+                let fs = plan_node.expect_functionscan();
+                let mut fexprs = PgVec::new_in(mcx);
+                if let Some(functions) = fs.functions.as_ref() {
+                    for rtfunc in functions.iter() {
+                        if let Some(fe) = rtfunc.funcexpr.as_ref() {
+                            fexprs.push(mcx::alloc_in(mcx, fe.clone_in(mcx)?)?);
+                        }
+                    }
+                }
+                let list_node = mcx::alloc_in(mcx, Node::mk_list(mcx, fexprs)?)?;
+                show_expression(
+                    es,
+                    mcx,
+                    plan_node,
+                    ancestors,
+                    &list_node,
+                    "Function Call",
+                )?;
+            }
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
+        }
         ntag::T_TableFuncScan => {
             // explain.c:2089-2095: verbose-only show_expression((Node *)
             //   scan->tablefunc, "Table Function Call", ...); then Filter.

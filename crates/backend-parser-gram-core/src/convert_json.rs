@@ -159,15 +159,31 @@ fn conv_json_behavior<'mcx>(
     })
 }
 
+/// `*mut JsonReturning` → `Option<JsonReturning>` (NULL → None). The grammar
+/// fills only `format` on the `RETURNING` clause; `typid`/`typmod` are
+/// analyze-filled, so they start zeroed (Invalid/-1-equivalent) here.
+fn json_returning_opt(p: *mut cpr::JsonReturning) -> Option<tn_prim::JsonReturning> {
+    if p.is_null() {
+        return None;
+    }
+    let r = unsafe { &*p };
+    Some(tn_prim::JsonReturning {
+        format: json_format_opt(r.format),
+        typid: r.typid,
+        typmod: r.typmod,
+    })
+}
+
 fn conv_json_output<'mcx>(
     mcx: Mcx<'mcx>,
     p: *mut cp::JsonOutput,
 ) -> PgResult<tn_re::JsonOutput<'mcx>> {
     let e = unsafe { &*p };
-    // `returning` is analyze-filled; the grammar leaves it NULL/zeroed.
+    // The grammar fills `returning->format` from the FORMAT clause;
+    // `typid`/`typmod` are analyze-filled later in transformJsonOutput.
     Ok(tn_re::JsonOutput {
         type_name: child_opt(mcx, e.type_name, conv_typename)?,
-        returning: None,
+        returning: json_returning_opt(e.returning),
     })
 }
 

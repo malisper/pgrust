@@ -556,10 +556,10 @@ pub fn ExecEvalJsonIsPredicate<'mcx>(
 
     let (js, js_null) = read_cell(state, resv);
     if js_null {
-        write_cell(state, resv, Datum::from_bool(false), false);
-        if resnull != resv {
-            write_cell(state, resnull, Datum::from_bool(false), false);
-        }
+        // C: `*op->resvalue = BoolGetDatum(false); return;` — it writes the
+        // value cell but leaves `*op->resnull` untouched (still true), so the
+        // predicate result is NULL when the subject is NULL.
+        write_cell(state, resv, Datum::from_bool(false), js_null);
         return Ok(());
     }
 
