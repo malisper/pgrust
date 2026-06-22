@@ -75,6 +75,7 @@ pub fn init_seams() {
     seams::statistic_proc_security_check::set(scalar::seam_statistic_proc_security_check);
     seams::stats_tuple_stanullfrac::set(scalar::seam_stats_tuple_stanullfrac);
     seams::mcv_selectivity::set(ineq::seam_mcv_selectivity);
+    seams::statext_clause_attnums_selectable::set(examine::seam_statext_clause_attnums_selectable);
     seams::estimate_num_groups::set(misc::seam_estimate_num_groups);
     // pathnode.c `create_unique_path` reaches `estimate_num_groups(..., NULL,
     // NULL)`; install the pathnode-side outward seam (no estinfo).

@@ -49,6 +49,7 @@ use backend_nodes_equalfuncs_seams as eq;
 use backend_nodes_nodeFuncs_seams as nf;
 use backend_optimizer_path_joinpath_seams as jp;
 use backend_optimizer_util_relnode_seams as rel_seams;
+use backend_optimizer_util_var_seams as var_seams;
 use backend_utils_cache_syscache_seams as syscache;
 
 use crate::FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER;
@@ -1063,4 +1064,57 @@ pub fn seam_get_join_variables<'mcx, 'run>(
 /// Seam body for `release_variable_stats`.
 pub fn seam_release_variable_stats(vardata: VariableStatData) {
     release_variable_stats(vardata)
+}
+
+/// Seam body for `statext_clause_attnums_selectable` — the non-leakproof
+/// permission tail of `statext_is_compatible_clause` (extended_stats.c:1626).
+///
+/// C:
+/// ```c
+/// Bitmapset *clause_attnums = NULL;
+/// int attnum = -1;
+/// while ((attnum = bms_next_member(*attnums, attnum)) >= 0)
+///     clause_attnums = bms_add_member(clause_attnums,
+///                          attnum - FirstLowInvalidHeapAttributeNumber);
+/// if (*exprs != NIL)
+///     pull_varattnos((Node *) *exprs, relid, &clause_attnums);
+/// if (!all_rows_selectable(root, relid, clause_attnums))
+///     return false;
+/// ```
+///
+/// `attnums` carries the *non*-offset individual-Var attribute numbers (the
+/// values stored in the clause walk's `Relids`); we offset each by
+/// `FirstLowInvalidHeapAttributeNumber` to build `clause_attnums`. We then run
+/// `pull_varattnos(expr, relid)` over each matched sub-expression and union the
+/// (already-offset) results in, exactly as C feeds the whole `*exprs` list to
+/// `pull_varattnos`.
+pub fn seam_statext_clause_attnums_selectable<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    relid: u32,
+    attnums: &[i32],
+    exprs: &[Expr<'mcx>],
+) -> PgResult<bool> {
+    use mcx::PgBox;
+
+    // Build clause_attnums in the offset (pull_varattnos) style from the
+    // individual-Var attnums.
+    let mut clause_attnums: Option<PgBox<'mcx, Bitmapset<'mcx>>> = None;
+    for &attnum in attnums {
+        let offset = attnum - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER as i32;
+        clause_attnums = Some(colbms::bms_add_member(mcx, clause_attnums.take(), offset)?);
+    }
+
+    // Merge attnums referenced inside the matched sub-expressions. C calls
+    // pull_varattnos on the whole *exprs List; the owned seam works per-Expr, so
+    // union each result (pull_varattnos already returns offset-style attnums).
+    for expr in exprs {
+        if let Some(more) = var_seams::pull_varattnos::call(mcx, expr, relid)? {
+            clause_attnums =
+                colbms::bms_union(mcx, clause_attnums.as_deref(), Some(&more))?;
+        }
+    }
+
+    all_rows_selectable(mcx, run, root, relid, clause_attnums.as_deref())
 }

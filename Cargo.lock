@@ -17039,6 +17039,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-scalar-datum-core",
+ "backend-utils-adt-selfuncs-seams",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",

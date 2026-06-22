@@ -35,6 +35,7 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 use backend_nodes_nodeFuncs_seams as nodefuncs;
 use backend_optimizer_path_small_seams as sel_seam;
 use backend_optimizer_util_relnode_seams as bms;
+use backend_utils_adt_selfuncs_seams as selfuncs;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 
@@ -320,10 +321,12 @@ fn statext_is_compatible_clause_internal<'mcx>(
 /// The leakproof permission check is faithfully ported: for the MCV-supported
 /// operators (=, <>, <, <=, >, >=) every operator is leakproof, so `leakproof`
 /// stays true and the per-column permission branch is never entered. If a
-/// non-leakproof operator ever reaches this path, the permission check is
-/// enforced via the (currently unported) pull_varattnos/all_rows_selectable
-/// owners — until they land, such a clause is conservatively rejected (returns
-/// false), exactly the safe direction the C permission check would take.
+/// non-leakproof operator reaches this path (e.g. the `mod(...)`-expression MCV
+/// clauses), the permission check is enforced via the selfuncs-owned
+/// `pull_varattnos` + `all_rows_selectable` machinery (the
+/// `statext_clause_attnums_selectable` seam): the user must hold SELECT on every
+/// referenced column and the relation must have no security-barrier/RLS
+/// `securityQuals`, otherwise the clause is rejected — exactly as C does.
 fn statext_is_compatible_clause<'mcx>(
     root: &PlannerInfo,
     clause: &Expr<'_>,
@@ -379,19 +382,39 @@ fn statext_is_compatible_clause<'mcx>(
     }
 
     if !leakproof {
-        // The clause uses a non-leakproof operator, so C's
-        // statext_is_compatible_clause checks the user can read all required
-        // attributes (pull_varattnos + all_rows_selectable, i.e.
-        // pg_class_aclcheck(ACL_SELECT) and a securityQuals/RLS check). That ACL
-        // machinery is not yet ported here; crucially, the table-level
-        // ACL_SELECT enforcement that would have errored out a forbidden query
-        // *before* the planner is also not yet enforced, so we cannot assume a
-        // clause reaching this point is permitted. Reject conservatively rather
-        // than risk leaking MCV values past a permission/securityQual the
-        // executor does not yet enforce. (This is the only blocker for the
-        // expression-statistics MCV estimates that use non-leakproof operators,
-        // e.g. numeric_eq from `mod(<numeric>, k) = c`.)
-        return Ok(false);
+        // The clause includes a non-leakproof operator, so check that the user
+        // has permission to read all required attributes; otherwise the
+        // operators might reveal values from the MCV list that the user doesn't
+        // have permission to see. We require all rows to be selectable — there
+        // must be no securityQuals from security barrier views or RLS policies.
+        // (extended_stats.c:1626; mirrors examine_variable / all_rows_selectable.)
+        //
+        // C builds `clause_attnums` by offsetting *attnums (individual-Var
+        // attnums) by FirstLowInvalidHeapAttributeNumber and then unioning in
+        // pull_varattnos((Node *) *exprs, relid, ...). The offsetting and the
+        // pull_varattnos/all_rows_selectable plumbing live in the selfuncs owner;
+        // we hand it the raw (non-offset) individual-Var attnums and the matched
+        // sub-expressions and let it perform the offset + union + ACL check.
+        let mut raw_attnums: Vec<i32> = Vec::new();
+        let mut attnum = -1i32;
+        loop {
+            attnum = bms::relids_next_member::call(&*attnums, attnum);
+            if attnum < 0 {
+                break;
+            }
+            raw_attnums.push(attnum);
+        }
+
+        if !selfuncs::statext_clause_attnums_selectable::call(
+            run.mcx(),
+            run,
+            root,
+            relid as u32,
+            &raw_attnums,
+            exprs,
+        )? {
+            return Ok(false);
+        }
     }
 
     Ok(true)

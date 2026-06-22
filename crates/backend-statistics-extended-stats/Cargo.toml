@@ -42,6 +42,7 @@ types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
 backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-seams" }
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
+backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 # stxexprs decode leg: stringToNode + eval_const_expressions + fix_opfuncids,
 # examine_expression (via analyze), the executor per-row eval (make_build_data /

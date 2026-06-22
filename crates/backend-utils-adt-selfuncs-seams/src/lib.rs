@@ -176,3 +176,32 @@ seam_core::seam!(
         var_on_left: bool,
     ) -> PgResult<(f64, f64)>
 );
+
+seam_core::seam!(
+    /// The non-leakproof permission tail of `statext_is_compatible_clause`
+    /// (extended_stats.c:1626): when an extended-statistics clause references a
+    /// non-leakproof operator, C requires the user to be able to read every
+    /// referenced column of relation `relid` (so the MCV list cannot reveal
+    /// values the user may not see). It builds the offset-style column set from
+    /// the individual-Var attnums plus `pull_varattnos()` over the matched
+    /// sub-expressions, then defers to `all_rows_selectable(root, relid,
+    /// clause_attnums)`.
+    ///
+    /// The clause-walk in `backend-statistics-extended-stats` accumulates the
+    /// individual-Var attnums as a planner `Relids` and the sub-expressions as a
+    /// `List`; here they cross as `attnums` (the raw, *non*-offset attribute
+    /// numbers, exactly the values stored in that `Relids`) and `exprs` (a
+    /// borrowed slice of the matched expression nodes). The owner offsets the
+    /// attnums by `FirstLowInvalidHeapAttributeNumber`, unions in
+    /// `pull_varattnos(expr, relid)` for each expression, and calls
+    /// `all_rows_selectable`. Returns `true` iff the user may read all rows.
+    /// `Err` carries the ACL/syscache `ereport(ERROR)`s and OOM.
+    pub fn statext_clause_attnums_selectable<'mcx>(
+        mcx: Mcx<'mcx>,
+        run: &PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        relid: u32,
+        attnums: &[i32],
+        exprs: &[Expr<'mcx>],
+    ) -> PgResult<bool>
+);
