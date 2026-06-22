@@ -1394,7 +1394,27 @@ fn build_plpgsql_parse_state(
     // Walk the namespace chain (expr->ns -> prev -> ...). A VAR/REC nsitem's
     // `itemno` is its datum dno; LABEL items are block markers (skipped). The
     // most-local binding of a name wins, so only insert if not already present.
+    //
+    // C's `plpgsql_ns_lookup` resolves a qualified `label.var` by descending to
+    // the block level whose terminating LABEL == `label` and looking `var` up in
+    // *that level only* — so `outerblock.param1` and `innerblock.param1` resolve
+    // to different shadowed `param1` bindings, and the function-name label
+    // qualifies the top (argument) level. The flat param map can't express that
+    // per-level distinction with bare keys alone, so we additionally register
+    // each binding under `<label>.<key>` for the label of its own block level.
+    //
+    // `plpgsql_ns_push` adds a level's LABEL *before* that level's variables, so
+    // walking the chain newest→oldest yields a level's VAR/REC items first, then
+    // its terminating LABEL. We buffer the (un-prefixed) keys inserted since the
+    // last LABEL; on reaching a LABEL we re-register each buffered key prefixed
+    // with that label (most-local wins, matching nearest-label resolution).
     let mut cur = expr.ns.as_deref();
+    // (key, info) pairs added at the current block level, awaiting their
+    // terminating LABEL so they can be re-registered as `<label>.<key>`. We carry
+    // each binding's own `info` (NOT a later `names.get(k)`) because the bare key
+    // may already be claimed by a more-local shadow of the same name.
+    let mut pending_keys: std::vec::Vec<(std::string::String, PlpgsqlParamInfo)> =
+        std::vec::Vec::new();
     while let Some(ns) = cur {
         match ns.itemtype {
             types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_VAR => {
@@ -1403,12 +1423,14 @@ fn build_plpgsql_parse_state(
                     if let PLpgSQL_datum::Var(v) = &estate.datums[dno as usize] {
                         if let Some(t) = v.datatype.as_ref() {
                             let key = ns.name.to_ascii_lowercase();
-                            names.entry(key).or_insert(PlpgsqlParamInfo {
+                            let info = PlpgsqlParamInfo {
                                 dno,
                                 typeid: t.typoid,
                                 typmod: t.atttypmod,
                                 collation: t.collation,
-                            });
+                            };
+                            names.entry(key.clone()).or_insert(info.clone());
+                            pending_keys.push((key, info));
                         }
                     }
                 }
@@ -1434,12 +1456,14 @@ fn build_plpgsql_parse_state(
                 // Whole-record reference (`rec`) — a composite Param of the
                 // record's runtime rowtype.
                 if let Some((rtype, rtypmod)) = record_rowtype(estate, rec_dno, handle) {
-                    names.entry(rec_name.clone()).or_insert(PlpgsqlParamInfo {
+                    let info = PlpgsqlParamInfo {
                         dno: rec_dno,
                         typeid: rtype,
                         typmod: rtypmod,
                         collation: INVALID_OID,
-                    });
+                    };
+                    names.entry(rec_name.clone()).or_insert(info.clone());
+                    pending_keys.push((rec_name.clone(), info));
                 }
                 // Field references (`rec.field`) — each RECFIELD child datum.
                 for d in estate.datums.iter() {
@@ -1464,15 +1488,29 @@ fn build_plpgsql_parse_state(
                             Some(fi) => (fi.ftypeid, fi.ftypmod, fi.fcollation),
                             None => (rf.finfo.ftypeid, rf.finfo.ftypmod, rf.finfo.fcollation),
                         };
-                        names.insert(
-                            key,
-                            PlpgsqlParamInfo { dno: rf.dno, typeid, typmod, collation },
-                        );
+                        let info = PlpgsqlParamInfo { dno: rf.dno, typeid, typmod, collation };
+                        names.insert(key.clone(), info.clone());
+                        pending_keys.push((key, info));
                     }
                 }
             }
             types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_LABEL => {
-                labels.insert(ns.name.to_ascii_lowercase());
+                let label = ns.name.to_ascii_lowercase();
+                labels.insert(label.clone());
+                // Re-register this level's bindings under `<label>.<key>` so a
+                // qualified `label.var` (or `label.rec.field`) resolves to the
+                // shadowed binding declared in *this* block level, matching C's
+                // `plpgsql_ns_lookup` per-level qualified scan. Most-local wins,
+                // so use `or_insert` (a nearer label of the same name keeps its
+                // binding). An empty label (anonymous block) qualifies nothing.
+                if !label.is_empty() {
+                    for (k, info) in pending_keys.iter() {
+                        names
+                            .entry(format!("{label}.{k}"))
+                            .or_insert_with(|| info.clone());
+                    }
+                }
+                pending_keys.clear();
             }
         }
         cur = ns.prev.as_deref();
