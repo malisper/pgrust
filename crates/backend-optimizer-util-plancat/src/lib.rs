@@ -499,7 +499,7 @@ pub fn get_relation_info<'mcx>(
 
     root.rel_mut(rel).indexlist = indexinfos;
 
-    let statlist = get_relation_statistics(root, rel, relation_object_id)?;
+    let statlist = get_relation_statistics(run, root, rel, relation_object_id)?;
     root.rel_mut(rel).statlist = statlist;
 
     // Grab foreign-table info using the relcache.
@@ -533,7 +533,7 @@ pub fn get_relation_info<'mcx>(
 
     // Collect info about relation's partitioning scheme, if any.
     if inhparent && relkind == RELKIND_PARTITIONED_TABLE {
-        ext::set_relation_partition_info::call(root, rel, relation_object_id)?;
+        ext::set_relation_partition_info::call(run.mcx(), root, rel, relation_object_id)?;
     }
 
     // `table_close(relation, NoLock)` — a single unpin. The `relation` guard's
@@ -989,7 +989,8 @@ fn rint(x: f64) -> f64 {
 /// `get_relation_constraints(root, relationObjectId, rel, include_noinherit,
 /// include_notnull, include_partition)` (plancat.c) — the relation's applicable
 /// constraint expressions, canonicalized and Var-stamped to `rel->relid`.
-fn get_relation_constraints(
+fn get_relation_constraints<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     relation_object_id: Oid,
     rel: RelId,
@@ -1013,7 +1014,8 @@ fn get_relation_constraints(
         }
         // stringToNode + eval_const_expressions + canonicalize_qual +
         // ChangeVarNodes + make_ands_implicit, appended to result.
-        let mut items = ext::process_check_constraint::call(root, &chk.ccbin, varno as i32)?;
+        let mut items =
+            ext::process_check_constraint::call(run.mcx(), root, &chk.ccbin, varno as i32)?;
         result.append(&mut items);
     }
 
@@ -1037,7 +1039,7 @@ fn get_relation_constraints(
 
     // Add partitioning constraints, if requested.
     if include_partition && ext::relation_is_partition::call(relation_object_id)? {
-        ext::set_baserel_partition_constraint::call(root, rel, relation_object_id)?;
+        ext::set_baserel_partition_constraint::call(run.mcx(), root, rel, relation_object_id)?;
         let mut pq = root.rel(rel).partition_qual.clone();
         result.append(&mut pq);
     }
@@ -1132,6 +1134,7 @@ pub fn relation_excluded_by_constraints<'mcx>(
 
     let relid = rte::rte_relid::call(run, root, rti);
     let constraint_pred = get_relation_constraints(
+        run,
         root,
         relid,
         rel,
@@ -1310,7 +1313,8 @@ fn build_index_tlist(
 
 /// `get_relation_statistics(rel, relation)` (plancat.c) — the relation's
 /// extended-statistics metadata (`StatisticExtInfo`s) as arena node handles.
-fn get_relation_statistics(
+fn get_relation_statistics<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     relation_object_id: Oid,
@@ -1323,7 +1327,8 @@ fn get_relation_statistics(
         // Build the covered-column keys + const-folded expressions (the
         // SearchSysCache1(STATEXTOID) + eval_const_expressions + fix_opfuncids +
         // ChangeVarNodes body).
-        let (key_attnums, exprs) = ext::get_stat_ext_keys_exprs::call(root, stat_oid, varno as i32)?;
+        let (key_attnums, exprs) =
+            ext::get_stat_ext_keys_exprs::call(run.mcx(), root, stat_oid, varno as i32)?;
         let mut keys: Relids = None;
         for &k in key_attnums.iter() {
             keys = bms::relids_add_member::call(keys.take(), k);

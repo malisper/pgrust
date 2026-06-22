@@ -329,7 +329,8 @@ seam_core::seam!(
     /// `varno` is `rel->relid`; when it is not 1, the decoded Vars (which the
     /// catalog stores with varno == 1) are re-stamped to it. `Err` carries the
     /// cache-lookup elog.
-    pub fn get_stat_ext_keys_exprs(
+    pub fn get_stat_ext_keys_exprs<'mcx>(
+        run_mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
         stat_oid: Oid,
         varno: i32,
@@ -375,7 +376,8 @@ seam_core::seam!(
     /// + make_ands_implicit a single check-constraint string into arena clause
     /// handles, with Vars stamped to `varno`. Mirrors the per-constraint body of
     /// `get_relation_constraints`. `Err` carries the parse/fold ereport.
-    pub fn process_check_constraint(
+    pub fn process_check_constraint<'mcx>(
+        run_mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
         ccbin: &str,
         varno: i32,
@@ -481,7 +483,8 @@ seam_core::seam!(
     /// `RelationGetPartitionKey`/`Qual`, `fmgr_info_copy`, `copyObject`,
     /// `expression_planner` and the lifetime-free `PartitionScheme`/`boundinfo`
     /// modelling.
-    pub fn set_relation_partition_info(
+    pub fn set_relation_partition_info<'mcx>(
+        run_mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         relid: Oid,
@@ -494,7 +497,8 @@ seam_core::seam!(
     /// `get_relation_constraints` when `include_partition` and the rel is a
     /// partition. `relid` carries the relation OID the C reads off the open
     /// `Relation` (the owner re-opens by OID, the caller's lock is already held).
-    pub fn set_baserel_partition_constraint(
+    pub fn set_baserel_partition_constraint<'mcx>(
+        run_mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         relid: Oid,
