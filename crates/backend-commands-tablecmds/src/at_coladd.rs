@@ -12,11 +12,12 @@
 //!     `add_column_collation_dependency` (the static helpers).
 //!
 //! The phase-3 "store the DEFAULT outside the heap" (missing-value) fast path
-//! (`ExecPrepareExpr`/`ExecEvalExpr` → `StoreAttrMissingVal`) and the
-//! table-rewrite fallback bottom out on the still-unported executor expr-eval /
-//! by-ref missing-value storage; those callees panic loudly when reached (a
-//! `DEFAULT` whose value must be materialized into existing rows). ADD COLUMN
-//! without a default, and the catalog-level default storage, are complete.
+//! (`ExecPrepareExpr`/`ExecEvalExpr` → `StoreAttrMissingVal`) is implemented:
+//! a non-volatile constant `DEFAULT` on a plain, non-generated, non-domain
+//! column is stored as the attribute's `attmissingval` (no table rewrite),
+//! and existing rows read it back via the descriptor's `constr->missing`. The
+//! volatile / generated-stored / domain-constraint cases fall back to the
+//! `AT_REWRITE_DEFAULT_VAL` table rewrite.
 
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
