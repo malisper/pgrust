@@ -642,14 +642,40 @@ pub fn ExecSortInitializeWorker<'mcx>(
     node: &mut SortStateData<'mcx>,
     pwcxt: ParallelWorkerContextHandle,
 ) -> PgResult<()> {
+    //   node->shared_info =
+    //       shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
+    //   node->am_worker = true;
+    //
+    // The lookup is `noError = true` (missing_ok): when the leader is NOT
+    // instrumenting (no EXPLAIN ANALYZE) `ExecSortInitializeDSM` returns early
+    // without inserting any chunk, so this lookup finds nothing and the C
+    // leaves `node->shared_info == NULL`. We faithfully reproduce that arm:
+    // `shared_info = None`, `am_worker = true`. Only when a chunk IS present
+    // (the instrumenting path) would the DSM-resident `SharedSortInfo` carrier
+    // be required — and that carrier is genuinely unported (the merged
+    // `SortStateData.shared_info` is an in-process `PgBox<SharedSortInfo>` which
+    // cannot hold the DSM `SharedRef`; same blocker as nodeAgg's
+    // `ExecAggInitializeWorker`). Defer to the carrier owner only in that case
+    // rather than silently dropping the worker's stats.
     let plan_node_id = sort_plan(node)?.plan.plan_node_id;
-    let _ = (plan_node_id, pwcxt, &mut node.am_worker);
-    panic!(
-        "backend_access_transam_parallel::shared_dsm_object: SharedSortInfo DSM \
-         attach (ExecSortInitializeWorker) — the in-process PgBox<SharedSortInfo> \
-         carrier cannot hold the shm_toc_lookup SharedRef; same blocker as nodeAgg's \
-         ExecAggInitializeWorker; unported"
-    );
+    let toc = parallel::pwcxt_toc(pwcxt);
+    match parallel::shm_toc_lookup(toc, plan_node_id as u64, true) {
+        None => {
+            // Leader was not instrumenting: no shared stats area to attach to.
+            node.shared_info = None;
+            node.am_worker = true;
+            Ok(())
+        }
+        Some(_chunk) => {
+            node.am_worker = true;
+            panic!(
+                "backend_access_transam_parallel::shared_dsm_object: SharedSortInfo DSM \
+                 attach (ExecSortInitializeWorker) — the in-process PgBox<SharedSortInfo> \
+                 carrier cannot hold the shm_toc_lookup SharedRef; same blocker as nodeAgg's \
+                 ExecAggInitializeWorker; unported"
+            );
+        }
+    }
 }
 
 /// `ExecSortRetrieveInstrumentation(node)` — transfer sort statistics from DSM
