@@ -559,6 +559,40 @@ pub fn AlterRelationNamespaceInternal<'mcx>(
     Ok(())
 }
 
+/// Seam wrapper for `AlterRelationNamespaceInternal`, reached by
+/// `AlterTypeNamespaceInternal` (typecmds.c) for composite types by OID. The
+/// composite-type path has no caller-side `mcx` or open `classRel`, so the
+/// wrapper opens+write-locks pg_class itself, performs the pg_class/pg_depend
+/// move, then closes pg_class keeping the lock until commit.
+pub fn alter_relation_namespace_internal_seam(
+    rel_oid: Oid,
+    old_nsp_oid: Oid,
+    new_nsp_oid: Oid,
+    has_depend_entry: bool,
+    objs_moved: &mut ObjectAddresses,
+) -> PgResult<()> {
+    let ctx = mcx::MemoryContext::new("AlterRelationNamespaceInternal");
+    let mcx = ctx.mcx();
+
+    // classRel = table_open(RelationRelationId, RowExclusiveLock);
+    let class_rel = relation_open(mcx, RelationRelationId, RowExclusiveLock)?;
+
+    let res = AlterRelationNamespaceInternal(
+        mcx,
+        &class_rel,
+        rel_oid,
+        old_nsp_oid,
+        new_nsp_oid,
+        has_depend_entry,
+        objs_moved,
+    );
+
+    // table_close(classRel, RowExclusiveLock); -- keep lock until commit.
+    class_rel.close(RowExclusiveLock)?;
+
+    res
+}
+
 /// `AlterIndexNamespaces(classRel, rel, oldNspOid, newNspOid, objsMoved)`
 /// (tablecmds.c:19127): move all of the relation's indexes to the new schema.
 fn alter_index_namespaces<'mcx>(

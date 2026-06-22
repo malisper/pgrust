@@ -167,6 +167,16 @@ pub fn init_seams() {
     seam::RenameConstraint::set(rename_schema::RenameConstraint);
     seam::AlterTableNamespace::set(rename_schema::AlterTableNamespace);
 
+    // AlterRelationNamespaceInternal seam (typecmds.c AlterTypeNamespaceInternal
+    // drives this for composite types by OID, with no caller-side `mcx`). The
+    // closure opens+write-locks pg_class itself (mirroring the C body which is
+    // entered with classRel already open in AlterTableNamespaceInternal but is
+    // separately reached for the composite-type path), runs the move, and
+    // closes pg_class keeping the lock until commit.
+    backend_commands_tablecmds_seams::alter_relation_namespace_internal::set(
+        rename_schema::alter_relation_namespace_internal_seam,
+    );
+
     seam::register_on_commit_action::set(oncommit::register_on_commit_action);
     seam::remove_on_commit_action::set(oncommit::remove_on_commit_action);
     seam::pre_commit_on_commit_actions::set(oncommit::pre_commit_on_commit_actions);

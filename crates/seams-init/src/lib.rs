@@ -1711,7 +1711,6 @@ mod recurrence_guard {
         // AlterTableNamespaceInternal stays: its body is ported and reached from
         // AlterTableNamespace, but it is not installed as a standalone seam.
         ("backend_commands_tablecmds", "AlterTableNamespaceInternal"),
-        ("backend_commands_tablecmds", "alter_relation_namespace_internal"),
         // `at_exec_change_owner` retired from this list: the ATExecChangeOwner
         // body is now ported (at_owner.rs) and installed in tablecmds'
         // init_seams() (for the pg_shdepend REASSIGN/DROP OWNED by-OID path); the
