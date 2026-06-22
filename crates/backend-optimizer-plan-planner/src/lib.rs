@@ -1937,14 +1937,16 @@ fn pqe_having_transfer<'mcx>(
         let parse = run.resolve(root.parse);
         let has_group_clause = !parse.groupClause.is_empty();
         let has_grouping_sets = !parse.groupingSets.is_empty();
-        // linitial(groupingSets) is a GroupingSet node; its emptiness is
-        // whether that GroupingSet's content list is empty.
+        // This loop runs AFTER expand_grouping_sets, so parse->groupingSets is
+        // a flat List of T_IntList sets sorted by length ascending (the empty
+        // set, if present, sorts first). C's test `linitial(groupingSets) != NIL`
+        // therefore checks whether the first (shortest) set is the empty set.
         let first_gset_nonempty = match parse.groupingSets.first() {
-            Some(gs) => match gs.as_ref().node_tag() {
-                ntag::T_GroupingSet => !gs.as_ref().expect_groupingset().content.is_empty(),
-                // A non-GroupingSet first element is unexpected; treat as
-                // non-empty (the conservative branch keeps a WHERE copy).
-                _ => true,
+            Some(gs) => match gs.as_ref().as_intlist() {
+                Some(l) => !l.is_empty(),
+                // Not yet expanded (still a GroupingSet tree) or unexpected:
+                // treat as non-empty (the conservative branch keeps a WHERE copy).
+                None => true,
             },
             None => false,
         };
