@@ -956,39 +956,46 @@ pub fn SS_process_ctes<'mcx>(
 /// whole query tree via the node walker, returning `true` on the first volatile
 /// expression found.
 fn query_contains_volatile(node: &Node<'_>) -> PgResult<bool> {
-    let mut found = false;
-    let mut err: Option<PgError> = None;
-    let mut visit = |n: &Node| -> bool {
-        if found || err.is_some() {
-            return true;
-        }
-        if let Some(e) = n.as_expr() {
-            match contain_volatile_functions(Some(e)) {
+    query_contains_volatile_node(node)
+}
+
+/// Dispatch a `Node` reached during the volatile scan of a CTE query: a nested
+/// `Query` (e.g. a FROM-subquery RTE handed up by `range_table_entry_walker`)
+/// recurses via `query_tree_walker` — mirroring C's `IsA(node, Query)` arm of
+/// `contain_volatile_functions_walker` — while every other Node is an `Expr` and
+/// runs the per-Expr volatility check. Without the Query recursion a volatile
+/// buried in an inner subquery RTE (e.g. `with x as (select * from (select
+/// f1, random() from t) ss)`) would be missed, wrongly inlining the CTE.
+fn query_contains_volatile_node(node: &Node<'_>) -> PgResult<bool> {
+    if let Some(q) = node.as_query() {
+        let mut found = false;
+        let mut err: Option<PgError> = None;
+        let mut visit = |n: &Node| -> bool {
+            if found || err.is_some() {
+                return true;
+            }
+            match query_contains_volatile_node(n) {
                 Ok(true) => {
                     found = true;
-                    return true;
+                    true
                 }
-                Ok(false) => {}
-                Err(e2) => {
-                    err = Some(e2);
-                    return true;
+                Ok(false) => false,
+                Err(e) => {
+                    err = Some(e);
+                    true
                 }
             }
+        };
+        backend_nodes_core::node_walker::query_tree_walker(q, &mut visit, 0);
+        if let Some(e) = err {
+            return Err(e);
         }
-        false
-    };
-    match node.as_query() {
-        Some(q) => {
-            backend_nodes_core::node_walker::query_tree_walker(q, &mut visit, 0);
-        }
-        None => {
-            visit(node);
-        }
+        return Ok(found);
     }
-    if let Some(e) = err {
-        return Err(e);
+    if let Some(e) = node.as_expr() {
+        return contain_volatile_functions(Some(e));
     }
-    Ok(found)
+    Ok(false)
 }
 
 // ===========================================================================
