@@ -717,7 +717,7 @@ fn register_partpruneinfo<'mcx>(
 fn fix_partprune_steps<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    steps: &mut [types_nodes::partprune_carrier::PartitionPruneStep],
+    steps: &mut [types_nodes::partprune_carrier::PartitionPruneStep<'static>],
     rtoffset: i32,
 ) -> PgResult<()> {
     use types_nodes::partprune_carrier::PartitionPruneStep;
@@ -726,7 +726,11 @@ fn fix_partprune_steps<'mcx>(
             let exprs = core::mem::take(&mut op.exprs);
             let mut fixed = Vec::with_capacity(exprs.len());
             for e in exprs {
-                fixed.push(fix_scan_expr(mcx, root, e, rtoffset, 1.0)?);
+                // Localize the arena ('static) step expr into the run `mcx` for the
+                // rewrite, then re-intern the result into the PlannerGlobal
+                // part-prune-info list (`'static` planner-arena) via erase_lifetime.
+                let e = e.clone_in(mcx)?;
+                fixed.push(fix_scan_expr(mcx, root, e, rtoffset, 1.0)?.erase_lifetime());
             }
             op.exprs = fixed;
         }
@@ -924,13 +928,16 @@ fn search_indexed_tlist_for_sortgroupref(
 
 /// `tlist_member(node, targetlist)` (tlist.c) — find a TLE whose expr equals
 /// `node` (ignoring resjunk). Returns the first match.
-fn tlist_member<'a>(node: &Expr, tlist: &'a [TargetEntry<'_>]) -> Option<&'a TargetEntry<'a>> {
+fn tlist_member<'a, 'b>(
+    node: &Expr<'_>,
+    tlist: &'a [TargetEntry<'b>],
+) -> Option<&'a TargetEntry<'b>> {
     for tle in tlist {
         if let Some(e) = tle.expr.as_deref() {
             if equal_expr(node, e) {
                 // SAFETY of lifetime: the slice borrow lifetime is tied to the
                 // caller; reborrow through the reference.
-                return Some(unsafe { &*(tle as *const TargetEntry) });
+                return Some(unsafe { &*(tle as *const TargetEntry<'b>) });
             }
         }
     }
@@ -1027,7 +1034,7 @@ pub fn record_plan_type_dependency(root: &mut PlannerInfo, typid: Oid) -> PgResu
 // ===========================================================================
 
 /// `fix_param_node(root, p)` (setrefs.c:2124).
-fn fix_param_node(root: &PlannerInfo, p: &Param) -> PgResult<Expr<'mcx>> {
+fn fix_param_node(root: &PlannerInfo, p: &Param) -> PgResult<Expr<'static>> {
     if p.paramkind == ParamKind::PARAM_MULTIEXPR {
         let subqueryid = (p.paramid >> 16) as i32;
         let colno = (p.paramid & 0xFFFF) as i32;
@@ -1083,17 +1090,13 @@ fn fix_alternative_subplan<'mcx>(
     // (the established `SubPlanExpr(Box<SubPlan<'static>>)` convention; the arena
     // outlives the read-only Expr tree).
     let mut subplans = asplan.subplans;
-    let chosen: PgBox<'static, types_nodes::primnodes::SubPlan<'static>> =
+    let chosen: PgBox<'mcx, types_nodes::primnodes::SubPlan<'mcx>> =
         subplans.swap_remove(best);
+    // `SubPlanExpr<'mcx>` now carries the run lifetime directly (no forged
+    // 'static): deep-clone the chosen child into `mcx` and wrap it.
     let cloned: types_nodes::primnodes::SubPlan<'mcx> = chosen.clone_in(mcx)?;
-    // SAFETY: lifetime-parameter-only transmute of an owned value whose backing
-    // allocations live in the planner-run `mcx` (which outlives the read-only
-    // Expr tree's notional 'static lifetime). Mirrors init-subselect's
-    // `subplan_into_static`.
-    let cloned_static: types_nodes::primnodes::SubPlan<'static> =
-        unsafe { core::mem::transmute(cloned) };
     Ok(Expr::SubPlan(types_nodes::primnodes::SubPlanExpr(ABox::new(
-        cloned_static,
+        cloned,
     ))))
 }
 
@@ -1159,7 +1162,7 @@ fn fix_scan_expr_mutator<'mcx>(
             }
             Ok(Expr::Var(var))
         }
-        Expr::Param(p) => fix_param_node(root, &p),
+        Expr::Param(p) => fix_param_node(root, &p)?.clone_in(mcx),
         Expr::Aggref(aggref) => {
             if let Some(aggparam) = find_minmax_agg_replacement_param(root, &aggref)? {
                 return Ok(Expr::Param(aggparam));
@@ -1229,7 +1232,7 @@ fn fix_scan_expr_recurse<'mcx>(
 
 /// A throwaway `Const` used to fill a mutator slot when an error is in flight
 /// (the result is discarded — the error is returned instead).
-fn error_placeholder_const() -> Const {
+fn error_placeholder_const<'mcx>() -> Const<'mcx> {
     Const::default()
 }
 
@@ -1443,7 +1446,7 @@ fn fix_join_expr_mutator<'mcx>(
             }
             // Special cases (only AFTER failing to match a lower tlist).
             match other {
-                Expr::Param(p) => fix_param_node(root, &p),
+                Expr::Param(p) => fix_param_node(root, &p)?.clone_in(mcx),
                 Expr::AlternativeSubPlan(asp) => {
                     let chosen = fix_alternative_subplan(mcx, root, *asp.0, ctx.num_exec)?;
                     fix_join_expr_mutator(mcx, root, chosen, ctx)
@@ -1551,7 +1554,7 @@ fn fix_upper_expr_mutator<'mcx>(
                 }
             }
             match other {
-                Expr::Param(p) => fix_param_node(root, &p),
+                Expr::Param(p) => fix_param_node(root, &p)?.clone_in(mcx),
                 Expr::Aggref(mut aggref) => {
                     if let Some(aggparam) = find_minmax_agg_replacement_param(root, &aggref)? {
                         return Ok(Expr::Param(aggparam));
@@ -1871,16 +1874,14 @@ fn set_param_references<'mcx>(
 /// `convert_combining_aggrefs(node, NULL)` (setrefs.c:2623) over an `Expr`.
 /// `mcx` is needed to deep-copy the (non-`Clone`) `Aggref` via `clone_in`; the
 /// copies are erased to the Expr tree's notional `'static` lifetime.
-fn convert_combining_aggrefs<'mcx>(mcx: Mcx<'mcx>, node: Expr) -> PgResult<Expr<'mcx>> {
+fn convert_combining_aggrefs<'mcx>(mcx: Mcx<'mcx>, node: Expr<'mcx>) -> PgResult<Expr<'mcx>> {
     match node {
         Expr::Aggref(orig) => {
             // child_agg = flat copy of orig; parent_agg = copy with args=NIL,
             // aggfilter=NULL. Aggref is not Clone (only clone_in); deep-copy into
             // mcx, then erase the lifetime to the Expr arm's notional 'static.
-            let mut child_agg: types_nodes::primnodes::Aggref =
-                erase_aggref(orig.clone_in(mcx)?);
-            let mut parent_agg: types_nodes::primnodes::Aggref =
-                erase_aggref(orig.clone_in(mcx)?);
+            let mut child_agg: types_nodes::primnodes::Aggref<'mcx> = orig.clone_in(mcx)?;
+            let mut parent_agg: types_nodes::primnodes::Aggref<'mcx> = orig.clone_in(mcx)?;
             parent_agg.args = Vec::new(); // args=NIL
             parent_agg.aggfilter = None;
             // child keeps the original args/aggfilter (they were copied above).
@@ -1902,9 +1903,8 @@ fn convert_combining_aggrefs<'mcx>(mcx: Mcx<'mcx>, node: Expr) -> PgResult<Expr<
                 resorigcol: 0,
                 resjunk: false,
             };
-            // SAFETY: lifetime-parameter-only transmute (backing allocs in `mcx`).
-            let te_static: TargetEntry<'static> = unsafe { core::mem::transmute(te) };
-            parent_agg.args = alloc::vec![te_static];
+            // `Aggref<'mcx>.args` now carries `'mcx` (no forged 'static transmute).
+            parent_agg.args = alloc::vec![te];
 
             ext::mark_partial_aggref::call(
                 &mut parent_agg,
@@ -2734,7 +2734,7 @@ fn set_join_references<'mcx>(
     Ok(())
 }
 
-fn take_joinqual<'mcx>(plan: &mut Node<'mcx>) -> Vec<Expr> {
+fn take_joinqual<'mcx>(plan: &mut Node<'mcx>) -> Vec<Expr<'mcx>> {
     match plan.node_tag() {
         ntag::T_NestLoop => take_pgvec_expr(&mut plan.as_nestloop_mut().unwrap().join.joinqual),
         ntag::T_MergeJoin => take_pgvec_expr(&mut plan.as_mergejoin_mut().unwrap().join.joinqual),
@@ -2742,7 +2742,7 @@ fn take_joinqual<'mcx>(plan: &mut Node<'mcx>) -> Vec<Expr> {
         _ => Vec::new(),
     }
 }
-fn set_joinqual<'mcx>(plan: &mut Node<'mcx>, list: Vec<Expr>, mcx: Mcx<'mcx>) {
+fn set_joinqual<'mcx>(plan: &mut Node<'mcx>, list: Vec<Expr<'mcx>>, mcx: Mcx<'mcx>) {
     let v = put_pgvec_expr(list, mcx);
     match plan.node_tag() {
         ntag::T_NestLoop => plan.as_nestloop_mut().unwrap().join.joinqual = v,
@@ -2761,14 +2761,14 @@ fn join_jointype<'mcx>(plan: &Node<'mcx>) -> types_pathnodes::JoinType {
 }
 
 /// Take an `Option<PgVec<Expr>>` joinqual into a Vec<Expr>.
-fn take_pgvec_expr(opt: &mut Option<PgVec<Expr>>) -> Vec<Expr> {
+fn take_pgvec_expr<'mcx>(opt: &mut Option<PgVec<'mcx, Expr<'mcx>>>) -> Vec<Expr<'mcx>> {
     match opt.take() {
         Some(v) => v.into_iter().collect(),
         None => Vec::new(),
     }
 }
-fn put_pgvec_expr<'mcx>(list: Vec<Expr>, mcx: Mcx<'mcx>) -> Option<PgVec<'mcx, Expr>> {
-    let mut v: PgVec<Expr> = PgVec::new_in(mcx);
+fn put_pgvec_expr<'mcx>(list: Vec<Expr<'mcx>>, mcx: Mcx<'mcx>) -> Option<PgVec<'mcx, Expr<'mcx>>> {
+    let mut v: PgVec<Expr<'mcx>> = PgVec::new_in(mcx);
     for e in list {
         v.push(e);
     }
@@ -2816,7 +2816,7 @@ fn fix_upper_nodelist<'mcx>(
     Ok(Some(out))
 }
 
-fn node_into_expr(n: Node) -> PgResult<Expr<'mcx>> {
+fn node_into_expr<'mcx>(n: Node<'mcx>) -> PgResult<Expr<'mcx>> {
     n.into_expr()
         .ok_or_else(|| PgError::error("expected an expression node in a clause list"))
 }
@@ -2884,7 +2884,7 @@ fn set_windowagg_runcondition_references<'mcx>(
 }
 
 /// `fix_windowagg_condition_expr_mutator` (setrefs.c:3442). newvarno = 0.
-fn fix_windowagg_condition_expr_mutator(itlist: &IndexedTlist, node: Expr) -> PgResult<Expr<'mcx>> {
+fn fix_windowagg_condition_expr_mutator<'mcx>(itlist: &IndexedTlist, node: Expr<'mcx>) -> PgResult<Expr<'mcx>> {
     match node {
         Expr::WindowFunc(_) => {
             match search_indexed_tlist_for_non_var(&node, itlist, 0)? {
