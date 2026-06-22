@@ -30,6 +30,7 @@ use types_core::xact::{
 };
 use types_core::{CommandId, InvalidOid};
 use types_error::PgResult;
+use types_storage::buf::BufferIsValid;
 use types_storage::storage::Buffer;
 use types_snapshot::snapshot::SnapshotType;
 use types_snapshot::SnapshotData;
@@ -191,6 +192,19 @@ fn SetHintBits(
     infomask: u16,
     xid: TransactionId,
 ) -> PgResult<()> {
+    // When the tuple is not backed by a shared buffer (e.g. a query-context copy
+    // checked by an RI/constraint trigger via SNAPSHOT_SELF), there is no buffer
+    // to consult for the LSN interlock and none to dirty. C reaches the
+    // BufferIsPermanent/MarkBufferDirtyHint calls with InvalidBuffer only with
+    // asserts disabled (they dereference past the buffer array); the meaningful
+    // behavior is simply to set the hint bit on the transient header and skip the
+    // durability bookkeeping. Guard explicitly here so the port's checked buffer
+    // primitives are never handed InvalidBuffer.
+    if !BufferIsValid(buffer) {
+        tuple.t_infomask |= infomask;
+        return Ok(());
+    }
+
     if TransactionIdIsValid(xid) {
         /* NB: xid must be known committed here! */
         let commitLSN: XLogRecPtr = transam_seam::transaction_id_get_commit_lsn::call(xid)?;

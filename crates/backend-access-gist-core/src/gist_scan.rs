@@ -1110,27 +1110,44 @@ fn build_fetch_tupdesc<'mcx>(
     // CreateTemplateTupleDesc(natts)
     let mut td = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, natts as i32)?;
 
-    // Key columns: opcintype.
-    for attno in 1..=nkeyatts {
-        let typid = index.rd_opcintype[attno - 1];
-        backend_access_common_tupdesc::TupleDescInitEntry(
-            &mut td,
-            attno as types_core::primitive::AttrNumber,
-            None,
-            typid,
-            -1,
-            0,
-        )?;
-    }
-    // Included columns: leaf-descriptor type.
+    // The leaf descriptor (index->rd_att) carries the concrete *stored* column
+    // types (e.g. int4range/daterange), while rd_opcintype carries the opclass
+    // input type (e.g. the polymorphic anyrange).
     let leaf = gist(scan_const_to_mut(scan))
         .giststate
         .leafTupdesc
         .as_ref()
         .expect("gistrescan: leafTupdesc not initialized")
         .clone_in(mcx)?;
-    for attno in (nkeyatts + 1)..=natts {
-        let typid = leaf.attr(attno - 1).atttypid;
+
+    // Key columns. C (gistscan.c gistrescan) uses rd_opcintype here. That is
+    // safe in C only because its on-disk varlenas keep their short (1-byte)
+    // headers, so `att_align_datum`/`att_align_pointer` skip alignment padding
+    // entirely (VARATT_IS_SHORT / VARATT_NOT_PAD_BYTE) and the opcintype's
+    // (possibly wider) typalign never actually pads. This port stores varlenas
+    // header-ful (always a 4-byte header — see backend-access-common-heaptuple
+    // SHORT_VARLENA_PACKING), so the form side *does* apply the opcintype align,
+    // producing a re-formed tuple whose 2nd+ varlena column lands at a wider-
+    // aligned offset than the index-only-scan output slot (typed from the heap
+    // column types via the planner's indextlist) deforms it from. Using the
+    // concrete leaf-descriptor type keeps the re-formed tuple's alignment
+    // identical to both the stored leaf tuple and the output slot, which is the
+    // faithful adaptation of C's "att is stored in original form" invariant for
+    // the header-ful storage model. INCLUDE columns already take the leaf type.
+    for attno in 1..=natts {
+        // gistFetchTuple reconstructs key columns with a fetch method via the
+        // opclass; for those the result is the opcintype. Without a fetch method
+        // (or any compress method) the value is stored verbatim as the leaf type.
+        let has_fetch = attno <= nkeyatts
+            && {
+                let g = gist(scan_const_to_mut(scan));
+                g.giststate.fetchFn[attno - 1].fn_oid != InvalidOid
+            };
+        let typid = if has_fetch {
+            index.rd_opcintype[attno - 1]
+        } else {
+            leaf.attr(attno - 1).atttypid
+        };
         backend_access_common_tupdesc::TupleDescInitEntry(
             &mut td,
             attno as types_core::primitive::AttrNumber,
