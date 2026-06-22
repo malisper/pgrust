@@ -58,7 +58,7 @@ use crate::at_phase::{
     AlterTableUtilityContext, CheckAlterTableIsSafe, ATT_FOREIGN_TABLE, ATT_PARTITIONED_TABLE,
     ATT_TABLE,
 };
-use crate::helpers::{here, RelationRelationId};
+use crate::helpers::{here, to_access_range_var, RelationRelationId};
 
 use backend_commands_tablecmds_seams as seam;
 
@@ -545,30 +545,51 @@ pub fn ATExecAddColumn<'mcx>(
     if RELKIND_HAS_STORAGE(relkind) {
         let mut has_missing = false;
 
-        // For an identity column we can't use build_column_default() (sequence
-        // ownership isn't set yet). The NextValueExpr build + identity-sequence
-        // ownership wiring is not yet ported.
-        if col_def.identity != 0 {
-            panic!(
-                "ALTER TABLE ADD COLUMN ... GENERATED ... AS IDENTITY: the NextValueExpr \
-                 phase-3 fill + identity-sequence ownership path is not yet ported \
-                 (faithful seam-and-panic)"
-            );
-        }
-
-        // defval = build_column_default(rel, attribute->attnum).
+        // For an identity column, we can't use build_column_default(), because
+        // the sequence ownership isn't set yet.  So do it manually.
         //
-        // The owned `rel` carrier still holds the pre-ADD tuple descriptor; the
-        // catalog row for the new column was inserted in this command (and made
-        // visible by the CommandCounterIncrement above), so re-open the relation
-        // to pick up the freshly-added attribute before resolving its default.
-        let fresh_rel = relation_open(mcx, myrelid, NoLock)?;
-        let mut defval = backend_rewrite_rewritehandler_seams::build_column_default::call(
-            mcx,
-            fresh_rel.alias(),
-            newattnum as i32,
-        )?;
-        drop(fresh_rel);
+        //   NextValueExpr *nve = makeNode(NextValueExpr);
+        //   nve->seqid = RangeVarGetRelid(colDef->identitySequence, NoLock, false);
+        //   nve->typeId = attribute->atttypid;
+        //   defval = (Expr *) nve;
+        // else
+        //   defval = (Expr *) build_column_default(rel, attribute->attnum);
+        let mut defval = if col_def.identity != 0 {
+            let identity_seq = col_def
+                .identitySequence
+                .as_deref()
+                .expect("ADD COLUMN identity: identitySequence is NULL");
+            let identity_seq_access = to_access_range_var(identity_seq);
+            let seqid = backend_catalog_namespace::RangeVarGetRelid(
+                mcx,
+                &identity_seq_access,
+                NoLock,
+                false,
+            )?;
+            let nve = types_nodes::primnodes::Expr::NextValueExpr(
+                types_nodes::primnodes::NextValueExpr {
+                    seqid,
+                    typeId: attribute_typid,
+                },
+            );
+            Some(mcx::alloc_in(mcx, nve)?)
+        } else {
+            // defval = build_column_default(rel, attribute->attnum).
+            //
+            // The owned `rel` carrier still holds the pre-ADD tuple descriptor;
+            // the catalog row for the new column was inserted in this command
+            // (and made visible by the CommandCounterIncrement above), so
+            // re-open the relation to pick up the freshly-added attribute
+            // before resolving its default.
+            let fresh_rel = relation_open(mcx, myrelid, NoLock)?;
+            let dv = backend_rewrite_rewritehandler_seams::build_column_default::call(
+                mcx,
+                fresh_rel.alias(),
+                newattnum as i32,
+            )?;
+            drop(fresh_rel);
+            dv
+        };
 
         // has_domain_constraints = DomainHasConstraints(attribute->atttypid).
         let has_domain_constraints =

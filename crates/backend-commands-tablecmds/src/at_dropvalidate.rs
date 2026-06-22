@@ -272,11 +272,38 @@ pub fn dropconstraint_internal<'mcx>(
                 .into_error());
         }
 
-        // Disallow if it's a GENERATED AS IDENTITY column. The live relcache
-        // descriptor carries attidentity (C reads it from a fresh syscache copy;
-        // the live form is equivalent here).
-        let att = rel.rd_att.attr((attnum - 1) as usize);
-        if att.attidentity != 0 {
+        // Disallow if it's a GENERATED AS IDENTITY column, and reset attnotnull
+        // if needed. C reads attidentity/attnotnull from a *fresh* syscache copy
+        // (`SearchSysCacheCopyAttName`), not the relcache descriptor: an earlier
+        // subcommand in the same ALTER pass (e.g. DROP IDENTITY, which runs in
+        // AT_PASS_DROP just like DROP NOT NULL) may already have cleared
+        // attidentity in pg_attribute. The owned `rel.rd_att` snapshot was taken
+        // at pass open and would still show the column as an identity column.
+        let tuple = backend_utils_cache_syscache::SearchSysCacheAttNum(mcx, rel.rd_id, attnum)?
+            .ok_or_else(|| {
+                backend_utils_error::ereport(ERROR)
+                    .errmsg_internal(format!(
+                        "cache lookup failed for attribute {attnum} of relation {}",
+                        rel.rd_id
+                    ))
+                    .into_error()
+            })?;
+        let attidentity = backend_utils_cache_syscache::SysCacheGetAttrNotNull(
+            mcx,
+            backend_utils_cache_syscache::ATTNUM,
+            &tuple,
+            types_catalog::pg_attribute::Anum_pg_attribute_attidentity as i32,
+        )?
+        .as_char();
+        let attnotnull = backend_utils_cache_syscache::SysCacheGetAttrNotNull(
+            mcx,
+            backend_utils_cache_syscache::ATTNUM,
+            &tuple,
+            types_catalog::pg_attribute::Anum_pg_attribute_attnotnull as i32,
+        )?
+        .as_bool();
+
+        if attidentity != 0 {
             let aname = get_attname::call(mcx, rel.rd_id, attnum, false)?
                 .map(|s| s.as_str().to_string())
                 .unwrap_or_default();
@@ -290,17 +317,8 @@ pub fn dropconstraint_internal<'mcx>(
         }
 
         // All good -- reset attnotnull if needed.
-        if att.attnotnull {
+        if attnotnull {
             // attForm->attnotnull = false; CatalogTupleUpdate(attrel, &atttup->t_self, atttup);
-            let tuple = backend_utils_cache_syscache::SearchSysCacheAttNum(mcx, rel.rd_id, attnum)?
-                .ok_or_else(|| {
-                    backend_utils_error::ereport(ERROR)
-                        .errmsg_internal(format!(
-                            "cache lookup failed for attribute {attnum} of relation {}",
-                            rel.rd_id
-                        ))
-                        .into_error()
-                })?;
             let row = PgAttributeUpdateRow {
                 attnotnull: Some(false),
                 ..Default::default()
@@ -551,10 +569,38 @@ pub fn ATExecDropNotNull<'mcx>(
         objectSubId: attnum as i32,
     };
 
-    let att = rel.rd_att.attr((attnum - 1) as usize);
+    // C reads attnotnull/attidentity from a *fresh* syscache copy
+    // (`SearchSysCacheCopyAttName`), not the relcache descriptor. An earlier
+    // subcommand in the same ALTER pass (e.g. DROP IDENTITY, which also runs in
+    // AT_PASS_DROP) may already have cleared attidentity in pg_attribute; the
+    // owned `rel.rd_att` snapshot was taken at pass open and would still show
+    // the column as an identity column.
+    let att_tuple = backend_utils_cache_syscache::SearchSysCacheAttNum(mcx, rel.rd_id, attnum)?
+        .ok_or_else(|| {
+            backend_utils_error::ereport(ERROR)
+                .errmsg_internal(format!(
+                    "cache lookup failed for attribute {attnum} of relation {}",
+                    rel.rd_id
+                ))
+                .into_error()
+        })?;
+    let att_attnotnull = backend_utils_cache_syscache::SysCacheGetAttrNotNull(
+        mcx,
+        backend_utils_cache_syscache::ATTNUM,
+        &att_tuple,
+        types_catalog::pg_attribute::Anum_pg_attribute_attnotnull as i32,
+    )?
+    .as_bool();
+    let att_attidentity = backend_utils_cache_syscache::SysCacheGetAttrNotNull(
+        mcx,
+        backend_utils_cache_syscache::ATTNUM,
+        &att_tuple,
+        types_catalog::pg_attribute::Anum_pg_attribute_attidentity as i32,
+    )?
+    .as_char();
 
     // If the column is already nullable there's nothing to do.
-    if !att.attnotnull {
+    if !att_attnotnull {
         drop(attr_rel);
         return Ok(ObjectAddress {
             classId: InvalidOid,
@@ -572,7 +618,7 @@ pub fn ATExecDropNotNull<'mcx>(
     }
 
     // if (attTup->attidentity) ereport(...identity column...)
-    if att.attidentity != 0 {
+    if att_attidentity != 0 {
         return Err(backend_utils_error::ereport(ERROR)
             .errcode(types_error::ERRCODE_SYNTAX_ERROR)
             .errmsg(format!(
