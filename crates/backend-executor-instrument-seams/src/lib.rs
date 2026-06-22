@@ -71,3 +71,12 @@ seam_core::seam!(
         add: types_nodes::Instrumentation,
     )
 );
+
+seam_core::seam!(
+    /// `pgWalUsage.wal_bytes += ...; wal_records++; wal_fpi += num_fpi`
+    /// (xlog.c:1105, the `XLogInsertRecord` "Report WAL traffic to the
+    /// instrumentation" block). The `pgWalUsage` global lives in instrument.c;
+    /// this seam lets the WAL-insertion core (xlog) report the just-inserted
+    /// record's traffic without depending on the instrument unit. Infallible.
+    pub fn report_wal_usage(wal_bytes: u64, wal_records: i64, wal_fpi: i64)
+);

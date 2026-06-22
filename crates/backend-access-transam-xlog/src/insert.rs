@@ -724,7 +724,6 @@ pub fn XLogInsertRecord(
     num_fpi: i32,
     topxid_included: bool,
 ) -> PgResult<XLogRecPtr> {
-    let _ = num_fpi;
     let ctl_ptr = xlog_ctl();
     if ctl_ptr.is_null() {
         return Err(PgError::error(
@@ -912,8 +911,19 @@ pub fn XLogInsertRecord(
     PROC_LAST_REC_PTR.with(|c| c.set(start_pos));
     XACT_LAST_REC_END.with(|c| c.set(end_pos));
 
-    // pgWalUsage / pgstat_report_fixed instrumentation is owned by pgstat
-    // (still unported) — behaviour-preserving bookkeeping, skipped.
+    // Report WAL traffic to the instrumentation (xlog.c:1100). Only when the
+    // record was actually inserted (not the no-op already-flushed-FPW-LSN case);
+    // the `pgWalUsage` global is owned by the instrument unit, reached via its
+    // `report_wal_usage` seam. (The C `pgstat_report_fixed = true` is a
+    // flush-skip optimization the ported pgstat-wal `flush_static_cb`
+    // reproduces via its own have-data check.)
+    if inserted {
+        backend_executor_instrument_seams::report_wal_usage::call(
+            xl_tot_len as u64,
+            1,
+            num_fpi as i64,
+        );
+    }
 
     Ok(end_pos)
 }

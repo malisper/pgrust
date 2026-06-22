@@ -3704,6 +3704,7 @@ dependencies = [
  "backend-access-transam-xlogrecovery-seams",
  "backend-access-transam-xlogutils",
  "backend-commands-vacuum-seams",
+ "backend-executor-instrument-seams",
  "backend-postmaster-checkpointer-seams",
  "backend-postmaster-postmaster-seams",
  "backend-postmaster-startup-seams",
@@ -19384,6 +19385,7 @@ name = "backend-utils-activity-pgstat-io"
 version = "0.0.0"
 dependencies = [
  "backend-executor-instrument",
+ "backend-storage-buffer-bufmgr-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-utils-activity-pgstat",
  "backend-utils-activity-pgstat-io-seams",
@@ -19418,6 +19420,7 @@ dependencies = [
  "backend-catalog-catalog-seams",
  "backend-commands-analyze-rt-seams",
  "backend-commands-tablecmds-seams",
+ "backend-storage-buffer-bufmgr-seams",
  "backend-utils-activity-pgstat",
  "backend-utils-activity-pgstat-backend",
  "backend-utils-activity-pgstat-database",

@@ -462,6 +462,15 @@ pub fn init_seams() {
     backend_executor_instrument_seams::instr_update_tuple_count::set(InstrUpdateTupleCount);
     backend_executor_instrument_seams::instr_agg_node::set(|dst, add| InstrAggNode(dst, &add));
 
+    // `pgWalUsage` traffic report from the WAL-insertion core (xlog.c:1105).
+    backend_executor_instrument_seams::report_wal_usage::set(|wal_bytes, wal_records, wal_fpi| {
+        with_pgWalUsage(|u| {
+            u.wal_bytes = u.wal_bytes.wrapping_add(wal_bytes);
+            u.wal_records += wal_records;
+            u.wal_fpi += wal_fpi;
+        });
+    });
+
     // --- lazy-vacuum driver's pgBufferUsage / pgWalUsage snapshot reads
     //     (vacuumlazy.c BufferUsageAccumDiff / WalUsageAccumDiff logging). These
     //     are this file's backend-global counters; the read seams home in
