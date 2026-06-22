@@ -845,7 +845,7 @@ fn QueueCheckConstraintValidation<'mcx>(
     })?;
     let expanded = backend_rewrite_rewritehandler_seams::expand_generated_columns_in_expr::call(
         mcx,
-        Some(cexpr),
+        Some(cexpr.erase_lifetime()),
         rel.rd_id,
         1,
     )?
@@ -854,7 +854,7 @@ fn QueueCheckConstraintValidation<'mcx>(
             .errmsg_internal("expand_generated_columns_in_expr returned None".to_string())
             .into_error()
     })?;
-    let qual_node = mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_expr(mcx, expanded)?)?;
+    let qual_node = mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_expr(mcx, expanded.clone_in(mcx)?)?)?;
 
     let newcon = NewConstraint {
         name: Some(mcx::PgString::from_str_in(constr_name, mcx)?),

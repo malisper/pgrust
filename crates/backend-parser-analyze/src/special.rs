@@ -162,7 +162,7 @@ pub fn transformCallStmt<'mcx>(
      * First, do standard parse analysis on the procedure call and its
      * arguments, allowing us to identify the called procedure.
      */
-    let mut targs: Vec<Expr> = Vec::new();
+    let mut targs: Vec<Expr<'static>> = Vec::new();
     targs
         .try_reserve(funccall.args.len())
         .map_err(|_| mcx.oom(funccall.args.len()))?;
@@ -188,7 +188,10 @@ pub fn transformCallStmt<'mcx>(
         true, /* proc_call */
         funccall.location,
     )?;
-    let mut node = node.ok_or_else(|| elog_error("CALL: ParseFuncOrColumn returned NULL"))?;
+    let node = node.ok_or_else(|| elog_error("CALL: ParseFuncOrColumn returned NULL"))?;
+    // Re-intern the parser-arena `'static` func node into `mcx` for the in-place
+    // collation pass and `'mcx` use below (invariant `Expr`).
+    let mut node: Expr<'mcx> = node.clone_in(mcx)?;
 
     backend_parser_parse_collate::assign_expr_collations(Some(pstate), &mut node)?;
 

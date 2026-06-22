@@ -172,9 +172,9 @@ pub fn find_placeholder_info<'a>(
 /// record that a PlaceHolderVar's value is needed at `where_needed`. Homed here
 /// (the joininfo unit ports `find_placeholder_info`); consumed by
 /// `add_vars_to_targetlist` / `add_vars_to_attr_needed` in init-subselect.
-pub fn phinfo_add_needed(
+pub fn phinfo_add_needed<'a>(
     root: &mut PlannerInfo,
-    phv: &PlaceHolderVar<'static>,
+    phv: &PlaceHolderVar<'a>,
     where_needed: &Relids,
 ) -> PgResult<()> {
     let phinfo_id = find_placeholder_info(root, phv)?;

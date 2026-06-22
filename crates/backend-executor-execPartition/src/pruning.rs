@@ -800,17 +800,15 @@ fn init_exec_contexts_inner<'mcx>(
                     &mut estate.es_partition_directory,
                     partrel.alias(),
                 )?;
-                let steps: alloc::vec::Vec<PartitionPruneStep<'static>> = downcast_steps(
+                // `InitPartitionPruneContext` compiles each step's `Expr` against
+                // the `'mcx` EState; `downcast_steps` re-clones the `'static`-erased
+                // steps into the executor arena (`PartitionPruneStep` is invariant
+                // in `'mcx`).
+                let steps: alloc::vec::Vec<PartitionPruneStep<'mcx>> = downcast_steps(
+                    mcx,
                     &prunestate.partprunedata[i].as_ref().unwrap().partrelprunedata[j]
                         .exec_pruning_steps,
-                );
-                // `InitPartitionPruneContext` compiles each step's `Expr` against
-                // the `'mcx` EState; re-clone the `'static`-erased steps into the
-                // executor arena (`PartitionPruneStep` is invariant in `'mcx`).
-                let steps: alloc::vec::Vec<PartitionPruneStep<'mcx>> = steps
-                    .iter()
-                    .map(|s| s.clone_in(mcx))
-                    .collect::<PgResult<_>>()?;
+                )?;
 
                 // InitPartitionPruneContext(&pprune->exec_context, ...,
                 //     partdesc, partkey, parent_plan, prunestate->econtext);
@@ -1078,7 +1076,7 @@ pub(crate) fn find_matching_subplans_recurse<'mcx>(
     if initial_prune && has_initial {
         // Extract the step list (owned) before borrowing initial_context mut.
         let steps =
-            downcast_steps(&prunedata.partrelprunedata[pprune_index].initial_pruning_steps);
+            downcast_steps(mcx, &prunedata.partrelprunedata[pprune_index].initial_pruning_steps)?;
         partset = partprune_seams::get_matching_partitions::call(
             mcx,
             &mut prunedata.partrelprunedata[pprune_index].initial_context,
@@ -1087,7 +1085,7 @@ pub(crate) fn find_matching_subplans_recurse<'mcx>(
         )?;
     } else if !initial_prune && has_exec {
         let steps =
-            downcast_steps(&prunedata.partrelprunedata[pprune_index].exec_pruning_steps);
+            downcast_steps(mcx, &prunedata.partrelprunedata[pprune_index].exec_pruning_steps)?;
         partset = partprune_seams::get_matching_partitions::call(
             mcx,
             &mut prunedata.partrelprunedata[pprune_index].exec_context,
@@ -1170,15 +1168,24 @@ fn clone_steps<'a>(steps: &'_ [PartitionPruneStep<'a>]) -> alloc::vec::Vec<Parti
     steps.to_vec()
 }
 
-/// Downcast an `&Opaque` pruning-steps payload to the step list.
-fn downcast_steps(o: &Opaque) -> alloc::vec::Vec<PartitionPruneStep<'static>> {
-    // The `Opaque` payload is a type-erased `Any` (`'static`-bound); the stored
-    // step list is the `'static`-erased plan-tree form.
+/// Downcast an `&Opaque` pruning-steps payload to the step list, deep-cloning
+/// each step into `mcx`. The `Opaque` payload is a type-erased `Any`
+/// (`'static`-bound), holding the plan-tree `'static`-erased step list (the
+/// handle-addressed plan-arena carve-out). `PartitionPruneStep` is invariant
+/// over its lifetime, so the stored `'static` steps are re-cloned into the
+/// caller's `mcx` (mirrors the `Expr::clone_in` arena round-trip) to feed the
+/// `'mcx`-typed `get_matching_partitions` seam.
+fn downcast_steps<'mcx>(
+    mcx: Mcx<'mcx>,
+    o: &Opaque,
+) -> PgResult<alloc::vec::Vec<PartitionPruneStep<'mcx>>> {
     o.0.as_ref()
         .expect("pruning_steps Opaque is NULL")
         .downcast_ref::<alloc::vec::Vec<PartitionPruneStep<'static>>>()
         .expect("pruning_steps Opaque is not a step list")
-        .clone()
+        .iter()
+        .map(|s| s.clone_in(mcx))
+        .collect()
 }
 
 /// An empty `PartitionPruneContext` placeholder (the C struct is embedded and

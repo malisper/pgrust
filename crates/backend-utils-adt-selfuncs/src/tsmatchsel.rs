@@ -111,7 +111,7 @@ pub fn tsmatchsel<'mcx>(
 /// 4-byte length header + `int32 size` + `QueryItem` array + operand storage).
 fn const_tsquery_image<'mcx>(
     mcx: Mcx<'mcx>,
-    constvalue: &types_tuple::backend_access_common_heaptuple::Datum<'static>,
+    constvalue: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<Vec<u8>> {
     let raw = constvalue.as_ref_bytes();
     // PG_DETOAST_DATUM(constval): the const could in principle be a short-header

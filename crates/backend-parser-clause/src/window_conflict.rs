@@ -361,7 +361,7 @@ fn transformFrameOffset<'mcx>(
     clause: Option<&Node<'mcx>>,
 ) -> PgResult<(Option<Node<'mcx>>, Oid)> {
     let constructName: &str;
-    let node: Expr;
+    let node: Expr<'static>;
     let mut inRangeFunc = InvalidOid; /* default result */
 
     /* Quick exit if no offset expression */
@@ -485,7 +485,7 @@ fn transformFrameOffset<'mcx>(
     /* Disallow variables in frame offsets */
     crate::checkExprIsVarFree(pstate, &node, constructName)?;
 
-    Ok((Some(Node::mk_expr(mcx, node)?), inRangeFunc))
+    Ok((Some(Node::mk_expr(mcx, node.clone_in(mcx)?)?), inRangeFunc))
 }
 
 // ===========================================================================
@@ -499,8 +499,8 @@ fn resolve_unique_index_expr<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     infer: &InferClause<'mcx>,
-) -> PgResult<Vec<Expr>> {
-    let mut result: Vec<Expr> = Vec::new();
+) -> PgResult<Vec<Expr<'static>>> {
+    let mut result: Vec<Expr<'static>> = Vec::new();
 
     for ielem_node in infer.indexElems.iter() {
         let ielem: &IndexElem = match ielem_node.node_tag() {
@@ -601,11 +601,11 @@ pub fn transformOnConflictArbiter<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     onConflictClause: &OnConflictClause<'mcx>,
-) -> PgResult<(Vec<Expr>, Option<Expr>, Oid)> {
+) -> PgResult<(Vec<Expr<'static>>, Option<Expr<'static>>, Oid)> {
     let infer = onConflictClause.infer.as_deref();
 
-    let mut arbiterExpr: Vec<Expr> = Vec::new();
-    let mut arbiterWhere: Option<Expr> = None;
+    let mut arbiterExpr: Vec<Expr<'static>> = Vec::new();
+    let mut arbiterWhere: Option<Expr<'static>> = None;
     let mut constraint: Oid = InvalidOid;
 
     if onConflictClause.action == ONCONFLICT_UPDATE && infer.is_none() {

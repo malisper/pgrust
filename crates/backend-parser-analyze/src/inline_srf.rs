@@ -657,7 +657,7 @@ fn coerce_fn_result_column<'mcx>(
     upper_tlist: &mut Vec<TargetEntry<'mcx>>,
     upper_tlist_nontrivial: &mut bool,
 ) -> PgResult<bool> {
-    let new_tle_expr: Expr;
+    let new_tle_expr: Expr<'mcx>;
     let resname = tlist[src_index].resname.as_deref().map(String::from);
 
     // If the TLE has a sortgroupref, don't change it (referenced by
@@ -668,10 +668,13 @@ fn coerce_fn_result_column<'mcx>(
             None => return Ok(false),
         };
         let exprtype = expr_type(Some(&src_expr))?;
+        // `coerce_to_target_type` works in the parser-arena `'static`; erase the
+        // `'mcx` source going in and re-clone the result back into `'mcx`
+        // (invariant `Expr`).
         let cast = backend_parser_coerce::coerce_to_target_type(
             mcx,
             None,
-            src_expr,
+            src_expr.erase_lifetime(),
             exprtype,
             res_type,
             res_typmod,
@@ -679,8 +682,8 @@ fn coerce_fn_result_column<'mcx>(
             CoercionForm::COERCE_IMPLICIT_CAST,
             -1,
         )?;
-        let mut cast = match cast {
-            Some(c) => c,
+        let mut cast: Expr<'mcx> = match cast {
+            Some(c) => c.clone_in(mcx)?,
             None => return Ok(false),
         };
         backend_parser_parse_collate::assign_expr_collations_in(mcx, &mut cast)?;
@@ -697,7 +700,7 @@ fn coerce_fn_result_column<'mcx>(
         let cast = backend_parser_coerce::coerce_to_target_type(
             mcx,
             None,
-            var_expr.clone(),
+            var_expr.clone().erase_lifetime(),
             vartype,
             res_type,
             res_typmod,
@@ -705,8 +708,8 @@ fn coerce_fn_result_column<'mcx>(
             CoercionForm::COERCE_IMPLICIT_CAST,
             -1,
         )?;
-        let mut cast = match cast {
-            Some(c) => c,
+        let mut cast: Expr<'mcx> = match cast {
+            Some(c) => c.clone_in(mcx)?,
             None => return Ok(false),
         };
         backend_parser_parse_collate::assign_expr_collations_in(mcx, &mut cast)?;

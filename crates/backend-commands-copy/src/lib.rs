@@ -1103,7 +1103,7 @@ fn analyze_copy_where<'mcx>(
     nsitem: types_nodes::parsestmt::ParseNamespaceItem<'mcx>,
     rel: &types_rel::Relation<'mcx>,
     stmt: &CopyStmt<'mcx>,
-) -> PgResult<PgVec<'mcx, Expr>> {
+) -> PgResult<PgVec<'mcx, Expr<'mcx>>> {
     use types_nodes::parsestmt::ParseExprKind::EXPR_KIND_COPY_WHERE;
 
     // add nsitem to query namespace
@@ -1122,8 +1122,12 @@ fn analyze_copy_where<'mcx>(
 
     // Make sure it yields a boolean result.
     //   whereClause = coerce_to_boolean(pstate, whereClause, "WHERE");
-    let mut where_clause =
+    let where_clause =
         backend_parser_coerce::coerce_to_boolean(mcx, Some(pstate), where_clause, "WHERE")?;
+    // Bring the parser-arena `'static` result into `mcx` for the in-place
+    // collation pass and the `eval_const_expressions(mcx, ..)` fold below
+    // (`Expr` is invariant over its lifetime).
+    let mut where_clause: Expr<'mcx> = where_clause.clone_in(mcx)?;
 
     // We have to fix its collations too.
     //   assign_expr_collations(pstate, whereClause);
@@ -1182,7 +1186,7 @@ fn analyze_copy_where<'mcx>(
 
     // whereClause = (Node *) make_ands_implicit((Expr *) whereClause);
     let implicit = backend_nodes_core::makefuncs::make_ands_implicit(canon);
-    let mut out: PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, implicit.len())?;
+    let mut out: PgVec<'mcx, Expr<'mcx>> = mcx::vec_with_capacity_in(mcx, implicit.len())?;
     for e in implicit {
         out.push(e);
     }
@@ -1195,7 +1199,7 @@ fn copy_from_driver<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     rel: &types_rel::Relation<'mcx>,
-    where_clause: PgVec<'mcx, Expr>,
+    where_clause: PgVec<'mcx, Expr<'mcx>>,
     stmt: &CopyStmt<'mcx>,
 ) -> PgResult<u64> {
     // ProcessCopyOptions(pstate, &opts, true /* is_from */, options).

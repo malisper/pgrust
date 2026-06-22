@@ -483,7 +483,7 @@ fn init_sexpr<'mcx>(
 /// the [`SetExprState`] for a function in a range-table function (FunctionScan /
 /// ROWS FROM).
 fn ExecInitTableFunctionResult<'mcx>(
-    expr: &Expr,
+    expr: &Expr<'mcx>,
     _econtext: EcxtId,
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -519,12 +519,12 @@ fn ExecInitTableFunctionResult<'mcx>(
 /// `args` carries `ExprState` by value (positional), so we surface any NULL cell
 /// loudly (an SRF call argument list never contains a NULL expression).
 fn init_expr_list<'mcx>(
-    args: &[Expr],
+    args: &[Expr<'mcx>],
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<mcx::PgVec<'mcx, types_nodes::execexpr::ExprState<'mcx>>> {
     let _ = parent;
-    let refs: Vec<Option<&Expr>> = args.iter().map(Some).collect();
+    let refs: Vec<Option<&Expr<'mcx>>> = args.iter().map(Some).collect();
     let states =
         backend_executor_execExpr_seams::exec_init_expr_list_no_parent::call(&refs, estate)?;
     let mut out = mcx::PgVec::new_in(estate.es_query_cxt);
@@ -1126,7 +1126,7 @@ fn exec_eval_func_args<'mcx>(
 /// `ExecInitFunctionResultSet(expr, econtext, parent)` (execSRF.c:443) — prepare
 /// a targetlist SRF for execution (nodeProjectSet.c).
 fn ExecInitFunctionResultSet<'mcx>(
-    expr: &Expr,
+    expr: &Expr<'mcx>,
     _econtext: EcxtId,
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,

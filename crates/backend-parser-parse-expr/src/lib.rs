@@ -570,7 +570,7 @@ fn transform_expr_node<'mcx>(
             .errcode(ERRCODE_INTERNAL_ERROR)
             .errmsg(alloc::format!(
                 "unrecognized node type: {}",
-                Node::mk_expr(aexpr_clone_ctx(pstate), other)?.node_tag().0
+                { let m = aexpr_clone_ctx(pstate); Node::mk_expr(m, other.clone_in(m)?)?.node_tag().0 }
             ))
             .into_error()),
     }
@@ -1566,19 +1566,25 @@ fn transformCaseExpr<'mcx>(
     let arg = transformExprRecurse(pstate, arg)?;
 
     // Generate the placeholder for the test expression.
-    let (arg, placeholder): (Option<Expr>, Option<CaseTestExpr>) = match arg {
-        Some(mut a) => {
-            if expr_type(Some(&a))? == UNKNOWNOID {
-                a = coerce::coerce_to_common_type::call(pstate, a, TEXTOID, "CASE")?;
-            }
-            // Run collation assignment on the test expression.
+    let (arg, placeholder): (Option<Expr<'static>>, Option<CaseTestExpr>) = match arg {
+        Some(a) => {
+            let a: Expr<'static> = if expr_type(Some(&a))? == UNKNOWNOID {
+                coerce::coerce_to_common_type::call(pstate, a, TEXTOID, "CASE")?
+            } else {
+                a
+            };
+            // Run collation assignment on the test expression. The collation
+            // routine mutates in place at the parse-arena `'mcx`, so bring the
+            // `'static` expr into the arena, assign, then erase back (the
+            // parser-arena `'static` intern boundary, cf. the WHEN/THEN arms).
+            let mut a: Expr<'mcx> = a.clone_in(aexpr_clone_ctx(pstate))?;
             assign_expr_collations(pstate, &mut a)?;
             let placeholder = CaseTestExpr {
                 typeId: expr_type(Some(&a))?,
                 typeMod: expr_typmod(Some(&a))?,
                 collation: expr_collation(Some(&a))?,
             };
-            (Some(a), Some(placeholder))
+            (Some(a.erase_lifetime()), Some(placeholder))
         }
         None => (None, None),
     };
@@ -5297,7 +5303,7 @@ fn transform_json_parse_arg<'mcx>(
         .ok_or_else(|| PgError::error("transformJsonParseArg: NULL argument"))?;
 
     let mut exprtype = expr_type(Some(&raw_expr))?;
-    let expr: Expr;
+    let expr: Expr<'static>;
 
     // prepare input document
     if exprtype == BYTEAOID {
@@ -5305,11 +5311,15 @@ fn transform_json_parse_arg<'mcx>(
         let location = expr_location(Some(&raw_expr))?;
         let converted = make_json_bytea_to_text_conversion(pstate, raw_expr, format, location)?;
         exprtype = TEXTOID;
+        // Re-clone `converted` into the parse arena so both `JsonValueExpr` arms
+        // share the arena `'mcx` (invariant `Expr` lifetime); the assembled
+        // `jve` is erased back to the parser-arena `'static` at the bind below.
+        let converted = converted.clone_in(aexpr_clone_ctx(pstate))?;
 
         // jve = makeJsonValueExpr(raw_expr, converted, format);
         let jve =
             make_json_value_expr(Some(raw_clone), Some(converted), *format);
-        expr = Expr::JsonValueExpr(jve);
+        expr = Expr::JsonValueExpr(jve).erase_lifetime();
     } else {
         let mut e = raw_expr;
         let (typcategory, _typispreferred) =
@@ -6472,7 +6482,7 @@ fn catalogname_differs_from_database(mcx: mcx::Mcx<'_>, catalogname: &str) -> Pg
 
 fn assign_expr_collations<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    expr: &mut Expr,
+    expr: &mut Expr<'mcx>,
 ) -> PgResult<()> {
     backend_parser_parse_collate::assign_expr_collations(Some(&*pstate), expr)
 }
@@ -6535,7 +6545,7 @@ fn analyze_one_exec_param_impl<'mcx>(
         -1,
     )?;
 
-    let Some(mut coerced) = coerced else {
+    let Some(coerced) = coerced else {
         // coerce_to_target_type returned NULL — the driver raises the
         // cannot-be-coerced ereport with C's exact branch order.
         return Ok(me::AnalyzedExecParam {
@@ -6546,6 +6556,11 @@ fn analyze_one_exec_param_impl<'mcx>(
         });
     };
 
+    // Bring the parser-arena `'static` result into this call's `mcx` (the local
+    // pstate's allocator) so `assign_expr_collations` (which mutates in place at
+    // `'mcx`) and the `AnalyzedExecParam<'mcx>` bind below share the arena
+    // lifetime (invariant `Expr`).
+    let mut coerced: Expr<'mcx> = coerced.clone_in(mcx)?;
     assign_expr_collations(pstate, &mut coerced)?;
 
     Ok(me::AnalyzedExecParam {

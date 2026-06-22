@@ -21,7 +21,7 @@ seam_core::seam!(
     /// non-`FuncExpr`/`OpExpr` node (the C
     /// `elog(ERROR, "unrecognized node type")`).
     pub fn exec_init_function_result_set<'mcx>(
-        expr: &types_nodes::primnodes::Expr,
+        expr: &types_nodes::primnodes::Expr<'mcx>,
         econtext: types_nodes::EcxtId,
         parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
@@ -68,7 +68,7 @@ seam_core::seam!(
     /// per-node `ExprContext`; `parent` is the lent plan-state. The compiled
     /// state is allocated in the per-query context; fallible on OOM.
     pub fn exec_init_table_function_result<'mcx>(
-        expr: &types_nodes::primnodes::Expr,
+        expr: &types_nodes::primnodes::Expr<'mcx>,
         econtext: types_nodes::EcxtId,
         parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,

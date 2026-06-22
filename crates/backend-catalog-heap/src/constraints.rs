@@ -63,7 +63,7 @@ const InvalidAttrNumber: AttrNumber = 0;
 
 /// Wrap a cooked [`Expr`] into a `Node::Expr` `NodePtr` for the storage
 /// boundary (`nodeToString` / `CreateConstraintEntry` take `&Node`).
-fn expr_to_nodeptr<'mcx>(mcx: Mcx<'mcx>, expr: Expr) -> PgResult<NodePtr<'mcx>> {
+fn expr_to_nodeptr<'mcx>(mcx: Mcx<'mcx>, expr: Expr<'mcx>) -> PgResult<NodePtr<'mcx>> {
     alloc_in(mcx, Node::mk_expr(mcx, expr)?)
 }
 
@@ -82,7 +82,7 @@ pub fn cookDefault<'mcx>(
     atttypmod: i32,
     attname: &str,
     attgenerated: i8,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     // Assert(raw_default != NULL); — the NodePtr is non-null by construction.
 
     /*
@@ -94,11 +94,15 @@ pub fn cookDefault<'mcx>(
     } else {
         ParseExprKind::EXPR_KIND_COLUMN_DEFAULT
     };
-    let mut expr = match backend_parser_parse_expr::transformExpr(pstate, Some(raw_node), expr_kind)?
-    {
-        Some(e) => e,
-        None => return Ok(None),
-    };
+    // The parser yields the parse-arena `'static` form; bring it into the
+    // pstate's `mcx` so the in-place collation pass, the `'mcx` node-wrap
+    // round-trips below, and the cooked-expr return all share `'mcx` (`Expr`
+    // is invariant over its lifetime).
+    let mut expr: Expr<'mcx> =
+        match backend_parser_parse_expr::transformExpr(pstate, Some(raw_node), expr_kind)? {
+            Some(e) => e.clone_in(mcx)?,
+            None => return Ok(None),
+        };
 
     if attgenerated != 0 {
         /* Disallow refs to other generated columns */
@@ -145,10 +149,13 @@ pub fn cookDefault<'mcx>(
     if OidIsValid(atttypid) {
         let type_id = backend_nodes_core::nodefuncs::expr_type(Some(&expr))?;
 
+        // `coerce_to_target_type` takes/returns the parse-arena `'static` form;
+        // erase at the call boundary and re-intern the result into `mcx` (the
+        // sanctioned `'static`↔`'mcx` round-trip — same arena, invariant `Expr`).
         let coerced = backend_parser_coerce::coerce_to_target_type(
             mcx,
             Some(pstate),
-            expr,
+            expr.erase_lifetime(),
             type_id,
             atttypid,
             atttypmod,
@@ -157,7 +164,7 @@ pub fn cookDefault<'mcx>(
             -1,
         )?;
         expr = match coerced {
-            Some(e) => e,
+            Some(e) => e.clone_in(mcx)?,
             None => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_DATATYPE_MISMATCH)
@@ -187,7 +194,7 @@ fn cookConstraint<'mcx>(
     pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
     raw_constraint: NodePtr<'mcx>,
     relname: &str,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     /*
      * Transform raw parsetree to executable expression.
      */
@@ -202,11 +209,14 @@ fn cookConstraint<'mcx>(
     /*
      * Make sure it yields a boolean result.
      */
-    let mut expr = backend_parser_coerce::coerce_to_boolean(mcx, Some(pstate), expr, "CHECK")?;
+    let expr = backend_parser_coerce::coerce_to_boolean(mcx, Some(pstate), expr, "CHECK")?;
 
     /*
-     * Take care of collations.
+     * Take care of collations. Bring the parser-arena `'static` result into the
+     * pstate's `mcx` (the collation routine mutates in place at `'mcx` and the
+     * cooked expr is stored at `'mcx`); `Expr` is invariant, so `clone_in`.
      */
+    let mut expr: Expr<'mcx> = expr.clone_in(mcx)?;
     backend_parser_parse_collate::assign_expr_collations(Some(pstate), &mut expr)?;
 
     /*

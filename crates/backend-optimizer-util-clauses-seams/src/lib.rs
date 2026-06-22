@@ -221,7 +221,7 @@ seam_core::seam!(
     /// `pg_proc.prorows`). `Err` carries the support function's
     /// `ereport(ERROR)`. Owner: `backend-optimizer-util-clauses` (the
     /// support-rows registry; per-function kernels register from their crates).
-    pub fn call_support_rows(prosupport: Oid, funcid: Oid, node: &Expr<'static>) -> PgResult<Option<f64>>
+    pub fn call_support_rows<'mcx>(prosupport: Oid, funcid: Oid, node: &Expr<'mcx>) -> PgResult<Option<f64>>
 );
 
 seam_core::seam!(

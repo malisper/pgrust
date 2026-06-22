@@ -2695,7 +2695,7 @@ mod clone_in_tests {
     use mcx::MemoryContext;
 
     /// Build a trivial `Expr::Var` for use as a leaf child.
-    fn a_var(varattno: AttrNumber) -> Expr {
+    fn a_var<'mcx>(varattno: AttrNumber) -> Expr<'mcx> {
         Expr::Var(Var {
             varno: 1,
             varattno,
@@ -2738,7 +2738,12 @@ mod clone_in_tests {
     /// direct call would form a dependency cycle).
     #[test]
     fn clone_in_aggref_bearing_target_entry_list() {
-        let ctx = MemoryContext::new("clone_in_test");
+        // Leak the context so its `Mcx` is genuinely `'static`, matching the
+        // arena `'static`-intern convention the test exercises (invariant `Expr`
+        // makes a borrowed-`ctx` `'static` annotation unsound otherwise).
+        let ctx: &'static MemoryContext = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+            MemoryContext::new("clone_in_test"),
+        ));
         let mcx = ctx.mcx();
 
         // Aggref with one aggregated arg (a TargetEntry wrapping a Var) and a
@@ -2883,7 +2888,10 @@ mod clone_in_tests {
     #[test]
     fn node_clone_in_routes_sublink_expr_through_clone_in() {
         use crate::nodes::Node;
-        let ctx = MemoryContext::new("clone_in_test");
+        // Leak the context so its `Mcx` is genuinely `'static` (see sibling test).
+        let ctx: &'static MemoryContext = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+            MemoryContext::new("clone_in_test"),
+        ));
         let mcx = ctx.mcx();
 
         let q = crate::copy_query::Query::new(mcx);

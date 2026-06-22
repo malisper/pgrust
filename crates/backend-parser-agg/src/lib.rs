@@ -156,11 +156,11 @@ fn node_location(n: &Node) -> i32 {
 /// is the raw ORDER BY (`SortBy` nodes wrapped as `Node`).
 pub fn transformAggregateCall<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    agg: Aggref,
-    args: Vec<Expr>,
+    agg: Aggref<'static>,
+    args: Vec<Expr<'static>>,
     aggorder: PgVec<'mcx, NodePtr<'mcx>>,
     agg_distinct: bool,
-) -> PgResult<Aggref> {
+) -> PgResult<Aggref<'static>> {
     let mcx = pstate_mcx(pstate);
     let mut agg = agg;
     let mut tlist: Vec<types_nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
@@ -202,7 +202,7 @@ pub fn transformAggregateCall<'mcx>(
             };
 
             // We don't bother to assign column names to the entries.
-            let tle = make_target_entry(mcx, arg, attno, None, false)?;
+            let tle = make_target_entry(mcx, arg.clone_in(mcx)?, attno, None, false)?;
             attno += 1;
             tlist.push(tle);
 
@@ -219,9 +219,11 @@ pub fn transformAggregateCall<'mcx>(
         // Regular aggregate, so it has no direct args.
         agg.aggdirectargs = Vec::new();
 
-        // Transform the plain list of Exprs into a targetlist.
+        // Transform the plain list of Exprs into a targetlist. The parser-arena
+        // `'static` args are deep-copied into `mcx` for the `'mcx` TargetEntry
+        // (invariant `Expr`); `tlist_into_static` re-interns the finished list.
         for arg in args {
-            let tle = make_target_entry(mcx, arg, attno, None, false)?;
+            let tle = make_target_entry(mcx, arg.clone_in(mcx)?, attno, None, false)?;
             attno += 1;
             tlist.push(tle);
         }
@@ -362,7 +364,7 @@ fn alloc_fmt(args: &core::fmt::Arguments) -> String {
 pub fn transformGroupingFunc<'mcx>(
     pstate: &mut ParseState<'mcx>,
     p_node: Node<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // C: GroupingFunc *p = (GroupingFunc *) gf; the grammar produces the *raw*
     // `Node::GroupingFunc` (rawexprnodes), whose `args` are raw `NodePtr`s.
     let Some(p): Option<types_nodes::rawexprnodes::GroupingFunc<'mcx>> =
@@ -389,7 +391,7 @@ pub fn transformGroupingFunc<'mcx>(
             .into_error());
     }
 
-    let mut result_list: Vec<Expr> = Vec::new();
+    let mut result_list: Vec<Expr<'static>> = Vec::new();
     result_list.reserve(p.args.len());
     let expr_kind = pstate.p_expr_kind;
     for arg in p.args.into_iter() {
@@ -439,28 +441,28 @@ fn pstate_mcx<'mcx>(pstate: &ParseState<'mcx>) -> Mcx<'mcx> {
 // ===========================================================================
 
 /// The two node kinds `check_agglevels_and_constraints` is invoked on.
-enum AggOrGrouping<'a> {
-    Agg(&'a mut Aggref),
-    Grouping(&'a mut types_nodes::primnodes::GroupingFunc),
+enum AggOrGrouping<'a, 'mcx> {
+    Agg(&'a mut Aggref<'mcx>),
+    Grouping(&'a mut types_nodes::primnodes::GroupingFunc<'mcx>),
 }
 
-fn check_agglevels_and_constraints<'mcx>(
+fn check_agglevels_and_constraints<'mcx, 'n>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    expr: AggOrGrouping<'_>,
+    expr: AggOrGrouping<'_, 'n>,
 ) -> PgResult<()> {
     let is_agg = matches!(expr, AggOrGrouping::Agg(_));
 
     // Snapshot the subtrees the level analysis walks (C reads
     // directargs/args/filter for Aggref, args for GroupingFunc).
-    let (directargs, args, filter, location): (Vec<Node>, Vec<Node>, Option<Node>, i32) = match &expr
+    let (directargs, args, filter, location): (Vec<Node<'mcx>>, Vec<Node<'mcx>>, Option<Node<'mcx>>, i32) = match &expr
     {
         AggOrGrouping::Agg(agg) => {
-            let mut directargs: Vec<Node> = Vec::new();
+            let mut directargs: Vec<Node<'mcx>> = Vec::new();
             for e in agg.aggdirectargs.iter() {
                 directargs.push(Node::mk_expr(mcx, e.clone_in(mcx)?)?);
             }
-            let mut args: Vec<Node> = Vec::new();
+            let mut args: Vec<Node<'mcx>> = Vec::new();
             for te in agg.args.iter() {
                 args.push(Node::mk_target_entry(mcx, te.clone_in(mcx)?)?);
             }
@@ -476,7 +478,7 @@ fn check_agglevels_and_constraints<'mcx>(
             (directargs, args, filter, agg.location)
         }
         AggOrGrouping::Grouping(grp) => {
-            let mut args: Vec<Node> = Vec::new();
+            let mut args: Vec<Node<'mcx>> = Vec::new();
             for e in grp.args.iter() {
                 args.push(Node::mk_expr(mcx, e.clone_in(mcx)?)?);
             }
@@ -1001,9 +1003,9 @@ fn rte_eref_aliasname<'a>(rte: &'a RangeTblEntry) -> &'a str {
 /// Finish initial transformation of a window function call.
 pub fn transformWindowFuncCall<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    wfunc: types_nodes::primnodes::WindowFunc,
+    wfunc: types_nodes::primnodes::WindowFunc<'static>,
     windef: WindowDef<'mcx>,
-) -> PgResult<types_nodes::primnodes::WindowFunc> {
+) -> PgResult<types_nodes::primnodes::WindowFunc<'static>> {
     let mut wfunc = wfunc;
     // A window function call can't contain another one (but aggs are OK).
     if pstate.p_hasWindowFuncs && contain_windowfuncs_exprs(pstate_mcx(pstate), &wfunc.args)? {
@@ -1263,7 +1265,7 @@ pub fn parseCheckAggregates<'mcx>(
     let mut gset_common: Vec<i32> = Vec::new();
     // groupClauses is a list of TargetEntry; carried as owned TargetEntry.
     let mut group_clauses: Vec<types_nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
-    let mut group_clause_common_vars: Vec<Expr> = Vec::new();
+    let mut group_clause_common_vars: Vec<Expr<'mcx>> = Vec::new();
     let mut func_grouped_rels: Vec<i32> = Vec::new();
     let has_join_rtes;
     let has_self_ref_rtes;
@@ -1581,7 +1583,7 @@ struct SubstituteContext<'a, 'mcx> {
     mcx: Mcx<'mcx>,
     pstate: &'a ParseState<'mcx>,
     group_clauses: &'a [types_nodes::primnodes::TargetEntry<'mcx>],
-    group_clause_common_vars: &'a [Expr],
+    group_clause_common_vars: &'a [Expr<'mcx>],
     gset_common: &'a [i32],
     have_groupingsets: bool,
     have_non_var_grouping: bool,
@@ -1597,7 +1599,7 @@ fn substitute_grouped_columns<'mcx>(
     node: Node<'mcx>,
     pstate: &ParseState<'mcx>,
     group_clauses: &[types_nodes::primnodes::TargetEntry<'mcx>],
-    group_clause_common_vars: &[Expr],
+    group_clause_common_vars: &[Expr<'mcx>],
     gset_common: &[i32],
     have_groupingsets: bool,
     have_non_var_grouping: bool,
@@ -1631,7 +1633,7 @@ fn substitute_grouped_columns_list<'mcx>(
     nodes: Vec<Node<'mcx>>,
     pstate: &ParseState<'mcx>,
     group_clauses: &[types_nodes::primnodes::TargetEntry<'mcx>],
-    group_clause_common_vars: &[Expr],
+    group_clause_common_vars: &[Expr<'mcx>],
     gset_common: &[i32],
     have_groupingsets: bool,
     have_non_var_grouping: bool,
@@ -1919,12 +1921,12 @@ fn mutate_generic<'mcx>(node: &mut Node<'mcx>, context: &mut SubstituteContext<'
 /// Take an `Expr` out of an `&mut Expr` slot, leaving a cheap placeholder
 /// (`Const` default) behind. Used to move a child into a `Node` for in-place
 /// mutation, then write the result back.
-fn replace_expr_dummy(slot: &mut Expr) -> Expr {
+fn replace_expr_dummy<'mcx>(slot: &mut Expr<'mcx>) -> Expr<'mcx> {
     core::mem::replace(slot, Expr::Const(types_nodes::primnodes::Const::default()))
 }
 
 /// Unwrap a `Node::Expr` back into its `Expr`.
-fn unwrap_node_expr(n: Node) -> Expr {
+fn unwrap_node_expr<'mcx>(n: Node<'mcx>) -> Expr<'mcx> {
     match n.into_expr() {
         Some(e) => e,
         None => Expr::Const(types_nodes::primnodes::Const::default()),
@@ -2174,11 +2176,11 @@ fn compute_grouping_refs(
             flat_node = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
                 context.mcx,
                 context.qry,
-                Node::mk_expr(context.mcx, expr.clone())?,
+                Node::mk_expr(context.mcx, expr.clone_in(context.mcx)?)?,
             )?;
             flat_node
         } else {
-            Node::mk_expr(context.mcx, expr.clone())?
+            Node::mk_expr(context.mcx, expr.clone_in(context.mcx)?)?
         };
 
         let cur_expr: &Expr = match expr_node.as_expr() {
@@ -2590,9 +2592,9 @@ pub fn build_aggregate_transfn_expr(
     transfn_oid: Oid,
     invtransfn_oid: Oid,
     build_invtrans: bool,
-) -> PgResult<(Expr, Option<Expr>)> {
+) -> PgResult<(Expr<'static>, Option<Expr<'static>>)> {
     // Build arg list to use in the transfn FuncExpr node.
-    let mut args: Vec<Expr> = Vec::new();
+    let mut args: Vec<Expr<'static>> = Vec::new();
     args.push(make_agg_arg(agg_state_type, agg_input_collation));
 
     let mut i = agg_num_direct_inputs;
@@ -2636,14 +2638,14 @@ pub fn build_aggregate_transfn_expr(
 }
 
 /// `makeFuncExpr(...)` — wraps `make_func_expr` (which returns an `Expr`).
-fn make_func_expr_variadic(
+fn make_func_expr_variadic<'mcx>(
     funcid: Oid,
     rettype: Oid,
-    args: Vec<Expr>,
+    args: Vec<Expr<'mcx>>,
     funccollid: Oid,
     inputcollid: Oid,
     fformat: types_nodes::primnodes::CoercionForm,
-) -> Expr {
+) -> Expr<'mcx> {
     make_func_expr(funcid, rettype, args, funccollid, inputcollid, fformat)
 }
 
@@ -2659,7 +2661,7 @@ fn set_funcvariadic(expr: &mut Expr, variadic: bool) {
 // ===========================================================================
 
 /// Build an expression tree for an aggregate's serialization function.
-pub fn build_aggregate_serialfn_expr(serialfn_oid: Oid) -> PgResult<Expr> {
+pub fn build_aggregate_serialfn_expr(serialfn_oid: Oid) -> PgResult<Expr<'static>> {
     // serialfn always takes INTERNAL and returns BYTEA.
     let args = alloc_vec1(make_agg_arg(INTERNALOID, InvalidOid));
     Ok(make_func_expr_variadic(
@@ -2677,9 +2679,9 @@ pub fn build_aggregate_serialfn_expr(serialfn_oid: Oid) -> PgResult<Expr> {
 // ===========================================================================
 
 /// Build an expression tree for an aggregate's deserialization function.
-pub fn build_aggregate_deserialfn_expr(deserialfn_oid: Oid) -> PgResult<Expr> {
+pub fn build_aggregate_deserialfn_expr(deserialfn_oid: Oid) -> PgResult<Expr<'static>> {
     // deserialfn always takes BYTEA, INTERNAL and returns INTERNAL.
-    let mut args: Vec<Expr> = Vec::new();
+    let mut args: Vec<Expr<'static>> = Vec::new();
     args.push(make_agg_arg(BYTEAOID, InvalidOid));
     args.push(make_agg_arg(INTERNALOID, InvalidOid));
     Ok(make_func_expr_variadic(
@@ -2704,9 +2706,9 @@ pub fn build_aggregate_finalfn_expr(
     agg_result_type: Oid,
     agg_input_collation: Oid,
     finalfn_oid: Oid,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // Build expr tree for final function.
-    let mut args: Vec<Expr> = Vec::new();
+    let mut args: Vec<Expr<'static>> = Vec::new();
     args.push(make_agg_arg(agg_state_type, agg_input_collation));
 
     // finalfn may take additional args, which match agg's input types.
@@ -2728,7 +2730,7 @@ pub fn build_aggregate_finalfn_expr(
 }
 
 #[inline]
-fn alloc_vec1(e: Expr) -> Vec<Expr> {
+fn alloc_vec1<'mcx>(e: Expr<'mcx>) -> Vec<Expr<'mcx>> {
     let mut v = Vec::new();
     v.push(e);
     v
@@ -2739,7 +2741,7 @@ fn alloc_vec1(e: Expr) -> Vec<Expr> {
 // ===========================================================================
 
 /// `make_agg_arg(argtype, argcollation)` — a dummy `Param` of the given type.
-fn make_agg_arg(argtype: Oid, argcollation: Oid) -> Expr {
+fn make_agg_arg<'mcx>(argtype: Oid, argcollation: Oid) -> Expr<'mcx> {
     Expr::Param(Param {
         paramkind: ParamKind::PARAM_EXEC,
         paramid: -1,

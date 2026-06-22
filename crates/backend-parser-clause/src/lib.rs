@@ -141,7 +141,7 @@ fn tle_expr_node<'mcx>(mcx: mcx::Mcx<'mcx>, tle: &TargetEntry<'mcx>) -> PgResult
 }
 
 /// `tle->expr` as a borrowed [`Expr`] for `exprType`/`equal`/`strip_*`.
-fn tle_expr<'a, 'mcx>(tle: &'a TargetEntry<'mcx>) -> &'a Expr {
+fn tle_expr<'a, 'mcx>(tle: &'a TargetEntry<'mcx>) -> &'a Expr<'mcx> {
     tle.expr
         .as_deref()
         .expect("TargetEntry.expr must be present")
@@ -159,7 +159,7 @@ pub fn transformWhereClause<'mcx>(
     clause: Option<Node<'mcx>>,
     exprKind: ParseExprKind,
     constructName: &str,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     let Some(clause) = clause else {
         return Ok(None);
     };
@@ -184,7 +184,7 @@ pub fn transformLimitClause<'mcx>(
     exprKind: ParseExprKind,
     constructName: &str,
     limitOption: LimitOption,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     let Some(clause) = clause else {
         return Ok(None);
     };
@@ -1117,7 +1117,10 @@ pub fn addTargetToSortList<'mcx>(
 
     /* if tlist item is an UNKNOWN literal, change it to TEXT */
     if restype == UNKNOWNOID {
-        let expr = tle_expr(&targetlist[tle_idx]).clone();
+        // Bridge the arena `'mcx` tlist expr to coerce_type's parser-arena
+        // `'static` (erase at entry, re-clone into `mcx` to store back), since
+        // `Expr` is invariant over its lifetime.
+        let expr = tle_expr(&targetlist[tle_idx]).clone().erase_lifetime();
         let coerced = backend_parser_coerce::coerce_type(
             mcx,
             Some(pstate),
@@ -1130,7 +1133,7 @@ pub fn addTargetToSortList<'mcx>(
             -1,
         )?
         .ok_or_else(|| elog_error("addTargetToSortList: coerce_type returned NULL"))?;
-        targetlist[tle_idx].expr = Some(alloc_in(mcx, coerced)?);
+        targetlist[tle_idx].expr = Some(alloc_in(mcx, coerced.clone_in(mcx)?)?);
         restype = TEXTOID;
     }
 
@@ -1229,7 +1232,10 @@ fn addTargetToGroupList<'mcx>(
 
     /* if tlist item is an UNKNOWN literal, change it to TEXT */
     if restype == UNKNOWNOID {
-        let expr = tle_expr(&targetlist[tle_idx]).clone();
+        // Bridge the arena `'mcx` tlist expr to coerce_type's parser-arena
+        // `'static` (erase at entry, re-clone into `mcx` to store back), since
+        // `Expr` is invariant over its lifetime.
+        let expr = tle_expr(&targetlist[tle_idx]).clone().erase_lifetime();
         let coerced = backend_parser_coerce::coerce_type(
             mcx,
             Some(pstate),
@@ -1242,7 +1248,7 @@ fn addTargetToGroupList<'mcx>(
             -1,
         )?
         .ok_or_else(|| elog_error("addTargetToGroupList: coerce_type returned NULL"))?;
-        targetlist[tle_idx].expr = Some(alloc_in(mcx, coerced)?);
+        targetlist[tle_idx].expr = Some(alloc_in(mcx, coerced.clone_in(mcx)?)?);
         restype = TEXTOID;
     }
 

@@ -1129,12 +1129,12 @@ fn collect_child_security_quals<'mcx>(
     root: &PlannerInfo,
     child_rti: Index,
     mcx: Mcx<'mcx>,
-) -> PgResult<Vec<Vec<Expr>>> {
+) -> PgResult<Vec<Vec<Expr<'mcx>>>> {
     let rte = planner_rt_fetch(run, root, child_rti);
-    let mut out: Vec<Vec<Expr>> = Vec::new();
+    let mut out: Vec<Vec<Expr<'mcx>>> = Vec::new();
     for qualset_np in rte.securityQuals.iter() {
         // Each securityQuals element is itself a List of Exprs (a qual set).
-        let mut set: Vec<Expr> = Vec::new();
+        let mut set: Vec<Expr<'mcx>> = Vec::new();
         let qualset_node = &**qualset_np;
         if let Some(list) = qualset_node.as_list() {
             for q in list.iter() {

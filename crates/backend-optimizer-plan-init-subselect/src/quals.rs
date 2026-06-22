@@ -67,7 +67,7 @@ const PVC_JOINCLAUSE_FLAGS: i32 = 0x0002 | 0x0008 | 0x0010;
 /// pointer reuse). The derived `Expr::clone()` panics on owned-subtree variants
 /// (SubLink/SubPlan/Aggref) whose children only deep-copy via `clone_in`; route
 /// every qual copy through `Expr::clone_in`.
-fn copy_clause_in(run: &PlannerRun<'_>, expr: &Expr) -> Expr {
+fn copy_clause_in<'mcx>(run: &PlannerRun<'mcx>, expr: &Expr) -> Expr<'mcx> {
     expr.clone_in(run.mcx())
         .unwrap_or_else(|e| panic!("copy_clause_in: clone_in: {e:?}"))
 }
@@ -89,8 +89,8 @@ fn elog_error(msg: impl Into<alloc::string::String>) -> PgError {
 pub fn distribute_qual_to_rels<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
-    clause: &Expr,
-    item_list: &mut Vec<JoinTreeItem>,
+    clause: &Expr<'mcx>,
+    item_list: &mut Vec<JoinTreeItem<'mcx>>,
     jti: JtId,
     sjinfo: Option<&SpecialJoinInfo>,
     security_level: u32,
@@ -346,7 +346,7 @@ fn push_oj_clause_info(
 ///
 /// Check whether `clause` is an IS NULL qual that is redundant with a lower
 /// JOIN_ANTI join (in which case `distribute_qual_to_rels` throws it away).
-fn check_redundant_nullability_qual(root: &PlannerInfo, clause: &Expr) -> bool {
+fn check_redundant_nullability_qual(root: &PlannerInfo, clause: &Expr<'_>) -> bool {
     // Check for IS NULL, and identify the Var forced to NULL.
     let forced_null_var = match initext::find_forced_null_var_expr::call(clause) {
         None => return false,
@@ -420,7 +420,11 @@ fn add_base_clause_to_rel<'mcx>(
             let incompat = bms::relids_copy::call(&root.rinfo(restrictinfo).incompatible_relids);
             let outer = bms::relids_copy::call(&root.rinfo(restrictinfo).outer_relids);
 
-            let false_const = eqext::make_bool_const::call(false, false);
+            // `make_bool_const` returns the leaf `Const` at the seam's notional
+            // `'static`; bring it into the planner-run arena `'mcx` (invariant
+            // `Expr`) for `make_restrictinfo`.
+            let false_const: Expr<'mcx> =
+                eqext::make_bool_const::call(false, false).clone_in(run.mcx())?;
             restrictinfo = eqext::make_restrictinfo::call(
                 run.mcx(),
                 root,

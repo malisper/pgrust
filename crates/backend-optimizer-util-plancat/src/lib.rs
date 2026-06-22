@@ -164,14 +164,14 @@ fn clamp_width_est(tuple_width: i64) -> i32 {
 
 /// `makeVar(varno, varattno, vartype, vartypmod, varcollid, varlevelsup)`
 /// (makefuncs.c) — build a `Var` `Expr` value.
-fn make_var(
+fn make_var<'mcx>(
     varno: i32,
     varattno: AttrNumber,
     vartype: Oid,
     vartypmod: i32,
     varcollid: Oid,
     varlevelsup: Index,
-) -> Expr {
+) -> Expr<'mcx> {
     Expr::Var(Var {
         varno,
         varattno,
@@ -1770,7 +1770,7 @@ fn seam_relation_excluded_by_constraints<'mcx>(
     }
 }
 
-fn seam_get_function_rows(funcid: Oid, node: &Expr) -> PgResult<f64> {
+fn seam_get_function_rows<'mcx>(funcid: Oid, node: &Expr<'mcx>) -> PgResult<f64> {
     // The clauses-seams contract passes the SRF node by value (`&Expr`) without a
     // PlannerInfo. plancat's `get_function_rows` body consults `pg_proc.prorows`
     // and a `SupportRequestRows` support function; with no `root` and no arena
@@ -1782,7 +1782,7 @@ fn seam_get_function_rows(funcid: Oid, node: &Expr) -> PgResult<f64> {
 /// C: read `pg_proc.prorows`, asserting `proretset`; the `prosupport` path runs
 /// a `SupportRequestRows` support function (unported tree-wide; mirror-and-panic
 /// — unreachable for current query paths where `prosupport == InvalidOid`).
-fn seam_get_function_rows_by_node(funcid: Oid, node: &Expr) -> PgResult<f64> {
+fn seam_get_function_rows_by_node<'mcx>(funcid: Oid, node: &Expr<'mcx>) -> PgResult<f64> {
     let form = syscache_seams::proc_cost_rows::call(funcid)?;
     debug_assert!(form.proretset);
     if form.prosupport != InvalidOid {

@@ -504,6 +504,6 @@ pub fn create_lateral_join_info(root: &mut PlannerInfo, run: &PlannerRun<'_>) {
 /// Deep-clone a slice of owned `Expr`s (the lifetime-free planner `Expr`
 /// derives `Clone`, so this is a straightforward element-wise copy — the C
 /// `copyObject` over already-fresh nodes).
-fn clone_exprs(v: &[Expr]) -> Vec<Expr> {
+fn clone_exprs<'mcx>(v: &[Expr<'mcx>]) -> Vec<Expr<'mcx>> {
     v.to_vec()
 }

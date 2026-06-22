@@ -125,7 +125,7 @@ pub fn transformInsertStmt<'mcx>(
     debug_assert_eq!(icolumns.len(), attrnos.len());
 
     // Determine which variant of INSERT we have.
-    let expr_list: PgVec<'mcx, Expr> = if select_stmt.is_none() {
+    let expr_list: PgVec<'mcx, Expr<'mcx>> = if select_stmt.is_none() {
         // INSERT ... DEFAULT VALUES: emit an empty targetlist; all columns are
         // defaulted when the planner expands the targetlist.
         PgVec::new_in(mcx)
@@ -274,7 +274,7 @@ fn transformInsertSelect<'mcx>(
     sub_namespace: PgVec<'mcx, types_nodes::parsestmt::ParseNamespaceItem<'mcx>>,
     icolumns: &PgVec<'mcx, ResTarget<'mcx>>,
     attrnos: &PgVec<'mcx, i32>,
-) -> PgResult<PgVec<'mcx, Expr>> {
+) -> PgResult<PgVec<'mcx, Expr<'mcx>>> {
     // We make the sub-pstate a child of the outer pstate so that it can see any
     // Param definitions supplied from above. Since the outer pstate's rtable and
     // namespace are presently empty, there are no side-effects of exposing names
@@ -350,7 +350,7 @@ fn transformInsertSelect<'mcx>(
     // HACK: unknown-type constants and params in the SELECT's targetlist are
     // copied up as-is rather than referenced as subquery outputs, so they can
     // be coerced to the target column type (see coerce_type special cases).
-    let mut expr_list: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    let mut expr_list: PgVec<'mcx, Expr<'static>> = PgVec::new_in(mcx);
     for tle in sub_target_list.iter() {
         if tle.resjunk {
             continue;
@@ -371,7 +371,9 @@ fn transformInsertSelect<'mcx>(
             var.location = backend_nodes_core::nodefuncs::expr_location(tle.expr.as_deref())?;
             Expr::Var(var)
         };
-        expr_list.push(expr);
+        // Re-intern into the parse arena's `'static` for the `transformInsertRow`
+        // contract (it `clone_in`s back into `mcx`); freshly-built at `'mcx` above.
+        expr_list.push(expr.erase_lifetime());
     }
 
     // Prepare row for assignment to target table.
@@ -389,7 +391,7 @@ fn transformInsertMultiRowValues<'mcx>(
     stmt: &InsertStmt<'mcx>,
     icolumns: &PgVec<'mcx, ResTarget<'mcx>>,
     attrnos: &PgVec<'mcx, i32>,
-) -> PgResult<PgVec<'mcx, Expr>> {
+) -> PgResult<PgVec<'mcx, Expr<'mcx>>> {
     debug_assert!(select_stmt.intoClause.is_none());
 
     // exprsLists: a List (PgVec<NodePtr>) where each element is a Node::List of
@@ -504,10 +506,12 @@ fn transformInsertMultiRowValues<'mcx>(
 
     backend_parser_relation::addNSItemToQuery(mcx, pstate, nsitem, true, false, false)?;
 
-    let mut var_exprs: PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, var_nodes.len())?;
+    let mut var_exprs: PgVec<'mcx, Expr<'static>> = mcx::vec_with_capacity_in(mcx, var_nodes.len())?;
     for vn in var_nodes.into_iter() {
         match mcx::PgBox::into_inner(vn).into_expr() {
-            Some(e) => var_exprs.push(e),
+            // Re-intern into the parse arena's `'static` for `transformInsertRow`
+            // (it `clone_in`s back into `mcx`).
+            Some(e) => var_exprs.push(e.erase_lifetime()),
             None => return Err(elog_error("expandNSItemVars produced a non-Expr node")),
         }
     }
@@ -526,12 +530,12 @@ fn transformInsertMultiRowValues<'mcx>(
 pub fn transformInsertRow<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    exprlist: PgVec<'mcx, Expr>,
+    exprlist: PgVec<'mcx, Expr<'static>>,
     stmtcols: &PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>>,
     icolumns: &PgVec<'mcx, ResTarget<'mcx>>,
     attrnos: &PgVec<'mcx, i32>,
     strip_indirection: bool,
-) -> PgResult<PgVec<'mcx, Expr>> {
+) -> PgResult<PgVec<'mcx, Expr<'mcx>>> {
     // Check length of the expr list: it must not have more expressions than
     // there are target columns. Fewer is allowed only if no explicit column
     // list was given (the remaining columns are implicitly defaulted).
@@ -568,7 +572,7 @@ pub fn transformInsertRow<'mcx>(
     }
 
     // Prepare columns for assignment to the target table.
-    let mut result: PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, exprlist.len())?;
+    let mut result: PgVec<'mcx, Expr<'mcx>> = mcx::vec_with_capacity_in(mcx, exprlist.len())?;
     for (idx, expr) in exprlist.into_iter().enumerate() {
         let col: &ResTarget<'mcx> = &icolumns[idx];
         let attno = attrnos[idx];
@@ -612,7 +616,9 @@ pub fn transformInsertRow<'mcx>(
             }
         }
 
-        result.push(transformed);
+        // The parser-arena `'static` assigned-expr is re-interned into `mcx` for
+        // the `PgVec<'mcx, Expr<'mcx>>` result (invariant `Expr`).
+        result.push(transformed.clone_in(mcx)?);
     }
     Ok(result)
 }
@@ -744,10 +750,12 @@ fn transformOnConflictClause<'mcx>(
     let mut arbiter_elems: PgVec<'mcx, NodePtr<'mcx>> =
         mcx::vec_with_capacity_in(mcx, arbiter_exprs.len())?;
     for e in arbiter_exprs.into_iter() {
-        arbiter_elems.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?);
+        // The arbiter Exprs come back in the parser-arena `'static`; re-clone
+        // each into `mcx` before wrapping (invariant `Expr`).
+        arbiter_elems.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
     }
     let arbiter_where: Option<NodePtr<'mcx>> = match arbiter_where_expr {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
+        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?),
         None => None,
     };
 
@@ -792,7 +800,7 @@ fn transformOnConflictClause<'mcx>(
             "WHERE",
         )?;
         on_conflict_where = match where_expr {
-            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
+            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?),
             None => None,
         };
 

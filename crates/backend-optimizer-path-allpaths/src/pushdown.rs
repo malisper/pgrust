@@ -44,7 +44,7 @@ use backend_nodes_core::nodefuncs::{
 /// Deep-copy a slice of `Expr` into `mcx` via `Expr::clone_in` (C copyObject).
 /// The derived `Expr::clone` panics on an owned-subtree child
 /// (`Aggref`/`SubLink`/`SubPlan`).
-fn clone_exprs_in(exprs: &[Expr], mcx: Mcx<'_>) -> PgResult<Vec<Expr>> {
+fn clone_exprs_in<'mcx>(exprs: &[Expr<'_>], mcx: Mcx<'mcx>) -> PgResult<Vec<Expr<'mcx>>> {
     let mut out = Vec::with_capacity(exprs.len());
     for e in exprs {
         out.push(e.clone_in(mcx)?);
@@ -179,7 +179,7 @@ fn node_as_windowclause<'a, 'mcx>(node: &'a Node<'mcx>) -> Option<&'a WindowClau
 
 /// Unwrap a `Node` to its inner `Expr` (the `Node::Expr` arm); `None` for
 /// non-expression nodes.
-fn node_as_expr<'a>(node: &'a Node<'_>) -> Option<&'a Expr> {
+fn node_as_expr<'a, 'b>(node: &'a Node<'b>) -> Option<&'a Expr<'b>> {
     node.as_expr()
 }
 

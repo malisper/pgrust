@@ -63,8 +63,8 @@ pub fn SS_replace_correlation_vars<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
-    expr: Expr,
-) -> PgResult<Expr> {
+    expr: Expr<'mcx>,
+) -> PgResult<Expr<'mcx>> {
     // No setup needed for tree walk, so away we go.
     replace_correlation_vars_mutator(mcx, root, run, expr)
 }
@@ -74,8 +74,8 @@ fn replace_correlation_vars_mutator<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
-    node: Expr,
-) -> PgResult<Expr> {
+    node: Expr<'mcx>,
+) -> PgResult<Expr<'mcx>> {
     // NB: in C each IsA check is a separate `if` (not else-if): a node matching
     // one variant with levelsup==0 falls through to expression_tree_mutator.
     if let Expr::Var(v) = &node {
@@ -161,9 +161,9 @@ pub fn SS_process_sublinks<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
-    expr: Expr,
+    expr: Expr<'mcx>,
     is_qual: bool,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let context = ProcessSublinksContext {
         is_top_qual: is_qual,
     };
@@ -175,9 +175,9 @@ fn process_sublinks_mutator<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
-    node: Expr,
+    node: Expr<'mcx>,
     context: &ProcessSublinksContext,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     if let Expr::SubLink(sublink) = node {
         // First, recursively process the lefthand-side expressions, if any.
         // They're not top-level anymore.

@@ -341,7 +341,7 @@ pub fn transformReturnStmt<'mcx>(
         ParseExprKind::EXPR_KIND_SELECT_TARGET,
     )?;
     let expr = expr.ok_or_else(|| elog_error("RETURN has no return value"))?;
-    let tle = backend_nodes_core::makefuncs::make_target_entry(mcx, expr, 1, None, false)?;
+    let tle = backend_nodes_core::makefuncs::make_target_entry(mcx, expr.clone_in(mcx)?, 1, None, false)?;
     qry.targetList = {
         let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
         v.push(tle);
@@ -413,7 +413,7 @@ pub fn transformValuesClause<'mcx>(
      * For each row of VALUES, transform the raw expressions, building a
      * column-organized intermediate representation.
      */
-    let mut colexprs: Vec<Vec<types_nodes::primnodes::Expr>> = Vec::new();
+    let mut colexprs: Vec<Vec<types_nodes::primnodes::Expr<'mcx>>> = Vec::new();
     let mut sublist_length: i32 = -1;
 
     for lc in stmt.valuesLists.iter() {
@@ -444,7 +444,9 @@ pub fn transformValuesClause<'mcx>(
         }
 
         for (i, expr) in transformed.into_iter().enumerate() {
-            colexprs[i].push(expr);
+            // Re-intern the parser-arena `'static` column expr into `mcx`; the
+            // VALUES coercion + collation pass below mutate at `'mcx`.
+            colexprs[i].push(expr.clone_in(mcx)?);
         }
     }
 
@@ -468,11 +470,14 @@ pub fn transformValuesClause<'mcx>(
             let c = backend_parser_coerce::coerce_to_common_type(
                 mcx,
                 Some(&mut *pstate),
-                col,
+                // coerce takes/returns the parser-arena `'static`; erase the
+                // `'mcx` column expr in, re-`clone_in` the result for the
+                // `'mcx` collation pass below (invariant `Expr`).
+                col.erase_lifetime(),
                 coltype,
                 "VALUES",
             )?;
-            coerced.push(c);
+            coerced.push(c.clone_in(mcx)?);
         }
         let coltypmod = backend_parser_coerce::select_common_typmod(&coerced, coltype)?;
         let mut coerced_mut = coerced;

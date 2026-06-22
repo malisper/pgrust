@@ -197,7 +197,12 @@ fn add_predicate_to_index_quals<'mcx>(
     for &pred_qual in &index.indpred {
         let one_qual = [pred_qual];
         if !predtest::predicate_implied_by::call(root, &one_qual, &restriction_nodes, false) {
-            pred_extra.push(ClauseListEntry::Bare(root.node(pred_qual).clone_in(mcx)?));
+            // `ClauseListEntry::Bare` carries the planner-arena `'static` form
+            // (the seam owns that intern slot); clone the predicate clause into
+            // `mcx` then erase to the arena lifetime at this intern boundary.
+            pred_extra.push(ClauseListEntry::Bare(
+                root.node(pred_qual).clone_in(mcx)?.erase_lifetime(),
+            ));
         }
     }
     result.extend(pred_extra);
@@ -1248,8 +1253,10 @@ fn gincost_scalararrayopexpr<'mcx>(
         .transpose()?
         .expect("gincost_scalararrayopexpr: SAOP must have a second argument");
 
-    // Aggressively reduce to a constant, and look through relabeling.
-    let mut rightop = sel::estimate_expression_value::call(run, root, &rightop)?;
+    // Aggressively reduce to a constant, and look through relabeling. The fold
+    // seam yields the planner-arena `'static` form; bring it into `mcx`.
+    let mut rightop: Expr<'mcx> =
+        sel::estimate_expression_value::call(run, root, &rightop)?.clone_in(mcx)?;
     if let Expr::RelabelType(r) = &rightop {
         if let Some(arg) = &r.arg {
             rightop = (**arg).clone_in(mcx)?;

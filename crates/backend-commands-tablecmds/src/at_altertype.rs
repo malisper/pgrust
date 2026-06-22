@@ -463,7 +463,7 @@ pub fn ATPrepAlterColumnType<'mcx>(
         let coerced = backend_parser_coerce::coerce_to_target_type(
             mcx,
             None,
-            transform,
+            transform.erase_lifetime(),
             src_type,
             targettype,
             targettypmod,
@@ -471,7 +471,7 @@ pub fn ATPrepAlterColumnType<'mcx>(
             CoercionForm::COERCE_IMPLICIT_CAST,
             -1,
         )?;
-        let Some(mut transform2) = coerced else {
+        let Some(coerced) = coerced else {
             // error text depends on whether USING was specified or not
             if def.cooked_default.is_some() {
                 return backend_utils_error::ereport(ERROR)
@@ -504,6 +504,9 @@ pub fn ATPrepAlterColumnType<'mcx>(
                     .map(|()| unreachable!());
             }
         };
+        // Bring the parser-arena `'static` coercion result into `mcx` for the
+        // in-place collation pass below (`Expr` is invariant over its lifetime).
+        let mut transform2: Expr<'mcx> = coerced.clone_in(mcx)?;
 
         // Fix collations after all else. C: assign_expr_collations(pstate,
         // transform) with a NULL-ish utility pstate; the port's in-place Node
@@ -511,14 +514,18 @@ pub fn ATPrepAlterColumnType<'mcx>(
         // (behaviourally identical to `assign_expr_collations(None, ...)`).
         assign_expr_collations_in(mcx, &mut transform2)?;
 
-        // Expand virtual generated columns in the expr.
+        // Expand virtual generated columns in the expr. The seam operates over
+        // the parser-arena `'static` form (erase in, clone the result back into
+        // `mcx` for the `'mcx` planner call below; `Expr` is invariant).
         let expanded = rewrite_seam::expand_generated_columns_in_expr::call(
             mcx,
-            Some(transform2),
+            Some(transform2.erase_lifetime()),
             rel.rd_id,
             1,
         )?;
-        let transform2 = expanded.expect("expand_generated_columns_in_expr returned None");
+        let transform2 = expanded
+            .expect("expand_generated_columns_in_expr returned None")
+            .clone_in(mcx)?;
 
         // Plan the expr now so we can accurately assess the need to rewrite.
         let planned = backend_optimizer_plan_planner::expression_planner(mcx, transform2)?;
@@ -1794,7 +1801,7 @@ pub fn ATExecAlterColumnType<'mcx>(
     // If there is a default, coerce it to the new datatype now (before changing
     // the column type), so build_column_default's own coercion will not fire the
     // wrong error.
-    let mut defaultexpr: Option<Expr> = None;
+    let mut defaultexpr: Option<Expr<'mcx>> = None;
     if atthasdef {
         let built = rewrite_seam::build_column_default::call(mcx, rel.alias(), attnum as i32)?;
         let built = built.expect("build_column_default returned NULL for atthasdef column");
@@ -1803,7 +1810,7 @@ pub fn ATExecAlterColumnType<'mcx>(
         let coerced = backend_parser_coerce::coerce_to_target_type(
             mcx,
             None,
-            stripped.clone_in(mcx)?,
+            stripped.clone_in(mcx)?.erase_lifetime(),
             src_type,
             targettype,
             targettypmod,
@@ -1831,7 +1838,9 @@ pub fn ATExecAlterColumnType<'mcx>(
                 .finish(here("ATExecAlterColumnType"))
                 .map(|()| unreachable!());
         };
-        defaultexpr = Some(coerced);
+        // `coerced` is the parser-arena `'static` coercion result; bring it into
+        // `mcx` for the `'mcx` `defaultexpr_node`/StoreAttrDefault path below.
+        defaultexpr = Some(coerced.clone_in(mcx)?);
     }
 
     // Find everything that depends on the column and record enough info to
@@ -1988,6 +1997,6 @@ fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<String> {
 }
 
 /// Wrap an `Expr` default back into a `Node` for `StoreAttrDefault`.
-fn defaultexpr_node<'mcx>(mcx: Mcx<'mcx>, expr: Expr) -> PgResult<Node<'mcx>> {
+fn defaultexpr_node<'mcx>(mcx: Mcx<'mcx>, expr: Expr<'mcx>) -> PgResult<Node<'mcx>> {
     Node::mk_expr(mcx, expr)
 }

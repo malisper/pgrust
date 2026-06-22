@@ -88,9 +88,9 @@ pub fn build_base_rel_tlists(root: &mut PlannerInfo, run: &PlannerRun<'_>) -> Pg
 /// final output if `where_needed` includes "relation 0"). The list may also
 /// contain `PlaceHolderVar`s, whose `ph_needed` is updated via the placeholder
 /// owner instead.
-pub fn add_vars_to_targetlist(
+pub fn add_vars_to_targetlist<'mcx>(
     root: &mut PlannerInfo,
-    vars: Vec<Expr>,
+    vars: Vec<Expr<'mcx>>,
     where_needed: Relids,
 ) -> PgResult<()> {
     debug_assert!(!bms::relids_is_empty::call(&where_needed));
@@ -212,9 +212,9 @@ pub fn rebuild_joinclause_attr_needed(
 /// `ph_needed` for PlaceHolderVars; the Vars are assumed already present in
 /// their relations' targetlists. Used to rebuild attr_needed after removal of a
 /// useless outer join.
-pub fn add_vars_to_attr_needed(
+pub fn add_vars_to_attr_needed<'mcx>(
     root: &mut PlannerInfo,
-    vars: Vec<Expr>,
+    vars: Vec<Expr<'mcx>>,
     where_needed: Relids,
 ) -> PgResult<()> {
     debug_assert!(!bms::relids_is_empty::call(&where_needed));

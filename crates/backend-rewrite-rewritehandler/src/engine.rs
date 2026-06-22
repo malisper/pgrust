@@ -94,8 +94,10 @@ fn get_generated_columns<'mcx>(
             || (include_stored && attr.attgenerated == ATTRIBUTE_GENERATED_STORED)
         {
             let defexpr = build_generation_expression(mcx, rel, (i + 1) as i32)?;
-            // ChangeVarNodes(defexpr, 1, rt_index, 0)
-            let mut defnode = Node::mk_expr(mcx, defexpr)?;
+            // ChangeVarNodes(defexpr, 1, rt_index, 0). The generation expression
+            // comes back at the arena `'static`; bring it into `mcx` for the
+            // in-place `Node`-walk (`Expr` is invariant over its lifetime).
+            let mut defnode = Node::mk_expr(mcx, defexpr.clone_in(mcx)?)?;
             ChangeVarNodes(&mut defnode, 1, rt_index, 0, mcx);
             let defexpr = defnode
                 .into_expr()
@@ -295,7 +297,7 @@ fn process_matched_tle<'mcx>(
 /// Deep-copy a `Vec<Expr>` into `mcx` (C: `copyObject` of a `List *`). Routes
 /// each element through `Expr::clone_in` so an `Aggref`/`SubLink`/`SubPlan`
 /// child is deep-copied rather than hitting the panicking derived `.clone()`.
-fn clone_expr_vec<'mcx>(mcx: Mcx<'mcx>, v: &[Expr]) -> PgResult<Vec<Expr>> {
+fn clone_expr_vec<'mcx>(mcx: Mcx<'mcx>, v: &[Expr<'_>]) -> PgResult<Vec<Expr<'mcx>>> {
     let mut out = Vec::with_capacity(v.len());
     for e in v {
         out.push(e.clone_in(mcx)?);
@@ -306,8 +308,8 @@ fn clone_expr_vec<'mcx>(mcx: Mcx<'mcx>, v: &[Expr]) -> PgResult<Vec<Expr>> {
 /// Deep-copy an `Option<Box<Expr>>` into `mcx`.
 fn clone_opt_box_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    e: &Option<Box<Expr>>,
-) -> PgResult<Option<Box<Expr>>> {
+    e: &Option<Box<Expr<'_>>>,
+) -> PgResult<Option<Box<Expr<'mcx>>>> {
     match e {
         Some(b) => Ok(Some(Box::new(b.clone_in(mcx)?))),
         None => Ok(None),
@@ -316,7 +318,7 @@ fn clone_opt_box_expr<'mcx>(
 
 /// `get_assignment_input(node)` (rewriteHandler.c:1201) — if node is an
 /// assignment node (FieldStore / SubscriptingRef store), return its input.
-fn get_assignment_input<'a>(node: Option<&'a Expr>) -> Option<&'a Expr> {
+fn get_assignment_input<'a, 'b>(node: Option<&'a Expr<'b>>) -> Option<&'a Expr<'b>> {
     match node? {
         Expr::FieldStore(fs) => fs.arg.as_deref(),
         Expr::SubscriptingRef(sr) => {
@@ -585,7 +587,7 @@ pub fn rewriteTargetListIU<'mcx>(
             new_tle = None;
         } else if apply_default {
             let new_expr_box = crate::build_column_default(mcx, target_relation, attrno)?;
-            let mut new_expr: Option<Expr> = match new_expr_box {
+            let mut new_expr: Option<Expr<'mcx>> = match new_expr_box {
                 Some(b) => Some(b.clone_in(mcx)?),
                 None => None,
             };
@@ -595,14 +597,20 @@ pub fn rewriteTargetListIU<'mcx>(
                 if command_type == CmdType::CMD_INSERT {
                     new_tle = None;
                 } else {
-                    new_expr = Some(backend_parser_coerce::coerce_null_to_domain(
-                        mcx,
-                        att_tup.atttypid,
-                        att_tup.atttypmod,
-                        att_tup.attcollation,
-                        att_tup.attlen as i32,
-                        att_tup.attbyval,
-                    )?);
+                    // coerce_null_to_domain returns at the parser-arena `'static`;
+                    // bring it into `mcx` to match `new_expr: Option<Expr<'mcx>>`
+                    // (`Expr` is invariant over its lifetime).
+                    new_expr = Some(
+                        backend_parser_coerce::coerce_null_to_domain(
+                            mcx,
+                            att_tup.atttypid,
+                            att_tup.atttypmod,
+                            att_tup.attcollation,
+                            att_tup.attlen as i32,
+                            att_tup.attbyval,
+                        )?
+                        .clone_in(mcx)?,
+                    );
                 }
             }
 
@@ -727,9 +735,11 @@ pub fn rewriteValuesRTE<'mcx>(
                     return Err(elog(format!("cannot set value in column {i} to DEFAULT")));
                 }
                 let att_tup: &FormData_pg_attribute = rd_att.attr((attrno - 1) as usize);
-                let new_expr: Option<Expr> = if !att_tup.attisdropped {
-                    crate::build_column_default(mcx, target_relation, attrno as i32)?
-                        .map(|b| (*b).clone())
+                let new_expr: Option<Expr<'mcx>> = if !att_tup.attisdropped {
+                    match crate::build_column_default(mcx, target_relation, attrno as i32)? {
+                        Some(b) => Some(b.clone_in(mcx)?),
+                        None => None,
+                    }
                 } else {
                     None // force NULL if dropped
                 };
@@ -742,6 +752,9 @@ pub fn rewriteValuesRTE<'mcx>(
                             all_replaced = false;
                             continue;
                         }
+                        // coerce_null_to_domain returns at the parser-arena
+                        // `'static`; bring it into `mcx` to unify with the
+                        // `Some(e)` arm's `'mcx` Expr (`Expr` is invariant).
                         backend_parser_coerce::coerce_null_to_domain(
                             mcx,
                             att_tup.atttypid,
@@ -750,6 +763,7 @@ pub fn rewriteValuesRTE<'mcx>(
                             att_tup.attlen as i32,
                             att_tup.attbyval,
                         )?
+                        .clone_in(mcx)?
                     }
                 };
                 new_list.push(alloc_in(mcx, Node::mk_expr(mcx, new_expr)?)?);
@@ -1036,17 +1050,16 @@ fn acquireLocksOnSubLinks<'mcx>(
     }
     if let Some(Expr::SubLink(sub)) = node.as_expr_mut() {
         // C: AcquireRewriteLocks(sublink->subselect, context->for_execute, false).
-        if let Some(sub_static) = sub.subselect.take() {
-            // 'static -> 'mcx: lifetime-parameter-only erase of mcx-owned data
-            // (the same relabel fireRIRonSubLink / query_box_into_static use).
-            let sub_mcx: PgBox<'mcx, Query<'mcx>> =
-                unsafe { core::mem::transmute(sub_static) };
-            let mut subquery: Query<'mcx> = PgBox::into_inner(sub_mcx);
+        if let Some(sub_box) = sub.subselect.take() {
+            // `SubLink::subselect` now threads `'mcx` (the Expr-'mcx flip), so the
+            // subquery is already arena-owned at `'mcx` — no `'static` relabel
+            // transmute / re-intern is needed; mutate in place and re-box at `'mcx`.
+            let mut subquery: Query<'mcx> = PgBox::into_inner(sub_box);
             if let Err(e) = AcquireRewriteLocks(mcx, &mut subquery, for_execute, false) {
                 *err = Some(e);
                 return true;
             }
-            match types_nodes::primnodes::query_box_into_static(subquery, mcx) {
+            match mcx::alloc_in(mcx, subquery) {
                 Ok(boxed) => sub.subselect = Some(boxed),
                 Err(e) => {
                     *err = Some(e);
@@ -2164,18 +2177,15 @@ fn fireRIRonSubLink<'mcx>(
         return true;
     }
     if let Some(Expr::SubLink(sub)) = node.as_expr_mut() {
-        // Do what we came for: take the embedded 'static subselect, rebind it
-        // to 'mcx (the data is mcx-owned — same lifetime-only relabel used by
-        // make_subplan / query_box_into_static), rewrite, and re-embed.
-        if let Some(sub_static) = sub.subselect.take() {
-            // 'static -> 'mcx: lifetime-parameter-only erase of mcx-owned data.
-            let sub_mcx: PgBox<'mcx, Query<'mcx>> =
-                unsafe { core::mem::transmute(sub_static) };
-            let subquery: Query<'mcx> = PgBox::into_inner(sub_mcx);
+        // `SubLink::subselect` now threads `'mcx` (the Expr-'mcx flip): take the
+        // already-arena-owned subselect, rewrite, and re-embed — no `'static`
+        // relabel transmute / re-intern needed.
+        if let Some(sub_box) = sub.subselect.take() {
+            let subquery: Query<'mcx> = PgBox::into_inner(sub_box);
             match fireRIRrules(mcx, subquery, active_rirs) {
                 Ok(rewritten) => {
                     *has_row_security |= rewritten.hasRowSecurity;
-                    match types_nodes::primnodes::query_box_into_static(rewritten, mcx) {
+                    match mcx::alloc_in(mcx, rewritten) {
                         Ok(boxed) => sub.subselect = Some(boxed),
                         Err(e) => {
                             *err = Some(e);

@@ -445,7 +445,7 @@ fn transformPartitionBoundValue<'mcx>(
     col_type: Oid,
     col_typmod: i32,
     part_collation: Oid,
-) -> PgResult<Const> {
+) -> PgResult<Const<'mcx>> {
     let val_location = bound_value_location(val);
 
     // value = transformExpr(pstate, val, EXPR_KIND_PARTITION_BOUND);
@@ -474,8 +474,8 @@ fn transformPartitionBoundValue<'mcx>(
         -1,
     )?;
 
-    let mut value = match coerced {
-        Some(v) => v,
+    let mut value: Expr<'mcx> = match coerced {
+        Some(v) => v.clone_in(mcx)?,
         None => {
             let type_name =
                 backend_utils_adt_format_type::format_type_be(mcx, col_type)?;

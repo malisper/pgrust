@@ -410,12 +410,12 @@ pub fn replace_nestloop_params(
 /// — exactly as `clauses/grounded.rs::convert_saop_to_hashed_saop_walker` does —
 /// the fallible seam errors are stashed in `err` and surfaced by the caller; on
 /// a pending error the walk short-circuits, returning nodes unchanged.
-pub(crate) fn replace_nestloop_params_mutator(
-    mcx: Mcx<'_>,
+pub(crate) fn replace_nestloop_params_mutator<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'mcx>,
     err: &mut Option<PgError>,
-) -> Expr {
+) -> Expr<'mcx> {
     if err.is_some() {
         return node;
     }
@@ -545,7 +545,7 @@ fn build_path_tlist<'mcx>(
         // panic-stub forcing the args-deep-copying `clone_in` path; route every
         // tlist expr through `Expr::clone_in` so the deep arena copy is used
         // (faithful to C's `copyObject` of the pathtarget expr).
-        let expr: Expr = if has_param_info {
+        let expr: Expr<'mcx> = if has_param_info {
             let replaced = replace_nestloop_params(mcx, root, node_id)?;
             root.node(replaced).clone_in(mcx)?
         } else {
@@ -1258,13 +1258,13 @@ fn build_scan_qual<'mcx>(
     root: &mut PlannerInfo,
     clauses: &[NodeId],
     has_param_info: bool,
-) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+) -> PgResult<Option<PgVec<'mcx, Expr<'mcx>>>> {
     if clauses.is_empty() {
         return Ok(None);
     }
     let mut out = vec_with_capacity_in(mcx, clauses.len())?;
     for &cid in clauses {
-        let expr: Expr = if has_param_info {
+        let expr: Expr<'mcx> = if has_param_info {
             let replaced = replace_nestloop_params(mcx, root, cid)?;
             root.node(replaced).clone_in(mcx)?
         } else {
@@ -1283,7 +1283,7 @@ fn build_scan_qual<'mcx>(
 /// `make_seqscan(qptlist, qpqual, scanrelid)` — build a `SeqScan` plan node.
 fn make_seqscan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
 ) -> SeqScan<'mcx> {
     let mut node = SeqScan::default();
@@ -1300,9 +1300,9 @@ fn make_seqscan<'mcx>(
 /// `ValuesScan` plan node.
 fn make_valuesscan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
-    values_lists: PgVec<'mcx, PgVec<'mcx, Expr>>,
+    values_lists: PgVec<'mcx, PgVec<'mcx, Expr<'mcx>>>,
 ) -> ValuesScan<'mcx> {
     let mut node = ValuesScan {
         scan: Scan::default(),
@@ -1322,7 +1322,7 @@ fn make_valuesscan<'mcx>(
 fn make_result<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    resconstantqual: Option<PgVec<'mcx, Expr>>,
+    resconstantqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     subplan: Option<Node<'mcx>>,
 ) -> PgResult<ResultNode<'mcx>> {
     let mut node = ResultNode::default();
@@ -1397,14 +1397,14 @@ fn create_seqscan_plan<'mcx>(
 /// `RestrictInfo->clause` arena handle before the call). The mutation matches
 /// each handled node shape (`OpExpr`/`RowCompareExpr`/`ScalarArrayOpExpr`/
 /// `NullTest`).
-fn fix_indexqual_clause(
-    mcx: Mcx<'_>,
+fn fix_indexqual_clause<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     index: &IndexOptInfo,
     indexcol: i32,
-    clause: Expr,
+    clause: Expr<'mcx>,
     indexcolnos: &[AttrNumber],
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     // Replace any outer-relation variables with nestloop params. This also
     // makes a copy of the clause, so it's safe to modify it in place below.
     let mut err: Option<PgError> = None;
@@ -1459,11 +1459,11 @@ fn fix_indexqual_clause(
 /// `stripped_indexquals` are kept as arena [`NodeId`] handles (the bare
 /// `RestrictInfo->clause`), so they can drive `predicate_implied_by` and
 /// `replace_nestloop_params` later; `fixed_indexquals` are owned `Expr`.
-fn fix_indexqual_references(
-    mcx: Mcx<'_>,
+fn fix_indexqual_references<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     best_path: PathId,
-) -> PgResult<(Vec<NodeId>, Vec<Expr>)> {
+) -> PgResult<(Vec<NodeId>, Vec<Expr<'mcx>>)> {
     // index = index_path->indexinfo (cloned out so we can mutate `root`).
     let index = match root.path(best_path) {
         PathNode::IndexPath(p) => p
@@ -1483,7 +1483,7 @@ fn fix_indexqual_references(
     };
 
     let mut stripped_indexquals: Vec<NodeId> = Vec::new();
-    let mut fixed_indexquals: Vec<Expr> = Vec::new();
+    let mut fixed_indexquals: Vec<Expr<'mcx>> = Vec::new();
 
     for iclause in &indexclauses {
         let indexcol = iclause.indexcol as i32;
@@ -1510,11 +1510,11 @@ fn fix_indexqual_references(
 /// indexorderby clauses to the executor form. A simplified version of
 /// `fix_indexqual_references`: the input is bare clauses (the path's
 /// `indexorderbys`) plus a separate `indexorderbycols` list.
-fn fix_indexorderby_references(
-    mcx: Mcx<'_>,
+fn fix_indexorderby_references<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     best_path: PathId,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     let index = match root.path(best_path) {
         PathNode::IndexPath(p) => p
             .indexinfo
@@ -1532,7 +1532,7 @@ fn fix_indexorderby_references(
         _ => unreachable!(),
     };
 
-    let mut fixed_indexorderbys: Vec<Expr> = Vec::new();
+    let mut fixed_indexorderbys: Vec<Expr<'mcx>> = Vec::new();
     for (&clause_id, &indexcol) in indexorderbys.iter().zip(indexorderbycols.iter()) {
         let clause = root.node(clause_id).clone_in(mcx)?;
         // fix_indexqual_clause with indexcolnos = NIL.
@@ -1546,13 +1546,13 @@ fn fix_indexorderby_references(
 /// `make_indexscan(...)` (createplan.c) — build an `IndexScan` plan node.
 fn make_indexscan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
     indexid: Oid,
-    indexqual: Option<PgVec<'mcx, Expr>>,
-    indexqualorig: Option<PgVec<'mcx, Expr>>,
-    indexorderby: Option<PgVec<'mcx, Expr>>,
-    indexorderbyorig: Option<PgVec<'mcx, Expr>>,
+    indexqual: Option<PgVec<'mcx, Expr<'mcx>>>,
+    indexqualorig: Option<PgVec<'mcx, Expr<'mcx>>>,
+    indexorderby: Option<PgVec<'mcx, Expr<'mcx>>>,
+    indexorderbyorig: Option<PgVec<'mcx, Expr<'mcx>>>,
     indexorderbyops: Option<PgVec<'mcx, Oid>>,
     indexscandir: types_scan::sdir::ScanDirection,
 ) -> IndexScan<'mcx> {
@@ -1578,12 +1578,12 @@ fn make_indexscan<'mcx>(
 /// `make_indexonlyscan(...)` (createplan.c) — build an `IndexOnlyScan` plan node.
 fn make_indexonlyscan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
     indexid: Oid,
-    indexqual: Option<PgVec<'mcx, Expr>>,
-    recheckqual: Option<PgVec<'mcx, Expr>>,
-    indexorderby: Option<PgVec<'mcx, Expr>>,
+    indexqual: Option<PgVec<'mcx, Expr<'mcx>>>,
+    recheckqual: Option<PgVec<'mcx, Expr<'mcx>>>,
+    indexorderby: Option<PgVec<'mcx, Expr<'mcx>>>,
     indextlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     indexscandir: types_scan::sdir::ScanDirection,
 ) -> IndexOnlyScan<'mcx> {
@@ -1616,12 +1616,12 @@ fn scan_direction_from_i32(dir: i32) -> types_scan::sdir::ScanDirection {
     }
 }
 
-/// Move an owned `Vec<Expr>` into the plan-node `Option<PgVec<Expr>>` field
+/// Move an owned `Vec<Expr<'mcx>>` into the plan-node `Option<PgVec<Expr<'mcx>>>` field
 /// (empty list = `None`, the C `NIL`).
 fn expr_vec_to_field<'mcx>(
     mcx: Mcx<'mcx>,
-    v: Vec<Expr>,
-) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    v: Vec<Expr<'mcx>>,
+) -> PgResult<Option<PgVec<'mcx, Expr<'mcx>>>> {
     if v.is_empty() {
         return Ok(None);
     }
@@ -2287,12 +2287,12 @@ fn list_concat_unique_nodes(root: &PlannerInfo, dst: &mut Vec<NodeId>, src: &[No
 }
 
 /// Resolve a list of bare clause arena handles into an owned (non-optional)
-/// plan-node `PgVec<Expr>` field.
+/// plan-node `PgVec<Expr<'mcx>>` field.
 fn node_list_to_expr_vec<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     nodes: &[NodeId],
-) -> PgResult<PgVec<'mcx, Expr>> {
+) -> PgResult<PgVec<'mcx, Expr<'mcx>>> {
     let mut out = vec_with_capacity_in(mcx, nodes.len())?;
     for &nid in nodes {
         out.push(root.node(nid).clone_in(mcx)?);
@@ -2300,13 +2300,13 @@ fn node_list_to_expr_vec<'mcx>(
     Ok(out)
 }
 
-/// Resolve a list of bare clause arena handles into a plain `Vec<Expr>` (for
+/// Resolve a list of bare clause arena handles into a plain `Vec<Expr<'mcx>>` (for
 /// `make_ands_explicit` / `make_orclause`, which take owned expression lists).
 fn node_list_to_expr_vec_std<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     nodes: &[NodeId],
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     let mut out = Vec::with_capacity(nodes.len());
     for &nid in nodes {
         out.push(root.node(nid).clone_in(mcx)?);
@@ -2315,12 +2315,12 @@ fn node_list_to_expr_vec_std<'mcx>(
 }
 
 /// Resolve a list of bare clause arena handles into an owned plan-node
-/// `Option<PgVec<Expr>>` field (empty = `None`, the C `NIL`).
+/// `Option<PgVec<Expr<'mcx>>>` field (empty = `None`, the C `NIL`).
 fn build_node_list_to_expr_field<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     nodes: &[NodeId],
-) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+) -> PgResult<Option<PgVec<'mcx, Expr<'mcx>>>> {
     if nodes.is_empty() {
         return Ok(None);
     }
@@ -2354,10 +2354,10 @@ fn create_valuesscan_plan<'mcx>(
 
     // rte = planner_rt_fetch(scan_relid, root); values_lists = rte->values_lists.
     // The RTE's values_lists is a List<List<Node>>; resolve each row's column
-    // expressions into the owned ValuesScan `PgVec<PgVec<Expr>>` carrier.
+    // expressions into the owned ValuesScan `PgVec<PgVec<Expr<'mcx>>>` carrier.
     let rte = planner_rt_fetch(run, root, scan_relid);
     debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_VALUES);
-    let mut values_lists: PgVec<'mcx, PgVec<'mcx, Expr>> =
+    let mut values_lists: PgVec<'mcx, PgVec<'mcx, Expr<'mcx>>> =
         vec_with_capacity_in(mcx, rte.values_lists.len())?;
     for row_node in rte.values_lists.iter() {
         // Each element of values_lists is a List node of column expressions.
@@ -2366,7 +2366,7 @@ fn create_valuesscan_plan<'mcx>(
                 "create_valuesscan_plan: RTE values_lists element is not a List",
             ));
         };
-        let mut row: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, cols.len())?;
+        let mut row: PgVec<'mcx, Expr<'mcx>> = vec_with_capacity_in(mcx, cols.len())?;
         for col in cols.iter() {
             if let Some(e) = (**col).as_expr() {
                 // copyObject of the VALUES column expr: route through clone_in,
@@ -2394,10 +2394,10 @@ fn create_valuesscan_plan<'mcx>(
     // The values lists could contain nestloop params, too.
     if has_param_info {
         let mut err: Option<PgError> = None;
-        let mut replaced: PgVec<'mcx, PgVec<'mcx, Expr>> =
+        let mut replaced: PgVec<'mcx, PgVec<'mcx, Expr<'mcx>>> =
             vec_with_capacity_in(mcx, values_lists.len())?;
         for row in values_lists.into_iter() {
-            let mut new_row: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, row.len())?;
+            let mut new_row: PgVec<'mcx, Expr<'mcx>> = vec_with_capacity_in(mcx, row.len())?;
             for expr in row.into_iter() {
                 let out = replace_nestloop_params_mutator(mcx, root, expr, &mut err);
                 new_row.push(out);
@@ -2499,7 +2499,7 @@ fn order_qual_clauses_rinfo(root: &mut PlannerInfo, quals: &[RinfoId]) -> Vec<Ri
 /// plan node.
 fn make_samplescan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
     tsc: TableSampleClause<'mcx>,
 ) -> SampleScan<'mcx> {
@@ -2518,9 +2518,9 @@ fn make_samplescan<'mcx>(
 /// plan node.
 fn make_tidscan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
-    tidquals: Option<PgVec<'mcx, Expr>>,
+    tidquals: Option<PgVec<'mcx, Expr<'mcx>>>,
 ) -> TidScan<'mcx> {
     let mut node = TidScan::default();
     let plan: &mut Plan = &mut node.scan.plan;
@@ -2537,9 +2537,9 @@ fn make_tidscan<'mcx>(
 /// `TidRangeScan` plan node.
 fn make_tidrangescan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
-    tidrangequals: Option<PgVec<'mcx, Expr>>,
+    tidrangequals: Option<PgVec<'mcx, Expr<'mcx>>>,
 ) -> TidRangeScan<'mcx> {
     let mut node = TidRangeScan::default();
     let plan: &mut Plan = &mut node.scan.plan;
@@ -2556,7 +2556,7 @@ fn make_tidrangescan<'mcx>(
 /// — build a `FunctionScan` plan node.
 fn make_functionscan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
     functions: Option<PgVec<'mcx, RangeTblFunction<'mcx>>>,
     funcordinality: bool,
@@ -2577,7 +2577,7 @@ fn make_functionscan<'mcx>(
 /// `CteScan` plan node.
 fn make_ctescan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
     cte_plan_id: i32,
     cte_param: i32,
@@ -2598,7 +2598,7 @@ fn make_ctescan<'mcx>(
 /// `NamedTuplestoreScan` plan node. (Cost is inserted by the caller.)
 fn make_namedtuplestorescan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
     enrname: Option<PgString<'mcx>>,
 ) -> NamedTuplestoreScan<'mcx> {
@@ -2619,7 +2619,7 @@ fn make_namedtuplestorescan<'mcx>(
 /// `WorkTableScan` plan node.
 fn make_worktablescan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
     wt_param: i32,
 ) -> WorkTableScan<'mcx> {
@@ -2640,7 +2640,7 @@ fn make_worktablescan<'mcx>(
 fn make_subqueryscan<'mcx>(
     mcx: Mcx<'mcx>,
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
     subplan: Node<'mcx>,
 ) -> PgResult<SubqueryScan<'mcx>> {
@@ -2670,12 +2670,12 @@ fn make_subqueryscan<'mcx>(
 
 /// Apply `replace_nestloop_params_mutator` to an owned `Expr`. Errors are
 /// surfaced through `err` (the infallible-mutator stash pattern).
-fn replace_nestloop_params_expr(
-    mcx: Mcx<'_>,
+fn replace_nestloop_params_expr<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    expr: Expr,
+    expr: Expr<'mcx>,
     err: &mut Option<PgError>,
-) -> Expr {
+) -> Expr<'mcx> {
     replace_nestloop_params_mutator(mcx, root, expr, err)
 }
 
@@ -2761,7 +2761,7 @@ fn create_samplescan_plan<'mcx>(
         };
         if !child_targets.is_empty() {
             if let Some(args) = tsc.args.take() {
-                let mut new_args: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, args.len())?;
+                let mut new_args: PgVec<'mcx, Expr<'mcx>> = vec_with_capacity_in(mcx, args.len())?;
                 for e in args.into_iter() {
                     let mut e = e;
                     for &(child, top_parent) in &child_targets {
@@ -2789,7 +2789,7 @@ fn create_samplescan_plan<'mcx>(
     if has_param_info {
         let mut err: Option<PgError> = None;
         if let Some(args) = tsc.args.take() {
-            let mut new_args: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, args.len())?;
+            let mut new_args: PgVec<'mcx, Expr<'mcx>> = vec_with_capacity_in(mcx, args.len())?;
             for e in args.into_iter() {
                 new_args.push(replace_nestloop_params_expr(mcx, root, e, &mut err));
             }
@@ -2903,7 +2903,7 @@ fn create_tidscan_plan<'mcx>(
     let mut scan_clauses = scan_clauses;
     if tidquals.len() > 1 {
         // make_orclause(tidquals) over the bare exprs.
-        let mut or_exprs: Vec<Expr> = Vec::with_capacity(tidquals.len());
+        let mut or_exprs: Vec<Expr<'mcx>> = Vec::with_capacity(tidquals.len());
         for &n in &tidquals {
             or_exprs.push(root.node(n).clone_in(mcx)?);
         }
@@ -2933,7 +2933,7 @@ fn create_tidscan_plan<'mcx>(
     let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
 
     // Build the owned tidquals expr list.
-    let tidquals_field: Option<PgVec<'mcx, Expr>> = if tidquals.is_empty() {
+    let tidquals_field: Option<PgVec<'mcx, Expr<'mcx>>> = if tidquals.is_empty() {
         None
     } else {
         let mut out = vec_with_capacity_in(mcx, tidquals.len())?;
@@ -3059,7 +3059,7 @@ fn create_tidrangescan_plan<'mcx>(
     }
     let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
 
-    let tidrangequals_field: Option<PgVec<'mcx, Expr>> = if tidrangequals.is_empty() {
+    let tidrangequals_field: Option<PgVec<'mcx, Expr<'mcx>>> = if tidrangequals.is_empty() {
         None
     } else {
         let mut out = vec_with_capacity_in(mcx, tidrangequals.len())?;
@@ -3164,7 +3164,7 @@ fn create_functionscan_plan<'mcx>(
 /// `TableFuncScan` plan node.
 fn make_tablefuncscan<'mcx>(
     qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qpqual: Option<PgVec<'mcx, Expr>>,
+    qpqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     scanrelid: u32,
     tablefunc: PgBox<'mcx, TableFunc<'mcx>>,
 ) -> TableFuncScan<'mcx> {
@@ -3224,8 +3224,19 @@ fn create_tablefuncscan_plan<'mcx>(
     // nestloop params within each Expr subtree of the TableFunc.
     if has_param_info {
         let mut err: Option<PgError> = None;
-        let mut repl = |e: &mut Expr| {
-            let old = e.clone();
+        let mut repl = |e: &mut Expr<'mcx>| {
+            if err.is_some() {
+                return;
+            }
+            // Deep-copy via `clone_in` (a derived `Expr::clone` panics on an
+            // owned-subtree child); on OOM stash the error and short-circuit.
+            let old = match e.clone_in(mcx) {
+                Ok(c) => c,
+                Err(ce) => {
+                    err = Some(ce);
+                    return;
+                }
+            };
             *e = replace_nestloop_params_expr(mcx, root, old, &mut err);
         };
         if let Some(b) = tablefunc.docexpr.as_deref_mut() {
@@ -3813,7 +3824,7 @@ fn nodes_to_expr_qual<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     clauses: &[NodeId],
-) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+) -> PgResult<Option<PgVec<'mcx, Expr<'mcx>>>> {
     if clauses.is_empty() {
         return Ok(None);
     }
@@ -3903,7 +3914,7 @@ fn make_memoize<'mcx>(
     lefttree: Node<'mcx>,
     hash_operators: PgVec<'mcx, Oid>,
     collations: PgVec<'mcx, Oid>,
-    param_exprs: PgVec<'mcx, Expr>,
+    param_exprs: PgVec<'mcx, Expr<'mcx>>,
     singlerow: bool,
     binary_mode: bool,
     est_entries: u32,
@@ -3965,7 +3976,7 @@ fn create_memoize_plan<'mcx>(
     // param_exprs = (List *) replace_nestloop_params(root,
     //                                  (Node *) best_path->param_exprs);
     let nkeys = path_param_exprs.len();
-    let mut param_exprs: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, nkeys)?;
+    let mut param_exprs: PgVec<'mcx, Expr<'mcx>> = vec_with_capacity_in(mcx, nkeys)?;
     for &cid in &path_param_exprs {
         let replaced = replace_nestloop_params(mcx, root, cid)?;
         param_exprs.push(root.node(replaced).clone_in(mcx)?);
@@ -4259,7 +4270,7 @@ fn prepare_sort_from_pathkeys<'mcx>(
                 // a candidate EM is available from the subplan's output.
                 // Deep-copy via `clone_in` (a shallow `.clone()` panics on
                 // owned-subtree Exprs such as Aggref/SubLink).
-                let mut tlist_exprs: Vec<Expr> = Vec::new();
+                let mut tlist_exprs: Vec<Expr<'mcx>> = Vec::new();
                 for tle in lefttree
                     .plan_head()
                     .targetlist
@@ -4408,8 +4419,8 @@ fn create_sort_plan<'mcx>(
 fn make_limit<'mcx>(
     mcx: Mcx<'mcx>,
     lefttree: Node<'mcx>,
-    limit_offset: Option<PgBox<'mcx, Expr>>,
-    limit_count: Option<PgBox<'mcx, Expr>>,
+    limit_offset: Option<PgBox<'mcx, Expr<'mcx>>>,
+    limit_count: Option<PgBox<'mcx, Expr<'mcx>>>,
     limit_option: types_nodes::nodelimit::LimitOption,
     uniq_num_cols: i32,
     uniq_col_idx: Option<PgVec<'mcx, AttrNumber>>,
@@ -4890,7 +4901,7 @@ fn make_modifytable<'mcx>(
     // mergeJoinConditions: each outer entry is the per-result-rel join condition
     // as a one-element Expr list (the arena stores a single `Expr` handle per
     // leaf, or the NULL marker `NodeId(0)` for no condition → empty/None).
-    let merge_join_conditions_field: Option<PgVec<'mcx, Option<PgVec<'mcx, Expr>>>> =
+    let merge_join_conditions_field: Option<PgVec<'mcx, Option<PgVec<'mcx, Expr<'mcx>>>>> =
         if merge_join_conditions.is_empty() {
             None
         } else {
@@ -4898,7 +4909,7 @@ fn make_modifytable<'mcx>(
             for sub in &merge_join_conditions {
                 // The planner emits exactly one inner handle per result rel.
                 let cond_id = sub.first().copied().unwrap_or_default();
-                let join_cond: Option<PgVec<'mcx, Expr>> = if cond_id == NodeId::default() {
+                let join_cond: Option<PgVec<'mcx, Expr<'mcx>>> = if cond_id == NodeId::default() {
                     None
                 } else {
                     let mut v = vec_with_capacity_in(mcx, 1)?;
@@ -4959,7 +4970,7 @@ fn resolve_merge_action<'mcx>(
 
     // qual: a single `Expr` arena handle (or NULL marker) -> the implicit-AND
     // `Expr` list the executor consumes (`(List *) qual` fed to `ExecInitQual`).
-    let qual: Option<PgVec<'mcx, Expr>> = if src.qual == NodeId::default() {
+    let qual: Option<PgVec<'mcx, Expr<'mcx>>> = if src.qual == NodeId::default() {
         None
     } else {
         let expr = root.node(src.qual).clone_in(mcx)?;
@@ -5044,7 +5055,7 @@ struct OnConflictPlanData<'mcx> {
     arbiter_indexes: PgVec<'mcx, Oid>,
     on_conflict_set: PgVec<'mcx, TargetEntry<'mcx>>,
     on_conflict_cols: PgVec<'mcx, i32>,
-    on_conflict_where: PgVec<'mcx, Expr>,
+    on_conflict_where: PgVec<'mcx, Expr<'mcx>>,
     excl_rel_rti: Index,
     excl_rel_tlist: PgVec<'mcx, TargetEntry<'mcx>>,
 }
@@ -5096,8 +5107,8 @@ fn resolve_onconflict_plan_data<'mcx>(
     }
 
     // onConflictWhere: modeled as the implicit-AND list of Expr fed to
-    // ExecInitQual. Flatten an AND tree / single qual into a Vec<Expr>.
-    let mut on_conflict_where: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    // ExecInitQual. Flatten an AND tree / single qual into a Vec<Expr<'mcx>>.
+    let mut on_conflict_where: PgVec<'mcx, Expr<'mcx>> = PgVec::new_in(mcx);
     if let Some(np) = oc.onConflictWhere.as_deref() {
         let e = np
             .as_expr()
@@ -5180,7 +5191,7 @@ fn limit_option_to_node(
 fn make_agg<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qual: Option<PgVec<'mcx, Expr>>,
+    qual: Option<PgVec<'mcx, Expr<'mcx>>>,
     aggstrategy: types_nodes::nodeagg::AggStrategy,
     aggsplit: types_nodes::nodeagg::AggSplit,
     num_group_cols: i32,
@@ -5833,7 +5844,7 @@ fn jointype_path_to_node(j: types_pathnodes::JoinType) -> NodeJoinType {
 /// parameter. `expr` is the (already-cloned) PHV to carry.
 fn make_nestparam_target_entry<'mcx>(
     mcx: Mcx<'mcx>,
-    expr: Expr,
+    expr: Expr<'mcx>,
     resno: AttrNumber,
 ) -> PgResult<TargetEntry<'mcx>> {
     Ok(TargetEntry {
@@ -5878,8 +5889,8 @@ fn get_switched_clauses<'mcx>(
     root: &mut PlannerInfo,
     clauses: &[RinfoId],
     outerrelids: &Relids,
-) -> PgResult<Vec<Expr>> {
-    let mut t_list: Vec<Expr> = Vec::with_capacity(clauses.len());
+) -> PgResult<Vec<Expr<'mcx>>> {
+    let mut t_list: Vec<Expr<'mcx>> = Vec::with_capacity(clauses.len());
     for &rid in clauses {
         let right_relids = root.rinfo(rid).right_relids.clone();
         let clause_id = root.rinfo(rid).clause;
@@ -5922,13 +5933,13 @@ fn bms_is_subset_relids(a: &Relids, b: &Relids) -> bool {
 }
 
 /// Resolve a list of clause expression arena handles into an owned qual
-/// `Vec<Expr>` (the C qpqual / joinqual lists, post-`extract_actual_*`). Empty
+/// `Vec<Expr<'mcx>>` (the C qpqual / joinqual lists, post-`extract_actual_*`). Empty
 /// list is the C `NIL` (`None`).
 fn node_ids_to_expr_list<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     ids: &[NodeId],
-) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+) -> PgResult<Option<PgVec<'mcx, Expr<'mcx>>>> {
     if ids.is_empty() {
         return Ok(None);
     }
@@ -5967,9 +5978,9 @@ fn list_difference_exprs(root: &PlannerInfo, joinclauses: &[NodeId], remove: &[E
 fn make_nestloop<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    joinclauses: Option<PgVec<'mcx, Expr>>,
-    otherclauses: Option<PgVec<'mcx, Expr>>,
-    nest_params: Vec<NestLoopParam>,
+    joinclauses: Option<PgVec<'mcx, Expr<'mcx>>>,
+    otherclauses: Option<PgVec<'mcx, Expr<'mcx>>>,
+    nest_params: Vec<NestLoopParam<'mcx>>,
     lefttree: Node<'mcx>,
     righttree: Node<'mcx>,
     jointype: NodeJoinType,
@@ -6024,8 +6035,8 @@ fn make_hash<'mcx>(
 fn make_hashjoin<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    joinclauses: Option<PgVec<'mcx, Expr>>,
-    otherclauses: Option<PgVec<'mcx, Expr>>,
+    joinclauses: Option<PgVec<'mcx, Expr<'mcx>>>,
+    otherclauses: Option<PgVec<'mcx, Expr<'mcx>>>,
     hashclauses: Option<PgVec<'mcx, Node<'mcx>>>,
     hashoperators: PgVec<'mcx, Oid>,
     hashcollations: PgVec<'mcx, Oid>,
@@ -6137,13 +6148,13 @@ fn create_nestloop_plan<'mcx>(
     // Build the executor-side NestLoopParam list (paramval is an `Expr` carrier)
     // as we go.
     let mut outer_plan = outer_plan;
-    let mut nest_params: Vec<NestLoopParam> = Vec::with_capacity(nest_param_ids.len());
+    let mut nest_params: Vec<NestLoopParam<'mcx>> = Vec::with_capacity(nest_param_ids.len());
     // Lazily build a mutable copy of the outer tlist only when we add a PHV.
     let mut outer_tlist: Option<Vec<TargetEntry<'mcx>>> = None;
     let mut outer_parallel_safe = outer_plan.plan_head().parallel_safe;
     for &nlp_id in &nest_param_ids {
         let paramno = root.nestloop_param(nlp_id).paramno;
-        let paramval = root.nestloop_param(nlp_id).paramval.clone();
+        let paramval = root.nestloop_param(nlp_id).paramval.clone_in(mcx)?;
         match paramval {
             Expr::Var(_) => {
                 // Nothing to do for simple Vars — already available from outer.
@@ -6299,7 +6310,7 @@ fn create_hashjoin_plan<'mcx>(
 
     // Remove the hashclauses from the join qual clauses (qpqual remainder).
     let hashclauses_actual = get_actual_clauses(root, &path_hashclauses);
-    let mut hashclauses_actual_exprs: Vec<Expr> = Vec::with_capacity(hashclauses_actual.len());
+    let mut hashclauses_actual_exprs: Vec<Expr<'mcx>> = Vec::with_capacity(hashclauses_actual.len());
     for &id in &hashclauses_actual {
         hashclauses_actual_exprs.push(root.node(id).clone_in(mcx)?);
     }
@@ -6502,9 +6513,9 @@ fn label_incrementalsort_with_costsize<'mcx>(
 fn make_mergejoin<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    joinclauses: Option<PgVec<'mcx, Expr>>,
-    otherclauses: Option<PgVec<'mcx, Expr>>,
-    mergeclauses: Vec<Expr>,
+    joinclauses: Option<PgVec<'mcx, Expr<'mcx>>>,
+    otherclauses: Option<PgVec<'mcx, Expr<'mcx>>>,
+    mergeclauses: Vec<Expr<'mcx>>,
     mergefamilies: Vec<Oid>,
     mergecollations: Vec<Oid>,
     mergereversals: Vec<bool>,
@@ -6610,7 +6621,7 @@ fn create_mergejoin_plan<'mcx>(
     // Remove the mergeclauses from the join qual clauses, leaving the quals to
     // be checked as qpquals.
     let mergeclauses_actual = get_actual_clauses(root, &path_mergeclauses);
-    let mut mergeclauses_actual_exprs: Vec<Expr> = Vec::with_capacity(mergeclauses_actual.len());
+    let mut mergeclauses_actual_exprs: Vec<Expr<'mcx>> = Vec::with_capacity(mergeclauses_actual.len());
     for &id in &mergeclauses_actual {
         mergeclauses_actual_exprs.push(root.node(id).clone_in(mcx)?);
     }
@@ -6805,8 +6816,8 @@ fn create_mergejoin_plan<'mcx>(
     let tlist = tlist_to_plan_field(mcx, tlist)?;
     let joinclauses_e = node_ids_to_expr_list(mcx, root, &joinclauses)?;
     let otherclauses_e = node_ids_to_expr_list(mcx, root, &otherclauses)?;
-    // mergeclauses field is the switched clause exprs (owned Vec<Expr>).
-    let mergeclauses_field: Vec<Expr> = mergeclauses;
+    // mergeclauses field is the switched clause exprs (owned Vec<Expr<'mcx>>).
+    let mergeclauses_field: Vec<Expr<'mcx>> = mergeclauses;
 
     let mut join_plan = make_mergejoin(
         mcx,
@@ -6960,7 +6971,7 @@ fn create_append_plan<'mcx>(
     // constraint exclusion; generate a dummy Result that returns no rows.
     if subpaths.is_empty() {
         // make_result(tlist, (Node *) list_make1(makeBoolConst(false, false)), NULL)
-        let mut resconstantqual: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, 1)?;
+        let mut resconstantqual: PgVec<'mcx, Expr<'mcx>> = vec_with_capacity_in(mcx, 1)?;
         resconstantqual.push(Expr::Const(make_bool_const(false, false)));
         let tlist = tlist_to_plan_field(mcx, tlist)?;
         let mut plan = make_result(mcx, tlist, Some(resconstantqual), None)?;
@@ -7343,7 +7354,7 @@ fn resolve_sort_group_clauses(
 fn make_group<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    qual: Option<PgVec<'mcx, Expr>>,
+    qual: Option<PgVec<'mcx, Expr<'mcx>>>,
     num_group_cols: i32,
     grp_col_idx: Vec<AttrNumber>,
     grp_operators: Vec<Oid>,
@@ -7422,8 +7433,8 @@ fn make_windowagg<'mcx>(
     tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     wc: &types_pathnodes::WindowClauseNode,
     win_name: Option<PgString<'mcx>>,
-    start_offset: Option<Expr>,
-    end_offset: Option<Expr>,
+    start_offset: Option<Expr<'mcx>>,
+    end_offset: Option<Expr<'mcx>>,
     part_num_cols: i32,
     part_col_idx: Vec<AttrNumber>,
     part_operators: Vec<Oid>,
@@ -7432,8 +7443,8 @@ fn make_windowagg<'mcx>(
     ord_col_idx: Vec<AttrNumber>,
     ord_operators: Vec<Oid>,
     ord_collations: Vec<Oid>,
-    run_condition: Option<PgVec<'mcx, Expr>>,
-    qual: Option<PgVec<'mcx, Expr>>,
+    run_condition: Option<PgVec<'mcx, Expr<'mcx>>>,
+    qual: Option<PgVec<'mcx, Expr<'mcx>>>,
     top_window: bool,
     lefttree: Node<'mcx>,
 ) -> PgResult<types_nodes::nodewindowagg::WindowAgg<'mcx>> {
@@ -7786,7 +7797,7 @@ fn create_unique_plan<'mcx>(
 
     // Resolve the uniq_exprs (arena handles → owned exprs); the values we are
     // supposed to unique-ify may be expressions over the subplan's Vars.
-    let uniq_exprs: Vec<Expr> = uniq_expr_ids
+    let uniq_exprs: Vec<Expr<'mcx>> = uniq_expr_ids
         .iter()
         .map(|&id| root.node(id).clone_in(mcx))
         .collect::<PgResult<Vec<_>>>()?;
@@ -8493,15 +8504,15 @@ fn oid_vec_opt<'mcx>(mcx: Mcx<'mcx>, v: Vec<Oid>) -> PgResult<Option<PgVec<'mcx,
 
 /// Wrap an owned `Expr` into the `Node<'mcx>` carrier the HashJoin hashkey /
 /// hashclause lists hold (`PgVec<Node>`).
-fn expr_to_node<'mcx>(mcx: Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
+fn expr_to_node<'mcx>(mcx: Mcx<'mcx>, e: Expr<'mcx>) -> PgResult<Node<'mcx>> {
     Ok(Node::mk_expr(mcx, e)?)
 }
 
-/// Move an owned `Vec<Expr>` into a `PgVec<Node>` (the HashJoin `hashclauses`
+/// Move an owned `Vec<Expr<'mcx>>` into a `PgVec<Node>` (the HashJoin `hashclauses`
 /// field; empty = `None`).
 fn exprs_to_node_list<'mcx>(
     mcx: Mcx<'mcx>,
-    v: Vec<Expr>,
+    v: Vec<Expr<'mcx>>,
 ) -> PgResult<Option<PgVec<'mcx, Node<'mcx>>>> {
     if v.is_empty() {
         return Ok(None);

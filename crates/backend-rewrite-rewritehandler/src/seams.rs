@@ -194,7 +194,7 @@ fn seam_build_column_default<'mcx>(
     mcx: Mcx<'mcx>,
     rel: types_rel::Relation<'mcx>,
     attrno: i32,
-) -> PgResult<Option<PgBox<'mcx, Expr>>> {
+) -> PgResult<Option<PgBox<'mcx, Expr<'mcx>>>> {
     build_column_default(mcx, &rel, attrno)
 }
 
@@ -202,17 +202,17 @@ fn seam_build_generation_expression<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,
     attrno: i32,
-) -> PgResult<PgBox<'mcx, Expr>> {
+) -> PgResult<PgBox<'mcx, Expr<'static>>> {
     let expr = crate::build_generation_expression(mcx, rel, attrno)?;
     mcx::alloc_in(mcx, expr)
 }
 
 fn seam_expand_generated_columns_in_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    node: Option<Expr>,
+    node: Option<Expr<'static>>,
     rel_oid: Oid,
     rt_index: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'static>>> {
     // The C `expand_generated_columns_in_expr` takes an already-open Relation;
     // the consumers (publicationcmds/plancat) hold the relation open, so we
     // re-open with NoLock to consult the tuple descriptor.

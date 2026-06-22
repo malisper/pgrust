@@ -748,12 +748,20 @@ pub fn CreatePolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatePolicyStmt<'mcx>) -> PgRe
         "POLICY",
     )?;
 
-    // Fix up collation information.
-    let mut qual = qual;
+    // Fix up collation information. The parser-arena `'static` quals are
+    // brought into `mcx` (collation assignment mutates in place at `'mcx`, tying
+    // pstate+expr to one lifetime; `Expr` is invariant so `clone_in` is required).
+    let mut qual: Option<types_nodes::primnodes::Expr<'mcx>> = match qual {
+        Some(e) => Some(e.clone_in(mcx)?),
+        None => None,
+    };
     if let Some(e) = qual.as_mut() {
         assign_expr_collations(Some(&qual_pstate), e)?;
     }
-    let mut with_check_qual = with_check_qual;
+    let mut with_check_qual: Option<types_nodes::primnodes::Expr<'mcx>> = match with_check_qual {
+        Some(e) => Some(e.clone_in(mcx)?),
+        None => None,
+    };
     if let Some(e) = with_check_qual.as_mut() {
         assign_expr_collations(Some(&with_check_pstate), e)?;
     }
@@ -880,7 +888,7 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
     let target_table = relation::relation_open(mcx, table_id, NoLock)?;
 
     // Parse the using policy clause.
-    let mut qual: Option<types_nodes::primnodes::Expr> = None;
+    let mut qual: Option<types_nodes::primnodes::Expr<'mcx>> = None;
     let mut qual_node: Option<Node<'mcx>> = None;
     let mut qual_pstate: Option<mcx::PgBox<'mcx, types_nodes::parsestmt::ParseState<'mcx>>> = None;
     if stmt.qual.is_some() {
@@ -902,6 +910,12 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
             ParseExprKind::EXPR_KIND_POLICY,
             "POLICY",
         )?;
+        // Bring the parser-arena `'static` qual into `mcx` for the in-place
+        // collation pass (pstate+expr share one invariant `'mcx`).
+        let mut q: Option<types_nodes::primnodes::Expr<'mcx>> = match q {
+            Some(e) => Some(e.clone_in(mcx)?),
+            None => None,
+        };
         if let Some(e) = q.as_mut() {
             assign_expr_collations(Some(&pstate), e)?;
         }
@@ -910,7 +924,7 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
     }
 
     // Parse the with-check policy clause.
-    let mut with_check_qual: Option<types_nodes::primnodes::Expr> = None;
+    let mut with_check_qual: Option<types_nodes::primnodes::Expr<'mcx>> = None;
     let mut with_check_pstate: Option<mcx::PgBox<'mcx, types_nodes::parsestmt::ParseState<'mcx>>> =
         None;
     if stmt.with_check.is_some() {
@@ -925,13 +939,19 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
             false,
         )?;
         addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
-        let mut q = transformWhereClause(
+        let q = transformWhereClause(
             mcx,
             &mut pstate,
             clone_clause(mcx, stmt.with_check.as_deref())?,
             ParseExprKind::EXPR_KIND_POLICY,
             "POLICY",
         )?;
+        // Bring the parser-arena `'static` qual into `mcx` for the in-place
+        // collation pass (pstate+expr share one invariant `'mcx`).
+        let mut q: Option<types_nodes::primnodes::Expr<'mcx>> = match q {
+            Some(e) => Some(e.clone_in(mcx)?),
+            None => None,
+        };
         if let Some(e) = q.as_mut() {
             assign_expr_collations(Some(&pstate), e)?;
         }

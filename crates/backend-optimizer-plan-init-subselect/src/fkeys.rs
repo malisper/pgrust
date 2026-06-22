@@ -163,7 +163,7 @@ pub fn match_foreign_keys_to_quals(root: &mut PlannerInfo) {
 /// Strips zero or more `RelabelType` wrappers; returns the innermost `Expr`
 /// (or `None` if a RelabelType had a NULL `arg`, mirroring the C loop exiting
 /// on a NULL pointer).
-fn strip_relabeltypes(mut expr: &Expr) -> Option<&Expr> {
+fn strip_relabeltypes<'a, 'mcx>(mut expr: &'a Expr<'mcx>) -> Option<&'a Expr<'mcx>> {
     loop {
         match expr.as_relabeltype() {
             Some(r) => match r.arg.as_deref() {

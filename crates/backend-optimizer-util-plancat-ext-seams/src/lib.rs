@@ -642,7 +642,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `get_function_rows(root, funcid, node)` over a by-value SRF node — the
     /// clauses-seams contract (no `root`, no arena handle).
-    pub fn get_function_rows_by_node(funcid: Oid, node: &Expr) -> PgResult<f64>
+    pub fn get_function_rows_by_node<'mcx>(funcid: Oid, node: &Expr<'mcx>) -> PgResult<f64>
 );
 seam_core::seam!(
     /// `relation->rd_rel->relispartition` for the relation.

@@ -2716,6 +2716,10 @@ fn cook_default<'mcx>(
     }
 
     /* Finally, take care of collations in the finished expression. */
+    // Bring the parser-arena `'static` result into this call's `mcx` (the
+    // collation routine mutates in place at `'mcx`, and the returned RichNode is
+    // `'mcx`); `Expr` is invariant over its lifetime, so `clone_in` is required.
+    let mut expr: Expr<'mcx> = expr.clone_in(mcx)?;
     backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut expr)?;
 
     Ok(Some(RichNode::mk_expr(mcx, expr)?))
@@ -2829,7 +2833,11 @@ fn domain_add_check_constraint<'mcx>(
     .expect("domainAddCheckConstraint: CHECK expression cannot be NULL");
 
     /* Make sure it yields a boolean result. */
-    let mut expr = backend_parser_coerce::coerce_to_boolean(mcx, Some(&mut pstate), expr, "CHECK")?;
+    let expr = backend_parser_coerce::coerce_to_boolean(mcx, Some(&mut pstate), expr, "CHECK")?;
+    // Bring the parser-arena `'static` result into this call's `mcx` for the
+    // in-place collation pass and the `'mcx` RichNode/var-clause checks below
+    // (`Expr` is invariant over its lifetime).
+    let mut expr: Expr<'mcx> = expr.clone_in(mcx)?;
 
     /* Fix up collation information. */
     backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut expr)?;

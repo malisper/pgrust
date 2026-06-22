@@ -126,12 +126,12 @@ pub fn make_subplan<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
-    orig_subquery: Option<PgBox<'static, types_nodes::copy_query::Query<'static>>>,
+    orig_subquery: Option<PgBox<'mcx, types_nodes::copy_query::Query<'mcx>>>,
     sub_link_type: SubLinkType,
     sub_link_id: i32,
-    testexpr: Option<Expr>,
+    testexpr: Option<Expr<'mcx>>,
     is_top_qual: bool,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let orig_subquery = orig_subquery.expect("make_subplan: SubLink has no subselect");
 
     // Copy the source Query node. The owned tree gives us a borrow; clone the
@@ -258,21 +258,18 @@ pub fn make_subplan<'mcx>(
                 // (Mcx-allocated); re-box each `Box<SubPlan<'static>>` into mcx.
                 let mut subplans: Vec<PgBox<'mcx, SubPlan<'mcx>>> = Vec::new();
                 if let Expr::SubPlan(s) = result {
-                    subplans.push(alloc_in(mcx, subplan_static_to_mcx(*s.0))?);
+                    subplans.push(alloc_in(mcx, *s.0)?);
                 } else {
                     unreachable!()
                 }
-                subplans.push(alloc_in(mcx, subplan_static_to_mcx(*hashplan.0))?);
+                subplans.push(alloc_in(mcx, *hashplan.0)?);
+                // The subplans Vec is already `'mcx`-branded (Mcx-allocated), so
+                // build the `AlternativeSubPlan` at `'mcx` and keep `result` at
+                // `'mcx` — no lifetime erasure needed (the prior forged-'static
+                // transmute is removed by the Expr-'mcx campaign).
                 let alt = types_nodes::primnodes::AlternativeSubPlan { subplans };
-                // Erase the 'mcx lifetime parameter to the Expr tree's notional
-                // 'static (the data lives in the planner-run context); same
-                // convention as `subplan_into_static`.
-                let alt_static: types_nodes::primnodes::AlternativeSubPlan<'static> =
-                    unsafe { core::mem::transmute(alt) };
                 result = Expr::AlternativeSubPlan(
-                    types_nodes::primnodes::AlternativeSubPlanExpr(alloc::boxed::Box::new(
-                        alt_static,
-                    )),
+                    types_nodes::primnodes::AlternativeSubPlanExpr(alloc::boxed::Box::new(alt)),
                 );
                 root.hasAlternativeSubPlans = true;
             }
@@ -296,17 +293,6 @@ fn subplan_into_static(s: SubPlan<'_>) -> SubPlan<'static> {
     unsafe { core::mem::transmute::<SubPlan<'_>, SubPlan<'static>>(s) }
 }
 
-/// Inverse of [`subplan_into_static`]: re-attach the `'mcx` lifetime to a
-/// `SubPlan<'static>` extracted from an `Expr::SubPlan` so it can be re-boxed
-/// into the `mcx`-bound `AlternativeSubPlan.subplans` Vec. Same
-/// lifetime-parameter-only transmute convention.
-#[inline]
-fn subplan_static_to_mcx<'mcx>(s: SubPlan<'static>) -> SubPlan<'mcx> {
-    // SAFETY: lifetime-parameter-only transmute; the data was originally
-    // allocated in this same planner-run `mcx` (see `subplan_into_static`).
-    unsafe { core::mem::transmute::<SubPlan<'static>, SubPlan<'mcx>>(s) }
-}
-
 // ===========================================================================
 // build_subplan
 // ===========================================================================
@@ -314,8 +300,8 @@ fn subplan_static_to_mcx<'mcx>(s: SubPlan<'static>) -> SubPlan<'mcx> {
 /// Outcome of the per-`subLinkType` dispatch in `build_subplan`: either a
 /// non-SubPlan replacement expression (Param / Const / converted rowcompare
 /// testexpr) or "the result is the SubPlan node itself" (built after interning).
-enum ResultKind {
-    Expr(Expr),
+enum ResultKind<'mcx> {
+    Expr(Expr<'mcx>),
     SubPlanNode,
 }
 
@@ -333,10 +319,10 @@ fn build_subplan<'mcx>(
     plan_params: Vec<types_pathnodes::NodeId>,
     sub_link_type: SubLinkType,
     sub_link_id: i32,
-    testexpr: Option<Expr>,
+    testexpr: Option<Expr<'mcx>>,
     testexpr_paramids: Option<PgVec<'mcx, i32>>,
     unknown_eq_false: bool,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     // Initialize the SubPlan node.
     let (first_col_type, first_col_typmod, first_col_collation) = get_first_col_type(&plan)?;
     let plan_parallel_safe = plan.plan_head().parallel_safe;
@@ -522,16 +508,17 @@ fn build_subplan<'mcx>(
     let result = match kind {
         ResultKind::Expr(e) => {
             if is_init_plan {
-                let nid = root.alloc_node(Expr::SubPlan(SubPlanExpr(alloc::boxed::Box::new(
-                    subplan_into_static(splan),
-                ))));
+                // `alloc_node` interns the Expr into the planner node arena
+                // (erasing the `'mcx` lifetime to the arena's notional 'static);
+                // `splan` is already `'mcx`-branded, so pass it straight through.
+                let nid = root.alloc_node(Expr::SubPlan(SubPlanExpr(alloc::boxed::Box::new(splan))));
                 root.init_plans.push(nid);
             }
             e
         }
         ResultKind::SubPlanNode => {
             debug_assert!(!is_init_plan);
-            Expr::SubPlan(SubPlanExpr(alloc::boxed::Box::new(subplan_into_static(splan))))
+            Expr::SubPlan(SubPlanExpr(alloc::boxed::Box::new(splan)))
         }
     };
 
@@ -565,12 +552,12 @@ fn first_tlist_type(plan: &Node<'_>) -> PgResult<(Oid, i32, Oid)> {
 /// `generate_subquery_params(root, tlist, &paramIds)` (subselect.c): build a
 /// list of `Param` exprs representing the output columns of a sublink's
 /// sub-select, returning `(params, ids)`.
-fn generate_subquery_params(
+fn generate_subquery_params<'mcx>(
     root: &mut PlannerInfo,
     plan: &Node<'_>,
-) -> PgResult<(Vec<Expr>, Vec<i32>)> {
+) -> PgResult<(Vec<Expr<'mcx>>, Vec<i32>)> {
     let head = plan.plan_head();
-    let mut result: Vec<Expr> = Vec::new();
+    let mut result: Vec<Expr<'mcx>> = Vec::new();
     let mut ids: Vec<i32> = Vec::new();
     if let Some(tlist) = head.targetlist.as_ref() {
         for tent in tlist.iter() {
@@ -602,8 +589,8 @@ fn generate_subquery_params(
 fn generate_subquery_vars<'mcx>(
     tlist: &[types_nodes::primnodes::TargetEntry<'mcx>],
     varno: types_core::primitive::Index,
-) -> PgResult<Vec<Expr>> {
-    let mut result: Vec<Expr> = Vec::new();
+) -> PgResult<Vec<Expr<'mcx>>> {
+    let mut result: Vec<Expr<'mcx>> = Vec::new();
     for tent in tlist.iter() {
         if tent.resjunk {
             continue;
@@ -622,14 +609,14 @@ fn generate_subquery_vars<'mcx>(
 /// PARAM_SUBLINK Params with the nodes from `subst_nodes`.
 fn convert_testexpr<'mcx>(
     _mcx: Mcx<'mcx>,
-    testexpr: Expr,
-    subst_nodes: &[Expr],
-) -> PgResult<Expr> {
+    testexpr: Expr<'mcx>,
+    subst_nodes: &[Expr<'mcx>],
+) -> PgResult<Expr<'mcx>> {
     convert_testexpr_mutator(testexpr, subst_nodes)
 }
 
 /// `convert_testexpr_mutator(node, context)` (subselect.c).
-fn convert_testexpr_mutator(node: Expr, subst_nodes: &[Expr]) -> PgResult<Expr> {
+fn convert_testexpr_mutator<'mcx>(node: Expr<'mcx>, subst_nodes: &[Expr<'mcx>]) -> PgResult<Expr<'mcx>> {
     if let Expr::Param(param) = &node {
         if param.paramkind == ParamKind::PARAM_SUBLINK {
             let id = param.paramid;
@@ -1485,7 +1472,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
     run: &PlannerRun<'mcx>,
     mcx: Mcx<'mcx>,
     mut subselect: types_nodes::copy_query::Query<'mcx>,
-) -> PgResult<Option<(types_nodes::copy_query::Query<'mcx>, Expr, PgVec<'mcx, i32>)>> {
+) -> PgResult<Option<(types_nodes::copy_query::Query<'mcx>, Expr<'mcx>, PgVec<'mcx, i32>)>> {
     // Query must not require a targetlist (caller already dealt with it).
     debug_assert!(subselect.targetList.is_empty());
 
@@ -1496,7 +1483,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
         .expect("convert_EXISTS_to_ANY: subquery has no jointree")
         .quals
         .take();
-    let where_clause: Option<Expr> = match where_clause_node {
+    let where_clause: Option<Expr<'mcx>> = match where_clause_node {
         Some(n) => match PgBox::into_inner(n).into_expr() {
             Some(e) => Some(e),
             None => return Err(elog_error("convert_EXISTS_to_ANY: WHERE is not an Expr")),
@@ -1950,7 +1937,7 @@ pub fn resolve_multiexpr_param(
     root: &PlannerInfo,
     subqueryid: usize,
     colno: usize,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     let nid = root.multiexpr_params[subqueryid - 1][colno - 1];
     // copyObject of a replacement Param — a flat clone of the interned node.
     Ok(root.node(nid).clone())

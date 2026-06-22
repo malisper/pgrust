@@ -1111,18 +1111,12 @@ pub fn init_seams() {
     // (they are interned via the caller's `mcx`); erase the `'mcx`-cloned results
     // at this arena-intern boundary.
     isub::pull_vars_of_level_node::set(|mcx, node, levelsup| {
-        Ok(pull_vars_of_level(mcx, node, levelsup)?
-            .into_iter()
-            .map(|e| e.erase_lifetime())
-            .collect())
+        pull_vars_of_level(mcx, node, levelsup)
     });
     // The RTE_SUBQUERY arm walks `rte->subquery` (an owned `Query`, not a `Node`)
     // through the sibling `_query` seam (same owner, var.c).
     isub::pull_vars_of_level_query::set(|mcx, query, levelsup| {
-        Ok(pull_vars_of_level_query(mcx, query, levelsup)?
-            .into_iter()
-            .map(|e| e.erase_lifetime())
-            .collect())
+        pull_vars_of_level_query(mcx, query, levelsup)
     });
 }
 

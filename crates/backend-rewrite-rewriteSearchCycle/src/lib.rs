@@ -97,7 +97,7 @@ fn elog_error(msg: impl Into<String>) -> PgError {
 /// `ressortgroupref`/`resorigtbl`/`resorigcol` fields.
 fn make_tle<'mcx>(
     mcx: Mcx<'mcx>,
-    expr: Expr,
+    expr: Expr<'mcx>,
     resno: AttrNumber,
     resname: &str,
 ) -> PgResult<TargetEntry<'mcx>> {
@@ -118,8 +118,8 @@ fn make_tle<'mcx>(
 
 /// `make_path_rowexpr(cte, col_list)` (rewriteSearchCycle.c:116) — a `RowExpr`
 /// over the named columns, which must be among the CTE's output columns.
-fn make_path_rowexpr(cte: &types_nodes::rawnodes::CommonTableExpr<'_>, col_list: &PgVec<'_, NodePtr<'_>>) -> RowExpr {
-    let mut args: Vec<Expr> = Vec::new();
+fn make_path_rowexpr<'mcx>(cte: &types_nodes::rawnodes::CommonTableExpr<'_>, col_list: &PgVec<'_, NodePtr<'_>>) -> RowExpr<'mcx> {
+    let mut args: Vec<Expr<'mcx>> = Vec::new();
     let mut colnames: Vec<String> = Vec::new();
 
     for lc in col_list.iter() {
@@ -155,7 +155,7 @@ fn make_path_rowexpr(cte: &types_nodes::rawnodes::CommonTableExpr<'_>, col_list:
 
 /// `make_path_initial_array(rowexpr)` (rewriteSearchCycle.c:158) — wrap a
 /// `RowExpr` in `ARRAY[ ... ]` for the initial search/cycle row.
-fn make_path_initial_array(rowexpr: RowExpr) -> Expr {
+fn make_path_initial_array<'mcx>(rowexpr: RowExpr<'mcx>) -> Expr<'mcx> {
     Expr::ArrayExpr(ArrayExpr {
         array_typeid: RECORDARRAYOID,
         array_collid: InvalidOid,
@@ -168,7 +168,7 @@ fn make_path_initial_array(rowexpr: RowExpr) -> Expr {
 
 /// `make_path_cat_expr(rowexpr, path_varattno)` (rewriteSearchCycle.c:179) — an
 /// array-catenation `cpa || ARRAY[ROW(cols)]` (the underlying `array_cat` call).
-fn make_path_cat_expr(rowexpr: RowExpr, path_varattno: AttrNumber) -> Expr {
+fn make_path_cat_expr<'mcx>(rowexpr: RowExpr<'mcx>, path_varattno: AttrNumber) -> Expr<'mcx> {
     let arr = Expr::ArrayExpr(ArrayExpr {
         array_typeid: RECORDARRAYOID,
         array_collid: InvalidOid,
@@ -367,10 +367,10 @@ pub fn rewriteSearchAndCycle<'mcx>(
     }
 
     // The added SEARCH column.
-    let mut search_col_rowexpr: Option<RowExpr> = None;
+    let mut search_col_rowexpr: Option<RowExpr<'mcx>> = None;
     if let Some(s) = search.as_ref() {
         let mut rowexpr = make_path_rowexpr(&cte, &s.search_col_list);
-        let texpr: Expr;
+        let texpr: Expr<'mcx>;
         if s.search_breadth_first {
             // lcons int8 const -1 as the *DEPTH* field.
             rowexpr.args.insert(
@@ -398,7 +398,7 @@ pub fn rewriteSearchAndCycle<'mcx>(
     }
 
     // The added CYCLE columns.
-    let mut cycle_col_rowexpr: Option<RowExpr> = None;
+    let mut cycle_col_rowexpr: Option<RowExpr<'mcx>> = None;
     if let Some(c) = cyc.as_ref() {
         // cycle_mark_default
         let resno = (newq1.targetList.len() + 1) as AttrNumber;
@@ -566,7 +566,7 @@ pub fn rewriteSearchAndCycle<'mcx>(
 
     // The added SEARCH column expression.
     if let Some(s) = search.as_ref() {
-        let texpr: Expr;
+        let texpr: Expr<'mcx>;
         if s.search_breadth_first {
             // ROW(sqc.depth + 1, cols)
             let mut rowexpr = search_col_rowexpr
@@ -770,8 +770,8 @@ struct CycleInfo<'mcx> {
     cycle_mark_typmod: i32,
     cycle_mark_collation: Oid,
     cycle_mark_neop: Oid,
-    cycle_mark_value: Expr,
-    cycle_mark_default: Expr,
+    cycle_mark_value: Expr<'mcx>,
+    cycle_mark_default: Expr<'mcx>,
     cycle_col_list: PgVec<'mcx, NodePtr<'mcx>>,
 }
 
@@ -787,7 +787,7 @@ struct SearchInfo<'mcx> {
 
 /// Clone a `Node::Expr`-wrapped expression out to a bare `Expr` (deep copy into
 /// `mcx`). Errors if the node is absent or not an `Expr`.
-fn clone_expr_node<'mcx>(mcx: Mcx<'mcx>, node: Option<&Node<'_>>) -> PgResult<Expr> {
+fn clone_expr_node<'mcx>(mcx: Mcx<'mcx>, node: Option<&Node<'_>>) -> PgResult<Expr<'mcx>> {
     let n = node.ok_or_else(|| elog_error("rewriteSearchAndCycle: missing cycle-mark expression"))?;
     let cloned = n.clone_in(mcx)?;
     cloned

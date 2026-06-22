@@ -104,7 +104,7 @@ fn get_stat_ext_keys_exprs(
     // if (varno != 1) ChangeVarNodes((Node *) exprs, 1, varno, 0);  — restamp the
     // Vars, which the catalog stores with varno == 1, to the parent relation.
     if varno != 1 {
-        plancat_ext::change_var_nodes::call(root, &ids, 1, varno);
+        plancat_ext::change_var_nodes::call(mcx, root, &ids, 1, varno);
     }
 
     Ok((keys, ids))
@@ -205,7 +205,7 @@ fn process_check_constraint(
     // if (varno != 1) ChangeVarNodes(cexpr, 1, varno, 0);  — restamp the Vars,
     // which `stringToNode` decoded with the catalog's varno == 1.
     if varno != 1 {
-        plancat_ext::change_var_nodes::call(root, &ids, 1, varno);
+        plancat_ext::change_var_nodes::call(mcx, root, &ids, 1, varno);
     }
 
     Ok(ids)
@@ -485,7 +485,7 @@ fn set_baserel_partition_key_exprs<'mcx>(
             // copyObject: clone the relcache expr into the lifetime-free arena.
             let id = root.alloc_node(src.clone());
             // Re-stamp the expression with the given varno (relid 1 -> varno).
-            plancat_ext::change_var_nodes::call(root, &[id], 1, varno as i32);
+            plancat_ext::change_var_nodes::call(mcx, root, &[id], 1, varno as i32);
             expr_idx += 1;
             id
         };
@@ -566,7 +566,7 @@ fn set_baserel_partition_constraint_inner<'mcx>(
 
     // if (rel->relid != 1) ChangeVarNodes((Node *) partconstr, 1, rel->relid, 0);
     if varno != 1 {
-        plancat_ext::change_var_nodes::call(root, &qual_ids, 1, varno as i32);
+        plancat_ext::change_var_nodes::call(mcx, root, &qual_ids, 1, varno as i32);
     }
 
     // rel->partition_qual = partconstr;

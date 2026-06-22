@@ -76,7 +76,7 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         args: &[NodeId],
         var_relid: i32,
-    ) -> PgResult<Option<(VariableStatData, Expr<'static>, bool)>>
+    ) -> PgResult<Option<(VariableStatData, Expr<'mcx>, bool)>>
 );
 
 seam_core::seam!(

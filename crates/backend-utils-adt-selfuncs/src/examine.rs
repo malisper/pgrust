@@ -66,12 +66,12 @@ const STATS_EXT_EXPRESSIONS: i8 = b'e' as i8;
 /// variant in this model but is not handled by the generic
 /// [`expression_tree_walker`](backend_nodes_core::nodefuncs::expression_tree_walker),
 /// so the PHV test is done here and the walker recurses into the rest.
-fn contain_placeholder(node: &Expr) -> bool {
+fn contain_placeholder(node: &Expr<'_>) -> bool {
     if node.is_placeholdervar() {
         return true;
     }
     let mut found = false;
-    backend_nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr| {
+    backend_nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr<'_>| {
         if contain_placeholder(child) {
             found = true;
             return true; // abort
@@ -84,7 +84,7 @@ fn contain_placeholder(node: &Expr) -> bool {
 /// `strip_all_phvs_mutator(node)` (selfuncs.c) — replace every `PlaceHolderVar`
 /// with its contained `phexpr`, recursively. Operates on an owned [`Expr`]
 /// (matching the C mutator returning a fresh `Node *`).
-fn strip_all_phvs_mutator(node: Expr) -> Expr {
+fn strip_all_phvs_mutator<'mcx>(node: Expr<'mcx>) -> Expr<'mcx> {
     if let Expr::PlaceHolderVar(phv) = node {
         let inner = phv
             .phexpr
@@ -101,9 +101,9 @@ fn strip_all_phvs_mutator(node: Expr) -> Expr {
 /// present. Returns an owned [`Expr`] (a clone of `node` when nothing changed).
 fn strip_all_phvs_deep<'mcx>(
     root: &PlannerInfo,
-    node: &Expr,
+    node: &Expr<'mcx>,
     mcx: Mcx<'mcx>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let last_ph_id = root.glob.as_ref().map(|g| g.last_ph_id).unwrap_or(0);
     if last_ph_id == 0 {
         return node.clone_in(mcx);
@@ -821,7 +821,7 @@ pub(crate) fn get_restriction_variable<'mcx, 'run>(
     root: &mut PlannerInfo,
     args: &[NodeId],
     var_relid: i32,
-) -> PgResult<Option<(VariableStatData, Expr, bool)>> {
+) -> PgResult<Option<(VariableStatData, Expr<'mcx>, bool)>> {
     // Fail if not a binary opclause (probably shouldn't happen).
     if args.len() != 2 {
         return Ok(None);
@@ -851,7 +851,7 @@ pub(crate) fn get_restriction_variable<'mcx, 'run>(
 
 /// `estimate_expression_value(root, node)` over an arena node handle — fold the
 /// node to a `Const` if possible (the ported clauses.c folder).
-fn estimate_other<'mcx>(mcx: Mcx<'mcx>, root: &PlannerInfo, node: NodeId) -> PgResult<Expr> {
+fn estimate_other<'mcx>(mcx: Mcx<'mcx>, root: &PlannerInfo, node: NodeId) -> PgResult<Expr<'mcx>> {
     // copyObject shape: a bare `.clone()` recurses into the panicking `Expr::clone`
     // arm when the operand carries a SubPlan/SubLink/Aggref (a correlated scalar
     // subselect on the non-Var side), so deep-copy through `clone_in`.
@@ -1036,7 +1036,7 @@ pub fn seam_get_restriction_variable<'mcx, 'run>(
     root: &mut PlannerInfo,
     args: &[NodeId],
     var_relid: i32,
-) -> PgResult<Option<(VariableStatData, Expr, bool)>> {
+) -> PgResult<Option<(VariableStatData, Expr<'mcx>, bool)>> {
     get_restriction_variable(mcx, run, root, args, var_relid)
 }
 
