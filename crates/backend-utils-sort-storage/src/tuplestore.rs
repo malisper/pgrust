@@ -177,6 +177,24 @@ impl<'mcx> TuplestorestateState<'mcx> {
     }
 }
 
+impl Drop for TuplestorestateState<'_> {
+    /// Mirror C's `tuplestore_end` BufFileClose (tuplestore.c:484): the spill
+    /// `BufFile` owns transaction-temp VFDs (`FD_CLOSE_AT_EOXACT` /
+    /// `FD_DELETE_AT_CLOSE`) that have no `Drop` of their own, so a carrier that
+    /// is dropped without going through [`tuplestore_end`] (e.g. a portal's
+    /// `holdStore` cleared to `None` in `PortalDrop`, or unwind teardown) would
+    /// otherwise leak the open temp file until end-of-transaction and emit
+    /// "temporary file ... not closed at end-of-transaction". Closing here makes
+    /// every drop path release the underlying files.
+    fn drop(&mut self) {
+        if let Some(file) = self.myfile.take() {
+            // Discarding the store: just close (and thereby delete) the
+            // physical files; a flush would be pointless and could error.
+            let _ = buffile::buf_file_close::call(file);
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Carrier helpers
 // ----------------------------------------------------------------------------
