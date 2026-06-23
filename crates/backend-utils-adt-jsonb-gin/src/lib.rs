@@ -343,7 +343,10 @@ fn numeric_normalize<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<String> {
 
 /// C: `gin_compare_jsonb(PG_FUNCTION_ARGS)`. Compare two GIN keys as
 /// `bttextcmp` does but under the C collation, which reduces to a plain unsigned
-/// byte compare (memcmp + length tiebreak == `Ord` over `&[u8]`).
+/// byte compare (memcmp + length tiebreak == `Ord` over `&[u8]`). `a`/`b` are the
+/// `VARDATA_ANY` payloads (the fmgr boundary `arg_text` strips the header
+/// header-form-agnostically); comparing the header-stripped payloads is what
+/// makes a short-packed stored key compare equal to its 4-byte query twin.
 pub fn gin_compare_jsonb(a: &[u8], b: &[u8]) -> i32 {
     use core::cmp::Ordering;
     match a.cmp(b) {

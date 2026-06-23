@@ -39,16 +39,30 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// A `text` arg's by-ref payload bytes. C: `PG_GETARG_TEXT_PP(i)` then
-/// `VARDATA_ANY` — the boundary delivers the detoasted varlena payload (header
-/// stripped) on the by-ref lane, which is exactly what `gin_compare_jsonb`
-/// compares.
+/// A `text` arg's `VARDATA_ANY` payload bytes. C: `PG_GETARG_TEXT_PP(i)` then
+/// `VARDATA_ANY` (`gin_compare_jsonb` calls `bttextcmp`, which reads `VARDATA_ANY`
+/// of each arg). The by-ref lane carries the RAW varlena image (header included,
+/// `as_varlena()` does not strip it), so strip the header here: a short (1-byte,
+/// low-bit-set) header skips ONE byte, an ordinary 4-byte header skips `VARHDRSZ`.
+/// The two GIN keys this compares are a STORED entry key (`make_text_key` -> small
+/// text, short-packed when stored as the GIN entry tuple once
+/// `SHORT_VARLENA_PACKING` is on) and a fresh query key (4-byte); comparing the
+/// raw images would compare differing headers and never match identical payloads
+/// (= the jsonb_ops GIN `@>`/`?` returns 0 rows). No-op while the flag is off
+/// (both keys are 4-byte). Mirrors `backend-utils-adt-varlena`'s
+/// `arg_bytes`/`vardata_any_slice` used by `fc_bttextcmp`.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("gin_compare_jsonb: text arg missing from by-ref lane")
+        .expect("gin_compare_jsonb: text arg missing from by-ref lane");
+    const VARHDRSZ: usize = 4;
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
+    }
 }
 
 #[inline]
