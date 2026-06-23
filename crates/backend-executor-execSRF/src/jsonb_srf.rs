@@ -115,13 +115,28 @@ fn arg_jsonb_image<'a>(fcinfo: &'a FunctionCallInfoBaseData<'_>, i: usize) -> &'
 /// `arg_jsonpath_image`), the `jsonpath` by-ref lane carries the full `jsonpath`
 /// varlena behind ONE extra leading `VARHDRSZ` word (the canonical-`ByRef`->ABI
 /// bridge frames a pass-by-reference arg that way); strip that one leading header
-/// to recover the real full `jsonpath` varlena the cores slice into.
+/// to recover the real full `jsonpath` varlena the cores slice into. The strip is
+/// short-aware (`vardata_any`) for parity with the sibling `arg_jsonpath_image`:
+/// the outer framing word is always 4-byte, so this is a no-op there, but a
+/// stored short-headed value reaching this adapter directly would still strip the
+/// correct single header byte once `SHORT_VARLENA_PACKING` is on.
 fn arg_jsonpath_image<'a>(fcinfo: &'a FunctionCallInfoBaseData<'_>, i: usize) -> &'a [u8] {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("jsonb_path_query SRF: by-ref `jsonpath` arg missing from by-ref lane");
-    &image[VARHDRSZ..]
+    vardata_any(image)
+}
+
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image:
+/// skip ONE header byte for a short (1-byte, low-bit-set) header, else `VARHDRSZ`.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
+    }
 }
 
 /// `PG_GETARG_BOOL(i)`: the `silent` flag arrives as a plain by-value word.

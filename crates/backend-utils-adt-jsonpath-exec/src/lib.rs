@@ -50,7 +50,7 @@ use backend_utils_adt_jsonb_util::{
 use backend_utils_adt_jsonpath::{
     jspGetArg, jspGetArraySubscript, jspGetBool, jspGetLeftArg, jspGetNext, jspGetNumeric,
     jspGetRightArg, jspGetString, jspHasNext, jspInit, jspInitByBuffer, JsonPathItem,
-    JsonPathItemType, JSONPATH_HDRSZ, JSONPATH_LAX,
+    JsonPathItemType, JSONPATH_LAX,
 };
 use backend_utils_error::{ereport, PgError, PgResult};
 use types_error::ERROR;
@@ -2403,7 +2403,7 @@ fn JsonItemFromDatum(mcx: Mcx<'_>, var: &JsonPathVariable) -> PgResult<JsonbValu
             // C: `res->val.string.val = VARDATA_ANY(val);`
             //    `res->val.string.len = VARSIZE_ANY_EXHDR(val);`
             let img = var_bytes()?;
-            let payload = &img[VARHDRSZ.min(img.len())..];
+            let payload = &img[varlena_data_off(img).min(img.len())..];
             Ok(JsonbValue {
                 typ: jbvType::jbvString,
                 val: JsonbValueData::String(payload.to_vec()),
@@ -2425,7 +2425,7 @@ fn JsonItemFromDatum(mcx: Mcx<'_>, var: &JsonPathVariable) -> PgResult<JsonbValu
             // C: `jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, str))` then
             // recurse as JSONBOID.
             let img = var_bytes()?;
-            let txt = &img[VARHDRSZ.min(img.len())..];
+            let txt = &img[varlena_data_off(img).min(img.len())..];
             let jb = jsonb_in_bytes(mcx, txt)?;
             let root = jsonb_root(&jb);
             let mut res = JsonbValue::null();
@@ -3898,15 +3898,32 @@ fn container_header(jc: &[u8]) -> u32 {
     u32::from_ne_bytes([jc[0], jc[1], jc[2], jc[3]])
 }
 
+/// `VARDATA_ANY` offset for an inline (non-compressed, non-external) varlena
+/// image: a short (1-byte, low-bit-set) header skips ONE byte, an ordinary
+/// 4-byte header skips `VARHDRSZ`. C's `PG_GETARG_JSONB_P`/`PG_GETARG_JSONPATH_P`
+/// detoast (un-pack short -> 4B) before `&jb->root` / the version word, but the
+/// pgrust EEOP_FUNCEXPR boundary forwards a stored value verbatim, so a small
+/// jsonb / jsonpath value reaches these cores short-headed once
+/// `SHORT_VARLENA_PACKING` is on. A fixed `VARHDRSZ` strip would land three bytes
+/// into the root container / version word. No-op while the flag is off (every
+/// stored value is 4-byte) and for freshly-built values (always 4-byte).
+#[inline]
+fn varlena_data_off(image: &[u8]) -> usize {
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        _ => VARHDRSZ,
+    }
+}
+
 /// The root `JsonbContainer` bytes of a full on-disk jsonb varlena.
 fn jsonb_root(jb: &[u8]) -> &[u8] {
-    &jb[VARHDRSZ..]
+    &jb[varlena_data_off(jb)..]
 }
 
 /// The `path->header` version/flags word of a full on-disk `jsonpath` varlena
 /// (the 4-byte word just past the varlena length header).
 fn jsonpath_header(js: &[u8]) -> u32 {
-    let off = JSONPATH_HDRSZ - 4;
+    let off = varlena_data_off(js);
     u32::from_ne_bytes([js[off], js[off + 1], js[off + 2], js[off + 3]])
 }
 

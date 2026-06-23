@@ -211,20 +211,27 @@ pub fn jsonpath_out<'mcx>(mcx: Mcx<'mcx>, input: &[u8]) -> PgResult<PgVec<'mcx, 
 /// well-formed single-header image.
 fn normalize_jsonpath_for_out(input: &[u8]) -> &[u8] {
     const VARHDRSZ: usize = 4;
-    if input.len() >= 8 {
-        let hdr = u32::from_ne_bytes([input[4], input[5], input[6], input[7]]);
+    // Read the version/flags word at the actual data offset (1-byte short header
+    // or 4-byte long header) so a short-packed single-header image is recognised
+    // as already well-formed once `SHORT_VARLENA_PACKING` is on.
+    let off = varlena_data_off(input);
+    if input.len() >= off + 4 {
+        let hdr = jsonpath_header(input);
         if hdr & !JSONPATH_LAX == JSONPATH_VERSION {
             return input;
         }
-        // Header at [4..8] is not a valid jsonpath version: this is the
-        // double-wrapped column path-spec Const. The genuine image begins after
-        // the outer VARHDRSZ word.
-        if input.len() >= VARHDRSZ + 8 {
+        // The header at the data offset is not a valid jsonpath version: this is
+        // the double-wrapped column path-spec Const. The outer framing word is
+        // always a 4-byte header (added by `ret_varlena`/const-fold), so the
+        // genuine image begins one VARHDRSZ word in; that inner image may itself
+        // carry a short header, so re-probe it header-agnostically.
+        if input.len() >= VARHDRSZ + 4 {
             let inner = &input[VARHDRSZ..];
-            let inner_hdr =
-                u32::from_ne_bytes([inner[4], inner[5], inner[6], inner[7]]);
-            if inner_hdr & !JSONPATH_LAX == JSONPATH_VERSION {
-                return inner;
+            if input.len() >= VARHDRSZ + varlena_data_off(inner) + 4 {
+                let inner_hdr = jsonpath_header(inner);
+                if inner_hdr & !JSONPATH_LAX == JSONPATH_VERSION {
+                    return inner;
+                }
             }
         }
     }

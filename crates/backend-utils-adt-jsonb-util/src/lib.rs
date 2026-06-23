@@ -151,6 +151,24 @@ fn container_child(jc: &[u8], index: usize) -> JEntry {
     u32::from_ne_bytes([jc[off], jc[off + 1], jc[off + 2], jc[off + 3]])
 }
 
+/// `VARDATA_ANY` offset for an inline (non-compressed, non-external) `jsonb`
+/// varlena image: a short (1-byte, low-bit-set) header skips ONE byte, an
+/// ordinary 4-byte header skips `VARHDRSZ`. C's `DatumGetJsonbP`
+/// (`PG_DETOAST_DATUM`) un-packs a short header to 4-byte before `&jb->root`,
+/// but pgrust's exec / subscripting boundaries reach this with a still-packed
+/// image (`pg_detoast_datum_packed` keeps a short header short, and the
+/// EEOP_FUNCEXPR boundary never detoasts), so a fixed `VARHDRSZ` strip would
+/// land three bytes into the root container once `SHORT_VARLENA_PACKING` is on.
+/// No-op while the flag is off (every stored value is 4-byte) and for
+/// freshly-built jsonb (`JsonbValueToJsonb` / parse results are always 4-byte).
+#[inline]
+fn jsonb_vardata_off(jsonb: &[u8]) -> usize {
+    match jsonb.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        _ => VARHDRSZ,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JsonbToJsonbValue / JsonbValueToJsonb
 // ---------------------------------------------------------------------------
@@ -160,11 +178,15 @@ fn container_child(jc: &[u8], index: usize) -> JEntry {
 /// `jsonb` is the full on-disk varlena bytes (length header + root container).
 pub fn JsonbToJsonbValue(jsonb: &[u8], val: &mut JsonbValue) -> PgResult<()> {
     // val->val.binary.data = &jsonb->root; len = VARSIZE(jsonb) - VARHDRSZ.
-    let len = (jsonb.len() - VARHDRSZ) as i32;
+    // The varlena header is 1 byte (short) or 4 bytes (long): strip exactly the
+    // header form's size so the root container starts at the right byte and its
+    // length excludes only the header actually present.
+    let off = jsonb_vardata_off(jsonb);
+    let len = (jsonb.len() - off) as i32;
     val.typ = jbvBinary;
     val.val = JsonbValueData::Binary {
         len,
-        data: slice_to_vec(&jsonb[VARHDRSZ..])?,
+        data: slice_to_vec(&jsonb[off..])?,
         // Document root: its container is at offset 0 within itself.
         offset: 0,
     };

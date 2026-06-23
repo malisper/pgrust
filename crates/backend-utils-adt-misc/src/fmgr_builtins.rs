@@ -82,8 +82,19 @@ fn arg_text_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("misc fn: text arg missing from by-ref lane");
-    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
-    &image[types_datum::varlena::VARHDRSZ..]
+    // VARDATA_ANY: a short (1-byte, low-bit-set) header skips ONE byte, an
+    // ordinary 4-byte header skips `VARHDRSZ`. A small stored text reaches an
+    // fmgr arg verbatim (the EEOP_FUNCEXPR boundary does not detoast/unpack), so
+    // a fixed 4-byte strip would drop three payload bytes — and over-read a value
+    // shorter than four bytes (e.g. an unnested `'1a'` array element) — once
+    // `SHORT_VARLENA_PACKING` is on. No-op while the flag is off (4-byte stored).
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= types_datum::varlena::VARHDRSZ => {
+            &image[types_datum::varlena::VARHDRSZ..]
+        }
+        _ => &[],
+    }
 }
 
 /// Write a `bool` result (C: `PG_RETURN_BOOL`).
