@@ -936,11 +936,15 @@ fn LWLockAttemptLock(lock: &LWLock, mode: LWLockMode) -> bool {
 
         // We always swap in the value (even when we saw the lock as taken)
         // because the swap doubles as a memory barrier.
+        // C's pg_atomic_compare_exchange_u32 has *full barrier* semantics
+        // (atomics.h:370) — match it with SeqCst on success and failure. On
+        // x86_64 this is the same `lock cmpxchg`; on aarch64 it strengthens to
+        // C's contract (the swap "doubles as a memory barrier", see above).
         match state.compare_exchange_weak(
             old_state,
             desired_state,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
         ) {
             Ok(_) => return !lock_free,
             Err(actual) => old_state = actual,
@@ -959,7 +963,8 @@ fn LWLockWaitListLock(lock: &LWLock) {
     let state = atomic_state(lock);
     loop {
         // always try once to acquire lock directly
-        let old_state = state.fetch_or(LW_FLAG_LOCKED, Ordering::AcqRel);
+        // C: pg_atomic_fetch_or_u32 — full barrier semantics (atomics.h:431).
+        let old_state = state.fetch_or(LW_FLAG_LOCKED, Ordering::SeqCst);
         if old_state & LW_FLAG_LOCKED == 0 {
             break; // got lock
         }
@@ -983,7 +988,8 @@ fn LWLockWaitListLock(lock: &LWLock) {
 
 /// `LWLockWaitListUnlock` (lwlock.c:929) — clear `LW_FLAG_LOCKED`.
 fn LWLockWaitListUnlock(lock: &LWLock) {
-    let old_state = atomic_state(lock).fetch_and(!LW_FLAG_LOCKED, Ordering::Release);
+    // C: pg_atomic_fetch_and_u32 — full barrier semantics (atomics.h:417).
+    let old_state = atomic_state(lock).fetch_and(!LW_FLAG_LOCKED, Ordering::SeqCst);
     debug_assert!(old_state & LW_FLAG_LOCKED != 0);
 }
 
@@ -1057,11 +1063,12 @@ fn LWLockWakeup(lock: &LWLock) {
                 desired_state &= !LW_FLAG_HAS_WAITERS;
             }
             desired_state &= !LW_FLAG_LOCKED; // release lock
+            // C: pg_atomic_compare_exchange_u32 — full barrier (atomics.h:370).
             match state.compare_exchange_weak(
                 old_state,
                 desired_state,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
             ) {
                 Ok(_) => break,
                 Err(actual) => old_state = actual,
@@ -1107,7 +1114,7 @@ fn LWLockQueueSelf(lock: &LWLock, mode: LWLockMode, my_proc_number: ProcNumber) 
     LWLockWaitListLock(lock);
 
     // setting the flag is protected by the spinlock
-    atomic_state(lock).fetch_or(LW_FLAG_HAS_WAITERS, Ordering::AcqRel);
+    atomic_state(lock).fetch_or(LW_FLAG_HAS_WAITERS, Ordering::SeqCst);
 
     proc_s::set_proc_lw_waiting::call(my_proc_number, LW_WS_WAITING);
     proc_s::set_proc_lw_wait_mode::call(my_proc_number, mode);
@@ -1143,7 +1150,7 @@ fn LWLockDequeueSelf(lock: &LWLock, my_proc_number: ProcNumber) {
     if proclist_is_empty(unsafe { waiters_mut(lock) })
         && (atomic_state(lock).load(Ordering::Relaxed) & LW_FLAG_HAS_WAITERS) != 0
     {
-        atomic_state(lock).fetch_and(!LW_FLAG_HAS_WAITERS, Ordering::AcqRel);
+        atomic_state(lock).fetch_and(!LW_FLAG_HAS_WAITERS, Ordering::SeqCst);
     }
 
     LWLockWaitListUnlock(lock);
@@ -1159,7 +1166,7 @@ fn LWLockDequeueSelf(lock: &LWLock, my_proc_number: ProcNumber) {
 
         // Reset RELEASE_OK flag if somebody woke us before we removed
         // ourselves — they'll have set it to false.
-        atomic_state(lock).fetch_or(LW_FLAG_RELEASE_OK, Ordering::AcqRel);
+        atomic_state(lock).fetch_or(LW_FLAG_RELEASE_OK, Ordering::SeqCst);
 
         // Now wait for the scheduled wakeup, otherwise our ->lwWaiting would
         // get reset at some inconvenient point later.
@@ -1259,7 +1266,7 @@ pub fn LWLockAcquire(
         extra_waits += wait_until_awakened(my_proc_number);
 
         // Retrying, allow LWLockRelease to release waiters again.
-        atomic_state(lock).fetch_or(LW_FLAG_RELEASE_OK, Ordering::AcqRel);
+        atomic_state(lock).fetch_or(LW_FLAG_RELEASE_OK, Ordering::SeqCst);
 
         LWLockReportWaitEnd();
 
@@ -1443,7 +1450,7 @@ pub fn LWLockWaitForVar(
 
         // Set RELEASE_OK flag, to make sure we get woken up as soon as the
         // lock is released.
-        atomic_state(lock).fetch_or(LW_FLAG_RELEASE_OK, Ordering::AcqRel);
+        atomic_state(lock).fetch_or(LW_FLAG_RELEASE_OK, Ordering::SeqCst);
 
         // We're now guaranteed to be woken up if necessary. Recheck the lock
         // and variable's state.
@@ -1553,11 +1560,11 @@ fn LWLockReleaseInternal(lock: &LWLock, mode: LWLockMode) {
     // pg_atomic_sub_fetch_u32 returns the NEW value.
     let oldstate = if mode == LW_EXCLUSIVE {
         state
-            .fetch_sub(LW_VAL_EXCLUSIVE, Ordering::AcqRel)
+            .fetch_sub(LW_VAL_EXCLUSIVE, Ordering::SeqCst)
             .wrapping_sub(LW_VAL_EXCLUSIVE)
     } else {
         state
-            .fetch_sub(LW_VAL_SHARED, Ordering::AcqRel)
+            .fetch_sub(LW_VAL_SHARED, Ordering::SeqCst)
             .wrapping_sub(LW_VAL_SHARED)
     };
 
