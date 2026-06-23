@@ -386,6 +386,29 @@ fn error_recovery(mcx: Mcx<'_>, err: types_error::PgError, state: &mut LoopState
     // error_context_stack = NULL — the ambient callback chain is retired
     // (backend-utils-error divergence #10); nothing to reset.
 
+    // C's `errfinish` (elog.c, ERROR-level path, just before `PG_RE_THROW()`)
+    // hard-resets the interrupt-holdoff counters: "Reset InterruptHoldoffCount
+    // in case we ereport'd from inside an interrupt holdoff section." Because
+    // pgrust's `errfinish` returns `Err(PgError)` instead of `siglongjmp`-ing,
+    // that reset is the catching frame's responsibility (backend-utils-error
+    // lib.rs divergence #1: "the ERROR-path resets of InterruptHoldoffCount /
+    // QueryCancelHoldoffCount … belong to the catching frame"). Do it here, at
+    // the earliest point the catch can intercept, mirroring C exactly:
+    //   InterruptHoldoffCount = 0;
+    //   QueryCancelHoldoffCount = 0;
+    //   CritSectionCount = 0;          /* should be unnecessary, but... */
+    // Without this, any `HOLD_INTERRUPTS()` left unbalanced along the unwind
+    // path leaks. The concrete observed leak: `ProcessParallelMessages`
+    // (parallel.c) does HOLD_INTERRUPTS()/RESUME_INTERRUPTS(), but when it
+    // rethrows a parallel worker's error mid-loop, the trailing
+    // RESUME_INTERRUPTS() is skipped (exactly as in C). C recovers via this
+    // elog.c reset; pgrust must do the same, or `InterruptHoldoffCount` stays 1
+    // forever, making `INTERRUPTS_CAN_BE_PROCESSED()` false so every subsequent
+    // parallel query in the session launches zero workers.
+    backend_utils_init_small::globals::SetInterruptHoldoffCount(0);
+    backend_utils_init_small::globals::SetQueryCancelHoldoffCount(0);
+    backend_utils_init_small::globals::SetCritSectionCount(0);
+
     // HOLD_INTERRUPTS() — the interrupt-holdoff bracket; the abort/cleanup
     // below cannot itself be interrupted in C. The holdoff counter lives in the
     // interrupt machinery; the cleanup here is straight-line.
