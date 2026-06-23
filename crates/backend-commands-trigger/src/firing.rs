@@ -3140,6 +3140,7 @@ fn exec_ar_insert_triggers_impl<'mcx>(
         recheck_indexes,
         /* modified_cols */ None,
         tc.as_deref(),
+        /* is_crosspart_update */ false,
     )
 }
 
@@ -3708,6 +3709,7 @@ fn after_trigger_save_event<'mcx>(
     recheck_indexes: &[Oid],
     modified_cols: Option<&types_nodes::Bitmapset<'_>>,
     tc: Option<&types_nodes::modifytable::TransitionCaptureState>,
+    is_crosspart_update: bool,
 ) -> PgResult<()> {
     use types_catalog::pg_trigger::{
         TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_MATCHES,
@@ -3863,7 +3865,7 @@ fn after_trigger_save_event<'mcx>(
     // their index so the WHEN-clause (tgqual) leg of TriggerEnabled can key
     // ri_TrigWhenExprs[i]. The replication-role / WHEN-qual check runs in the
     // second pass, which needs &mut estate (predicate compile + ExecQual).
-    let candidates: Vec<(usize, i8, i16, bool, Oid, bool, bool, Oid, Oid, bool)> = {
+    let candidates: Vec<(usize, i8, i16, bool, Oid, bool, bool, Oid, Oid, bool, bool)> = {
         let rri = estate.result_rel(relinfo);
         let trigdesc = rri
             .ri_TrigDesc
@@ -3885,6 +3887,7 @@ fn after_trigger_save_event<'mcx>(
                 trig.tgconstrindid,
                 trig.tgfoid,
                 trig.tgoldtable.is_some() || trig.tgnewtable.is_some(),
+                trig.tgisclone,
             ));
         }
         out
@@ -3894,7 +3897,7 @@ fn after_trigger_save_event<'mcx>(
     // tgqual ExprState eval against oldslot/newslot) for each candidate, then the
     // FK-enforcement / unique-recheck skips, and collect the survivors to queue.
     let mut trigs: Vec<(Oid, bool, bool, Oid, Oid, bool)> = Vec::new();
-    for (i, tgenabled, tgnattr, has_qual, tgoid, tgdeferrable, tginitdeferred, tgconstrindid, tgfoid, uses_transition) in
+    for (i, tgenabled, tgnattr, has_qual, tgoid, tgdeferrable, tginitdeferred, tgconstrindid, tgfoid, uses_transition, tgisclone) in
         candidates
     {
         {
@@ -3918,44 +3921,78 @@ fn after_trigger_save_event<'mcx>(
             if !enabled {
                 continue;
             }
-            // Cross-partition UPDATE row event queued on the root partitioned
-            // table (trigger.c:6502, the RI_TRIGGER_NONE case): a regular
-            // (non-FK) row trigger on the partitioned root is NOT queued here,
-            // because the same row trigger is cloned onto the affected leaf
-            // partition(s) and the DELETE/INSERT events fired there are queued
-            // instead. (FK PK/FK-side triggers go through their own RI branches
-            // in `ri_fk_enforcement_skip`.) Without this, the root's AFTER
-            // UPDATE row trigger fires a spurious extra time on a cross-part
-            // update.
-            if fired_by_upd_or_del && is_partitioned_root {
-                use backend_utils_adt_ri_triggers_seams as ri;
-                const RI_TRIGGER_PK: i32 = 1;
-                const RI_TRIGGER_FK: i32 = 2;
-                let kind = ri::ri_fkey_trigger_type::call(tgfoid);
-                if kind != RI_TRIGGER_PK && kind != RI_TRIGGER_FK {
-                    continue;
-                }
-            }
-            // FK-enforcement-trigger skip (trigger.c:6442). On UPDATE/DELETE,
+            // FK-enforcement-trigger skip (trigger.c:6444). On UPDATE/DELETE,
             // RI_FKey_trigger_type classifies the trigger function and the PK/FK
             // `*_check_required` predicate decides whether queueing can be
             // skipped because the constraint will still pass. Required for
             // correctness (SET DEFAULT / multi-FK CASCADE / self-referential
-            // CASCADE), not an optimization. (The cross-partition PK
-            // component-delete skip is not threaded on this leg.)
-            if fired_by_upd_or_del
-                && ri_fk_enforcement_skip(
-                    estate,
-                    relinfo,
-                    i,
-                    tgfoid,
-                    relkind,
-                    event == TRIGGER_EVENT_UPDATE,
-                    oldslot,
-                    newslot,
-                )?
-            {
-                continue;
+            // CASCADE), not an optimization.
+            //
+            // The cross-partition-update legs of this switch are also threaded
+            // here so that during a cross-partition UPDATE of a partitioned PK
+            // table the FK action / RI errors name the ROOT (the CP_UPDATE
+            // event queued on the root partitioned table performs enforcement),
+            // not the source leaf partition's clone.
+            if fired_by_upd_or_del {
+                const RI_TRIGGER_PK: i32 = 1;
+                const RI_TRIGGER_FK: i32 = 2;
+                let kind = backend_utils_adt_ri_triggers_seams::ri_fkey_trigger_type::call(tgfoid);
+                match kind {
+                    RI_TRIGGER_PK => {
+                        // trigger.c:6459 — for cross-partition updates of a
+                        // partitioned PK table, skip the event fired by the
+                        // component delete on the source leaf partition unless
+                        // the constraint originates in the partition itself
+                        // (!tgisclone); the update event fired on the root
+                        // (partitioned) target table performs the FK action.
+                        if is_crosspart_update
+                            && event == TRIGGER_EVENT_DELETE
+                            && tgisclone
+                        {
+                            continue;
+                        }
+                        // trigger.c:6465 — RI_FKey_pk_upd_check_required skip.
+                        if ri_fk_enforcement_skip(
+                            estate,
+                            relinfo,
+                            i,
+                            tgfoid,
+                            relkind,
+                            event == TRIGGER_EVENT_UPDATE,
+                            oldslot,
+                            newslot,
+                        )? {
+                            continue;
+                        }
+                    }
+                    RI_TRIGGER_FK => {
+                        // trigger.c:6486 — an UPDATE on a partitioned FK table is
+                        // always skipped here (the INSERT event on the dest leaf
+                        // does the check); otherwise RI_FKey_fk_upd_check_required.
+                        if ri_fk_enforcement_skip(
+                            estate,
+                            relinfo,
+                            i,
+                            tgfoid,
+                            relkind,
+                            event == TRIGGER_EVENT_UPDATE,
+                            oldslot,
+                            newslot,
+                        )? {
+                            continue;
+                        }
+                    }
+                    _ => {
+                        // RI_TRIGGER_NONE (trigger.c:6495) — a plain row trigger.
+                        // No need to queue the update event fired during a
+                        // cross-partition update of a partitioned table: the same
+                        // row trigger is present on the affected leaf partition(s)
+                        // and the events fired on them are queued instead.
+                        if is_partitioned_root {
+                            continue;
+                        }
+                    }
+                }
             }
             // F_UNIQUE_KEY_RECHECK skip: queue only if the constraint's index is
             // in recheckIndexes (otherwise uniqueness was definitely not
@@ -4341,7 +4378,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
     tupleid: Option<&ItemPointerData>,
     fdw_trigtuple: Option<&types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
     tc: Option<&types_nodes::TransitionCaptureState>,
-    _is_crosspart_update: bool,
+    is_crosspart_update: bool,
 ) -> PgResult<()> {
     // TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
     let rri = estate.result_rel(relinfo);
@@ -4439,6 +4476,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
         &[],
         /* modified_cols */ None,
         tc,
+        is_crosspart_update,
     )
 }
 /// `ExecIRDeleteTriggers(estate, relinfo, trigtuple)` (trigger.c:2849) — fire the
@@ -5233,6 +5271,7 @@ fn exec_ar_update_triggers_impl<'mcx>(
         recheck_indexes,
         updated_cols.as_deref(),
         tc.as_deref(),
+        is_crosspart_update,
     )
 }
 
