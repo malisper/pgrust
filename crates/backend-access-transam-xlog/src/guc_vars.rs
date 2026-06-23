@@ -342,6 +342,17 @@ pub fn install() {
         get: || XLOG_ARCHIVE_COMMAND.with(|c| c.borrow().clone()),
         set: |v| XLOG_ARCHIVE_COMMAND.with(|c| *c.borrow_mut() = v),
     });
+
+    // The inward `xlog_archive_command` seam (consumed by the archiver and the
+    // built-in shell archive module, mirroring C's bare `XLogArchiveCommand`
+    // read) is backed by the same GUC cell. `""` when unset, matching the C
+    // `char *XLogArchiveCommand = ""` default. Symmetric with the
+    // `xlog_archive_library` seam (installed by the pgarch owner).
+    backend_access_transam_xlog_seams::xlog_archive_command::set(|| {
+        XLOG_ARCHIVE_COMMAND
+            .with(|c| c.borrow().clone())
+            .unwrap_or_default()
+    });
     vars::wal_consistency_checking_string.install(GucVarAccessors {
         get: || WAL_CONSISTENCY_CHECKING_STRING.with(|c| c.borrow().clone()),
         set: |v| WAL_CONSISTENCY_CHECKING_STRING.with(|c| *c.borrow_mut() = v),
