@@ -374,13 +374,31 @@ fn parse_interval(b: &[u8]) -> (i64, i32, i32) {
     (time, day, month)
 }
 
-/// `inet` varlena: 4-byte header then `inet_struct { family: u8, bits: u8,
-/// ipaddr: [u8;16] }`. Returns `(family, addr[ip_addrsize], bits)`.
+/// `VARDATA_ANY` byte offset of an inline (non-compressed, non-external) varlena
+/// image: ONE header byte for a short (1-byte, low-bit-set, non-1-byte-toast)
+/// header, else `VARHDRSZ`. C's `brin_minmax_multi_distance_inet` reaches its
+/// args via `PG_GETARG_INET_PP` (the packed/`VARDATA_ANY`-aware accessor) because
+/// a stored BRIN inet bound can carry a short header once `SHORT_VARLENA_PACKING`
+/// is on; a fixed 4-byte strip would read 3 bytes into the inet_struct. No-op
+/// while the flag is off (no stored value is short-headed).
+#[inline]
+fn vardata_any_off(b: &[u8]) -> usize {
+    match b.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
+        _ => VARHDRSZ,
+    }
+}
+
+/// `inet` varlena: varlena header (4-byte OR 1-byte short) then `inet_struct
+/// { family: u8, bits: u8, ipaddr: [u8;16] }`. Returns `(family,
+/// addr[ip_addrsize], bits)`. The struct offset is computed from the actual
+/// header form so a short-packed stored inet is read correctly.
 fn parse_inet(b: &[u8]) -> (u8, alloc::vec::Vec<u8>, i32) {
-    let family = b[VARHDRSZ];
-    let bits = b[VARHDRSZ + 1] as i32;
+    let off = vardata_any_off(b);
+    let family = b[off];
+    let bits = b[off + 1] as i32;
     let addrsize = if family == PGSQL_AF_INET { 4 } else { 16 };
-    let addr = b[VARHDRSZ + 2..VARHDRSZ + 2 + addrsize].to_vec();
+    let addr = b[off + 2..off + 2 + addrsize].to_vec();
     (family, addr, bits)
 }
 

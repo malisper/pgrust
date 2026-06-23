@@ -74,11 +74,42 @@ fn arg_numeric(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
     numeric_with_header(payload)
 }
 
-/// Ensure a `numeric` byte image carries its 4-byte varlena header. A header-ful
-/// image has a length word matching its own length; otherwise prepend one.
+/// Un-pack a SHORT (1-byte low-bit-set, non-1-byte-toast) varlena header into the
+/// canonical 4-byte-header image, mirroring C's `PG_DETOAST_DATUM` short arm
+/// (`detoast_attr`: `SET_VARSIZE(new, data_size + VARHDRSZ); copy VARDATA_SHORT`).
+/// A stored `numeric` column value arrives short-headed once
+/// `SHORT_VARLENA_PACKING` is on, but C's `PG_GETARG_NUMERIC` detoasts (un-packs)
+/// it before the cores read the struct; the numeric byte-view accessors expect a
+/// header (4-byte OR short), so we normalise to 4-byte here. No-op while the flag
+/// is off (no stored value is short).
+fn unpack_short_to_4b(bytes: &[u8]) -> Option<Vec<u8>> {
+    // VARATT_IS_1B_E (0x01) is a 1-byte external TOAST pointer — never a packed
+    // inline short header — so exclude it; any other low-bit-set first byte is a
+    // short (VARATT_IS_SHORT) header whose length is the high 7 bits.
+    let h = *bytes.first()?;
+    if h == 0x01 || (h & 0x01) == 0 {
+        return None;
+    }
+    let short_len = ((h >> 1) & 0x7f) as usize; // VARSIZE_SHORT == (header >> 1) & 0x7F
+    let data_size = short_len.saturating_sub(1); // minus VARHDRSZ_SHORT (1)
+    let total = types_datum::varlena::VARHDRSZ + data_size;
+    let mut buf = Vec::with_capacity(total);
+    buf.extend_from_slice(&types_datum::varlena::set_varsize_4b(total));
+    buf.extend_from_slice(&bytes[1..1 + data_size]);
+    Some(buf)
+}
+
+/// Ensure a `numeric` byte image carries a canonical 4-byte varlena header. A
+/// 4-byte-header-ful image has a length word matching its own length and is
+/// returned verbatim; a SHORT-headed image is un-packed to 4-byte (C's
+/// `PG_GETARG_NUMERIC` detoast); a bare header-less payload gets a header
+/// prepended.
 fn numeric_with_header(bytes: &[u8]) -> Vec<u8> {
     if numeric_has_header(bytes) {
         return bytes.to_vec();
+    }
+    if let Some(unpacked) = unpack_short_to_4b(bytes) {
+        return unpacked;
     }
     let total = types_datum::varlena::VARHDRSZ + bytes.len();
     let mut buf = Vec::with_capacity(total);
