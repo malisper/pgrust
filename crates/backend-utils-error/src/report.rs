@@ -20,6 +20,32 @@ use crate::{config, errno, policy, sink, stack, syslog};
 const FORMATTED_TS_LEN: usize = 128;
 const _: () = assert!(FORMATTED_TS_LEN > 0); // keep the C constant on record
 
+// Syslog priority levels and `PIPE_BUF`. On wasm `libc` exports neither; pin
+// the standard Linux numeric values (sys/syslog.h: LOG_CRIT=2 .. LOG_DEBUG=7;
+// PIPE_BUF=4096) so the elevel->priority mapping and the pipe-chunk size are
+// identical to the native build. Single-user wasm sends syslog to stderr and
+// never uses the syslogger pipe, so these are effectively inert there.
+#[cfg(not(target_family = "wasm"))]
+mod sysconst {
+    pub const LOG_CRIT: i32 = libc::LOG_CRIT;
+    pub const LOG_ERR: i32 = libc::LOG_ERR;
+    pub const LOG_WARNING: i32 = libc::LOG_WARNING;
+    pub const LOG_NOTICE: i32 = libc::LOG_NOTICE;
+    pub const LOG_INFO: i32 = libc::LOG_INFO;
+    pub const LOG_DEBUG: i32 = libc::LOG_DEBUG;
+    pub const PIPE_BUF: usize = libc::PIPE_BUF;
+}
+#[cfg(target_family = "wasm")]
+mod sysconst {
+    pub const LOG_CRIT: i32 = 2;
+    pub const LOG_ERR: i32 = 3;
+    pub const LOG_WARNING: i32 = 4;
+    pub const LOG_NOTICE: i32 = 5;
+    pub const LOG_INFO: i32 = 6;
+    pub const LOG_DEBUG: i32 = 7;
+    pub const PIPE_BUF: usize = 4096;
+}
+
 /// elog.c's per-backend file statics (`saved_timeval`, `formatted_log_time`,
 /// `formatted_start_time`, `log_line_number`, `save_format_errnumber`,
 /// `save_format_domain`). Per AGENTS.md "Backend-global state" these are
@@ -641,12 +667,12 @@ pub fn send_message_to_server_log(edata: &PgError) {
     // Write to syslog, if enabled
     if config::log_destination() & LOG_DESTINATION_SYSLOG != 0 {
         let syslog_level = match edata.level {
-            DEBUG5 | DEBUG4 | DEBUG3 | DEBUG2 | DEBUG1 => libc::LOG_DEBUG,
-            LOG | LOG_SERVER_ONLY | INFO => libc::LOG_INFO,
-            NOTICE | WARNING | WARNING_CLIENT_ONLY => libc::LOG_NOTICE,
-            ERROR => libc::LOG_WARNING,
-            FATAL => libc::LOG_ERR,
-            _ => libc::LOG_CRIT, // PANIC and default
+            DEBUG5 | DEBUG4 | DEBUG3 | DEBUG2 | DEBUG1 => sysconst::LOG_DEBUG,
+            LOG | LOG_SERVER_ONLY | INFO => sysconst::LOG_INFO,
+            NOTICE | WARNING | WARNING_CLIENT_ONLY => sysconst::LOG_NOTICE,
+            ERROR => sysconst::LOG_WARNING,
+            FATAL => sysconst::LOG_ERR,
+            _ => sysconst::LOG_CRIT, // PANIC and default
         };
         syslog::write_syslog(syslog_level, &buf);
     }
@@ -709,10 +735,10 @@ pub fn write_console(line: &[u8]) {
 /// `PIPE_CHUNK_SIZE` (`postmaster/syslogger.h`): the OS `PIPE_BUF` clamped
 /// to 64K, so both sides of the pipe protocol share the OS constant (the
 /// syslogger crate derives its copy the same way).
-const PIPE_CHUNK_SIZE: usize = if libc::PIPE_BUF > 65536 {
+const PIPE_CHUNK_SIZE: usize = if sysconst::PIPE_BUF > 65536 {
     65536
 } else {
-    libc::PIPE_BUF
+    sysconst::PIPE_BUF
 };
 
 /// `PIPE_HEADER_SIZE = offsetof(PipeProtoHeader, data)`:
@@ -766,9 +792,7 @@ pub fn write_pipe_chunks(data: &[u8], dest: i32) {
         // write(fileno(stderr), &p, ...); (void) rc;  — one write per chunk,
         // result ignored. Must be a single write for pipe atomicity, so use
         // the raw fd rather than the buffering Stdio handle.
-        unsafe {
-            let _ = libc::write(2, chunk.as_ptr().cast(), chunk.len());
-        }
+        write_fd2(&chunk);
     };
 
     // write all but the last chunk (no PIPE_PROTO_IS_LAST yet)
@@ -780,6 +804,20 @@ pub fn write_pipe_chunks(data: &[u8], dest: i32) {
 
     // write the last chunk
     write_chunk(rest, flags | PIPE_PROTO_IS_LAST);
+}
+
+/// Atomic single write to fd 2 (stderr) for the pipe-chunk protocol. Native
+/// uses the raw `write(2)` syscall (single write = pipe atomicity); wasm has no
+/// syslogger pipe, so it writes through std's stderr handle.
+#[cfg(not(target_family = "wasm"))]
+fn write_fd2(chunk: &[u8]) {
+    unsafe {
+        let _ = libc::write(2, chunk.as_ptr().cast(), chunk.len());
+    }
+}
+#[cfg(target_family = "wasm")]
+fn write_fd2(chunk: &[u8]) {
+    let _ = std::io::stderr().write_all(chunk);
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +975,15 @@ pub fn vwrite_stderr(message: &str) {
 /// `DebugFileOpen` — redirect stderr (and possibly stdout) into the debug
 /// output file named by `OutputFileName`. The C freopen calls are realized as
 /// open + dup2 onto the standard descriptors.
+///
+/// wasm (single-process) has no `dup2`/fd-redirection and runs without the
+/// `-o OutputFileName` debug-redirect mode, so this is a no-op there.
+#[cfg(target_family = "wasm")]
+pub fn DebugFileOpen() -> PgResult<()> {
+    Ok(())
+}
+
+#[cfg(not(target_family = "wasm"))]
 pub fn DebugFileOpen() -> PgResult<()> {
     let Some(name) = config::output_file_name().filter(|n| !n.is_empty()) else {
         return Ok(());

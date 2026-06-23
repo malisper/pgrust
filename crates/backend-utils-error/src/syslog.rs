@@ -28,12 +28,30 @@ struct SyslogState {
     seq: u64,
 }
 
+/// `LOG_LOCAL0` — default syslog facility. On wasm `libc` has no syslog
+/// constants; pin the standard value (16 << 3 = 128) so the GUC default still
+/// round-trips. Single-user wasm routes syslog to stderr, so the facility is
+/// otherwise inert.
+#[cfg(not(target_family = "wasm"))]
+const DEFAULT_SYSLOG_FACILITY: i32 = libc::LOG_LOCAL0;
+#[cfg(target_family = "wasm")]
+const DEFAULT_SYSLOG_FACILITY: i32 = 16 << 3;
+
 static SYSLOG_STATE: Mutex<SyslogState> = Mutex::new(SyslogState {
     openlog_done: false,
     ident: None,
-    facility: libc::LOG_LOCAL0,
+    facility: DEFAULT_SYSLOG_FACILITY,
     seq: 0,
 });
+
+/// `closelog()` — close the syslog connection. No-op on wasm (no connection
+/// was ever opened; syslog output went to stderr).
+#[cfg(not(target_family = "wasm"))]
+unsafe fn closelog() {
+    libc::closelog();
+}
+#[cfg(target_family = "wasm")]
+unsafe fn closelog() {}
 
 /// GUC assign_hook body for `syslog_ident`: don't thrash the connection if
 /// unchanged; otherwise close it so the next write reopens with the new ident.
@@ -45,7 +63,7 @@ pub(crate) fn assign_syslog_ident(newval: &str) {
         .map_or(true, |old| old.as_bytes() != newval.as_bytes());
     if changed {
         if state.openlog_done {
-            unsafe { libc::closelog() };
+            unsafe { closelog() };
             state.openlog_done = false;
         }
         state.ident = CString::new(newval).ok();
@@ -63,13 +81,35 @@ pub(crate) fn assign_syslog_facility(newval: i32) {
     let mut state = SYSLOG_STATE.lock().expect("syslog state poisoned");
     if state.facility != newval {
         if state.openlog_done {
-            unsafe { libc::closelog() };
+            unsafe { closelog() };
             state.openlog_done = false;
         }
         state.facility = newval;
     }
 }
 
+/// `openlog(ident, LOG_PID | LOG_NDELAY | LOG_NOWAIT, facility)` — open the
+/// syslog connection. The ident pointer is retained by openlog(3) for the
+/// connection's lifetime; the caller keeps the owning `CString` in
+/// `SYSLOG_STATE`.
+#[cfg(not(target_family = "wasm"))]
+fn open_syslog(ident: &Option<CString>, facility: i32) {
+    let ident_ptr = ident.as_ref().map_or(c"postgres".as_ptr(), |i| i.as_ptr());
+    unsafe {
+        libc::openlog(
+            ident_ptr,
+            libc::LOG_PID | libc::LOG_NDELAY | libc::LOG_NOWAIT,
+            facility,
+        );
+    }
+}
+
+/// wasm (single-process) stub: there is no syslog connection to open —
+/// messages go to stderr via [`raw_syslog`].
+#[cfg(target_family = "wasm")]
+fn open_syslog(_ident: &Option<CString>, _facility: i32) {}
+
+#[cfg(not(target_family = "wasm"))]
 fn raw_syslog(level: i32, message: &[u8]) {
     // Interior NULs cannot occur in text built from Rust strings, but guard.
     let Ok(cmsg) = CString::new(message) else {
@@ -78,6 +118,17 @@ fn raw_syslog(level: i32, message: &[u8]) {
     unsafe {
         libc::syslog(level, c"%s".as_ptr(), cmsg.as_ptr());
     }
+}
+
+/// wasm (single-process) stub: no `syslog(3)`, so a syslog-destined line is
+/// written to stderr instead (matching the feasibility-map "syslog -> stderr"
+/// decision). The level is dropped — stderr has no priority channel.
+#[cfg(target_family = "wasm")]
+fn raw_syslog(_level: i32, message: &[u8]) {
+    use std::io::Write;
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(message);
+    let _ = err.write_all(b"\n");
 }
 
 /// `write_syslog` — write one message line to syslog, splitting long messages
@@ -89,17 +140,7 @@ pub fn write_syslog(level: i32, line: &str) {
 
         // Open syslog connection if not done yet
         if !state.openlog_done {
-            let ident_ptr = state
-                .ident
-                .as_ref()
-                .map_or(c"postgres".as_ptr(), |i| i.as_ptr());
-            unsafe {
-                libc::openlog(
-                    ident_ptr,
-                    libc::LOG_PID | libc::LOG_NDELAY | libc::LOG_NOWAIT,
-                    state.facility,
-                );
-            }
+            open_syslog(&state.ident, state.facility);
             state.openlog_done = true;
         }
 
